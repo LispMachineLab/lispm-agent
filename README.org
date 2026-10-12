@@ -1,6 +1,9 @@
 #+title: LispM — a Lisp Machine for agents
 #+startup: content
 
+#+ATTR_HTML: :alt LispM logo :width 720
+[[file:assets/logo/lispm-logo-dark-v2.png]]
+
 LispM runs AI agents inside Emacs rather than beside it: the context is an org buffer, tools
 are Elisp functions, approvals are org TODO states, memory is org files under git, and agents
 are woken by Emacs hooks and delegate work to each other. See [[file:DESIGN.org][DESIGN.org]] for the design.
