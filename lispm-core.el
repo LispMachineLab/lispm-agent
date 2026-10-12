@@ -54,7 +54,8 @@ makes to its memory, and every turn of every session, is a commit."
 (defcustom lispm-backends
   '((rotom :api openai :url "http://127.0.0.1:14550/v1" :model "gpt-5.5"
            :features (streaming reasoning-effort))
-    (rotom-messages :api anthropic :url "http://127.0.0.1:14550" :model "gpt-5.5")
+    (rotom-messages :api anthropic :url "http://127.0.0.1:14550" :model "gpt-5.5"
+                    :features (streaming tool-errors))
     (openai :api openai :url "https://api.openai.com/v1" :model "gpt-5.5"
             :key openai
             :features (streaming reasoning-effort max-completion-tokens stream-usage))
@@ -87,10 +88,10 @@ Each entry is (NAME . PLIST) with keys
                `tool-errors' (the is_error flag on tool results;
                without it, failures are marked in the text).
 The default, `rotom', is a local gateway serving many upstream models
-\(GPT, Grok, ...) behind both shapes.  Its Chat Completions side
-streams faithfully; its Messages side, `rotom-messages', gets plain
-requests, as its translation loses the arguments of parallel tool
-calls when streaming (RyanKung/rotom#18) and rejects is_error (#19)."
+\(GPT, Grok, ...) behind both shapes: `rotom' is its Chat Completions
+side, `rotom-messages' its Messages side.  Use rotom 1.5.15 or later;
+earlier versions lose the arguments of parallel tool calls when
+streaming Messages (RyanKung/rotom#18) and reject is_error (#19)."
   :type '(alist :key-type symbol :value-type plist))
 
 (defcustom lispm-backend 'rotom

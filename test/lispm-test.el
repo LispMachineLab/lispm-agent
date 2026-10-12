@@ -259,7 +259,7 @@ BODY can use `project', a scratch directory for agents to work in."
       (should (eq (alist-get 'eager_input_streaming (aref (alist-get 'tools body) 0)) t))
       (should (equal (aref (alist-get 'messages body) 0) (car messages))))
     (pcase-let ((`(,body . ,betas)
-                 (lispm-api-request (alist-get 'rotom-messages lispm-backends)
+                 (lispm-api-request '(:api anthropic :model "m")
                                     "gpt-5.5" "high" "sys" tools messages)))
       (should-not (assq 'thinking body))
       (should-not (assq 'fallbacks body))

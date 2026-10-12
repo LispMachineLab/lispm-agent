@@ -16,7 +16,8 @@ they are agents. In code, the package name and prefix are all lowercase: ~lispm~
 
 Requires Emacs 29.1+ (developed on 31.1), curl, and a model endpoint speaking either the OpenAI
 Chat Completions API (most servers do) or the Anthropic Messages API. By default LispM uses the
-local Rotom gateway through Chat Completions (~http://127.0.0.1:14550/v1~, model ~gpt-5.5~).
+local Rotom gateway (1.5.15 or later) through Chat Completions (~http://127.0.0.1:14550/v1~,
+model ~gpt-5.5~).
 
 #+begin_src emacs-lisp
 (add-to-list 'load-path "~/src/lispm")      ; git clone https://github.com/RyanKung/lispm
@@ -122,7 +123,7 @@ use. The presets:
 
 Each agent can also set its own ~:backend~, ~:model~ and ~:effort~, so agents on different
 providers can work together. ~C-h v lispm-backends~ documents every option; section 8 of
-DESIGN.org explains the translation between the shapes and Rotom's known issues.
+DESIGN.org explains the translation between the shapes.
 
 * Tests
 
