@@ -543,6 +543,83 @@ BODY can use `port' and `log', the file the server records requests in."
       (should (eq (lispm-tool-action agent (lispm-get-tool "write_file") '((path . "/tmp/x"))) 'ask))
       (should (eq (lispm-tool-action agent (lispm-get-tool "run_shell") nil) 'ask)))))
 
+(ert-deftest lispm-test-search-regexps ()
+  "Regexps in ripgrep's syntax become Emacs regexps; globs match paths."
+  (let ((case-fold-search nil))
+    (pcase-dolist (`(,pattern ,emacs ,string ,match)
+                   '(("foo(bar|baz)\\d{2}" "foo\\(bar\\|baz\\)[0-9]\\{2\\}" "foobaz12" t)
+                     ("^\\s*\\(defun" "^[[:space:]]*(defun" "  (defun" t)
+                     ("(?:ab)+c" "\\(?:ab\\)+c" "ababc" t)
+                     ("[^a-z]+$" "[^a-z]+$" "ABC" t)
+                     ("[\\d.]+" "[0-9.]+" "3.14" t)
+                     ("[a\\]]" "[]a]" "]" t)
+                     ("a\\|b{x}" "a|b{x}" "a|b{x}" t)
+                     ("\\w+@\\w+" "[[:alnum:]_]+@[[:alnum:]_]+" "assistant@lispm" t)
+                     ("x{2,}" "x\\{2,\\}" "x" nil)))
+      (should (equal (lispm-tools--emacs-regexp pattern) emacs))
+      (should (eq (and (string-match-p emacs string) t) match))))
+  (should-error (lispm-tools--emacs-regexp "foo(?=bar)"))
+  (should-error (lispm-tools--emacs-regexp "a[b"))
+  (pcase-dolist (`(,glob ,file ,match)
+                 '(("*.el" "/r/a/b.el" t) ("*.el" "/r/a/b.elc" nil)
+                   ("src/**/*.ts" "/r/src/x/y.ts" t) ("src/**/*.ts" "/r/src/y.ts" t)
+                   ("*.{ts,tsx}" "/r/a.tsx" t) ("test/*" "/r/test/a/b" nil)))
+    (should (eq (and (funcall (lispm-tools--glob-predicate glob "/r/") file) t) match))))
+
+(defun lispm-test--search (agent input)
+  "Run search_files on INPUT as AGENT and wait for its result."
+  (let ((lispm-current-agent agent) result)
+    (lispm-tool-invoke (lispm-get-tool "search_files") input
+                       (lambda (text errorp) (setq result (cons text errorp))))
+    (lispm-test--wait (lambda () result))
+    result))
+
+(ert-deftest lispm-test-search-files ()
+  "search_files searches in Emacs: project files, open buffers, in slices."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          ;; One file per slice, so the search goes through the event loop.
+          (lispm-tools--search-slice 0))
+      (dolist (file '("a.el" "sub/b.el" "notes.txt" ".hidden/c.el"))
+        (make-directory (file-name-directory (expand-file-name file project)) t)
+        (with-temp-file (expand-file-name file project)
+          (insert ";; header\n(defun lispm-demo-" (file-name-base file) " ()\n  \"Doc.\")\n")))
+      (with-temp-file (expand-file-name "blob.bin" project)
+        (set-buffer-multibyte nil)
+        (insert "(defun lispm-demo-blob\0\0\0"))
+      (should (equal (lispm-test--search agent '((pattern . "\\(defun lispm-demo-(a|b)\\b")))
+                     '("a.el:2:(defun lispm-demo-a ()\nsub/b.el:2:(defun lispm-demo-b ()" . nil)))
+      ;; Hidden directories and binary files are left out; globs and paths narrow.
+      (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-\\w+") (glob . "*.txt"))))
+                     "notes.txt:2:(defun lispm-demo-notes ()"))
+      (should (equal (car (lispm-test--search agent '((pattern . "DOC") (path . "sub") (ignore_case . t))))
+                     "sub/b.el:3:  \"Doc.\")"))
+      (should (equal (car (lispm-test--search agent '((pattern . "(?i)doc") (path . "a.el"))))
+                     "a.el:3:  \"Doc.\")"))
+      (should (equal (car (lispm-test--search agent '((pattern . "no such text"))))
+                     "No matches."))
+      (should (equal (substring-no-properties
+                      (lispm-chat--tool-title '(:name "search_files"
+                                                :input ((pattern . "a|b") (path . "src") (glob . "*.el")))))
+                     "Search(\"a|b\" in src, *.el)"))
+      (should (cdr (lispm-test--search agent '((pattern . "a(?=b)")))))
+      ;; Unsaved edits in a file's buffer are what is searched, as read_file shows them.
+      (with-current-buffer (find-file-noselect (expand-file-name "a.el" project))
+        (goto-char (point-max))
+        (insert "(defun lispm-demo-unsaved ())\n"))
+      (should (equal (car (lispm-test--search agent '((pattern . "demo-unsaved"))))
+                     "a.el:4:(defun lispm-demo-unsaved ())"))
+      ;; In a git project, the project's files are searched: .gitignore applies.
+      (when (executable-find "git")
+        (let ((default-directory (file-name-as-directory (expand-file-name "repo" project))))
+          (make-directory default-directory)
+          (call-process "git" nil nil nil "init" "-q")
+          (with-temp-file ".gitignore" (insert "ignored.el\n"))
+          (with-temp-file "ignored.el" (insert "(defun lispm-demo-ignored ())\n"))
+          (with-temp-file "kept.el" (insert "(defun lispm-demo-kept ())\n")))
+        (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-[ik]") (path . "repo"))))
+                       "repo/kept.el:1:(defun lispm-demo-kept ())"))))))
+
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env
     (let ((agent (lispm-defagent tester :root project)) result)

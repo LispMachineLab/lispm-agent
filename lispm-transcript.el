@@ -109,7 +109,7 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
 (defun lispm-transcript--summary (input)
   "A short label for a tool call with INPUT: its main string argument."
   (when (consp input)
-    (let ((value (or (cl-loop for key in '(path buffer command query title name to agent id)
+    (let ((value (or (cl-loop for key in '(pattern path buffer command query title name to agent id)
                               for value = (alist-get key input)
                               when (stringp value) return value)
                      (cl-loop for (key . value) in input

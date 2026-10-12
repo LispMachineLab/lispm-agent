@@ -37,6 +37,7 @@
 
 (require 'help-fns)
 (require 'seq)
+(require 'project)
 (require 'lispm-core)
 
 (defcustom lispm-rationale-permissions '(write exec)
@@ -386,29 +387,289 @@ unsaved edits included: what the user sees."
                 (format "\n[... %d more]" (- (length entries) 500))
               ""))))
 
+;;;; Searching
+;;
+;; search_files is Emacs-native: project.el lists the files (so a git
+;; project's .gitignore applies), and Emacs regexps search them in
+;; buffers, a file's own buffer when Emacs visits it, so unsaved edits
+;; are found, as read_file shows them.  The search runs in slices
+;; between which Emacs stays responsive.  Models write regexps in the
+;; syntax of ripgrep and grep -E; `lispm-tools--emacs-regexp' translates.
+
+(defcustom lispm-search-max-matches 200
+  "Matching lines after which search_files stops."
+  :type 'integer
+  :group 'lispm)
+
+(defcustom lispm-search-max-file-size (* 1024 1024)
+  "Files larger than this many bytes are not searched."
+  :type 'integer
+  :group 'lispm)
+
+(defconst lispm-tools--search-slice 0.03
+  "Seconds search_files works before letting Emacs handle other events.")
+
+(defun lispm-tools--bracket (pattern start)
+  "Translate the bracket expression at START in PATTERN.
+Return (EMACS-REGEXP . END), END being the position after it."
+  (let ((i (1+ start)) (n (length pattern)) negated rbracket dash caret items)
+    (when (and (< i n) (eq (aref pattern i) ?^)) (setq negated t) (cl-incf i))
+    (when (and (< i n) (eq (aref pattern i) ?\])) (setq rbracket t) (cl-incf i))
+    (catch 'end
+      (while t
+        (when (>= i n) (error "Unterminated [ in %s" pattern))
+        (let ((c (aref pattern i)))
+          (cond
+           ((eq c ?\]) (cl-incf i) (throw 'end nil))
+           ((and (eq c ?\[) (< (1+ i) n) (eq (aref pattern (1+ i)) ?:))
+            (let ((close (string-search ":]" pattern (+ i 2))))
+              (unless close (error "Unterminated [: in %s" pattern))
+              (push (substring pattern i (+ close 2)) items)
+              (setq i (+ close 2))))
+           ((eq c ?\\)
+            (when (>= (1+ i) n) (error "Unterminated [ in %s" pattern))
+            (let ((d (aref pattern (1+ i))))
+              (setq i (+ i 2))
+              (pcase d
+                (?d (push "0-9" items))
+                (?s (push "[:space:]" items))
+                (?w (push "[:alnum:]_" items))
+                (?t (push "\t" items))
+                (?n (push "\n" items))
+                (?\] (setq rbracket t))
+                (?- (setq dash t))
+                (?^ (setq caret t))
+                ((or ?D ?S ?W) (error "\\%c inside [...] is not supported" d))
+                (_ (push (string d) items)))))
+           (t (push (string c) items) (cl-incf i))))))
+    (cons (if (and caret (not negated) (not rbracket) (not dash) (null items))
+              "\\^"
+            (concat "[" (if negated "^" "") (if rbracket "]" "")
+                    (apply #'concat (nreverse items))
+                    (if caret "^" "") (if dash "-" "") "]"))
+          i)))
+
+(defun lispm-tools--emacs-regexp (pattern)
+  "PATTERN, a regexp in the syntax of ripgrep and grep -E, as an Emacs regexp.
+Groups, alternation and intervals lose their backslashes' meaning in
+the translation; \\d, \\s and \\w become character classes.  Signal an
+error for what Emacs regexps cannot express, such as lookaround."
+  (let ((i 0) (n (length pattern)) out)
+    (while (< i n)
+      (let ((c (aref pattern i)))
+        (cond
+         ((eq c ?\\)
+          (when (= (1+ i) n) (error "Trailing backslash in %s" pattern))
+          (let ((d (aref pattern (1+ i))))
+            (setq i (+ i 2))
+            (push (pcase d
+                    (?d "[0-9]") (?D "[^0-9]")
+                    (?s "[[:space:]]") (?S "[^[:space:]]")
+                    (?w "[[:alnum:]_]") (?W "[^[:alnum:]_]")
+                    (?b "\\b") (?B "\\B") (?< "\\<") (?> "\\>")
+                    (?t "\t") (?n "\n") (?r "\r")
+                    ((pred (lambda (d) (<= ?1 d ?9))) (string ?\\ d))
+                    (_ (regexp-quote (string d))))
+                  out)))
+         ((eq c ?\()
+          (cond ((eq (string-match "(\\?:" pattern i) i)
+                 (push "\\(?:" out) (setq i (+ i 3)))
+                ((eq (string-match "(\\?" pattern i) i)
+                 (error "(?...) groups other than (?:...), such as lookaround, are not supported: %s"
+                        pattern))
+                (t (push "\\(" out) (cl-incf i))))
+         ((eq c ?\)) (push "\\)" out) (cl-incf i))
+         ((eq c ?|) (push "\\|" out) (cl-incf i))
+         ((and (eq c ?{) (eq (string-match "{\\([0-9]*\\)\\(,[0-9]*\\)?}" pattern i) i)
+               (string-match-p "[0-9]" (match-string 0 pattern)))
+          (push (concat "\\{" (match-string 1 pattern) (or (match-string 2 pattern) "") "\\}") out)
+          (setq i (match-end 0)))
+         ((eq c ?\[)
+          (pcase-let ((`(,bracket . ,end) (lispm-tools--bracket pattern i)))
+            (push bracket out)
+            (setq i end)))
+         (t (push (string c) out) (cl-incf i)))))
+    (apply #'concat (nreverse out))))
+
+(defun lispm-tools--glob-body (glob)
+  "GLOB as an unanchored Emacs regexp."
+  (let ((i 0) (n (length glob)) out)
+    (while (< i n)
+      (let ((c (aref glob i)))
+        (cond
+         ((eq (string-search "**/" glob i) i) (push "\\(?:.*/\\)?" out) (setq i (+ i 3)))
+         ((eq (string-search "**" glob i) i) (push ".*" out) (setq i (+ i 2)))
+         ((eq c ?*) (push "[^/]*" out) (cl-incf i))
+         ((eq c ??) (push "[^/]" out) (cl-incf i))
+         ((and (eq c ?{) (string-search "}" glob i))
+          (let ((close (string-search "}" glob i)))
+            (push (concat "\\(?:"
+                          (mapconcat #'lispm-tools--glob-body
+                                     (split-string (substring glob (1+ i) close) ",")
+                                     "\\|")
+                          "\\)")
+                  out)
+            (setq i (1+ close))))
+         ((and (eq c ?\[) (string-search "]" glob (1+ i)))
+          (let ((close (string-search "]" glob (+ i 2))))
+            (push (concat "[" (replace-regexp-in-string "\\`!" "^" (substring glob (1+ i) close)) "]")
+                  out)
+            (setq i (1+ close))))
+         (t (push (regexp-quote (string c)) out) (cl-incf i)))))
+    (apply #'concat (nreverse out))))
+
+(defun lispm-tools--glob-predicate (glob directory)
+  "Predicate on file names matching GLOB, a path glob under DIRECTORY.
+A GLOB without a slash is matched against the file's name alone."
+  (let ((regexp (concat "\\`" (lispm-tools--glob-body glob) "\\'")))
+    (if (string-search "/" glob)
+        (lambda (file) (string-match-p regexp (file-relative-name file directory)))
+      (lambda (file) (string-match-p regexp (file-name-nondirectory file))))))
+
+(defun lispm-tools--searchable-directory-p (directory)
+  "Non-nil if a search outside a project should descend into DIRECTORY."
+  (let ((name (file-name-nondirectory (directory-file-name directory))))
+    (not (or (string-prefix-p "." name)
+             (member name vc-directory-exclusion-list)
+             (member name '("node_modules"))))))
+
+(defun lispm-tools--search-files (target glob)
+  "The files a search of TARGET, a file or directory, goes through.
+Those of the project around TARGET (as `project-files' lists them),
+else all those below it; only those matching GLOB, if given."
+  (let ((files (cond ((file-regular-p target) (list target))
+                     ((not (file-directory-p target))
+                      (error "No such file or directory: %s" target))
+                     ((when-let* ((project (project-current nil target)))
+                        ;; The project's backend may not work here, such as
+                        ;; a checkout of a VCS that is not installed.
+                        (ignore-errors (project-files project (list target)))))
+                     (t (sort (directory-files-recursively
+                               target "" nil #'lispm-tools--searchable-directory-p)
+                              #'string<)))))
+    (if glob
+        (seq-filter (lispm-tools--glob-predicate
+                     glob (if (file-directory-p target) target (file-name-directory target)))
+                    files)
+      files)))
+
+(defun lispm-tools--matches (regexp label limit)
+  "Lines of the current buffer matching REGEXP, at most LIMIT.
+Each is a string LABEL:LINE:TEXT, TEXT cut at 300 characters."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((line 1) (bol (point-min)) matches)
+        (while (and (< (length matches) limit)
+                    (not (eobp))
+                    (re-search-forward regexp nil t))
+          (let ((start (line-beginning-position)))
+            (setq line (+ line (count-lines bol start))
+                  bol start)
+            (push (format "%s:%d:%s" label line
+                          (truncate-string-to-width
+                           (buffer-substring-no-properties start (line-end-position)) 300 nil nil "…"))
+                  matches)
+            (forward-line 1)))
+        (nreverse matches)))))
+
+(defun lispm-tools--search (agent regexp case-fold files done)
+  "Search FILES for REGEXP in slices, and call DONE with what is found.
+CASE-FOLD non-nil ignores case.  The search is abandoned if the turn
+of AGENT in which it started ends meanwhile."
+  (let ((root (lispm-tools--root))
+        (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
+        (buffer (generate-new-buffer " *lispm-search*" t))
+        (visiting (make-hash-table :test #'equal))
+        (matches nil) (count 0) (large 0) (truncated nil))
+    (dolist (b (buffer-list))
+      (when-let* ((file (buffer-file-name b)))
+        (puthash (expand-file-name file) b visiting)))
+    (cl-labels
+        ((label (file)
+           (if (file-in-directory-p file root) (file-relative-name file root)
+             (abbreviate-file-name file)))
+         (search-file (file)
+           (let ((open (gethash file visiting))
+                 (limit (- lispm-search-max-matches count)))
+             (if (buffer-live-p open)
+                 (with-current-buffer open
+                   (let ((case-fold-search case-fold))
+                     (lispm-tools--matches regexp (label file) limit)))
+               (with-current-buffer buffer
+                 (let* ((size (or (file-attribute-size (file-attributes file)) 0))
+                        (small (<= size lispm-search-max-file-size))
+                        ;; Read files as they are, no decompression or
+                        ;; decryption, and as UTF-8: detecting each file's
+                        ;; coding system would double the time.
+                        (file-name-handler-alist nil)
+                        (coding-system-for-read 'utf-8))
+                   (erase-buffer)
+                   ;; Binary files are skipped; of a large one only the
+                   ;; head is read, to tell whether it is.
+                   (when (and (ignore-errors
+                                (insert-file-contents file nil 0 (if small size 8000))
+                                t)
+                              (not (save-excursion
+                                     (goto-char (point-min))
+                                     (search-forward "\0" (min (point-max) 8000) t)))
+                              (or small (progn (cl-incf large) nil)))
+                     (let ((case-fold-search case-fold))
+                       (lispm-tools--matches regexp (label file) limit))))))))
+         (finish ()
+           (kill-buffer buffer)
+           (funcall done
+                    (if (null matches)
+                        (concat "No matches."
+                                (if (> large 0) (format " (%d files over %d bytes were not searched)"
+                                                        large lispm-search-max-file-size)
+                                  ""))
+                      (concat (string-join (nreverse matches) "\n")
+                              (if truncated
+                                  (format "\n[stopped after %d matches; narrow the search with path or glob]"
+                                          count)
+                                "")
+                              (if (> large 0)
+                                  (format "\n[%d files over %d bytes were not searched]"
+                                          large lispm-search-max-file-size)
+                                "")))))
+         (step ()
+           (condition-case err
+               (if (and turn (or (not (lispm-agent-busy-p agent))
+                                 (/= turn (lispm-agent-turn agent))))
+                   (kill-buffer buffer)
+                 (let ((deadline (+ (float-time) lispm-tools--search-slice)))
+                   ;; At least one file per slice, however short the slice.
+                   (while (progn
+                            (let ((found (and files (search-file (pop files)))))
+                              (setq matches (nconc (nreverse found) matches)
+                                    count (+ count (length found))
+                                    truncated (>= count lispm-search-max-matches)))
+                            (and files (not truncated) (< (float-time) deadline))))
+                   (if (and files (not truncated))
+                       (run-at-time 0 nil #'step)
+                     (finish))))
+             (error (when (buffer-live-p buffer) (kill-buffer buffer))
+                    (funcall done (error-message-string err) t)))))
+      (step))))
+
 (lispm-deftool search_files
-    ((pattern string "Regular expression (extended syntax) to search for.")
+    ((pattern string "Regular expression, in the syntax of ripgrep or grep -E: (a|b), \\d, \\w, \\s, x{2,3}, [^...]; no lookaround.")
      (path string "File or directory to search (default: your root)." :optional t)
-     (glob string "Only search files matching this glob, e.g. \"*.el\"." :optional t))
-  "Search file contents recursively; returns matching lines as file:line:text."
-  :permission read
-  (let* ((target (lispm-tools--file (or path ".")))
-         (default-directory (lispm-tools--root))
-         (rg (executable-find "rg"))
-         (args (if rg
-                   `("rg" "--line-number" "--no-heading" "--color=never"
-                     ,@(and glob (list "--glob" glob)) "-e" ,pattern ,target)
-                 `("grep" "-rnE" "--binary-files=without-match" "--exclude-dir=.git"
-                   ,@(and glob (list (concat "--include=" glob))) "-e" ,pattern ,target))))
-    (with-temp-buffer
-      (apply #'call-process (car args) nil t nil (cdr args))
-      (let ((lines (split-string (buffer-string) "\n" t)))
-        (if (null lines)
-            "No matches."
-          (concat (string-join (seq-take lines 200) "\n")
-                  (if (> (length lines) 200)
-                      (format "\n[... %d more matches]" (- (length lines) 200))
-                    "")))))))
+     (glob string "Only search files matching this glob, e.g. \"*.el\" or \"src/**/*.ts\"." :optional t)
+     (ignore-case boolean "Match regardless of case." :optional t))
+  "Search file contents; returns matching lines as path:line:text.
+Searches the project's files (a git project's .gitignore applies) and
+the unsaved contents of files open in Emacs."
+  :async t
+  (let* ((agent lispm-current-agent)
+         (case-fold (or ignore-case (string-prefix-p "(?i)" pattern)))
+         (regexp (lispm-tools--emacs-regexp (string-remove-prefix "(?i)" pattern)))
+         (target (lispm-tools--file (or path "."))))
+    ;; An invalid regexp fails here, not file after file.
+    (string-match-p regexp "")
+    (lispm-tools--search agent regexp case-fold (lispm-tools--search-files target glob) done)))
 
 (lispm-deftool list_buffers ()
   "List the buffers open in Emacs: name, major mode, file and whether modified.

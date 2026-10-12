@@ -359,7 +359,17 @@ Code blocks lose their fences and keep their lines as they are."
 
 (defun lispm-chat--tool-title (item)
   "Name(argument) of the tool call ITEM."
-  (let ((argument (lispm-transcript--summary (plist-get item :input))))
+  (let* ((input (plist-get item :input))
+         (argument (if (and (equal (plist-get item :name) "search_files")
+                            (stringp (alist-get 'pattern input)))
+                       (concat (format "%S" (alist-get 'pattern input))
+                               (if (stringp (alist-get 'path input))
+                                   (format " in %s" (alist-get 'path input))
+                                 "")
+                               (if (stringp (alist-get 'glob input))
+                                   (format ", %s" (alist-get 'glob input))
+                                 ""))
+                     (lispm-transcript--summary input))))
     (concat (propertize (lispm-chat--tool-name (plist-get item :name)) 'face 'lispm-chat-tool)
             (if argument (format "(%s)" (lispm--oneline argument 70)) ""))))
 
@@ -437,7 +447,9 @@ Code blocks lose their fences and keep their lines as they are."
             (list (concat "Listed " (lispm-chat--count (max 0 (1- (length lines))) "path")))))
          ("search_files"
           (if (or expanded (string-prefix-p "No matches" result)) lines
-            (list (concat "Found " (lispm-chat--count (length lines) "matching line")))))
+            (list (concat "Found " (lispm-chat--count
+                                    (cl-count-if (lambda (l) (not (string-prefix-p "[" l))) lines)
+                                    "matching line")))))
          (_ (lispm-chat--more (if expanded lines (seq-take lines lispm-chat-preview-lines))
                               (length lines))))))))
 
