@@ -220,7 +220,9 @@ Tool calls awaiting approval are WAITING headings: review them with
             ;; tools grouping buffers by directory, see the project.
             (setq default-directory (lispm-agent-root agent)))
           (when (and agent (not (buffer-live-p (lispm-agent-buffer agent))))
-            (setf (lispm-agent-buffer agent) (current-buffer)))))
+            (setf (lispm-agent-buffer agent) (current-buffer)))
+          (when (and agent (eq (lispm-agent-buffer agent) (current-buffer)))
+            (lispm--resume-calls agent))))
     (remove-hook 'org-after-todo-state-change-hook #'lispm--todo-state-changed t)
     (remove-hook 'kill-buffer-hook #'lispm--session-killed t)
     (remove-hook 'after-change-functions #'lispm--update-placeholder t)
@@ -591,9 +593,11 @@ reply when the turn handling TEXT ends."
   (when (and (not (lispm-agent-busy-p agent))
              (not (lispm-agent-compacting agent))
              (lispm-agent-inbox agent))
-    (let ((entry (pop (lispm-agent-inbox agent))))
-      (lispm-session-buffer agent)
-      (lispm--begin-turn agent entry))))
+    ;; Opening a standing agent's session can take up calls it left
+    ;; awaiting approval; the inbox waits until they are settled.
+    (lispm-session-buffer agent)
+    (unless (lispm-agent-busy-p agent)
+      (lispm--begin-turn agent (pop (lispm-agent-inbox agent))))))
 
 (defun lispm--begin-turn (agent &optional entry)
   "Start a turn of AGENT on inbox ENTRY, or on what the user typed.
@@ -831,17 +835,24 @@ once every call has a result."
       (lispm--maybe-continue agent))))
 
 (defun lispm--run-tool (agent id)
-  "Run AGENT's pending tool call ID."
-  (let ((call (gethash id (lispm-agent-pending agent))))
-    (plist-put call :status 'run)
-    (lispm--in-session agent
-      (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
-    (lispm-set-state agent 'acting (format "running %s" (plist-get call :name)))
-    (let ((lispm-current-agent agent)
-          (default-directory (lispm-agent-root agent)))
-      (lispm-tool-invoke (plist-get call :tool) (plist-get call :input)
-                         (lambda (text errorp &optional images)
-                           (lispm--tool-done agent id text errorp nil images))))))
+  "Run AGENT's pending tool call ID.
+A call taken up from a reopened session gets its tool now, by name:
+tools of MCP servers appear only once the servers have started."
+  (let* ((call (gethash id (lispm-agent-pending agent)))
+         (tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))))
+    (if (not tool)
+        (lispm--tool-done agent id (format "There is no tool named %s available to you."
+                                           (plist-get call :name))
+                          t "FAILED")
+      (plist-put call :status 'run)
+      (lispm--in-session agent
+        (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
+      (lispm-set-state agent 'acting (format "running %s" (plist-get call :name)))
+      (let ((lispm-current-agent agent)
+            (default-directory (lispm-agent-root agent)))
+        (lispm-tool-invoke tool (plist-get call :input)
+                           (lambda (text errorp &optional images)
+                             (lispm--tool-done agent id text errorp nil images)))))))
 
 (defun lispm--tool-done (agent id text errorp &optional state images)
   "Record TEXT as the result of AGENT's call ID; ERRORP marks failure.
@@ -998,6 +1009,57 @@ REASON, for a denial, is passed on to the model."
                             (concat " Their reason: " reason)
                           " Do not repeat it unchanged; adapt, or ask the user."))
                 t "DENIED"))))))
+
+(defconst lispm--interrupted-result
+  "The call was interrupted: Emacs stopped before it finished, so whether it took effect is unknown.  Check before repeating it."
+  "Result of a call that was running when its session was last saved.")
+
+(defun lispm--resume-calls (agent)
+  "Take up the tool calls AGENT's session left without a result.
+A session saved in the middle of a turn and opened again, after
+Emacs restarted, records them as headings, which hold all a call
+needs: calls awaiting approval await it again, and calls that were
+running are recorded as interrupted, their processes gone.  Once the
+calls awaiting approval are settled, the turn goes on; if there are
+none, it ends here, without a request to the model.
+This runs while the session opens, before `lispm-session-mode-hook'
+has started its MCP servers: tools are looked up when a call runs."
+  (let ((calls (and (eq (lispm-agent-state agent) 'idle)
+                    (zerop (hash-table-count (lispm-agent-pending agent)))
+                    (plist-get (lispm-transcript-parse) :pending-calls))))
+    (when calls
+      (cl-incf (lispm-agent-turn agent))
+      (setf (lispm-agent-steps agent) 0)
+      (dolist (call calls)
+        (puthash (plist-get call :id)
+                 (list :status (if (member (plist-get call :state) '("WAITING" "APPROVED"))
+                                   'ask
+                                 'run)
+                       :name (plist-get call :name)
+                       :input (plist-get call :input)
+                       :marker (copy-marker (plist-get call :pos) t))
+                 (lispm-agent-pending agent)))
+      (lispm-set-state agent 'acting)
+      (setf (lispm-agent-dispatching agent) t)
+      (unwind-protect
+          (dolist (call calls)
+            (let ((id (plist-get call :id)))
+              (pcase (plist-get call :state)
+                ("WAITING")
+                ;; Approved, but never run: ask again rather than run it
+                ;; while the session is being opened.
+                ("APPROVED"
+                 (lispm--in-session agent
+                   (lispm-transcript-set-state
+                    (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING")))
+                (_ (lispm--tool-done agent id lispm--interrupted-result t)))))
+        (setf (lispm-agent-dispatching agent) nil))
+      (lispm--update-state agent)
+      (unless (eq (lispm-agent-state agent) 'waiting)
+        (lispm--in-session agent
+          (lispm--newline)
+          (insert "* User\n"))
+        (lispm-set-state agent 'idle)))))
 
 (defun lispm--ask-approval (agent id)
   "Show AGENT's call ID for approval: a preview, a notification."

@@ -223,6 +223,13 @@ extra rule: *writes outside the agent's root always ask*, whatever the policy sa
 Approval *never blocks*: the agent sits in ~waiting~ while the user and the other agents carry
 on; the mode line shows ~λ[coder!]~ when something awaits approval.
 
+*Approval survives restarts.* A call's heading holds all it needs (id, tool, input, state), so a
+session saved while calls await approval and opened again after Emacs restarted takes them up
+(~lispm--resume-calls~): WAITING calls await approval again, and once they are settled the turn
+goes on. Calls that were running are recorded as interrupted, their processes gone; if nothing
+awaits approval, the turn ends there without asking the model. The in-memory table of pending
+calls is only a cache of what the transcript says.
+
 *Explainability* comes in four layers: the ~why~ of every write or exec call; the transcript
 itself (every call's input, state and result); ~lispm-show-request~ (the raw request the model
 sees); the git history and per-turn diffs (~lispm-turn-diff~).

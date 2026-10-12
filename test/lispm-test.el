@@ -1030,6 +1030,100 @@ text go back to the model byte for byte."
                                     :title)
                          "Pond poems")))))))
 
+(defun lispm-test--crash (agent)
+  "Save AGENT's session, then end it as an Emacs crash would.
+The file keeps what was saved; whatever stopping the agent writes is
+undone on disk.  Return the session file."
+  (let* ((buffer (lispm-agent-buffer agent))
+         (file (buffer-file-name buffer))
+         (saved (progn (with-current-buffer buffer (save-buffer))
+                       (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+    (kill-buffer buffer)
+    (let ((coding-system-for-write 'utf-8))
+      (write-region saved nil file nil 'silent))
+    file))
+
+(ert-deftest lispm-test-resume-suspended-calls ()
+  "A session saved mid-turn resumes its calls from the transcript.
+A call awaiting approval can still be approved; a running call, whose
+process died with Emacs, is recorded as interrupted."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let* ((default-directory project)
+           (agent (lispm-start)))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell"
+                                                   '((why . "w") (command . "sleep 30")))
+                                 (lispm-test--tool "t2" "edit_file"
+                                                   '((why . "w") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp")))))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let* ((file (lispm-test--crash agent))
+             (revived (progn
+                        ;; The file holds the turn as it was saved.
+                        (should (string-match-p "^\\*\\* RUNNING run_shell" (lispm--file-text file)))
+                        (lispm-resume-file file))))
+        ;; The call awaiting approval is known again ...
+        (should (equal (lispm--waiting-calls revived) '("t2")))
+        (should (eq (lispm-agent-state revived) 'waiting))
+        ;; ... the one that was running is not left without a result ...
+        (should (string-match-p "^\\*\\* FAILED run_shell" (lispm-test--transcript revived)))
+        ;; ... and approving the org way finishes the turn.
+        (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+              lispm-test--scripts)
+        (with-current-buffer (lispm-agent-buffer revived)
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* WAITING edit_file")
+          (org-todo "APPROVED"))
+        (should (lispm-test--wait (lispm-test--idle-p revived) 2))
+        (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+        (let ((results (alist-get 'content
+                                  (aref (alist-get 'messages (car lispm-test--requests)) 2))))
+          (should (string-match-p "interrupted" (alist-get 'content (aref results 0))))
+          (should (equal (alist-get 'content (aref results 1))
+                         "Replaced 1 occurrence in a.txt.")))))))
+
+(ert-deftest lispm-test-resume-call-to-late-tool ()
+  "A resumed call gets its tool when it runs, not when the session opens.
+Tools of MCP servers are registered only once the servers have
+started, after the session opened."
+  (lispm-test-env
+    (lispm-deftool lispm_test_late ()
+      "A tool registered late, as an MCP server's are."
+      :permission write
+      "late ok")
+    (unwind-protect
+        (let* ((default-directory project)
+               (agent (lispm-start)))
+          (setq lispm-test--scripts
+                `((assistant@project
+                   ,(lispm-test--msg "tool_use" (lispm-test--tool "l1" "lispm_test_late" '((why . "w")))))))
+          (lispm-tell agent "Use the late tool")
+          (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+          (let ((file (lispm-test--crash agent)))
+            ;; Emacs restarts: the tool's server has not started yet.
+            (remhash "lispm_test_late" lispm-tools--registry)
+            (let ((revived (lispm-resume-file file)))
+              (should (equal (lispm--waiting-calls revived) '("l1")))
+              (lispm-deftool lispm_test_late ()
+                "A tool registered late, as an MCP server's are."
+                :permission write
+                "late ok")
+              (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+                    lispm-test--scripts)
+              (lispm-resolve revived "l1" 'approve)
+              (should (lispm-test--wait (lispm-test--idle-p revived)))
+              (should (equal (alist-get 'content
+                                        (aref (alist-get 'content
+                                                         (aref (alist-get 'messages (car lispm-test--requests)) 2))
+                                              0))
+                             "late ok")))))
+      (remhash "lispm_test_late" lispm-tools--registry))))
+
 (ert-deftest lispm-test-placeholder ()
   "An empty input heading shows a hint, which is display only and goes once typing starts."
   (lispm-test-env
