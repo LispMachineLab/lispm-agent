@@ -229,6 +229,14 @@ Tool calls awaiting approval are WAITING headings: review them with
 
 (defun lispm--update-placeholder (&rest _)
   "Show a hint after the input heading while nothing is written under it."
+  ;; A change function must keep the match data: `replace-match', in
+  ;; `org-todo' for one, reads it again after the change to fix the
+  ;; replacement's case, and would upcase from wherever we matched.
+  (save-match-data
+    (lispm--update-placeholder-1)))
+
+(defun lispm--update-placeholder-1 ()
+  "Show or hide the input placeholder; see `lispm--update-placeholder'."
   (let ((input (and lispm-session-mode (lispm--input-heading-p))))
     (if (not input)
         (when (overlayp lispm--placeholder)

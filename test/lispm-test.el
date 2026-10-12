@@ -872,6 +872,40 @@ stand in."
                               (lispm-test--transcript agent)))
       (should (lispm-test--input-heading-p agent)))))
 
+(ert-deftest lispm-test-org-approval-keeps-transcript ()
+  "Approving with `org-todo' changes the call's keyword and nothing else.
+The response's earlier blocks keep their case: ids, signatures and
+text go back to the model byte for byte."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let ((agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use" (lispm-test--thinking "Plan it" "sig-a")
+                                 (lispm-test--text "Editing a.txt.")
+                                 (lispm-test--tool "t1" "edit_file"
+                                                   '((why . "w") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((before (lispm-test--transcript agent)))
+        (with-current-buffer (lispm-agent-buffer agent)
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* WAITING edit_file")
+          (org-todo "APPROVED"))
+        (let ((after (lispm-test--transcript agent))
+              (case-fold-search nil))
+          (should (equal (replace-regexp-in-string "^\\*\\* APPROVED " "** WAITING " after)
+                         before))))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (alist-get 'content (aref (alist-get 'messages (car lispm-test--requests)) 1))
+                     (vector (lispm-test--thinking "Plan it" "sig-a")
+                             (lispm-test--text "Editing a.txt.")
+                             (lispm-test--tool "t1" "edit_file"
+                                               '((why . "w") (path . "a.txt")
+                                                 (old_text . "world") (new_text . "lisp")))))))))
+
 (defun lispm-test--input-heading-p (agent)
   "Whether AGENT's session ends with an empty input heading."
   (with-current-buffer (lispm-agent-buffer agent) (lispm--input-heading-p)))
