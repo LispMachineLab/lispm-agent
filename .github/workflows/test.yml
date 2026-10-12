@@ -1,0 +1,35 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Emacs ${{ matrix.emacs }}
+    runs-on: ubuntu-latest
+    # The development snapshot may break for reasons of its own.
+    continue-on-error: ${{ matrix.emacs == 'snapshot' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 30.1 is the oldest LispM supports (Package-Requires).
+        emacs: ['30.1', '30.2', '31.1', 'snapshot']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: purcell/setup-emacs@v8.0
+        with:
+          version: ${{ matrix.emacs }}
+      # make deps installs lispm.el's Package-Requires (mcp.el) into .deps/.
+      - uses: actions/cache@v6
+        with:
+          path: .deps
+          key: deps-${{ matrix.emacs }}-${{ hashFiles('lispm.el', 'test/install-deps.el') }}
+      - name: Byte-compile, warnings as errors
+        run: make compile
+      - name: Test
+        run: make test
