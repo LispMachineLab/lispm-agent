@@ -160,12 +160,111 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
           (lispm-transcript--body (lispm--json-encode block))
           "#+end_src\n"))
 
-(defun lispm-transcript-result (text errorp)
-  "Section text for a tool result TEXT; ERRORP marks a failure."
+(defun lispm-transcript-result (text errorp &optional images directory)
+  "Section text for a tool result TEXT; ERRORP marks a failure.
+IMAGES are files the result also holds, such as screenshots; they are
+linked, relative to DIRECTORY if given, one per line."
   (concat "*** " (if errorp "Error" "Result") "\n"
           "#+begin_example\n"
           (lispm-transcript--body text)
-          "#+end_example\n"))
+          "#+end_example\n"
+          (mapconcat (lambda (file)
+                       (format "[[file:%s]]\n"
+                               (if directory (file-relative-name file directory) file)))
+                     images "")))
+
+;;;; Images
+;;
+;; An image in a tool result is a file next to the session, linked from
+;; the result's section, so org can show it inline.  The parser reads
+;; the files into image blocks; only the last `lispm-context-images'
+;; are sent, the others replaced by a line of text.
+
+(defcustom lispm-context-images 5
+  "How many of a session's latest images requests carry.
+Older ones are dropped in batches of this many, so that the request
+prefix, and with it the model's cache, changes only once a batch."
+  :type 'integer
+  :group 'lispm)
+
+(defconst lispm-transcript--image-types
+  '(("png" . "image/png") ("jpg" . "image/jpeg") ("jpeg" . "image/jpeg")
+    ("gif" . "image/gif") ("webp" . "image/webp"))
+  "Image file extensions and their media types.")
+
+(defun lispm-transcript--images (beg end)
+  "Image files linked alone on a line between BEG and END."
+  (save-excursion
+    (goto-char beg)
+    (let ((base (if buffer-file-name (file-name-directory buffer-file-name) default-directory))
+          files)
+      (while (re-search-forward "^\\[\\[file:\\([^]\n]+\\)\\]\\][ \t]*$" end t)
+        (let ((file (match-string-no-properties 1)))
+          (when (assoc (downcase (or (file-name-extension file) "")) lispm-transcript--image-types)
+            (push (expand-file-name file base) files))))
+      (nreverse files))))
+
+(defun lispm-transcript--image-block (file)
+  "A placeholder image block for FILE; `lispm-transcript--load-images' reads it."
+  `((type . "image") (lispm-file . ,file)))
+
+(defun lispm-transcript--map-images (function messages)
+  "MESSAGES with each image placeholder replaced by FUNCTION's value for it.
+Placeholders are content blocks or blocks inside tool results."
+  (let ((map (lambda (blocks)
+               (vconcat (mapcar (lambda (block)
+                                  (cond ((alist-get 'lispm-file block) (funcall function block))
+                                        ((and (equal (alist-get 'type block) "tool_result")
+                                              (vectorp (alist-get 'content block)))
+                                         (let ((copy (copy-alist block)))
+                                           (setf (alist-get 'content copy)
+                                                 (vconcat (mapcar (lambda (b)
+                                                                    (if (alist-get 'lispm-file b)
+                                                                        (funcall function b)
+                                                                      b))
+                                                                  (alist-get 'content block))))
+                                           copy))
+                                        (t block)))
+                                blocks)))))
+    (mapcar (lambda (message)
+              (let ((content (alist-get 'content message)))
+                (if (not (vectorp content))
+                    message
+                  (let ((copy (copy-alist message)))
+                    (setf (alist-get 'content copy) (funcall map content))
+                    copy))))
+            messages)))
+
+(defun lispm-transcript--load-images (messages)
+  "MESSAGES with their latest image placeholders read into image blocks.
+The others become a line of text; see `lispm-context-images'."
+  (let ((total 0) (seen 0))
+    (lispm-transcript--map-images (lambda (block) (cl-incf total) block) messages)
+    (if (zerop total)
+        messages
+      (let* ((keep (max 1 lispm-context-images))
+             (drop (- total keep))
+             (drop (if (> drop 0) (- drop (% drop keep)) 0)))
+        (lispm-transcript--map-images
+         (lambda (block)
+           (let ((file (alist-get 'lispm-file block)))
+             (cl-incf seen)
+             (cond ((<= seen drop)
+                    `((type . "text") (text . ,(format "[image %s, no longer shown]"
+                                                       (file-name-nondirectory file)))))
+                   ((not (file-readable-p file))
+                    `((type . "text") (text . ,(format "[image %s is missing]" file))))
+                   (t
+                    `((type . "image")
+                      (source (type . "base64")
+                              (media_type . ,(cdr (assoc (downcase (file-name-extension file))
+                                                         lispm-transcript--image-types)))
+                              (data . ,(with-temp-buffer
+                                         (set-buffer-multibyte nil)
+                                         (insert-file-contents-literally file)
+                                         (base64-encode-region (point-min) (point-max) t)
+                                         (buffer-string)))))))))
+         messages)))))
 
 (defun lispm-transcript-preview (diff)
   "Section text showing DIFF while a call awaits approval."
@@ -313,9 +412,14 @@ own notes."
   "A text content block holding TEXT."
   `((type . "text") (text . ,text)))
 
-(defun lispm-transcript--tool-result (id text errorp)
-  "A tool_result block for the call ID with TEXT; ERRORP marks failure."
-  `((type . "tool_result") (tool_use_id . ,id) (content . ,text)
+(defun lispm-transcript--tool-result (id text errorp &optional images)
+  "A tool_result block for the call ID with TEXT; ERRORP marks failure.
+IMAGES are files the result holds besides TEXT."
+  `((type . "tool_result") (tool_use_id . ,id)
+    (content . ,(if images
+                    (vconcat (list (lispm-transcript--text-block text))
+                             (mapcar #'lispm-transcript--image-block images))
+                  text))
     ,@(when errorp '((is_error . t)))))
 
 (defun lispm-transcript--parse-assistant (beg end)
@@ -342,14 +446,15 @@ Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-IDS)."
                                   for title = (plist-get (lispm-transcript--heading kbeg)
                                                          :title)
                                   when (member title '("Result" "Error"))
-                                  return (cons (or (lispm-transcript--block kbody kend) "")
-                                               (equal title "Error")))))
+                                  return (list (or (lispm-transcript--block kbody kend) "")
+                                               (equal title "Error")
+                                               (lispm-transcript--images kbody kend)))))
             (push `((type . "tool_use") (id . ,id)
                     (name . ,(cdr (assoc "TOOL" props)))
                     (input . ,(if (consp input) input nil)))
                   blocks)
             (cond (result
-                   (push (lispm-transcript--tool-result id (car result) (cdr result))
+                   (push (apply #'lispm-transcript--tool-result id result)
                          results))
                   ((member (plist-get heading :todo) '("WAITING" "APPROVED" "RUNNING"))
                    (push id pending))
@@ -411,7 +516,8 @@ yet) and :last-role."
                  (when results
                    (push `((role . "user") (content . ,(vconcat results))) messages))
                  (setq pending (append pending ids)))))))
-        (setq messages (lispm-transcript--normalize (nreverse messages)))
+        (setq messages (lispm-transcript--load-images
+                        (lispm-transcript--normalize (nreverse messages))))
         (list :system system
               :messages messages
               :pending pending

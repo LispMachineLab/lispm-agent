@@ -69,12 +69,30 @@
     (and texts (string-join texts "\n\n"))))
 
 (defun lispm-openai--result-text (block)
-  "Content of the tool_result BLOCK as text."
+  "Content of the tool_result BLOCK as text; its images are left out."
   (let* ((content (alist-get 'content block))
          (text (if (stringp content)
                    content
-                 (mapconcat (lambda (b) (or (alist-get 'text b) "")) content "\n"))))
+                 (or (lispm-openai--text (append content nil)) ""))))
     (if (eq (alist-get 'is_error block) t) (concat "Error: " text) text)))
+
+(defun lispm-openai--image-part (block)
+  "The Chat Completions content part for the image BLOCK."
+  (let ((source (alist-get 'source block)))
+    `((type . "image_url")
+      (image_url (url . ,(format "data:%s;base64,%s"
+                                 (alist-get 'media_type source) (alist-get 'data source)))))))
+
+(defun lispm-openai--images (blocks)
+  "The image blocks among BLOCKS and the content of their tool results."
+  (cl-loop for b in blocks
+           append (pcase (alist-get 'type b)
+                    ("image" (list b))
+                    ("tool_result"
+                     (let ((content (alist-get 'content b)))
+                       (and (vectorp content)
+                            (seq-filter (lambda (x) (equal (alist-get 'type x) "image"))
+                                        content)))))))
 
 (defun lispm-openai--messages (system messages)
   "SYSTEM and Messages-shape MESSAGES as Chat Completions messages."
@@ -99,14 +117,26 @@
                         ,@(and calls `((tool_calls . ,(vconcat calls)))))
                       out)))
           ;; Tool results must directly follow the call; text comes after.
+          ;; Tool messages hold text only, so images, of tool results or
+          ;; the user's, follow in a user message.
           (dolist (b blocks)
             (when (equal (alist-get 'type b) "tool_result")
               (push `((role . "tool")
                       (tool_call_id . ,(alist-get 'tool_use_id b))
                       (content . ,(lispm-openai--result-text b)))
                     out)))
-          (when-let* ((text (lispm-openai--text blocks)))
-            (push `((role . "user") (content . ,text)) out)))))
+          (let ((text (lispm-openai--text blocks))
+                (images (lispm-openai--images blocks)))
+            (cond
+             (images
+              (push `((role . "user")
+                      (content . ,(vconcat
+                                   (if text
+                                       `(((type . "text") (text . ,text)))
+                                     '(((type . "text") (text . "Images from the tool results above."))))
+                                   (mapcar #'lispm-openai--image-part images))))
+                    out))
+             (text (push `((role . "user") (content . ,text)) out)))))))
     (nreverse out)))
 
 (defun lispm-openai-request (backend model effort system tools messages)

@@ -272,6 +272,32 @@ Tool calls awaiting approval are WAITING headings: review them with
                               (_ "C-c C-k abort"))
                             'face 'shadow))))))
 
+(defun lispm-image-directory (agent)
+  "Directory of the images of AGENT's session, next to its session files.
+Session files are under git (see `lispm-git'); images are kept out."
+  (let ((dir (expand-file-name (concat (lispm-agent-id agent) ".images/")
+                               (lispm--sessions-directory (lispm-agent-root agent)))))
+    (make-directory dir t)
+    dir))
+
+(defun lispm-save-image (agent data &optional type)
+  "Save the image DATA (base64) in AGENT's session; return the file.
+TYPE is its media type, image/png by default.  Without an agent, the
+image goes to a temporary file."
+  (let* ((extension (or (car (rassoc (or type "image/png") lispm-transcript--image-types)) "png"))
+         (file (if agent
+                   (let ((dir (lispm-image-directory agent)))
+                     (expand-file-name (format "%04d.%s" (1+ (length (directory-files
+                                                                      dir nil "\\`[0-9]+\\.")))
+                                               extension)
+                                       dir))
+                 (make-temp-file "lispm-image-" nil (concat "." extension))))
+         (coding-system-for-write 'binary))
+    (with-temp-file file
+      (set-buffer-multibyte nil)
+      (insert (base64-decode-string data)))
+    file))
+
 (defun lispm--sessions-directory (root)
   "Directory of the session files of the project at ROOT."
   (let ((dir (expand-file-name "sessions/" (lispm-project-directory root))))
@@ -604,11 +630,29 @@ Signal a `user-error' if the session cannot be sent as it is."
                        (mapcar #'lispm-tool-schema (lispm-agent-tools* agent))
                        (plist-get parsed :messages))))
 
+(defvar lispm-request-wait-functions nil
+  "Functions that can hold back an agent's request for a moment.
+Each is called with the agent before a request is made, and returns
+a short description of what the request waits for, or nil.  While
+one does, the request is tried again shortly; MCP servers still
+starting hold requests back so that their tools are there.")
+
 (defun lispm--request (agent)
   "Ask the model for AGENT's next step."
   (cond
    ((not (buffer-live-p (lispm-agent-buffer agent)))
     (lispm-set-state agent 'idle "session buffer was killed"))
+   ((when-let* ((waiting (run-hook-with-args-until-success 'lispm-request-wait-functions agent)))
+      (lispm-set-state agent 'requesting waiting)
+      (let ((turn (lispm-agent-turn agent))
+            (steps (lispm-agent-steps agent)))
+        (run-at-time 0.2 nil (lambda ()
+                               ;; Unless the turn was stopped meanwhile.
+                               (when (and (eq (lispm-agent-state agent) 'requesting)
+                                          (eql turn (lispm-agent-turn agent))
+                                          (eql steps (lispm-agent-steps agent)))
+                                 (lispm--request agent)))))
+      t))
    ((>= (lispm-agent-steps agent) lispm-max-steps)
     (lispm--finish-turn agent (format "Stopped after %d model requests (`lispm-max-steps')."
                                       lispm-max-steps)))
@@ -788,11 +832,13 @@ once every call has a result."
     (let ((lispm-current-agent agent)
           (default-directory (lispm-agent-root agent)))
       (lispm-tool-invoke (plist-get call :tool) (plist-get call :input)
-                         (lambda (text errorp) (lispm--tool-done agent id text errorp))))))
+                         (lambda (text errorp &optional images)
+                           (lispm--tool-done agent id text errorp nil images))))))
 
-(defun lispm--tool-done (agent id text errorp &optional state)
+(defun lispm--tool-done (agent id text errorp &optional state images)
   "Record TEXT as the result of AGENT's call ID; ERRORP marks failure.
-STATE overrides the call's final TODO keyword."
+STATE overrides the call's final TODO keyword.  IMAGES are files the
+result holds besides TEXT."
   (when-let* ((call (gethash id (lispm-agent-pending agent))))
     (remhash id (lispm-agent-pending agent))
     (let ((marker (plist-get call :marker)))
@@ -801,7 +847,9 @@ STATE overrides the call's final TODO keyword."
           (lispm-transcript-set-state marker (or state (if errorp "FAILED" "DONE")))
           (goto-char (lispm-transcript-subtree-end marker 2))
           (let ((start (point)))
-            (insert (lispm-transcript-result text errorp))
+            (insert (lispm-transcript-result text errorp images
+                                             (and buffer-file-name
+                                                  (file-name-directory buffer-file-name))))
             (when (> (cl-count ?\n text) 12)
               (lispm-transcript-fold start))))))
     (unless (lispm-agent-dispatching agent)

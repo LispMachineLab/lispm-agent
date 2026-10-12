@@ -15,13 +15,17 @@ they are agents. In code, the package name and prefix are all lowercase: ~lispm~
 
 * Installation
 
-Requires Emacs 29.1+ (developed on 31.1), curl, and a model endpoint speaking either the OpenAI
+Requires Emacs 30.1+ (developed on 31.1), curl, and a model endpoint speaking either the OpenAI
 Chat Completions API (most servers do) or the Anthropic Messages API. By default LispM uses the
 local Rotom gateway (1.5.15 or later) through Chat Completions (~http://127.0.0.1:14550/v1~,
 model ~gpt-5.5~).
 
+LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA, which must be in
+~package-archives~); installing LispM as a package installs it too:
+
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/src/lispm")      ; git clone https://github.com/RyanKung/lispm
+(package-vc-install "https://github.com/RyanKung/lispm")
+;; or, from a checkout of your own: (package-vc-install-from-checkout "~/src/lispm")
 (require 'lispm)
 (lispm-mode-line-mode 1)          ; show busy agents and pending approvals in the mode line
 #+end_src
@@ -171,11 +175,43 @@ Each agent can also set its own ~:backend~, ~:model~ and ~:effort~, so agents on
 providers can work together. ~C-h v lispm-backends~ documents every option; section 9 of
 DESIGN.org explains the translation between the shapes.
 
+* MCP servers and computer use
+
+Agents use the tools of [[https://modelcontextprotocol.io][Model Context Protocol]] servers as
+their own. List the servers in ~lispm-mcp-servers~, as for mcp.el's ~mcp-hub-servers~; they
+start when a session opens, and a session's first request waits for them. Their tools are
+named ~mcp__SERVER__TOOL~ (~peekaboo:see~ in the chat) and ask for approval by default
+(permission class ~mcp~; a server's ~:permission~ gives its tools another class).
+
+For computer use on macOS, [[https://github.com/openclaw/Peekaboo][Peekaboo]] (macOS 15+,
+Node 22+) lets agents see the screen and use applications:
+
+#+begin_src emacs-lisp
+(setq lispm-mcp-servers
+      '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp"))))
+#+end_src
+
+Emacs then needs Screen Recording and Accessibility permission (System Settings > Privacy &
+Security); ~peekaboo:permissions~ reports what is missing. Images that tools return, such as
+the screenshots of ~peekaboo:see~, go to the model and are kept next to the session (out of
+git); ~TAB~ on the call shows them in the chat. Requests carry the latest
+~lispm-context-images~ images. ~M-x lispm-mcp-status~, ~lispm-mcp-start~ and ~lispm-mcp-stop~
+manage the servers.
+
+A server's tools join every role whose ~:tools~ is ~t~ (the default). Peekaboo's 26 tools
+take about 14,000 tokens of every request, so you may rather give them to a role of their own:
+
+#+begin_src emacs-lisp
+(lispm-defrole computer
+  "Uses the Mac's applications for the user."
+  :tools '(read_file list_directory recall remember "mcp__peekaboo__*"))
+#+end_src
+
 * Tests
 
 #+begin_src sh
-make test      # ERT: a fake model drives whole turns; a local fake SSE server drives the real curl transport
-make compile
+make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers drive curl and mcp.el
+make compile   # make deps, which both run first, installs mcp.el into .deps/
 #+end_src
 
 * Files
@@ -191,6 +227,7 @@ make compile
 | lispm-memory.el        | memory.org and tasks.org, git audit trail                       |
 | lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
 | lispm-collab.el        | multi-agent collaboration tools                                 |
+| lispm-mcp.el           | the tools of MCP servers, through mcp.el                        |
 | lispm-chat.el          | the chat interface, drawn from the org transcript               |
 | lispm.el               | entry commands, dashboard, mode line                            |
 

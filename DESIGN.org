@@ -26,6 +26,7 @@ implementation:
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
 | Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
+| Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
 | Model APIs                | two API shapes behind one internal format                        | [[file:lispm-api.el][lispm-api.el]], [[file:lispm-openai.el][lispm-openai.el]], [[file:lispm-anthropic.el][lispm-anthropic.el]]   |
 
 The name comes from the Lisp Machines (CONS, CADR, Symbolics Genera, ...): environments where
@@ -360,7 +361,39 @@ To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
 ~claude-opus-5-5~, with every Messages feature enabled, including server-side refusal fallbacks
 (~fallbacks: "default"~).
 
-* 10. Known limitations and next steps
+* 10. MCP servers and images
+
+Tools need not be written in Lisp: the tools of any Model Context Protocol server become an
+agent's tools. LispM does not speak the protocol itself; it depends on mcp.el, which does, and
+adds what an agent runtime needs on top:
+
+- *Registration.* When a server lists its tools, each becomes a LispM tool named
+  ~mcp__SERVER__TOOL~ whose schema is the server's own (~lispm-tool~ has an ~input-schema~
+  slot for tools that are not defined by ~lispm-deftool~ parameters). JSON crosses between the
+  two libraries' conventions (alists and ~:false~ here, plists and ~:json-false~ in mcp.el).
+- *Permissions.* MCP tools have the permission class ~mcp~, which asks by default, like
+  ~write~ and ~exec~: a server can do anything. A server's ~:permission~ gives its tools
+  another class; "don't ask again" in the chat allows one tool at a time.
+- *Starting.* Servers start when a session opens (~lispm-mcp-autostart~), asynchronously.
+  Their tools should be there from a session's first request on, both for the model and for
+  the prompt cache, so a request waits while a server is still starting
+  (~lispm-request-wait-functions~, ~lispm-mcp-start-timeout~); the chat says so.
+
+*Images.* A tool result can hold images: Peekaboo's ~see~ returns a screenshot with its map of
+the screen. The transcript cannot hold image data, and should not: base64 would swamp it. So
+an image is a file next to the session (~SESSION-ID.images/0001.png~, kept out of git) and
+the result's section links it, one ~[[file:...]]~ per line, which org can show inline. The
+parser turns each link into an image block, read from the file when the request is made.
+Only the latest ~lispm-context-images~ images are sent; older ones become a line of text, a
+batch at a time, so that the request prefix, and the cache bound to it, changes only once a
+batch. Chat Completions accepts images in user messages but not in tool messages, so there the
+images follow the tool messages in a user message of their own.
+
+Computer use is then not something LispM implements: on macOS, Peekaboo is configured as a
+server, and an agent sees the screen through ~see~ and acts through ~click~, ~type~, ~press~,
+~scroll~ and the rest, on accessibility elements rather than guessed coordinates.
+
+* 11. Known limitations and next steps
 
 - *Drafts are context in the org interface*: with ~lispm-interface~ set to ~org~, if another
   agent's message arrives while the user is typing under ~* User~, the draft is sent along as

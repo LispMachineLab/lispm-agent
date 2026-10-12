@@ -192,12 +192,13 @@
              (type (cdr (assoc "BLOCK" props))))
         (cond
          ((assoc "TOOL_ID" props)
-          (let ((json (lispm-transcript--block bbeg own-end)) result failed preview)
+          (let ((json (lispm-transcript--block bbeg own-end)) result failed preview images)
             (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
               (pcase (plist-get (lispm-transcript--heading kbeg) :title)
                 ((and (or "Result" "Error") title)
                  (setq result (or (lispm-transcript--block kbody kend) "")
-                       failed (equal title "Error")))
+                       failed (equal title "Error")
+                       images (lispm-transcript--images kbody kend)))
                 ("Preview" (setq preview (lispm-transcript--block kbody kend)))))
             (let ((input (and json (ignore-errors (lispm--json-decode json)))))
               (push (list :kind 'tool
@@ -205,7 +206,7 @@
                           :name (cdr (assoc "TOOL" props))
                           :state (plist-get heading :todo)
                           :input (and (consp input) input)
-                          :result result :failed failed :preview preview)
+                          :result result :failed failed :preview preview :images images)
                     items))))
          ((member type '("thinking" "reasoning"))
           (let* ((json (lispm-transcript--block bbeg own-end))
@@ -361,8 +362,11 @@ Code blocks lose their fences and keep their lines as they are."
   "The names tools are shown under.")
 
 (defun lispm-chat--tool-name (name)
-  "The name the tool NAME is shown under."
-  (or (alist-get name lispm-chat--tool-names nil nil #'equal) name))
+  "The name the tool NAME is shown under; SERVER:TOOL for an MCP server's."
+  (cond ((alist-get name lispm-chat--tool-names nil nil #'equal))
+        ((and name (string-match "\\`mcp__\\(.+?\\)__\\(.+\\)\\'" name))
+         (format "%s:%s" (match-string 1 name) (match-string 2 name)))
+        (t name)))
 
 (defun lispm-chat--tool-title (item)
   "Name(argument) of the tool call ITEM."
@@ -422,7 +426,8 @@ Code blocks lose their fences and keep their lines as they are."
          (input (plist-get item :input))
          (path (or (alist-get 'path input) (alist-get 'buffer input)))
          (result (or (plist-get item :result) ""))
-         (lines (split-string (string-trim-right result) "\n")))
+         (lines (and (not (string-blank-p result))
+                     (split-string (string-trim-right result) "\n"))))
     (pcase (plist-get item :state)
       ("WRITING" nil)
       ((or "RUNNING" "APPROVED") (list "Running…"))
@@ -460,13 +465,33 @@ Code blocks lose their fences and keep their lines as they are."
          (_ (lispm-chat--more (if expanded lines (seq-take lines lispm-chat-preview-lines))
                               (length lines))))))))
 
+(defun lispm-chat--image (file)
+  "FILE shown as an image, or named where images cannot be shown."
+  (if (and (display-images-p) (file-readable-p file))
+      (propertize (format "[%s]" (file-name-nondirectory file))
+                  'display (create-image file nil nil
+                                         :max-width (min 900 (max 300 (* (lispm-chat--width)
+                                                                         (frame-char-width))))
+                                         :max-height 700))
+    (format "[image %s]" (abbreviate-file-name file))))
+
+(defun lispm-chat--image-lines (item)
+  "Lines showing the images of the tool call ITEM's result."
+  (when-let* ((images (plist-get item :images)))
+    (if (plist-get item :expanded)
+        (mapcar #'lispm-chat--image images)
+      (list (propertize (format "%s (TAB to show)"
+                                (lispm-chat--count (length images) "image"))
+                        'face 'lispm-chat-dim)))))
+
 (defun lispm-chat--tool (item)
   "Text of the tool call ITEM."
   (let ((face (pcase (plist-get item :state)
                 ("DONE" 'lispm-chat-ok)
                 ((or "DENIED" "FAILED") 'lispm-chat-error)
                 (_ 'lispm-chat-pending)))
-        (lines (lispm-chat--result-lines item (plist-get item :expanded))))
+        (lines (append (lispm-chat--result-lines item (plist-get item :expanded))
+                       (lispm-chat--image-lines item))))
     (concat "\n" (propertize "⏺ " 'face face) (lispm-chat--tool-title item)
             (if lines
                 (concat "\n" (lispm-chat--indent (string-join lines "\n") "     "
@@ -707,6 +732,8 @@ ITEMS are the session's items, where the call's preview is."
                          ((string-prefix-p "writing " status)
                           (format "Writing %s…" (substring status 8)))
                          ((string-match-p "retry" status) (format "Thinking… (%s)" status))
+                         ((string-prefix-p "waiting for " status)
+                          (concat "W" (substring status 1) "…"))
                          (t "Thinking…"))))
         (concat "\n"
                 (propertize (concat frame " " verb) 'face 'lispm-chat-accent)

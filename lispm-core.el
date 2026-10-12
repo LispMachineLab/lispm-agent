@@ -119,14 +119,15 @@ over latency and cost."
   :type 'integer)
 
 (defcustom lispm-default-policy
-  '((read . auto) (memory . auto) (comm . auto) (write . ask) (exec . ask))
+  '((read . auto) (memory . auto) (comm . auto) (write . ask) (exec . ask) (mcp . ask))
   "Default approval policy: an alist from permission class to action.
 Classes are `read' (inspect files, buffers and Emacs state),
 `memory' (the agent's own memory and tasks), `comm' (talk to other
-agents), `write' (change files or buffers) and `exec' (run shell
-commands or evaluate Lisp).  Actions are `auto' (run at once), `ask'
-\(wait for the user's approval) and `deny'.  An agent's :policy
-overrides entries here."
+agents), `write' (change files or buffers), `exec' (run shell
+commands or evaluate Lisp) and `mcp' (tools of MCP servers, unless
+`lispm-mcp-servers' gives a server's tools another class).  Actions
+are `auto' (run at once), `ask' \(wait for the user's approval) and
+`deny'.  An agent's :policy overrides entries here."
   :type '(alist :key-type symbol
                 :value-type (choice (const auto) (const ask) (const deny))))
 

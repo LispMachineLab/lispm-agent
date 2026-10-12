@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/RyanKung/lispm
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "30.1") (mcp "0.1"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -48,6 +48,8 @@
 ;;                  wake agents up (lispm-runtime.el);
 ;;   collaboration  agents message and delegate to each other
 ;;                  (lispm-collab.el);
+;;   MCP            the tools of Model Context Protocol servers, such as
+;;                  Peekaboo's for using the computer (lispm-mcp.el);
 ;;   audit, undo    every edit is an undo step and a journal entry
 ;;                  (`lispm-turn-diff', `lispm-revert-turn'); every turn
 ;;                  is a git commit.
@@ -64,6 +66,7 @@
 (require 'lispm-memory)
 (require 'lispm-runtime)
 (require 'lispm-collab)
+(require 'lispm-mcp)
 (require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)

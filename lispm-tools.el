@@ -63,8 +63,12 @@ reads it when approving, and it stays in the transcript."
   :group 'lispm)
 
 (cl-defstruct (lispm-tool (:constructor lispm-tool--create) (:copier nil))
-  "A tool callable by agents."
-  name description params permission function async preview)
+  "A tool callable by agents.
+Tools defined with `lispm-deftool' have PARAMS, from which their schema
+is made and their arguments checked.  Tools from elsewhere, such as
+MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist)
+and a FUNCTION taking the whole input."
+  name description params input-schema permission function async preview)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -123,6 +127,14 @@ is printed.  Signal an error to report a failure to the model."
 
 (defun lispm-tool-schema (tool)
   "The API definition of TOOL."
+  (if-let* ((schema (lispm-tool-input-schema tool)))
+      `((name . ,(lispm-tool-name tool))
+        (description . ,(lispm-tool-description tool))
+        (input_schema . ,schema))
+    (lispm-tools--params-schema tool)))
+
+(defun lispm-tools--params-schema (tool)
+  "The API definition of TOOL, made from its parameters."
   (let (props required)
     (when (memq (lispm-tool-permission tool) lispm-rationale-permissions)
       (push '(why (type . "string")
@@ -145,11 +157,20 @@ is printed.  Signal an error to report a failure to the model."
                     (required . ,(vconcat (nreverse required)))))))
 
 (defun lispm-agent-tools* (agent)
-  "Tools AGENT may call, sorted by name (a stable request prefix)."
-  (let ((spec (lispm-agent-tools agent)) tools)
+  "Tools AGENT may call, sorted by name (a stable request prefix).
+In a role's list of tools, a name ending with * stands for every
+tool whose name starts with the rest, such as mcp__peekaboo__*."
+  (let ((spec (and (listp (lispm-agent-tools agent))
+                   (mapcar (lambda (x) (format "%s" x)) (lispm-agent-tools agent))))
+        (all (eq (lispm-agent-tools agent) t))
+        tools)
     (maphash (lambda (name tool)
-               (when (or (eq spec t)
-                         (member name (mapcar (lambda (x) (format "%s" x)) spec)))
+               (when (or all
+                         (seq-some (lambda (pattern)
+                                     (if (string-suffix-p "*" pattern)
+                                         (string-prefix-p (substring pattern 0 -1) name)
+                                       (equal pattern name)))
+                                   spec))
                  (push tool tools)))
              lispm-tools--registry)
     (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
@@ -172,9 +193,16 @@ is printed.  Signal an error to report a failure to the model."
     (if (eq value :false) nil value)))
 
 (defun lispm-tools--arguments (tool input)
-  "Validate INPUT against TOOL's parameters; return the argument list."
+  "Validate INPUT against TOOL's parameters; return the argument list.
+A tool with a schema of its own gets INPUT whole."
   (unless (listp input)
     (error "Input must be a JSON object"))
+  (if (lispm-tool-input-schema tool)
+      (list input)
+    (lispm-tools--param-arguments tool input)))
+
+(defun lispm-tools--param-arguments (tool input)
+  "INPUT checked against TOOL's parameters, as an argument list."
   (mapcar (lambda (param)
             (pcase-let* ((`(,arg ,type ,_doc . ,opts) param)
                          (key (lispm-tools--key arg))
@@ -198,13 +226,16 @@ is printed.  Signal an error to report a failure to the model."
 (defun lispm-tool-invoke (tool input done)
   "Run TOOL on INPUT, a decoded JSON object.
 Call DONE exactly once with the result text and non-nil if the call
-failed.  Synchronous tools call DONE before returning."
+failed, and, if the result has images, a third argument: their files.
+Synchronous tools call DONE before returning.  An asynchronous tool's
+`done' takes the same arguments."
   (if (lispm-tool-async tool)
       (let* ((called nil)
-             (once (lambda (result &optional errorp)
+             (once (lambda (result &optional errorp images)
                      (unless called
                        (setq called t)
-                       (funcall done (lispm-tools--result-text result) errorp)))))
+                       (apply done (lispm-tools--result-text result) errorp
+                              (and images (list images)))))))
         (condition-case err
             (apply (lispm-tool-function tool) once (lispm-tools--arguments tool input))
           (error (funcall once (error-message-string err) t))))

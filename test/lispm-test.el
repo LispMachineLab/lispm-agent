@@ -620,6 +620,115 @@ BODY can use `port' and `log', the file the server records requests in."
         (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-[ik]") (path . "repo"))))
                        "repo/kept.el:1:(defun lispm-demo-kept ())"))))))
 
+;;;; MCP and images
+
+(defmacro lispm-test-with-mcp (&rest body)
+  "Run BODY with the fake MCP server of test/ configured.
+mcp.el waits for idle time, which batch Emacs never has; plain timers
+stand in."
+  (declare (indent 0))
+  `(cl-letf (((symbol-function 'run-with-idle-timer)
+              (lambda (secs repeat function &rest args)
+                (apply #'run-at-time secs repeat function args))))
+     (let ((lispm-mcp-servers
+            `(("fake" :command "python3"
+               :args (,(expand-file-name "fake_mcp_server.py" lispm-test--dir)))))
+           (mcp-server-wait-initial-time 0))
+       (unwind-protect (progn ,@body)
+         (lispm-mcp-stop)
+         (clrhash lispm-mcp--failed)))))
+
+(ert-deftest lispm-test-images-in-requests ()
+  "Images of tool results are read in, the oldest dropped in batches."
+  (let* ((dir (make-temp-file "lispm-images-" t))
+         (files (cl-loop for i from 1 to 12
+                         collect (let ((file (expand-file-name (format "%02d.png" i) dir)))
+                                   (with-temp-file file (insert "png"))
+                                   file)))
+         (messages (mapcar (lambda (file)
+                             `((role . "user")
+                               (content . [((type . "tool_result") (tool_use_id . "x")
+                                            (content . ,(vector (lispm-transcript--text-block "shot")
+                                                                (lispm-transcript--image-block file))))])))
+                           files))
+         (lispm-context-images 5)
+         (loaded (lispm-transcript--load-images messages))
+         (blocks (mapcar (lambda (m) (aref (alist-get 'content (aref (alist-get 'content m) 0)) 1))
+                         loaded)))
+    (unwind-protect
+        (progn
+          ;; 12 images, 5 kept: 7 too many, dropped in a batch of 5.
+          (should (equal (mapcar (lambda (b) (alist-get 'type b)) blocks)
+                         '("text" "text" "text" "text" "text"
+                           "image" "image" "image" "image" "image" "image" "image")))
+          (should (equal (alist-get 'source (nth 11 blocks))
+                         `((type . "base64") (media_type . "image/png")
+                           (data . ,(base64-encode-string "png" t)))))
+          ;; Chat Completions: tool messages are text; the images follow.
+          (let ((out (lispm-openai--messages nil (last loaded 1))))
+            (should (equal (alist-get 'role (nth 0 out)) "tool"))
+            (should (equal (alist-get 'content (nth 0 out)) "shot"))
+            (should (equal (alist-get 'role (nth 1 out)) "user"))
+            (should (equal (alist-get 'url (alist-get 'image_url (aref (alist-get 'content (nth 1 out)) 1)))
+                           (concat "data:image/png;base64," (base64-encode-string "png" t)))))
+          ;; Results with images round-trip through the transcript.
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory dir))
+            (insert "* User\nhi\n* Assistant\n")
+            (insert (lispm-transcript--tool-use '((type . "tool_use") (id . "t1") (name . "snap") (input))
+                                                "DONE"))
+            (insert (lispm-transcript-result "Here." nil (list (car files)) dir))
+            (should (string-match-p "^\\[\\[file:01\\.png\\]\\]$" (buffer-string)))
+            (let ((result (aref (alist-get 'content (nth 2 (plist-get (lispm-transcript-parse) :messages))) 0)))
+              (should (equal (alist-get 'type (aref (alist-get 'content result) 1)) "image")))))
+      (delete-directory dir t))))
+
+(ert-deftest lispm-test-mcp ()
+  "An MCP server's tools are an agent's: they wait for it, take JSON, return images."
+  (lispm-test-env
+    (lispm-test-with-mcp
+      (let* ((default-directory project)
+             ;; Opening the session starts the server.
+             (agent (lispm-start)))
+        (setf (lispm-agent-policy agent) '((mcp . auto)))
+        (setq lispm-test--scripts
+              `((assistant@project
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t1" "mcp__fake__echo"
+                                                     '((text . "hi") (loud . :false))))
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "mcp__fake__snap" nil))
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t3" "mcp__fake__fail" nil))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+        (lispm-tell agent "Use the fake tools")
+        (should (lispm-test--wait (lispm-test--idle-p agent) 15))
+        ;; The first request waited for the server, so the session has its tools.
+        (let ((first (car (last lispm-test--requests))))
+          (should (seq-find (lambda (tool) (equal (alist-get 'name tool) "mcp__fake__echo"))
+                            (alist-get 'tools first)))
+          (should (equal (alist-get 'input_schema
+                                    (seq-find (lambda (tool) (equal (alist-get 'name tool) "mcp__fake__snap"))
+                                              (alist-get 'tools first)))
+                         '((type . "object") (properties)))))
+        (let ((transcript (lispm-test--transcript agent)))
+          ;; JSON false reaches the server as false.
+          (should (string-match-p "hi {\"loud\": false, \"text\": \"hi\"}" transcript))
+          (should (string-match-p "^\\*\\* DONE mcp__fake__snap" transcript))
+          (should (string-match-p "^\\*\\* FAILED mcp__fake__fail" transcript))
+          (should (string-match-p (format "^\\[\\[file:%s\\.images/0001\\.png\\]\\]$"
+                                          (regexp-quote (lispm-agent-id agent)))
+                                  transcript)))
+        (should (file-exists-p (expand-file-name "0001.png" (lispm-image-directory agent))))
+        ;; The image went to the model.
+        (let* ((messages (alist-get 'messages (car lispm-test--requests)))
+               (snap (seq-find (lambda (block) (equal (alist-get 'tool_use_id block) "t2"))
+                               (seq-mapcat (lambda (m) (append (alist-get 'content m) nil)) messages))))
+          (should (equal (alist-get 'type (aref (alist-get 'content snap) 1)) "image")))
+        ;; The chat shows the server's tools by name, and their images.
+        (let ((text (lispm-test--chat-text (lispm-chat agent))))
+          (should (string-match-p "⏺ fake:snap\n  ⎿  Here it is\\.\n     1 image (TAB to show)" text)))
+        (lispm-mcp-stop)
+        (should-not (lispm-get-tool "mcp__fake__echo"))))))
+
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env
     (let ((agent (lispm-defagent tester :root project)) result)
