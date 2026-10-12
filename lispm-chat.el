@@ -23,7 +23,7 @@
 ;; is also the agent's context; people talk to the agent in a chat
 ;; buffer instead, laid out like Claude Code's terminal interface:
 ;;
-;;   > what you asked
+;;   λ >> what you asked
 ;;
 ;;   ⏺ What the agent said.
 ;;
@@ -32,7 +32,7 @@
 ;;
 ;;   ✻ Thinking… (4s · C-c C-c to interrupt)
 ;;   ──────────────────────────────────────
-;;   > your next message
+;;   λ >> your next message
 ;;   ──────────────────────────────────────
 ;;     / for commands · RET send · S-RET newline
 ;;
@@ -109,6 +109,10 @@
   "Lines of a diff shown before it is expanded."
   :type 'integer)
 
+(defcustom lispm-chat-prompt "λ >> "
+  "The prompt before what you write, and before the messages you sent."
+  :type 'string)
+
 (defvar-local lispm-chat-agent nil
   "The agent this chat talks to.")
 (put 'lispm-chat-agent 'permanent-local t)
@@ -124,6 +128,9 @@
 
 (defvar-local lispm-chat--footer nil
   "Overlay drawing the rule and hints below the input.")
+
+(defvar-local lispm-chat--input-overlay nil
+  "Overlay over the input, indenting its lines under the prompt's end.")
 
 (defvar-local lispm-chat--expanded nil
   "Hash table of the keys of the items shown in full.")
@@ -472,12 +479,11 @@ Code blocks lose their fences and keep their lines as they are."
   (pcase (plist-get item :kind)
     ('user
      (concat "\n"
-             (propertize (lispm-chat--indent
+             (propertize (lispm-chat--prompted
                           (concat (if (plist-get item :from)
                                       (format "[from %s] " (plist-get item :from))
                                     "")
-                                  (plist-get item :text))
-                          "  " "> ")
+                                  (plist-get item :text)))
                          'face 'lispm-chat-user)
              "\n"))
     ('text
@@ -513,6 +519,11 @@ Code blocks lose their fences and keep their lines as they are."
                          'face 'lispm-chat-dim)
              "\n"))
     ('tool (lispm-chat--tool item))))
+
+(defun lispm-chat--prompted (text)
+  "TEXT after the prompt, its other lines indented to match."
+  (lispm-chat--indent text (make-string (string-width lispm-chat-prompt) ?\s)
+                      lispm-chat-prompt))
 
 (defun lispm-chat--read-only (string)
   "STRING, made part of the drawn region the user cannot edit."
@@ -707,14 +718,13 @@ ITEMS are the session's items, where the call's preview is."
   (when-let* ((inbox (lispm-agent-inbox agent)))
     (concat "\n"
             (mapconcat (lambda (entry)
-                         (propertize (lispm-chat--indent
+                         (propertize (lispm-chat--prompted
                                       (concat (cond ((plist-get entry :from)
                                                      (format "[from %s] " (plist-get entry :from)))
                                                     ((plist-get entry :event)
                                                      (format "[%s] " (plist-get entry :event)))
                                                     (t ""))
-                                              (plist-get entry :text))
-                                      "  " "> ")
+                                              (plist-get entry :text)))
                                      'face 'lispm-chat-dim))
                        inbox "\n")
             (propertize "\n  ⎿  queued; sent when the agent is free" 'face 'lispm-chat-dim)
@@ -902,6 +912,8 @@ ITEMS are the session's items, where the call's preview is."
       ;; Put it on the footer's first character instead: the placeholder,
       ;; or a space (a newline holds no cursor).
       (put-text-property 0 1 'cursor t footer)
+      ;; Its lines are not the input's: no indentation under the prompt.
+      (add-text-properties 0 (length footer) '(line-prefix "" wrap-prefix "") footer)
       (overlay-put lispm-chat--footer 'after-string footer))))
 
 (defun lispm-chat-return ()
@@ -1178,11 +1190,15 @@ Write at the bottom and press RET; / starts a command (/help lists them).
   (add-hook 'window-size-change-functions #'lispm-chat--resized nil t)
   (let ((inhibit-read-only t))
     (erase-buffer)
-    (insert (propertize "> " 'face 'lispm-chat-accent 'read-only t
+    (insert (propertize lispm-chat-prompt 'face 'lispm-chat-accent 'read-only t
                         'front-sticky '(read-only) 'rear-nonsticky t))
     (setq lispm-chat--prompt-start (copy-marker (point-min) t)
           lispm-chat--input-start (point-marker)
-          lispm-chat--footer (make-overlay (point-max) (point-max) nil t t)))
+          lispm-chat--input-overlay (make-overlay (point-max) (point-max) nil nil t)
+          lispm-chat--footer (make-overlay (point-max) (point-max) nil t t))
+    (let ((indent (make-string (string-width lispm-chat-prompt) ?\s)))
+      (overlay-put lispm-chat--input-overlay 'line-prefix indent)
+      (overlay-put lispm-chat--input-overlay 'wrap-prefix indent)))
   (when lispm-chat-agent
     (setq default-directory (lispm-agent-root lispm-chat-agent))
     (unless (memq (lispm-agent-state lispm-chat-agent) '(idle waiting))

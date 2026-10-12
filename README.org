@@ -33,8 +33,9 @@ conversation per agent, and you can run several and come back to any of them.
 
 1. In any project, ~M-x lispm~ starts a new agent there and opens its chat (role
    ~assistant~; ~C-u M-x lispm~ picks another role). Start as many as you like.
-2. Type at the ~>~ prompt at the bottom and press ~RET~; ~S-RET~ or ~C-j~ starts a new line,
-   ~M-p~ / ~M-n~ recall what you sent. Messages sent while the agent works are queued.
+2. Type at the ~λ >>~ prompt at the bottom (~lispm-chat-prompt~) and press ~RET~; ~S-RET~ or
+   ~C-j~ starts a new line, ~M-p~ / ~M-n~ recall what you sent. Messages sent while the agent
+   works are queued.
 3. The reply streams in above the prompt: what the agent says (~⏺~), each tool call as
    ~⏺ Read(file)~ with a one-line result (~TAB~ on it shows it in full), edits as diffs. A
    call that needs approval opens a box with the command or diff and the model's reason;
