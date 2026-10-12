@@ -1,7 +1,7 @@
 EMACS ?= emacs
 ELS = lispm-core.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el \
-      lispm-memory.el lispm-runtime.el lispm-collab.el lispm-mcp.el lispm-chat.el lispm.el
+      lispm-memory.el lispm-runtime.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-chat.el lispm.el
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))"
 

@@ -69,6 +69,8 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm-directory (expand-file-name "home/" tmp))
           (project (expand-file-name "project/" tmp))
           (lispm-git nil)
+          ;; Titles are asked for in tests of their own.
+          (lispm-auto-title nil)
           ;; Scripted responses are matched against Messages-shape requests.
           (lispm-backends (cons '(test :api anthropic :url "http://fake.invalid" :model "test-model")
                                 lispm-backends))
@@ -799,6 +801,40 @@ stand in."
                      '("mcp__p__click")))
       (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "p" tools 2 sources))
                      '("mcp__p__see" "mcp__p__click"))))))
+
+(ert-deftest lispm-test-auto-title ()
+  "An untitled session is titled by the model after its first turn, once."
+  (lispm-test-env
+    (let* ((lispm-auto-title t)
+           (agent (lispm-defagent tester "Test agent." :root project))
+           (asked 0)
+           (lispm-api-function
+            (lambda (backend body betas &rest callbacks)
+              (if (not (string-prefix-p "You title conversations" (alist-get 'system body)))
+                  (apply #'lispm-test--fake-api backend body betas callbacks)
+                (cl-incf asked)
+                (should-not (alist-get 'tools body))
+                (should (string-match-p "Say hello to Lisp"
+                                        (alist-get 'text (aref (alist-get 'content (aref (alist-get 'messages body) 0)) 0))))
+                (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                             (lispm-test--msg "end_turn" (lispm-test--text "“向 Lisp 问好”。")))
+                nil))))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "Hello, Lisp."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Again.")))))
+      (lispm-tell agent "Say hello to Lisp")
+      (should (lispm-test--wait (lambda () (lispm-session-title agent))))
+      (should (equal (lispm-session-title agent) "向 Lisp 问好"))
+      (should (equal (plist-get (seq-find (lambda (s) (equal (plist-get s :id) (lispm-agent-id agent)))
+                                          (lispm-sessions))
+                                :title)
+                     "向 Lisp 问好"))
+      ;; Asked once; a title the user gives is kept.
+      (lispm-rename-session (buffer-file-name (lispm-agent-buffer agent)) "Mine")
+      (lispm-tell agent "Once more")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (= asked 1))
+      (should (equal (lispm-session-title agent) "Mine")))))
 
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env

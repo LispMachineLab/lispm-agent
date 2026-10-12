@@ -49,7 +49,9 @@ conversation per agent, and you can run several and come back to any of them.
    ~/resume~, ~/model~, ~/diff~, ~/undo~, ~/memory~, ~/cost~, ~/agents~, ~/transcript~,
    ~/exit~.
 5. Killing the chat ends the agent; its session stays on disk, and ~M-x lispm-resume~ brings
-   back any recorded session (those of the current project first).
+   back any recorded session (those of the current project first). Sessions are listed under
+   a title the model gives them after their first turn, in your language
+   (~lispm-auto-title~), until you rename them.
 
 | Key                 | In the chat                                                      |
 |---------------------+------------------------------------------------------------------|
@@ -233,6 +235,7 @@ make compile   # make deps, which both run first, installs mcp.el into .deps/
 | lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
 | lispm-collab.el        | multi-agent collaboration tools                                 |
 | lispm-mcp.el           | the tools of MCP servers, through mcp.el                        |
+| lispm-title.el         | sessions titled by the model                                    |
 | lispm-chat.el          | the chat interface, drawn from the org transcript               |
 | lispm.el               | entry commands, dashboard, mode line                            |
 

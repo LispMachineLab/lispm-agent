@@ -67,6 +67,7 @@
 (require 'lispm-runtime)
 (require 'lispm-collab)
 (require 'lispm-mcp)
+(require 'lispm-title)
 (require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
