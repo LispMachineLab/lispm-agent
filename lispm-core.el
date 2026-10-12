@@ -514,13 +514,19 @@ and the incomplete remainder."
       "")))
 
 (defun lispm--git-environment ()
-  "`process-environment' without the variables that point git elsewhere.
+  "`process-environment' without the variables that steer git from outside.
 Git gives them to the commands it runs, such as hooks and those of
-rebase -x; git run by an Emacs started so would act on that
-repository, not on the one in `default-directory'."
+rebase -x: GIT_DIR and the like name its repository, GIT_AUTHOR_* and
+GIT_COMMITTER_* the author and date of commits, GIT_CONFIG_* its `git -c'
+settings.  Git run by an Emacs started so would commit to that
+repository, as that author, not to the one in `default-directory'."
   (seq-remove (lambda (entry)
-                (string-match-p "\\`GIT_\\(?:DIR\\|WORK_TREE\\|INDEX_FILE\\|OBJECT_DIRECTORY\\|ALTERNATE_OBJECT_DIRECTORIES\\|COMMON_DIR\\|NAMESPACE\\|PREFIX\\)="
-                                entry))
+                (string-match-p
+                 (concat "\\`GIT_\\(?:DIR\\|WORK_TREE\\|INDEX_FILE\\|OBJECT_DIRECTORY\\|ALTERNATE_OBJECT_DIRECTORIES"
+                         "\\|COMMON_DIR\\|CEILING_DIRECTORIES\\|NAMESPACE\\|PREFIX"
+                         "\\|\\(?:AUTHOR\\|COMMITTER\\)_\\(?:NAME\\|EMAIL\\|DATE\\)"
+                         "\\|CONFIG_\\(?:PARAMETERS\\|COUNT\\)\\)=")
+                 entry))
               process-environment))
 
 (defun lispm--diff (old new label)

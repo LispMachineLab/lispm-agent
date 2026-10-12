@@ -14,6 +14,10 @@
 (require 'ert)
 (require 'lispm)
 
+;; Git in any test, not only in `lispm-test-env', acts on the repository
+;; of its directory, even when the suite runs under a git hook.
+(setq process-environment (lispm--git-environment))
+
 (defvar lispm-test--dir (file-name-directory (or load-file-name buffer-file-name)))
 
 (defvar lispm-test--scripts nil
@@ -1400,6 +1404,11 @@ Its policy is the stricter of its role's and its caller's."
 
 ;;;; Memory
 
+(defun lispm-test--git-settled-p ()
+  "Non-nil when every queued change has been committed."
+  (and (null lispm-git--queue) (null lispm-git--timer)
+       (not (process-live-p lispm-git--process))))
+
 (ert-deftest lispm-test-memory-and-tasks ()
   (lispm-test-env
     (let ((agent (lispm-defagent keeper :root project))
@@ -1439,8 +1448,7 @@ Its policy is the stricter of its role's and its caller's."
       (should (string-match-p "^\\* indentation$"
                               (lispm--file-text (lispm-memory-file agent))))
       (when lispm-git
-        (let ((settled (lambda () (and (null lispm-git--queue) (null lispm-git--timer)
-                                       (not (process-live-p lispm-git--process)))))
+        (let ((settled #'lispm-test--git-settled-p)
               (default-directory lispm-directory))
           (should (lispm-test--wait settled 10))
           ;; One burst of changes, one commit listing each of them.
@@ -1457,6 +1465,38 @@ Its policy is the stricter of its role's and its caller's."
           (should (lispm-test--wait settled 10))
           (should (equal (shell-command-to-string "git log --format=%s")
                          "keeper: remember \"Later\"\nkeeper: 7 changes\n")))))))
+
+(ert-deftest lispm-test-git-history-under-git ()
+  "Commits go to `lispm-directory', by the agent, even when git started Emacs."
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (let* ((agent (lispm-defagent keeper :root project))
+           (lispm-git (executable-find "git"))
+           (elsewhere (expand-file-name "../elsewhere/" project))
+           (state (lambda () (cons (directory-files-recursively elsewhere "" t)
+                                   (lispm--file-text (expand-file-name ".git/config" elsewhere)))))
+           before)
+      (make-directory elsewhere)
+      (let ((default-directory elsewhere))
+        (call-process "git" nil nil nil "init" "-q"))
+      (setq before (funcall state))
+      ;; As a git hook in a linked worktree, run by `git -c', exports them.
+      (let ((process-environment
+             (append (list (concat "GIT_DIR=" elsewhere ".git")
+                           (concat "GIT_INDEX_FILE=" elsewhere ".git/index")
+                           "GIT_AUTHOR_NAME=someone"
+                           "GIT_CONFIG_PARAMETERS='init.defaultBranch'='inherited'"
+                           "GIT_CONFIG_COUNT=1" "GIT_CONFIG_KEY_0=init.defaultBranch"
+                           "GIT_CONFIG_VALUE_0=inherited")
+                     process-environment)))
+        (lispm-test--call agent "remember" '((title . "Note") (content . "x")))
+        (should (lispm-test--wait #'lispm-test--git-settled-p 10)))
+      (should (equal (funcall state) before))
+      (let ((default-directory lispm-directory))
+        (should (equal (shell-command-to-string "git log --format=%an%n%s")
+                       "keeper\nkeeper: remember \"Note\"\n"))
+        (should-not (equal (shell-command-to-string "git symbolic-ref --short HEAD")
+                           "inherited\n"))))))
 
 ;;;; Commands
 
