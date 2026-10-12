@@ -975,6 +975,39 @@ text go back to the model byte for byte."
         (should (equal (alist-get 'content (aref messages 0))
                        [((type . "text") (text . "new topic"))]))))))
 
+(ert-deftest lispm-test-tools-frozen-per-session ()
+  "The tool list is frozen when a session starts, like the system prompt.
+A tool defined later does not change the request prefix of sessions
+already running, unless the agent's tools grow on purpose
+\(`lispm-tools-changed-functions'); new tools then come after the others."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (names (lambda (body) (mapcar (lambda (tool) (alist-get 'name tool))
+                                        (alist-get 'tools body)))))
+      (unwind-protect
+          (progn
+            (setq lispm-test--scripts
+                  `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "one"))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "two"))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "three")))))
+            (lispm-tell agent "first")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (lispm-deftool lispm_test_probe ()
+              "A tool defined while a session runs."
+              "ok")
+            (lispm-tell agent "second")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (run-hook-with-args 'lispm-tools-changed-functions agent)
+            (lispm-tell agent "third")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let ((requests (reverse lispm-test--requests)))
+              (should (= (length requests) 3))
+              (should (equal (alist-get 'tools (nth 1 requests))
+                             (alist-get 'tools (nth 0 requests))))
+              (should (equal (funcall names (nth 2 requests))
+                             (append (funcall names (nth 0 requests)) '("lispm_test_probe"))))))
+        (remhash "lispm_test_probe" lispm-tools--registry)))))
+
 ;;;; Agents and sessions
 
 (ert-deftest lispm-test-start-and-resume ()

@@ -90,6 +90,11 @@ Use it for notifications, e.g. with the alert package."
 (defvar-local lispm--live nil
   "Markers (START . END) of the response being streamed in, or nil.")
 
+(defvar-local lispm--tools nil
+  "Schemas of the tools the session in this buffer offers the model.
+See `lispm-session-tools'.")
+(put 'lispm--tools 'permanent-local t)
+
 (defvar-local lispm--live-kind nil
   "Kind of the content last streamed into the live region.")
 
@@ -626,6 +631,41 @@ continuation first, and the turn starts there."
       (insert (lispm-transcript-section (lispm--entry-title entry) (plist-get entry :text)))))
   (lispm--request agent))
 
+(defun lispm-session-tools (agent)
+  "Schemas of the tools AGENT's session offers the model.
+Like the system prompt, they are frozen: taken when the session first
+needs them and kept while it is open, so a tool defined or redefined
+later, or a role redefined with other tools, does not change the
+request prefix, which the prompt cache and the model's thinking are
+bound to.  A new session, or a handover, takes the tools as they are
+then."
+  (with-current-buffer (lispm-agent-buffer agent)
+    (or lispm--tools
+        (setq lispm--tools (mapcar #'lispm-tool-schema (lispm-agent-tools* agent))))))
+
+(defun lispm--extend-session-tools (agent)
+  "Offer AGENT's session the tools it gained, after those it had.
+Run from `lispm-tools-changed-functions' when an agent's tools grow in
+the middle of a session, as when it turns on a toolset it was offered
+on demand.  The earlier tools keep their place; the request prefix
+changes once."
+  (let ((buffer (lispm-agent-buffer agent)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when lispm--tools
+          (let ((names (mapcar (lambda (schema) (alist-get 'name schema)) lispm--tools)))
+            (dolist (tool (lispm-agent-tools* agent))
+              (unless (member (lispm-tool-name tool) names)
+                (setq lispm--tools
+                      (append lispm--tools (list (lispm-tool-schema tool))))))))))))
+
+(add-hook 'lispm-tools-changed-functions #'lispm--extend-session-tools)
+
+(defun lispm--offers-tool-p (agent name)
+  "Non-nil if AGENT's session offers the model the tool NAME."
+  (seq-some (lambda (schema) (equal (alist-get 'name schema) name))
+            (lispm-session-tools agent)))
+
 (defun lispm-request-body (agent)
   "Request for AGENT's next model call, as (BODY . BETAS).
 Signal a `user-error' if the session cannot be sent as it is."
@@ -639,7 +679,7 @@ Signal a `user-error' if the session cannot be sent as it is."
                        (lispm-agent-model* agent)
                        (lispm-agent-effort* agent)
                        (plist-get parsed :system)
-                       (mapcar #'lispm-tool-schema (lispm-agent-tools* agent))
+                       (lispm-session-tools agent)
                        (plist-get parsed :messages))))
 
 (defvar lispm-request-wait-functions nil
@@ -762,7 +802,7 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE)."
       (list "FAILED" 'fail (format "Not executed: the response stopped (%s) before the call was complete." stopped)))
      ((member (alist-get 'id block) invalid)
       (list "FAILED" 'fail "INVALID_JSON: the input of this call was not valid JSON. Make the call again."))
-     ((not (memq tool (lispm-agent-tools* agent)))
+     ((not (and tool (lispm--offers-tool-p agent name)))
       (list "FAILED" 'fail (format "There is no tool named %s available to you." name)))
      (t
       (pcase (lispm-tool-action agent tool (alist-get 'input block))

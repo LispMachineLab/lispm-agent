@@ -59,7 +59,9 @@ An agent holds:
 
 - *Identity*: name (~ROLE@PROJECT~), session id, role, project root.
 - *Capabilities*, copied from its role; redefining a role updates its live agents, the way
-  redefining a function changes what running code calls.
+  redefining a function changes what running code calls. Two things stay as a session started
+  with them, since the request prefix is bound to them: its system prompt and the tool list
+  offered to the model (section 2).
 - *Runtime state*: its session buffer, the request in flight, an inbox, the table of pending
   tool calls, the edit snapshots of the current turn (the journal), the tools the user allowed
   for this Emacs session, the agent it is waiting on (~waiting-on~), its hook and timer
@@ -120,8 +122,12 @@ prefix-matched as well. Therefore:
   escaping (a comma before lines starting with ~*~ or ~#+~) and end in exactly one newline,
   which the parser strips. Thinking and other blocks are stored verbatim as JSON. The test
   ~lispm-test-transcript-roundtrip~ checks this.
-- The system prompt and the tool list are frozen when a session starts (the memory index is
-  snapshotted at that point too) and never rewritten afterwards.
+- The system prompt is frozen when a session starts (the memory index is snapshotted at that
+  point too) and never rewritten afterwards. So is the tool list, as long as the session is
+  open (~lispm-session-tools~): tools defined later, or a role redefined with other tools,
+  reach the next session or the next handover. The exception is an agent whose tools grow on
+  purpose mid-session (~lispm-tools-changed-functions~): the new tools are added after the
+  others, and the prefix changes once.
 - If the user edits history, requests to the first-party API carry
   ~prefix_mismatch_behavior: "drop_block"~: the thinking after the edit point is dropped and the
   cache is rebuilt from there, but the request succeeds. *Editing history is allowed; it costs
