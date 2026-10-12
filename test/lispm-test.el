@@ -1181,6 +1181,33 @@ started, after the session opened."
       ;; The helper's session stays on record.
       (should (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project")) (lispm-sessions))))))
 
+(ert-deftest lispm-test-helper-policy-bounded-by-caller ()
+  "A helper may do no more than the agent that asked for it.
+Its policy is the stricter of its role's and its caller's."
+  (lispm-test-env
+    (lispm-defrole coder "Writes code." :policy '((write . auto)))
+    (let ((reviewer (lispm-defagent reviewer :root project :policy '((write . deny)))))
+      (setq lispm-test--scripts
+            `((reviewer ,(lispm-test--msg "tool_use"
+                                          (lispm-test--tool "t1" "ask_agent"
+                                                            '((agent . "coder") (request . "Write x.txt"))))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Asked.")))
+              (coder@project ,(lispm-test--msg "tool_use"
+                                               (lispm-test--tool "c1" "write_file"
+                                                                 '((why . "asked to") (path . "x.txt")
+                                                                   (content . "written\n"))))
+                             ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell reviewer "Get x.txt written")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p reviewer))
+                                                (= (length lispm-test--requests) 4)
+                                                (null (cdr (lispm-agents)))))))
+      (should-not (file-exists-p (expand-file-name "x.txt" project)))
+      (let* ((helper-request (seq-find (lambda (body)
+                                         (eq (lispm-test--agent-name body) 'coder@project))
+                                       lispm-test--requests))
+             (results (alist-get 'content (aref (alist-get 'messages helper-request) 2))))
+        (should (string-match-p "Denied by policy" (alist-get 'content (aref results 0))))))))
+
 (ert-deftest lispm-test-compaction ()
   "A long session is handed over: memory saved, a summary written, the turn continued."
   (lispm-test-env

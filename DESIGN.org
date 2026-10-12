@@ -272,7 +272,9 @@ needs only three tools:
   the other agent's turn ends, its final reply becomes the result. The caller occupies no
   thread and blocks no one meanwhile. Named a role instead of an agent, ~ask_agent~ starts a
   helper of that role in the caller's project and retires it once it has replied: a subagent,
-  whose session stays on record.
+  whose session stays on record. *A helper may do no more than its caller*: for each permission
+  class its policy is the stricter of its role's and its caller's (its ~ceiling~), so a reviewer
+  that may not write cannot get writes done by starting a coder.
 
 Concurrency:
 

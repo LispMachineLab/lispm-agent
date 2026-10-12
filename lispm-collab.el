@@ -31,7 +31,10 @@
 ;;                 agent's turn ends; its final reply is the result.
 ;;                 Asking a role rather than an agent starts a helper
 ;;                 of that role in the caller's project, which retires
-;;                 once it has replied: a subagent.
+;;                 once it has replied: a subagent.  A helper may do no
+;;                 more than its caller: for each permission class it
+;;                 gets the stricter of its role's and its caller's
+;;                 policy.
 ;;
 ;; Shared state needs no locks: the event loop is single-threaded, and
 ;; edits are exact-text replacements, which fail instead of clobbering
@@ -130,6 +133,9 @@ helper retires once it has replied."
          (target (or helper (lispm-collab--target agent))))
     (when (lispm-collab--cycle-p me target)
       (error "%s is (indirectly) waiting on you; asking it would deadlock" agent))
+    ;; Delegating must not widen what the caller may do.
+    (when helper
+      (setf (lispm-agent-ceiling helper) (lispm-policy me)))
     (setf (lispm-agent-waiting-on me) target)
     (lispm-tell target request
                 :from (lispm-agent-name me)
