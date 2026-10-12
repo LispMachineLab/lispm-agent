@@ -668,8 +668,10 @@ changes once."
 
 (defun lispm-request-body (agent)
   "Request for AGENT's next model call, as (BODY . BETAS).
-Signal a `user-error' if the session cannot be sent as it is."
-  (let ((parsed (with-current-buffer (lispm-agent-buffer agent) (lispm-transcript-parse))))
+Signal a `user-error' if the session cannot be sent as it is.  Tools
+whose descriptions depend on the agent see it as `lispm-current-agent'."
+  (let ((parsed (with-current-buffer (lispm-agent-buffer agent) (lispm-transcript-parse)))
+        (lispm-current-agent agent))
     (when (plist-get parsed :pending)
       (user-error "Tool calls still await a result: %s"
                   (string-join (plist-get parsed :pending) ", ")))
