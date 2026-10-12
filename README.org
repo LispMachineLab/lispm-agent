@@ -14,6 +14,12 @@ The name comes from the Lisp Machine (LispM): an environment where everything wa
 object and the editor and the system were one. Back then its inhabitants were programs; here
 they are agents. In code, the package name and prefix are all lowercase: ~lispm~.
 
+#+HTML: <p align="center"><img src="assets/demo/lispm-demo.gif" alt="An agent fixes a failing test in Emacs, its conversation is shown as an org document, and it opens a diff window by evaluating Emacs Lisp" /></p>
+
+Above, an agent runs a project's failing tests and fixes the bug, asking before it runs a
+command or edits a file; the chat then turns out to be an org document whose tool calls are
+TODO entries; last, the agent opens a diff beside the chat by evaluating Emacs Lisp.
+
 * Installation
 
 Requires Emacs 30.1+ (developed on 31.1), curl, and a model endpoint speaking either the OpenAI
@@ -244,6 +250,9 @@ make compile   # warnings are errors; make deps, which both run first, installs 
 
 CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request.
 
+~make demo~ records the demo above again (~assets/demo/~), with [[https://github.com/charmbracelet/vhs][VHS]], Emacs in a terminal and
+a real model through the default backend; [[file:demo/demo.tape][demo/demo.tape]] is the script.
+
 * Files
 
 | File                   | Contents                                                        |
@@ -264,6 +273,7 @@ CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every
 | skills/                | the skills LispM comes with: web                                |
 | lispm-chat.el          | the chat interface, drawn from the org transcript               |
 | lispm.el               | entry commands, dashboard, mode line                            |
+| demo/                  | the demo: VHS script, Emacs setup and sample project            |
 
 * License
 

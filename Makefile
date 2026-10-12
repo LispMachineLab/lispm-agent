@@ -6,7 +6,7 @@ ELS = lispm-core.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))"
 
-.PHONY: all deps compile test clean
+.PHONY: all deps compile test demo clean
 
 all: compile test
 
@@ -23,6 +23,10 @@ compile: deps
 
 test: deps
 	$(EMACS) -Q --batch $(DEPS) -L . -L test -l test/lispm-test.el -f ert-run-tests-batch-and-exit
+
+# Record assets/demo/lispm-demo.gif and .mp4 again (needs vhs and a model).
+demo: deps
+	vhs demo/demo.tape
 
 clean:
 	rm -f *.elc test/*.elc
