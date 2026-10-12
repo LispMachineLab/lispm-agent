@@ -1,5 +1,8 @@
 ;;; lispm-test.el --- Tests for lispm  -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026  Ryan.K
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
 ;;; Commentary:
 
 ;; Run with `make test'.  The model is replaced by a scripted fake

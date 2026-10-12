@@ -119,3 +119,6 @@ make compile
 | lispm-collab.el        | multi-agent collaboration tools                                 |
 | lispm.el               | entry commands, dashboard, mode line                            |
 
+* License
+
+GPL-3.0-or-later; see [[file:LICENSE][LICENSE]].

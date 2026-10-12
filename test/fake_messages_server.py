@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026  Ryan.K
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A fake Messages API endpoint for lispm's tests.
 
 Prints the port it listens on, appends every request it receives (path,
