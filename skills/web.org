@@ -179,9 +179,19 @@ otherwise url.el fetches its HTML.  PROBLEM is nil, or why it failed."
           (push (cons text (shr-expand-url href)) links))))
     (seq-uniq (nreverse links) (lambda (a b) (equal (cdr a) (cdr b))))))
 
+(defun lispm-web--readable (dom)
+  "The readable part of DOM, its main content, as eww finds it; or nil."
+  (ignore-errors
+    (if (fboundp 'eww-readable-dom)
+        (eww-readable-dom dom)
+      ;; Before Emacs 31, eww scores the nodes, then takes the best.
+      (let ((copy (copy-tree dom)))
+        (eww-score-readability copy)
+        (eww-highest-readability copy)))))
+
 (defun lispm-web-text (dom url)
   "The readable text of DOM, a page at URL: its main content, as eww finds it."
-  (let ((main (or (ignore-errors (eww-readable-dom dom)) dom)))
+  (let ((main (or (lispm-web--readable dom) dom)))
     (with-temp-buffer
       (let ((shr-width 100)
             (shr-use-fonts nil)
