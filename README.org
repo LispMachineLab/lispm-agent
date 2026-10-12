@@ -1,7 +1,7 @@
 #+title: LispM — a Lisp Machine for agents
 #+startup: content
 
-#+HTML: <p align="center"><img src="assets/logo/lispm-mark-dark-v5.png" alt="LispM emblem" width="200" /></p>
+#+HTML: <p align="center"><img src="assets/logo/lispm-lambda-rainbow.png" alt="LispM logo" width="200" /></p>
 
 LispM runs AI agents inside Emacs rather than beside it. You talk to an agent in a chat
 laid out like Claude Code's; underneath, the conversation is stored as an org document that is
