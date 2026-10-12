@@ -319,19 +319,20 @@ calls of one response, become one commit listing each of them."
       (setq lispm-git--queue nil)
       (make-directory default-directory t)
       (setq lispm-git--process
-            (make-process
-             :name "lispm-git" :buffer (get-buffer-create " *lispm-git*") :noquery t
-             :command
-             (list "sh" "-c"
-                   (concat "{ [ -d .git ] || git init -q; } && "
-                           ;; Images of sessions stay out of the history.
-                           "{ grep -qxF '*.images/' .git/info/exclude 2>/dev/null"
-                           " || { mkdir -p .git/info && echo '*.images/' >> .git/info/exclude; }; } && "
-                           "git add -A && "
-                           "{ git diff --cached --quiet || git"
-                           " -c user.name=" (shell-quote-argument author)
-                           " -c user.email=" (shell-quote-argument (concat author "@lispm.invalid"))
-                           " commit -q -m " (shell-quote-argument message) "; }"))))))))
+            (let ((process-environment (lispm--git-environment)))
+              (make-process
+               :name "lispm-git" :buffer (get-buffer-create " *lispm-git*") :noquery t
+               :command
+               (list "sh" "-c"
+                     (concat "{ [ -d .git ] || git init -q; } && "
+                             ;; Images of sessions stay out of the history.
+                             "{ grep -qxF '*.images/' .git/info/exclude 2>/dev/null"
+                             " || { mkdir -p .git/info && echo '*.images/' >> .git/info/exclude; }; } && "
+                             "git add -A && "
+                             "{ git diff --cached --quiet || git"
+                             " -c user.name=" (shell-quote-argument author)
+                             " -c user.email=" (shell-quote-argument (concat author "@lispm.invalid"))
+                             " commit -q -m " (shell-quote-argument message) "; }")))))))))
 
 (defun lispm-git--commit-turn (agent _reply)
   "Commit AGENT's session after a turn."

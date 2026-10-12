@@ -792,10 +792,11 @@ else all those below it; only those matching GLOB, if given."
   (let ((files (cond ((file-regular-p target) (list target))
                      ((not (file-directory-p target))
                       (error "No such file or directory: %s" target))
-                     ((when-let* ((project (project-current nil target)))
-                        ;; The project's backend may not work here, such as
-                        ;; a checkout of a VCS that is not installed.
-                        (ignore-errors (project-files project (list target)))))
+                     ((let ((process-environment (lispm--git-environment)))
+                        (when-let* ((project (project-current nil target)))
+                          ;; The project's backend may not work here, such as
+                          ;; a checkout of a VCS that is not installed.
+                          (ignore-errors (project-files project (list target))))))
                      (t (sort (directory-files-recursively
                                target "" nil #'lispm-tools--searchable-directory-p)
                               #'string<)))))
