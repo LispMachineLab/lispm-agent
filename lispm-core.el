@@ -148,6 +148,10 @@ invalidate the model's cached prefix.")
 (defvar lispm-session-end-functions nil
   "Abnormal hook run with an agent whose session is closing.")
 
+(defvar lispm-tools-changed-functions nil
+  "Abnormal hook run with an agent whose tools changed in mid-session.
+That happens when search_tools loads deferred tools for it.")
+
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
 
@@ -200,6 +204,7 @@ invalidate the model's cached prefix.")
   (turn 0)                   ; turn counter
   journal                    ; alist TURN -> edit snapshots
   allowed                    ; tool names approved for this Emacs session
+  loaded-tools               ; deferred tools loaded by search_tools, by name
   waiting-on                 ; agent this one awaits (ask_agent)
   compacting                 ; non-nil while the session is handed over
   triggers                   ; hook and timer subscriptions

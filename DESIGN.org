@@ -170,7 +170,8 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   input, so a long search never freezes it. Models write regexps in ripgrep's syntax
   (~(a|b)~, ~\d~, ~x{2}~); ~lispm-tools--emacs-regexp~ translates them, and refuses what
   Emacs regexps lack (lookaround) rather than silently matching something else.
-- Built-in tools: ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
+- Built-in tools, the core layer every agent carries (section 10 explains the deferred others
+  and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
   ~describe_symbol~ (read); ~edit_file~ ~write_file~ ~edit_buffer~ (write); ~run_shell~
   ~eval_elisp~ (exec); memory, task and collaboration tools are described below.
 - ~eval_elisp~ is the most Emacs-native tool of all: the agent can reach anything in Emacs
@@ -374,10 +375,23 @@ adds what an agent runtime needs on top:
 - *Permissions.* MCP tools have the permission class ~mcp~, which asks by default, like
   ~write~ and ~exec~: a server can do anything. A server's ~:permission~ gives its tools
   another class; "don't ask again" in the chat allows one tool at a time.
-- *Starting.* Servers start when a session opens (~lispm-mcp-autostart~), asynchronously.
-  Their tools should be there from a session's first request on, both for the model and for
-  the prompt cache, so a request waits while a server is still starting
-  (~lispm-request-wait-functions~, ~lispm-mcp-start-timeout~); the chat says so.
+- *Deferred tools.* A server's tools are deferred (see below): the server starts when an
+  agent first searches them. A server with ~:defer nil~ starts when a session opens instead
+  (~lispm-mcp-autostart~), and since its tools should be there from the session's first
+  request on, for the model and for the prompt cache, a request waits while it is still
+  starting (~lispm-request-wait-functions~, ~lispm-mcp-start-timeout~); the chat says so.
+
+*Two steps to a tool.* Tools cost room in every request: Peekaboo's 26 take about 14,000
+tokens, and a few servers would crowd out the conversation. So an agent carries a core layer,
+the tools it commonly needs, and the others are deferred: offered only once the model has
+found them with ~search_tools~, which lists the sources of deferred tools (an MCP server, with
+its ~:description~) and searches their tools by keywords, scoring names above descriptions, or
+takes exact names (~select:A,B~). The tools it finds are loaded for the agent and offered from
+its next request on, for the rest of the session (~lispm-agent-loaded-tools~); the tool list
+changes then, which costs the cached request prefix once. A resumed session loads them again
+from its transcript, which records the searches and the calls. Sources register through
+~lispm-tool-sources~, so deferred tools need not be MCP tools: ~lispm-deftool~ takes
+~:deferred t~.
 
 *Images.* A tool result can hold images: Peekaboo's ~see~ returns a screenshot with its map of
 the screen. The transcript cannot hold image data, and should not: base64 would swamp it. So

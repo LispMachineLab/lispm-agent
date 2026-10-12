@@ -39,6 +39,7 @@
 (require 'seq)
 (require 'project)
 (require 'lispm-core)
+(require 'lispm-transcript)
 
 (defcustom lispm-rationale-permissions '(write exec)
   "Permission classes whose tools take a required `why' argument.
@@ -66,9 +67,11 @@ reads it when approving, and it stays in the transcript."
   "A tool callable by agents.
 Tools defined with `lispm-deftool' have PARAMS, from which their schema
 is made and their arguments checked.  Tools from elsewhere, such as
-MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist)
-and a FUNCTION taking the whole input."
-  name description params input-schema permission function async preview)
+MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist,
+or a function returning one) and a FUNCTION taking the whole input.
+A DEFERRED tool is not offered to an agent until search_tools has
+found it for that agent."
+  name description params input-schema permission function async preview deferred)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -98,17 +101,20 @@ BODY may start with keyword options:
                      failure); its own value is ignored
   :preview FUNCTION  called with the same arguments; returns a string
                      (usually a diff) shown while the call awaits approval
+  :deferred t        offered only once search_tools finds it (see
+                     `lispm-tool-sources'): for tools seldom needed
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview
+  (let ((permission 'read) async preview deferred
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
         (:permission (setq permission (pop body)))
         (:async (setq async (pop body)))
-        (:preview (setq preview (pop body)))))
+        (:preview (setq preview (pop body)))
+        (:deferred (setq deferred (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -117,6 +123,7 @@ is printed.  Signal an error to report a failure to the model."
        :permission ',permission
        :async ,async
        :preview ,preview
+       :deferred ,deferred
        :function ,(if async
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
                     `(lambda ,args (ignore ,@args) ,@body))))))
@@ -129,8 +136,9 @@ is printed.  Signal an error to report a failure to the model."
   "The API definition of TOOL."
   (if-let* ((schema (lispm-tool-input-schema tool)))
       `((name . ,(lispm-tool-name tool))
-        (description . ,(lispm-tool-description tool))
-        (input_schema . ,schema))
+        (description . ,(let ((description (lispm-tool-description tool)))
+                          (if (functionp description) (funcall description) description)))
+        (input_schema . ,(if (functionp schema) (funcall schema) schema)))
     (lispm-tools--params-schema tool)))
 
 (defun lispm-tools--params-schema (tool)
@@ -159,18 +167,24 @@ is printed.  Signal an error to report a failure to the model."
 (defun lispm-agent-tools* (agent)
   "Tools AGENT may call, sorted by name (a stable request prefix).
 In a role's list of tools, a name ending with * stands for every
-tool whose name starts with the rest, such as mcp__peekaboo__*."
-  (let ((spec (and (listp (lispm-agent-tools agent))
-                   (mapcar (lambda (x) (format "%s" x)) (lispm-agent-tools agent))))
-        (all (eq (lispm-agent-tools agent) t))
-        tools)
+tool whose name starts with the rest, such as mcp__peekaboo__*.
+Deferred tools are left out until search_tools has loaded them for
+AGENT; search_tools itself is there when there are any to find."
+  (let* ((spec (and (listp (lispm-agent-tools agent))
+                    (mapcar (lambda (x) (format "%s" x)) (lispm-agent-tools agent))))
+         (all (eq (lispm-agent-tools agent) t))
+         (searchable (lispm-tools--searchable-p))
+         tools)
     (maphash (lambda (name tool)
-               (when (or all
-                         (seq-some (lambda (pattern)
-                                     (if (string-suffix-p "*" pattern)
-                                         (string-prefix-p (substring pattern 0 -1) name)
-                                       (equal pattern name)))
-                                   spec))
+               (when (and (or all
+                              (seq-some (lambda (pattern)
+                                          (if (string-suffix-p "*" pattern)
+                                              (string-prefix-p (substring pattern 0 -1) name)
+                                            (equal pattern name)))
+                                        spec))
+                          (or (not (lispm-tool-deferred tool))
+                              (member name (lispm-agent-loaded-tools agent)))
+                          (or searchable (not (equal name "search_tools"))))
                  (push tool tools)))
              lispm-tools--registry)
     (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
@@ -253,6 +267,213 @@ Synchronous tools call DONE before returning.  An asynchronous tool's
     (condition-case err
         (apply preview (lispm-tools--arguments tool input))
       (error (format "(no preview: %s)" (error-message-string err))))))
+
+;;;; Deferred tools
+;;
+;; An agent carries a layer of tools it commonly needs; others, many or
+;; seldom needed, are deferred: Peekaboo's 26 tools, for using the
+;; computer, would take 14,000 tokens of every request.  Using one is
+;; two steps.  The model searches for what it needs with search_tools,
+;; which loads the tools it finds, and from its next step on, they are
+;; offered to it like the others, for the rest of the session.  A
+;; resumed session has them again: the transcript records which tools
+;; it searched for and called.
+
+(defcustom lispm-tool-search-results 5
+  "How many tools search_tools loads for a search by keywords."
+  :type 'integer
+  :group 'lispm)
+
+(defvar lispm-tool-sources nil
+  "Functions listing sources of deferred tools, such as MCP servers.
+Each returns a list of plists, one per source:
+  :name         the source's name, which a search can use
+  :description  what its tools are for
+  :pending      non-nil while its tools are not registered yet
+  :prepare      a function of a callback, registering its tools (a
+                server may have to start), then calling the callback
+                with nil, or with what went wrong
+  :provides     a predicate on tool names: whether the source has it")
+
+(defun lispm-tools--sources ()
+  "The sources of deferred tools, from `lispm-tool-sources'."
+  (apply #'append (mapcar #'funcall lispm-tool-sources)))
+
+(defun lispm-tools--deferred ()
+  "The deferred tools registered."
+  (let (tools)
+    (maphash (lambda (_name tool) (when (lispm-tool-deferred tool) (push tool tools)))
+             lispm-tools--registry)
+    (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
+
+(defun lispm-tools--searchable-p ()
+  "Non-nil if there are deferred tools, or sources of them."
+  (or (lispm-tools--sources)
+      (catch 'found
+        (maphash (lambda (_name tool) (when (lispm-tool-deferred tool) (throw 'found t)))
+                 lispm-tools--registry)
+        nil)))
+
+(defun lispm-tools--prepare (sources callback)
+  "Prepare SOURCES, all at once; call CALLBACK with their problems."
+  (if (null sources)
+      (funcall callback nil)
+    (let ((waiting (length sources)) problems)
+      (dolist (source sources)
+        (funcall (plist-get source :prepare)
+                 (lambda (problem)
+                   (when problem (push problem problems))
+                   (when (zerop (cl-decf waiting))
+                     (funcall callback (nreverse problems)))))))))
+
+(defun lispm-tools--description (tool)
+  "The first line of TOOL's description."
+  (let ((description (lispm-tool-description tool)))
+    (car (split-string (if (functionp description) (funcall description) description) "\n"))))
+
+(defun lispm-tools--find (query tools limit &optional sources)
+  "The TOOLS QUERY asks for, at most LIMIT of them.
+\"select:A,B\" asks for those tools by name.  Otherwise a word of
+QUERY naming one of SOURCES (as `lispm-tool-sources' describes them)
+keeps that source's tools only, and each other word found in a tool's
+name counts twice, in its description once; with no other word, all
+the source's tools are found."
+  (if (string-prefix-p "select:" query)
+      (let ((names (split-string (substring query 7) "[, ]+" t)))
+        (seq-filter (lambda (tool) (member (lispm-tool-name tool) names)) tools))
+    (let* ((words (split-string (downcase query) "[^[:alnum:]_]+" t))
+           (named (seq-filter (lambda (source) (member (downcase (plist-get source :name)) words))
+                              sources))
+           (words (seq-difference words (mapcar (lambda (source) (downcase (plist-get source :name)))
+                                                named)))
+           (tools (if named
+                      (seq-filter (lambda (tool)
+                                    (seq-some (lambda (source)
+                                                (funcall (plist-get source :provides)
+                                                         (lispm-tool-name tool)))
+                                              named))
+                                  tools)
+                    tools))
+           (scored (mapcar (lambda (tool)
+                             (let ((name (downcase (lispm-tool-name tool)))
+                                   (description (downcase (lispm-tools--description tool))))
+                               (cons (cl-loop for word in words
+                                              sum (+ (if (string-search word name) 2 0)
+                                                     (if (string-search word description) 1 0)))
+                                     tool)))
+                           tools)))
+      (mapcar #'cdr (seq-take (seq-filter (lambda (pair) (or (> (car pair) 0) (null words)))
+                                          (cl-stable-sort scored #'> :key #'car))
+                              limit)))))
+
+(defun lispm-tools-load (agent names)
+  "Offer AGENT the deferred tools NAMES from its next request on."
+  (let ((new (seq-remove (lambda (name) (member name (lispm-agent-loaded-tools agent))) names)))
+    (when new
+      (setf (lispm-agent-loaded-tools agent) (append (lispm-agent-loaded-tools agent) new))
+      (run-hook-with-args 'lispm-tools-changed-functions agent))))
+
+(defconst lispm-tools--loaded-prefix "Tools now available: "
+  "How a search_tools result starts the list of the tools it loaded.")
+
+(lispm-register-tool
+ (lispm-tool--create
+  :name "search_tools"
+  :description
+  (lambda ()
+    (concat "Find and load tools you do not have yet, when a request needs one: they are yours "
+            "from your next step on, for the rest of the conversation. Search by keywords "
+            "(\"screenshot click\"), a source's name, or exact names (\"select:NAME,NAME\").\n"
+            "Sources:\n"
+            (mapconcat (lambda (source)
+                         (format "- %s: %s" (plist-get source :name) (plist-get source :description)))
+                       (lispm-tools--sources) "\n")))
+  :input-schema
+  '((type . "object")
+    (properties (query (type . "string")
+                       (description . "Keywords, a source's name, or select:NAME,NAME."))
+                (max_results (type . "integer")
+                             (description . "How many tools to load for keywords (default 5).")))
+    (required . ["query"]))
+  :permission 'read
+  :async t
+  :function
+  (lambda (done input)
+    (let ((agent lispm-current-agent)
+          (query (alist-get 'query input))
+          (limit (alist-get 'max_results input)))
+      (unless (stringp query) (error "Say what tools to search for"))
+      (lispm-tools--prepare
+       (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools--sources))
+       (lambda (problems)
+         (let ((found (lispm-tools--find
+                       query
+                       (seq-remove (lambda (tool) (member (lispm-tool-name tool)
+                                                          (lispm-agent-loaded-tools agent)))
+                                   (lispm-tools--deferred))
+                       (if (integerp limit) limit lispm-tool-search-results)
+                       (lispm-tools--sources))))
+           (lispm-tools-load agent (mapcar #'lispm-tool-name found))
+           (funcall done
+                    (concat (if found
+                                (concat lispm-tools--loaded-prefix
+                                        (mapconcat #'lispm-tool-name found ", ") ".\n"
+                                        (mapconcat (lambda (tool)
+                                                     (format "- %s: %s" (lispm-tool-name tool)
+                                                             (lispm-tools--description tool)))
+                                                   found "\n"))
+                              (format "No tools match %S; you have loaded: %s." query
+                                      (if (lispm-agent-loaded-tools agent)
+                                          (string-join (lispm-agent-loaded-tools agent) ", ")
+                                        "none")))
+                            (if problems (concat "\n" (string-join problems "\n")) ""))))))))))
+
+(defvar lispm-session-mode)
+(defvar lispm-session-agent)
+
+(defun lispm-tools--used ()
+  "Tools the session in the current buffer loaded with search_tools or called."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((case-fold-search nil) names)
+        (while (re-search-forward
+                (concat "^\\*\\* \\(?:[A-Z]+ \\)?\\([^ \n]+\\)\\|^"
+                        (regexp-quote lispm-tools--loaded-prefix) "\\(.*\\)\\.$")
+                nil t)
+          (if (match-beginning 1)
+              (push (match-string-no-properties 1) names)
+            (setq names (append (reverse (split-string (match-string-no-properties 2) ", " t))
+                                names))))
+        (delete-dups (nreverse names))))))
+
+(defun lispm-tools--restore ()
+  "Load again the deferred tools the session in this buffer had loaded.
+They count as loaded at once, so the session's next request has them,
+waiting for them if a server has to start."
+  (when-let* ((agent (and (bound-and-true-p lispm-session-mode) lispm-session-agent)))
+    (let* ((sources (lispm-tools--sources))
+           (names (seq-filter (lambda (name)
+                                (let ((tool (lispm-get-tool name)))
+                                  (if tool
+                                      (lispm-tool-deferred tool)
+                                    (seq-some (lambda (source) (funcall (plist-get source :provides) name))
+                                              sources))))
+                              (lispm-tools--used))))
+      (when names
+        (setf (lispm-agent-loaded-tools agent)
+              (seq-uniq (append (lispm-agent-loaded-tools agent) names)))
+        (lispm-tools--prepare
+         (seq-filter (lambda (source)
+                       (and (plist-get source :pending)
+                            (seq-some (plist-get source :provides) names)))
+                     sources)
+         (lambda (problems)
+           (when problems
+             (message "LispM: %s" (string-join problems "; ")))))))))
+
+(add-hook 'lispm-session-mode-hook #'lispm-tools--restore)
 
 ;;;; Permissions
 

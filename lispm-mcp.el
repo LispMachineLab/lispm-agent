@@ -25,12 +25,16 @@
 ;; named mcp__SERVER__TOOL, and turns results into text and images.
 ;;
 ;;   (setq lispm-mcp-servers
-;;         '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp"))))
+;;         '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp")
+;;            :description "See the macOS screen and use its applications.")))
 ;;
-;; gives agents Peekaboo's tools: they see the macOS screen and use its
-;; applications (computer use).  Servers start when a session opens; a
-;; request waits for those still starting, so that a session has their
-;; tools from its first request on.  Their tools have the permission
+;; gives agents Peekaboo's tools: they see the screen and use the Mac's
+;; applications (computer use).  A server's tools are deferred: an
+;; agent finds the ones it needs with search_tools (see
+;; `lispm-tool-sources'), which starts the server, and only the tools it
+;; loads take room in its requests.  A server with :defer nil starts
+;; when a session opens instead, and all its tools are always there; a
+;; request waits for it while it starts.  The tools have the permission
 ;; class `mcp', which asks for approval by default; a server's
 ;; :permission gives its tools another class.
 
@@ -52,12 +56,16 @@ An alist from a server's name to a plist describing it, as for
 `mcp-hub-servers': :command and :args (and :env, a plist of
 environment variables) start a server speaking over stdio; :url
 \(with :token and :headers) reaches one over HTTP.  LispM adds
+:description, what the server's tools are for, which the model reads
+to decide when to search them; :defer, nil for a server to start with
+each session and all its tools to be offered, rather than its tools
+being deferred, found with search_tools (the default); and
 :permission, the permission class of the server's tools, `mcp' by
 default (see `lispm-default-policy')."
   :type '(alist :key-type string :value-type plist))
 
 (defcustom lispm-mcp-autostart t
-  "Non-nil to start the servers of `lispm-mcp-servers' when a session opens."
+  "Non-nil to start the servers with :defer nil when a session opens."
   :type 'boolean)
 
 (defcustom lispm-mcp-start-timeout 120
@@ -112,10 +120,10 @@ The first start of a server run with npx or uvx downloads it."
 (defun lispm-mcp--register (server tools)
   "Make SERVER's TOOLS, as listed by the server, tools of LispM agents."
   (lispm-mcp--unregister server)
-  (let ((permission (or (plist-get (alist-get server lispm-mcp-servers nil nil #'equal)
-                                   :permission)
-                        'mcp))
-        names)
+  (let* ((config (alist-get server lispm-mcp-servers nil nil #'equal))
+         (permission (or (plist-get config :permission) 'mcp))
+         (deferred (lispm-mcp--deferred-p config))
+         names)
     (seq-doseq (tool tools)
       (let* ((tool-name (plist-get tool :name))
              (name (lispm-mcp--tool-name server tool-name))
@@ -128,6 +136,7 @@ The first start of a server run with npx or uvx downloads it."
           :name name
           :description (or (plist-get tool :description) (format "%s of %s" tool-name server))
           :input-schema schema
+          :deferred deferred
           :permission permission
           :async t
           :function (lambda (done input) (lispm-mcp--call server tool-name input done))))))
@@ -181,6 +190,15 @@ Images are saved in AGENT's session."
 
 ;;;; Servers
 
+(defun lispm-mcp--deferred-p (config)
+  "Non-nil if the server CONFIG describes is off until switched on."
+  (if (plist-member config :defer) (plist-get config :defer) t))
+
+(defun lispm-mcp--running-p (server)
+  "Non-nil if SERVER's process runs."
+  (when-let* ((connection (gethash server mcp-server-connections)))
+    (jsonrpc-running-p connection)))
+
 (defun lispm-mcp--live-p (server)
   "Non-nil if SERVER is running or starting."
   (or (gethash server lispm-mcp--starting)
@@ -218,14 +236,12 @@ Images are saved in AGENT's session."
 
 ;;;###autoload
 (defun lispm-mcp-start (&optional server)
-  "Start the servers of `lispm-mcp-servers' not running, or only SERVER.
-Interactively, start them all; a server that failed is tried again."
+  "Start the servers of `lispm-mcp-servers' that are not running, or SERVER.
+Deferred tools stay so: search_tools finds them."
   (interactive)
   (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
     (when (and (or (null server) (equal server name))
-               (not (lispm-mcp--live-p name))
-               (or (called-interactively-p 'any) server
-                   (> (- (float-time) (gethash name lispm-mcp--failed 0)) lispm-mcp--retry-after)))
+               (not (lispm-mcp--live-p name)))
       (lispm-mcp--connect name config))))
 
 (defun lispm-mcp-stop (&optional server)
@@ -255,12 +271,52 @@ Interactively, start them all; a server that failed is tried again."
              "No MCP servers: see `lispm-mcp-servers'")))
 
 (defun lispm-mcp--autostart ()
-  "Start the MCP servers, if they are to start on their own."
+  "Start the servers with :defer nil, if `lispm-mcp-autostart' says so."
   (when lispm-mcp-autostart
-    (lispm-mcp-start)))
+    (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
+      (unless (or (lispm-mcp--deferred-p config)
+                  (lispm-mcp--live-p name)
+                  (< (- (float-time) (gethash name lispm-mcp--failed 0)) lispm-mcp--retry-after))
+        (lispm-mcp--connect name config)))))
+
+(defun lispm-mcp--activate (server callback)
+  "Ready SERVER's tools, starting it if need be; then call CALLBACK.
+CALLBACK gets nil when the tools are there, or what went wrong."
+  (if (and (gethash server lispm-mcp--tools) (lispm-mcp--running-p server))
+      (funcall callback nil)
+    (let ((since (float-time)) timer)
+      (unless (gethash server lispm-mcp--starting)
+        (lispm-mcp-start server))
+      (setq timer
+            (run-at-time
+             0.2 0.2
+             (lambda ()
+               (let ((problem
+                      (cond ((gethash server lispm-mcp--starting) 'wait)
+                            ((gethash server lispm-mcp--tools) nil)
+                            ((>= (gethash server lispm-mcp--failed 0) since)
+                             (format "The MCP server %s failed to start; see *Messages*." server))
+                            (t (format "The MCP server %s has no tools." server)))))
+                 (unless (eq problem 'wait)
+                   (cancel-timer timer)
+                   (funcall callback problem)))))))))
+
+(defun lispm-mcp--sources ()
+  "The servers whose tools are deferred, as sources of tools for search_tools."
+  (cl-loop for (name . config) in lispm-mcp-servers
+           when (lispm-mcp--deferred-p config)
+           collect (let ((prefix (lispm-mcp--tool-name name "")))
+                     (list :name name
+                           :description (or (plist-get config :description)
+                                            (format "the tools of the MCP server %s" name))
+                           :pending (not (and (gethash name lispm-mcp--tools)
+                                              (lispm-mcp--running-p name)))
+                           :prepare (lambda (callback) (lispm-mcp--activate name callback))
+                           :provides (lambda (tool) (string-prefix-p prefix tool))))))
 
 (defun lispm-mcp--wait (_agent)
-  "What a request waits for: MCP servers still starting, or nil."
+  "What a request waits for: MCP servers still starting, or nil.
+Servers whose tools are deferred start only when searched."
   (lispm-mcp--autostart)
   (let ((now (float-time)) waiting late)
     (maphash (lambda (name started)
@@ -272,6 +328,7 @@ Interactively, start them all; a server that failed is tried again."
                          (if (cdr waiting) "s" "") (string-join waiting ", ")))))
 
 (add-hook 'lispm-session-mode-hook #'lispm-mcp--autostart)
+(add-hook 'lispm-tool-sources #'lispm-mcp--sources)
 (add-hook 'lispm-request-wait-functions #'lispm-mcp--wait)
 
 (provide 'lispm-mcp)

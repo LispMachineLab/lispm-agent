@@ -175,37 +175,42 @@ Each agent can also set its own ~:backend~, ~:model~ and ~:effort~, so agents on
 providers can work together. ~C-h v lispm-backends~ documents every option; section 9 of
 DESIGN.org explains the translation between the shapes.
 
+* Tools: the core layer and the rest
+
+An agent carries the tools it commonly needs: reading, editing and searching files and buffers,
+running commands and Lisp, memory, tasks and other agents. Others are /deferred/: they take no
+room in requests until needed. Using one takes two steps: the model finds it with
+~search_tools~, by keywords (~"screenshot click"~), a source's name, or exact names
+(~"select:NAME,NAME"~), which loads what it finds; from its next step on, those tools are
+offered like the others, for the rest of the session, and again when it is resumed. The tools
+of MCP servers are deferred by default; a tool of your own is when its ~lispm-deftool~ says
+~:deferred t~.
+
 * MCP servers and computer use
 
 Agents use the tools of [[https://modelcontextprotocol.io][Model Context Protocol]] servers as
-their own. List the servers in ~lispm-mcp-servers~, as for mcp.el's ~mcp-hub-servers~; they
-start when a session opens, and a session's first request waits for them. Their tools are
-named ~mcp__SERVER__TOOL~ (~peekaboo:see~ in the chat) and ask for approval by default
-(permission class ~mcp~; a server's ~:permission~ gives its tools another class).
+their own. List the servers in ~lispm-mcp-servers~, as for mcp.el's ~mcp-hub-servers~, with a
+~:description~ of what they are for, which ~search_tools~ shows the model. A server starts
+when an agent first searches its tools; with ~:defer nil~ it starts with each session instead,
+and all its tools are always offered. Their tools are named ~mcp__SERVER__TOOL~
+(~peekaboo:see~ in the chat) and ask for approval by default (permission class ~mcp~; a
+server's ~:permission~ gives its tools another class).
 
 For computer use on macOS, [[https://github.com/openclaw/Peekaboo][Peekaboo]] (macOS 15+,
 Node 22+) lets agents see the screen and use applications:
 
 #+begin_src emacs-lisp
 (setq lispm-mcp-servers
-      '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp"))))
+      '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp")
+         :description "See the macOS screen and use its applications (computer use).")))
 #+end_src
 
 Emacs then needs Screen Recording and Accessibility permission (System Settings > Privacy &
-Security); ~peekaboo:permissions~ reports what is missing. Images that tools return, such as
-the screenshots of ~peekaboo:see~, go to the model and are kept next to the session (out of
-git); ~TAB~ on the call shows them in the chat. Requests carry the latest
-~lispm-context-images~ images. ~M-x lispm-mcp-status~, ~lispm-mcp-start~ and ~lispm-mcp-stop~
-manage the servers.
-
-A server's tools join every role whose ~:tools~ is ~t~ (the default). Peekaboo's 26 tools
-take about 14,000 tokens of every request, so you may rather give them to a role of their own:
-
-#+begin_src emacs-lisp
-(lispm-defrole computer
-  "Uses the Mac's applications for the user."
-  :tools '(read_file list_directory recall remember "mcp__peekaboo__*"))
-#+end_src
+Security); ~peekaboo:permissions~ reports what is missing. Peekaboo has 26 tools, about 14,000
+tokens; deferred, an agent loads only those it uses. Images that tools return, such as the
+screenshots of ~peekaboo:see~, go to the model and are kept next to the session (out of git);
+~TAB~ on the call shows them in the chat. Requests carry the latest ~lispm-context-images~
+images. ~M-x lispm-mcp-status~, ~lispm-mcp-start~ and ~lispm-mcp-stop~ manage the servers.
 
 * Tests
 

@@ -622,17 +622,18 @@ BODY can use `port' and `log', the file the server records requests in."
 
 ;;;; MCP and images
 
-(defmacro lispm-test-with-mcp (&rest body)
-  "Run BODY with the fake MCP server of test/ configured.
+(defmacro lispm-test-with-mcp (props &rest body)
+  "Run BODY with the fake MCP server of test/ configured, with PROPS.
 mcp.el waits for idle time, which batch Emacs never has; plain timers
 stand in."
-  (declare (indent 0))
+  (declare (indent 1))
   `(cl-letf (((symbol-function 'run-with-idle-timer)
               (lambda (secs repeat function &rest args)
                 (apply #'run-at-time secs repeat function args))))
      (let ((lispm-mcp-servers
-            `(("fake" :command "python3"
-               :args (,(expand-file-name "fake_mcp_server.py" lispm-test--dir)))))
+            (list (append (list "fake" :command "python3"
+                                :args (list (expand-file-name "fake_mcp_server.py" lispm-test--dir)))
+                          ',props)))
            (mcp-server-wait-initial-time 0))
        (unwind-protect (progn ,@body)
          (lispm-mcp-stop)
@@ -686,7 +687,7 @@ stand in."
 (ert-deftest lispm-test-mcp ()
   "An MCP server's tools are an agent's: they wait for it, take JSON, return images."
   (lispm-test-env
-    (lispm-test-with-mcp
+    (lispm-test-with-mcp (:defer nil)
       (let* ((default-directory project)
              ;; Opening the session starts the server.
              (agent (lispm-start)))
@@ -728,6 +729,76 @@ stand in."
           (should (string-match-p "⏺ fake:snap\n  ⎿  Here it is\\.\n     1 image (TAB to show)" text)))
         (lispm-mcp-stop)
         (should-not (lispm-get-tool "mcp__fake__echo"))))))
+
+(ert-deftest lispm-test-tool-search ()
+  "Deferred tools are found with search_tools, then offered, also after a resume."
+  (lispm-test-env
+    (lispm-test-with-mcp (:description "Fake things for tests.")
+      (let* ((default-directory project)
+             (agent (lispm-start))
+             (names (lambda (request) (mapcar (lambda (tool) (alist-get 'name tool))
+                                              (alist-get 'tools request)))))
+        ;; Nothing starts with the session.
+        (should-not (lispm-mcp--running-p "fake"))
+        (setq lispm-test--scripts
+              `((assistant@project
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "search_tools" '((query . "echo text"))))
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "mcp__fake__echo" '((text . "on"))))
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t3" "search_tools"
+                                                               '((query . "select:mcp__fake__snap"))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+        (setf (lispm-agent-policy agent) '((mcp . auto)))
+        (lispm-tell agent "Use the fake things")
+        (should (lispm-test--wait (lispm-test--idle-p agent) 15))
+        (let ((requests (reverse lispm-test--requests)))
+          ;; The first request offers the search, not the tools ...
+          (should (member "search_tools" (funcall names (nth 0 requests))))
+          (should-not (seq-some (lambda (name) (string-prefix-p "mcp__" name))
+                                (funcall names (nth 0 requests))))
+          (should (string-match-p "- fake: Fake things for tests\\."
+                                  (alist-get 'description
+                                             (seq-find (lambda (tool) (equal (alist-get 'name tool) "search_tools"))
+                                                       (alist-get 'tools (nth 0 requests))))))
+          ;; ... then the tool the search found, and only it ...
+          (should (member "mcp__fake__echo" (funcall names (nth 1 requests))))
+          (should-not (member "mcp__fake__snap" (funcall names (nth 1 requests))))
+          ;; ... and one asked for by name.
+          (should (member "mcp__fake__snap" (funcall names (nth 3 requests)))))
+        (let ((transcript (lispm-test--transcript agent)))
+          (should (string-match-p "^Tools now available: mcp__fake__echo\\.$" transcript))
+          (should (string-match-p "^on {\"text\": \"on\"}$" transcript)))
+        ;; A resumed session has them again, as its transcript says.
+        (let ((file (buffer-file-name (lispm-agent-buffer agent))))
+          (with-current-buffer (lispm-agent-buffer agent) (save-buffer))
+          (lispm-retire agent)
+          (let ((revived (lispm-resume-file file)))
+            (should (equal (lispm-agent-loaded-tools revived) '("mcp__fake__echo" "mcp__fake__snap")))
+            (should (member "mcp__fake__snap"
+                            (mapcar #'lispm-tool-name (lispm-agent-tools* revived))))))))))
+
+(ert-deftest lispm-test-tool-search-ranking ()
+  "Keywords rank tools by their names, then descriptions; select: picks by name."
+  (let ((tools (mapcar (lambda (spec)
+                         (lispm-tool--create :name (car spec) :description (cdr spec) :deferred t))
+                       '(("mcp__p__see" . "Captures a screenshot and an element map.")
+                         ("mcp__p__click" . "Clicks on UI elements or coordinates.")
+                         ("mcp__p__image" . "Screenshot only; use see for element detection.")
+                         ("mcp__g__log" . "Shows the commit log.")))))
+    (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "screenshot" tools 5))
+                   '("mcp__p__see" "mcp__p__image")))
+    (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "click screenshot" tools 1))
+                   '("mcp__p__click")))
+    (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "mcp__p" tools 5))
+                   '("mcp__p__see" "mcp__p__click" "mcp__p__image")))
+    (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "select:mcp__g__log, mcp__p__see" tools 1))
+                   '("mcp__p__see" "mcp__g__log")))
+    (should-not (lispm-tools--find "weather" tools 5))
+    ;; A source's name keeps its tools; the other words rank them.
+    (let ((sources (list (list :name "p" :provides (lambda (name) (string-prefix-p "mcp__p__" name))))))
+      (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "p click" tools 5 sources))
+                     '("mcp__p__click")))
+      (should (equal (mapcar #'lispm-tool-name (lispm-tools--find "p" tools 2 sources))
+                     '("mcp__p__see" "mcp__p__click"))))))
 
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env

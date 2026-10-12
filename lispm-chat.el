@@ -358,7 +358,8 @@ Code blocks lose their fences and keep their lines as they are."
     ("list_buffers" . "Buffers") ("describe_symbol" . "Describe")
     ("remember" . "Remember") ("recall" . "Recall") ("forget" . "Forget")
     ("task_add" . "Task") ("task_update" . "Task") ("task_list" . "Tasks")
-    ("ask_agent" . "Ask") ("send_message" . "Message") ("list_agents" . "Agents"))
+    ("ask_agent" . "Ask") ("send_message" . "Message") ("list_agents" . "Agents")
+    ("search_tools" . "ToolSearch"))
   "The names tools are shown under.")
 
 (defun lispm-chat--tool-name (name)
