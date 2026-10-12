@@ -638,10 +638,12 @@ needs them and kept while it is open, so a tool defined or redefined
 later, or a role redefined with other tools, does not change the
 request prefix, which the prompt cache and the model's thinking are
 bound to.  A new session, or a handover, takes the tools as they are
-then."
+then.  Tools whose descriptions depend on the agent see it as
+`lispm-current-agent'."
   (with-current-buffer (lispm-agent-buffer agent)
     (or lispm--tools
-        (setq lispm--tools (mapcar #'lispm-tool-schema (lispm-agent-tools* agent))))))
+        (setq lispm--tools (let ((lispm-current-agent agent))
+                             (mapcar #'lispm-tool-schema (lispm-agent-tools* agent)))))))
 
 (defun lispm--extend-session-tools (agent)
   "Offer AGENT's session the tools it gained, after those it had.
@@ -657,7 +659,9 @@ changes once."
             (dolist (tool (lispm-agent-tools* agent))
               (unless (member (lispm-tool-name tool) names)
                 (setq lispm--tools
-                      (append lispm--tools (list (lispm-tool-schema tool))))))))))))
+                      (append lispm--tools
+                              (list (let ((lispm-current-agent agent))
+                                      (lispm-tool-schema tool)))))))))))))
 
 (add-hook 'lispm-tools-changed-functions #'lispm--extend-session-tools)
 

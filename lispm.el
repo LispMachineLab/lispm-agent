@@ -50,6 +50,10 @@
 ;;                  (lispm-collab.el);
 ;;   MCP            the tools of Model Context Protocol servers, such as
 ;;                  Peekaboo's for using the computer (lispm-mcp.el);
+;;   Emacs itself   found with apropos and read in its manuals
+;;                  (lispm-emacs.el), used with eval_elisp;
+;;   skills         how to do things with Emacs, such as browse the
+;;                  web, loaded when needed (lispm-skills.el, skills/);
 ;;   audit, undo    every edit is an undo step and a journal entry
 ;;                  (`lispm-turn-diff', `lispm-revert-turn'); every turn
 ;;                  is a git commit.
@@ -68,6 +72,8 @@
 (require 'lispm-collab)
 (require 'lispm-mcp)
 (require 'lispm-title)
+(require 'lispm-emacs)
+(require 'lispm-skills)
 (require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)

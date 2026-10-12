@@ -848,6 +848,184 @@ stand in."
       (should (= asked 1))
       (should (equal (lispm-session-title agent) "Mine")))))
 
+;;;; Emacs itself, and skills
+
+(ert-deftest lispm-test-eval-async ()
+  "eval_elisp waits for a value promised with lispm-async."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          result)
+      (let ((lispm-current-agent agent))
+        (lispm-tool-invoke (lispm-get-tool "eval_elisp")
+                           '((code . "(princ \"start\") (lispm-async (lambda (resolve) (run-at-time 0.05 nil resolve (* 6 7))))"))
+                           (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+      (should-not result)
+      (should (lispm-test--wait (lambda () result)))
+      (should (equal result '("start\n=> 42" . nil)))
+      (setq result nil)
+      (let ((lispm-current-agent agent) (lispm-eval-timeout 0.1))
+        (lispm-tool-invoke (lispm-get-tool "eval_elisp")
+                           '((code . "(lispm-async #'ignore)"))
+                           (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+      (should (lispm-test--wait (lambda () result)))
+      (should (cdr result))
+      (should (string-match-p "Timed out" (car result))))))
+
+(ert-deftest lispm-test-apropos-and-info ()
+  "apropos finds what Emacs can do; read_info reads its manuals."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (should (string-match-p "^lispm-tools--emacs-regexp (function) "
+                              (car (lispm-test--call agent "apropos" '((pattern . "lispm emacs regexp"))))))
+      (let ((variables (car (lispm-test--call agent "apropos" '((pattern . "lispm eval timeout") (kind . "variable"))))))
+        (should (string-match-p "^lispm-eval-timeout (variable) Seconds eval_elisp waits" variables))
+        (should-not (string-match-p "(function)" variables)))
+      (should (string-match-p "Nothing matches" (car (lispm-test--call agent "apropos" '((pattern . "zzqqxx"))))))
+      (should (string-match-p "\\`(eww)Top\n" (car (lispm-test--call agent "read_info" '((manual . "eww"))))))
+      (should (string-match-p "\\`(eww)Basics\n" (car (lispm-test--call agent "read_info" '((manual . "eww") (search . "readable"))))))
+      (should (string-match-p "\\* Elisp:" (car (lispm-test--call agent "read_info" nil))))
+      (should (cdr (lispm-test--call agent "read_info" '((manual . "no-such-manual"))))))))
+
+(defun lispm-test--write (file text)
+  "Write TEXT to FILE, making its directory."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file (insert text)))
+
+(ert-deftest lispm-test-skills ()
+  "Skills are listed, loaded with their code and tools, and restored on resume."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "user-skills/" project))
+           (lispm-skill-directories (list user-skills))
+           (default-directory project)
+           (agent (lispm-start))
+           (names (lambda (request) (mapcar (lambda (tool) (alist-get 'name tool))
+                                            (alist-get 'tools request)))))
+      (lispm-test--write (expand-file-name "greet.org" user-skills)
+                         (concat "#+title: Greet\n#+description: Greet people warmly.\n\n"
+                                 "Use greet_tool.\n\n#+begin_src emacs-lisp :lispm load\n"
+                                 "(defun lispm-test-greet-helper () \"hi\")\n"
+                                 "(lispm-deftool greet_tool ((who string \"Who.\")) \"Greet WHO.\"\n"
+                                 "  (format \"Hello, %s!\" who))\n#+end_src\n"))
+      (lispm-test--write (expand-file-name ".lispm/skills/local/SKILL.org" project)
+                         (concat "#+title: Local\n#+description: A project's own skill.\n\n"
+                                 "#+begin_src emacs-lisp :lispm load\n(defun lispm-test-local-helper () t)\n#+end_src\n"))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "skill" '((name . "greet"))))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "greet_tool" '((who . "Lisp"))))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t3" "skill" '((name . "local"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (unwind-protect
+          (progn
+            (lispm-tell agent "Greet Lisp")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let ((requests (reverse lispm-test--requests)))
+              (let ((skill (seq-find (lambda (tool) (equal (alist-get 'name tool) "skill"))
+                                     (alist-get 'tools (nth 0 requests)))))
+                (should (string-match-p "- greet: Greet people warmly\\." (alist-get 'description skill)))
+                (should (string-match-p "- local: A project's own skill\\." (alist-get 'description skill))))
+              (should-not (member "greet_tool" (funcall names (nth 0 requests))))
+              (should (member "greet_tool" (funcall names (nth 1 requests)))))
+            (let ((transcript (lispm-test--transcript agent)))
+              (should (string-match-p "^Skill greet loaded; tools now available: greet_tool\\.$" transcript))
+              (should (string-match-p "^Use greet_tool\\.$" transcript))
+              (should (string-match-p "^Hello, Lisp!$" transcript))
+              (should (string-match-p "^Skill local loaded (a project's skill: its code was not evaluated)\\.$"
+                                      transcript)))
+            (should (fboundp 'lispm-test-greet-helper))
+            (should-not (fboundp 'lispm-test-local-helper))
+            ;; A resumed session evaluates the code again and has the tools.
+            (let ((file (buffer-file-name (lispm-agent-buffer agent))))
+              (with-current-buffer (lispm-agent-buffer agent) (save-buffer))
+              (lispm-retire agent)
+              (fmakunbound 'lispm-test-greet-helper)
+              (let ((revived (lispm-resume-file file)))
+                (should (fboundp 'lispm-test-greet-helper))
+                (should (member "greet_tool" (mapcar #'lispm-tool-name (lispm-agent-tools* revived)))))))
+        (remhash "greet_tool" lispm-tools--registry)
+        (fmakunbound 'lispm-test-greet-helper)))))
+
+(ert-deftest lispm-test-agent-aware-schemas ()
+  "A tool's description computed for the request sees the agent, also when loaded later.
+The tool comes from a source prepared asynchronously, as a server that
+starts is, so its schema is made outside the call that loaded it."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (lispm-tool-sources
+            (list (lambda ()
+                    (list (list :name "late" :description "A source that takes a moment."
+                                :pending t
+                                :prepare (lambda (callback) (run-at-time 0.01 nil callback nil))
+                                :provides (lambda (name) (equal name "whose_tool"))))))))
+      (lispm-register-tool
+       (lispm-tool--create
+        :name "whose_tool" :deferred t :permission 'read
+        :description (lambda () (format "For %s." (and lispm-current-agent
+                                                       (lispm-agent-name lispm-current-agent))))
+        :input-schema '((type . "object") (properties))
+        :function (lambda (_input) "mine")))
+      (unwind-protect
+          (progn
+            (setq lispm-test--scripts
+                  `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "search_tools"
+                                                                           '((query . "select:whose_tool"))))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+            (lispm-tell agent "Find whose_tool")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let* ((last (car lispm-test--requests))
+                   (tool (seq-find (lambda (tool) (equal (alist-get 'name tool) "whose_tool"))
+                                   (alist-get 'tools last))))
+              (should (equal (alist-get 'description tool) "For tester."))))
+        (remhash "whose_tool" lispm-tools--registry)))))
+
+(ert-deftest lispm-test-web-skill ()
+  "The web skill searches and reads pages (here through url.el, from a local server)."
+  (lispm-test-env
+    (let* ((server (make-process :name "lispm-test-web" :buffer (generate-new-buffer " *web*")
+                                 :command (list "python3" "-u" "-m" "http.server" "0" "--bind" "127.0.0.1"
+                                                "--directory" (expand-file-name "web" lispm-test--dir))
+                                 :noquery t))
+           (agent (lispm-defagent tester "Test agent." :root project :policy '((web . auto))))
+           port)
+      (unwind-protect
+          (progn
+            (should (lispm-test--wait (lambda ()
+                                        (with-current-buffer (process-buffer server)
+                                          (goto-char (point-min))
+                                          (when (re-search-forward "port \\([0-9]+\\)" nil t)
+                                            (setq port (match-string 1)))))))
+            (should (string-match-p "tools now available: web_fetch, web_search"
+                                    (car (lispm-test--call agent "skill" '((name . "web"))))))
+            (let ((lispm-web-search-url (format "http://127.0.0.1:%s/search.html?q=%%s" port))
+                  result)
+              (let ((lispm-current-agent agent))
+                (lispm-tool-invoke (lispm-get-tool "web_search") '((query . "lisp machine"))
+                                   (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+              (should (lispm-test--wait (lambda () result)))
+              (should (equal (car result)
+                             (concat "Lisp machine - Wikipedia\nhttps://en.wikipedia.org/wiki/Lisp_machine\n"
+                                     "Lisp machines were general-purpose computers designed to run Lisp.\n\n"
+                                     "Genera\nhttps://example.org/genera\nThe Symbolics operating system.")))
+              (setq result nil)
+              (let ((lispm-current-agent agent))
+                (lispm-tool-invoke (lispm-get-tool "web_fetch")
+                                   `((url . ,(format "http://127.0.0.1:%s/page.html" port)))
+                                   (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+              (should (lispm-test--wait (lambda () result)))
+              (let ((page (car result)))
+                (should (string-match-p "\\`Title: Lisp Machines\nURL: http://127\\.0\\.0\\.1:[0-9]+/page\\.html\n" page))
+                (should (string-match-p "Chaosnet" page))
+                (should (string-match-p "历史上的 Lisp 机器" page))
+                ;; The readable part, not the navigation; its links, absolute.
+                (should-not (string-match-p "Privacy" (car (split-string page "\n\nLinks:\n"))))
+                (should (string-match-p (format "^\\[[0-9]+\\] Genera: http://127\\.0\\.0\\.1:%s/genera\\.html$" port)
+                                        page)))))
+        (delete-process server)
+        (kill-buffer (process-buffer server))
+        (remhash "web_search" lispm-tools--registry)
+        (remhash "web_fetch" lispm-tools--registry)))))
+
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env
     (let ((agent (lispm-defagent tester :root project)) result)

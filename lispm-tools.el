@@ -1096,25 +1096,81 @@ output also streams into a buffer the user can watch."
         (end-of-file nil))
       (nreverse forms))))
 
+(defcustom lispm-eval-timeout 120
+  "Seconds eval_elisp waits for a value promised with `lispm-async'."
+  :type 'integer
+  :group 'lispm)
+
+(cl-defstruct (lispm-async (:constructor lispm-async--create) (:copier nil))
+  "A value computed asynchronously: see `lispm-async'."
+  settled value failed waiters)
+
+(defun lispm-async (function)
+  "Return a promise of the value FUNCTION computes asynchronously.
+FUNCTION is called at once with a function RESOLVE, to call later with
+the value, and non-nil as second argument if it is a failure.  Code
+that eval_elisp evaluates can end with such a promise, and the agent
+gets the value once it is resolved:
+
+  (lispm-async
+   (lambda (resolve)
+     (url-retrieve URL (lambda (_) (funcall resolve (buffer-string))))))"
+  (let ((promise (lispm-async--create)))
+    (funcall function
+             (lambda (value &optional failed)
+               (unless (lispm-async-settled promise)
+                 (setf (lispm-async-settled promise) t
+                       (lispm-async-value promise) value
+                       (lispm-async-failed promise) failed)
+                 (dolist (waiter (lispm-async-waiters promise))
+                   (funcall waiter value failed)))))
+    promise))
+
+(defun lispm-async-then (promise function)
+  "Call FUNCTION with PROMISE's value and failure flag once it is settled."
+  (if (lispm-async-settled promise)
+      (funcall function (lispm-async-value promise) (lispm-async-failed promise))
+    (push function (lispm-async-waiters promise))))
+
+(defun lispm-tools--eval-result (printed value)
+  "What eval_elisp returns: PRINTED output, then VALUE."
+  (let ((print-length 100) (print-level 10))
+    (concat (if (string-empty-p printed) "" (concat printed "\n"))
+            "=> " (if (stringp value) value (prin1-to-string value)))))
+
 (lispm-deftool eval_elisp
     ((code string "One or more Emacs Lisp forms, evaluated in order with lexical binding."))
   "Evaluate Emacs Lisp in the running Emacs and return the last value,
 plus anything printed.  This reaches all of Emacs: buffers, windows,
-processes, org, magit, any installed package."
+processes, the network, org, magit, any installed package.  Find
+functions with apropos; learn them with describe_symbol and read_info.
+To wait for something asynchronous (a process, a page loading, a
+timer), end with (lispm-async (lambda (resolve) ...)) and call
+\(funcall resolve VALUE) once the value is there."
   :permission exec
+  :async t
   (let* ((output (generate-new-buffer " *lispm-eval*" t))
          (standard-output output)
          (default-directory (lispm-tools--root))
-         value)
+         value printed)
     (unwind-protect
         (progn
           (dolist (form (lispm-tools--read-forms code))
             (setq value (eval form t)))
-          (let ((printed (with-current-buffer output (buffer-string)))
-                (print-length 100) (print-level 10))
-            (concat (if (string-empty-p printed) "" (concat printed "\n"))
-                    "=> " (prin1-to-string value))))
-      (kill-buffer output))))
+          (setq printed (with-current-buffer output (buffer-string))))
+      (kill-buffer output))
+    (if (not (lispm-async-p value))
+        (funcall done (lispm-tools--eval-result printed value))
+      (let ((timer (run-at-time
+                    lispm-eval-timeout nil
+                    (lambda ()
+                      (funcall done (format "Timed out after %d seconds waiting for the promised value."
+                                            lispm-eval-timeout)
+                               t)))))
+        (lispm-async-then value
+                          (lambda (result failed)
+                            (cancel-timer timer)
+                            (funcall done (lispm-tools--eval-result printed result) failed)))))))
 
 (provide 'lispm-tools)
 ;;; lispm-tools.el ends here

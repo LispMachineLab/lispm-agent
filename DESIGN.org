@@ -178,10 +178,17 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   Emacs regexps lack (lookaround) rather than silently matching something else.
 - Built-in tools, the core layer every agent carries (section 10 explains the deferred others
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
-  ~describe_symbol~ (read); ~edit_file~ ~write_file~ ~edit_buffer~ (write); ~run_shell~
-  ~eval_elisp~ (exec); memory, task and collaboration tools are described below.
-- ~eval_elisp~ is the most Emacs-native tool of all: the agent can reach anything in Emacs
-  (magit, org, LSP, windows, ...). It needs approval by default.
+  ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
+  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ (exec); memory, task and collaboration tools
+  are described below.
+- *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
+  ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
+  what an agent lacks is knowing what there is. It finds out as a person would: ~apropos~
+  finds the functions, commands and variables named after something, ~describe_symbol~
+  documents one, ~read_info~ reads the manuals of Emacs and its packages, by node or through
+  their indexes. Asynchronous work (a process, a page loading) ends with
+  ~(lispm-async (lambda (resolve) ...))~, and eval_elisp waits for the value. eval_elisp
+  needs approval by default.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
 
@@ -422,7 +429,33 @@ Computer use is then not something LispM implements: on macOS, Peekaboo is confi
 server, and an agent sees the screen through ~see~ and acts through ~click~, ~type~, ~press~,
 ~scroll~ and the rest, on accessibility elements rather than guessed coordinates.
 
-* 11. Known limitations and next steps
+* 11. Skills: knowing how
+
+A skill is what it takes to do a kind of thing with Emacs, written down: which functions, in
+which steps, with which pitfalls. It is an org file, ~NAME.org~ or ~NAME/SKILL.org~, with a
+~#+title~ and a ~#+description~, instructions for the model, and source blocks marked
+~:lispm load~ whose code defines helper functions, and tools if the skill wants them (they
+become deferred tools of the agent that loads it). Skills come from ~lispm-skill-directories~:
+LispM's own ~skills/~, the user's ~~/.lispm/skills/~, then the agent's project's
+~.lispm/skills/~, a later skill replacing an earlier one of the same name.
+
+Skills are loaded in two steps too. The ~skill~ tool's description lists every skill's name
+and description; when a request calls for one, the model loads it, its text becomes the
+call's result, so the conversation holds it from then on without changing the request's tool
+list, and its code is evaluated. A project's skills may come from anywhere, so their code is
+not evaluated; their text still is read. A resumed session evaluates again the code of the
+skills it loaded.
+
+The first skill is ~web~: searching the web and reading pages. Pages are rendered by Emacs's
+own WebKit (xwidgets) out of sight, scripts and all, with the cookies of the user's own
+xwidget browsing; without xwidgets, url.el fetches the HTML. Either way the HTML is parsed
+by libxml, its main content found by eww's readability scoring and rendered as text by shr,
+the same code eww uses to show pages. A widget's events, the results of its scripts among
+them, wait until something wakes Emacs's event loop, so a timer watches the load and keeps
+the loop turning. Its tools have the permission class ~web~, which asks by default: a fetch
+can carry data out.
+
+* 12. Known limitations and next steps
 
 - *Drafts are context in the org interface*: with ~lispm-interface~ set to ~org~, if another
   agent's message arrives while the user is typing under ~* User~, the draft is sent along as

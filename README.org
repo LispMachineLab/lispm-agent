@@ -189,6 +189,25 @@ offered like the others, for the rest of the session, and again when it is resum
 of MCP servers are deferred by default; a tool of your own is when its ~lispm-deftool~ says
 ~:deferred t~.
 
+* Emacs is the operating system
+
+Whatever Emacs can do, an agent can do with ~eval_elisp~; ~apropos~, ~describe_symbol~ and
+~read_info~ (the Info manuals) let it find out what there is and how it works. Code that
+waits for something ends with ~(lispm-async (lambda (resolve) ...))~.
+
+* Skills
+
+A skill is how to do a kind of thing with Emacs, written down in an org file: a ~#+title~, a
+~#+description~, instructions, and source blocks marked ~:lispm load~ with helper functions
+or tools. Agents see every skill's description and load one when a request needs it. Put
+yours in ~~/.lispm/skills/~ (~NAME.org~, or ~NAME/SKILL.org~ with files beside it); a
+project's go in its ~.lispm/skills/~, though their code is not run.
+
+LispM comes with ~web~: ~web_search~ and ~web_fetch~, which render pages with Emacs's own
+WebKit (xwidgets) when it has it, else fetch them with url.el, and read them as eww's readable
+mode does. They ask for approval (permission class ~web~); allow them for good with
+~(add-to-list 'lispm-default-policy '(web . auto))~.
+
 * MCP servers and computer use
 
 Agents use the tools of [[https://modelcontextprotocol.io][Model Context Protocol]] servers as
@@ -237,6 +256,9 @@ make compile   # make deps, which both run first, installs mcp.el into .deps/
 | lispm-collab.el        | multi-agent collaboration tools                                 |
 | lispm-mcp.el           | the tools of MCP servers, through mcp.el                        |
 | lispm-title.el         | sessions titled by the model                                    |
+| lispm-emacs.el         | apropos and the Info manuals: Emacs, as agents find and learn it |
+| lispm-skills.el        | skills: loading them, their code and tools                      |
+| skills/                | the skills LispM comes with: web                                |
 | lispm-chat.el          | the chat interface, drawn from the org transcript               |
 | lispm.el               | entry commands, dashboard, mode line                            |
 
