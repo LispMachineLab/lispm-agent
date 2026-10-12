@@ -16,8 +16,10 @@ deps: .deps/.installed
 	$(EMACS) -Q --batch -l test/install-deps.el
 	touch $@
 
+# Warnings are errors: CI compiles with every supported Emacs.
 compile: deps
-	$(EMACS) -Q --batch $(DEPS) -L . -f batch-byte-compile $(ELS)
+	$(EMACS) -Q --batch $(DEPS) -L . --eval "(setq byte-compile-error-on-warn t)" \
+	  -f batch-byte-compile $(ELS)
 
 test: deps
 	$(EMACS) -Q --batch $(DEPS) -L . -L test -l test/lispm-test.el -f ert-run-tests-batch-and-exit
