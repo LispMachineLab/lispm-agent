@@ -79,7 +79,10 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm--roles (copy-sequence lispm--roles))
           (lispm-api-function #'lispm-test--fake-api)
           (lispm-test--scripts nil)
-          (lispm-test--requests nil))
+          (lispm-test--requests nil)
+          ;; Run from git (a hook, rebase -x), the tests' git commands
+          ;; would act on that repository rather than on their own.
+          (process-environment (lispm--git-environment)))
      (make-directory project t)
      (unwind-protect
          (progn ,@body)
@@ -620,7 +623,12 @@ BODY can use `port' and `log', the file the server records requests in."
           (with-temp-file "ignored.el" (insert "(defun lispm-demo-ignored ())\n"))
           (with-temp-file "kept.el" (insert "(defun lispm-demo-kept ())\n")))
         (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-[ik]") (path . "repo"))))
-                       "repo/kept.el:1:(defun lispm-demo-kept ())"))))))
+                       "repo/kept.el:1:(defun lispm-demo-kept ())"))
+        ;; Also when Emacs runs under git, which points GIT_DIR elsewhere.
+        (let ((process-environment (cons (concat "GIT_DIR=" (expand-file-name "elsewhere/.git" project))
+                                         process-environment)))
+          (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-[ik]") (path . "repo"))))
+                         "repo/kept.el:1:(defun lispm-demo-kept ())")))))))
 
 ;;;; MCP and images
 

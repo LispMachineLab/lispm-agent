@@ -490,6 +490,16 @@ and the incomplete remainder."
           (buffer-string))
       "")))
 
+(defun lispm--git-environment ()
+  "`process-environment' without the variables that point git elsewhere.
+Git gives them to the commands it runs, such as hooks and those of
+rebase -x; git run by an Emacs started so would act on that
+repository, not on the one in `default-directory'."
+  (seq-remove (lambda (entry)
+                (string-match-p "\\`GIT_\\(?:DIR\\|WORK_TREE\\|INDEX_FILE\\|OBJECT_DIRECTORY\\|ALTERNATE_OBJECT_DIRECTORIES\\|COMMON_DIR\\|NAMESPACE\\|PREFIX\\)="
+                                entry))
+              process-environment))
+
 (defun lispm--diff (old new label)
   "Unified diff from string OLD to string NEW, with file LABEL."
   (if (equal old new)
