@@ -1105,6 +1105,15 @@ BODY can use `port' and `log', the file the server records requests in."
       (should (string-prefix-p " " (buffer-name session)))
       (should (eq (buffer-local-value 'major-mode chat) 'lispm-chat-mode))
       (should (string-match-p "Welcome to LispM" (lispm-test--chat-text chat)))
+      ;; The cursor is drawn where the input ends, not after the hints below it.
+      (with-current-buffer chat
+        (dolist (input '("" "typed"))
+          (lispm-chat-set-input input)
+          (let ((footer (overlay-get lispm-chat--footer 'after-string)))
+            (should (= (overlay-start lispm-chat--footer) (point-max)))
+            (should (get-text-property 0 'cursor footer))
+            (should-not (eq (aref footer 0) ?\n))))
+        (lispm-chat-set-input ""))
       (lispm-test--chat-type chat "Greet lisp")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
       (let ((text (lispm-test--chat-text chat)))

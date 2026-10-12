@@ -875,17 +875,22 @@ ITEMS are the session's items, where the call's preview is."
 (defun lispm-chat--update-footer (&rest _)
   "Draw the rule and hints below the input, and a placeholder while it is empty."
   (when (overlayp lispm-chat--footer)
-    (overlay-put
-     lispm-chat--footer 'after-string
-     (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
-                 (propertize (if (and lispm-chat-agent (lispm--waiting-calls lispm-chat-agent))
-                                 "Answer above with 1, 2 or 3"
-                               "Try \"explain this project\", or / for commands")
-                             'face 'lispm-chat-dim 'cursor t)
-               "")
-             "\n" (lispm-chat--rule) "\n"
-             (propertize "  / for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt"
-                         'face 'lispm-chat-dim)))))
+    (let ((footer
+           (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
+                       (propertize (if (and lispm-chat-agent (lispm--waiting-calls lispm-chat-agent))
+                                       "Answer above with 1, 2 or 3"
+                                     "Try \"explain this project\", or / for commands")
+                                   'face 'lispm-chat-dim)
+                     " ")
+                   "\n" (lispm-chat--rule) "\n"
+                   (propertize "  / for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt"
+                               'face 'lispm-chat-dim))))
+      ;; The footer is drawn at the end of the input, where point usually
+      ;; is, and Emacs would draw the cursor after it, below the hints.
+      ;; Put it on the footer's first character instead: the placeholder,
+      ;; or a space (a newline holds no cursor).
+      (put-text-property 0 1 'cursor t footer)
+      (overlay-put lispm-chat--footer 'after-string footer))))
 
 (defun lispm-chat-return ()
   "Send what is written, or answer the approval prompt if nothing is.
