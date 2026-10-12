@@ -382,6 +382,7 @@ A standing agent stays declared and resumes its session when needed."
     (lispm--save-session agent)
     (if (buffer-live-p buffer)
         (kill-buffer buffer)
+      (run-hook-with-args 'lispm-session-end-functions agent)
       (unless (lispm-agent-standing agent)
         (lispm-forget-agent agent)))))
 
@@ -392,6 +393,7 @@ A standing agent stays declared and resumes its session when needed."
       (when (lispm-agent-busy-p agent)
         (lispm--stop agent "Stopped: the session buffer was closed."))
       (setf (lispm-agent-buffer agent) nil)
+      (run-hook-with-args 'lispm-session-end-functions agent)
       (unless (lispm-agent-standing agent)
         (lispm-unwatch agent)
         (lispm-forget-agent agent)))))
@@ -870,9 +872,12 @@ STATE overrides the call's final TODO keyword."
 
 ;;;; Commands
 
+(defvar lispm-chat-agent)
+
 (defun lispm--buffer-agent ()
-  "The agent of the current session buffer."
+  "The agent of the current session or chat buffer."
   (or lispm-session-agent
+      (bound-and-true-p lispm-chat-agent)
       (user-error "Not in an agent session (or its agent is not defined)")))
 
 (defun lispm-send ()
@@ -950,9 +955,10 @@ REASON, for a denial, is passed on to the model."
         (insert (lispm-transcript-preview preview))))
     (run-hook-with-args 'lispm-approval-functions agent (plist-get call :name)
                         (plist-get call :input))
-    (message "λ %s wants to run %s: review it with C-c C-y in %s"
-             (lispm-agent-name agent) (plist-get call :name)
-             (buffer-name (lispm-agent-buffer agent)))))
+    (message "λ %s wants to run %s: %s" (lispm-agent-name agent) (plist-get call :name)
+             (if (buffer-live-p (lispm-agent-view agent))
+                 (format "answer in %s" (buffer-name (lispm-agent-view agent)))
+               (format "review it with C-c C-y in %s" (buffer-name (lispm-agent-buffer agent)))))))
 
 (defun lispm--todo-state-changed ()
   "Approve or deny a call whose heading the user moved to a new TODO state.

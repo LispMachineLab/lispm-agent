@@ -283,17 +283,18 @@ outside the agent's root always ask, whatever the policy says."
 
 (defun lispm-tools--number-lines (text offset limit)
   "Lines of TEXT from OFFSET (1-based), at most LIMIT, with line numbers."
-  (let* ((lines (split-string text "\n"))
+  (let* ((lines (split-string (string-remove-suffix "\n" text) "\n"))
          (total (length lines))
          (offset (max 1 (or offset 1)))
          (limit (or limit 2000))
          (shown (seq-take (nthcdr (1- offset) lines) limit))
          (n (1- offset)))
     (concat (mapconcat (lambda (line) (format "%6d\t%s" (cl-incf n) line)) shown "\n")
-            (if (< (+ offset (length shown) -1) total)
-                (format "\n[... %d more lines; continue with offset %d]"
-                        (- total offset (length shown) -1) (+ offset (length shown)))
-              ""))))
+            (let ((more (- total offset (length shown) -1)))
+              (if (> more 0)
+                  (format "\n[... %d more line%s; continue with offset %d]"
+                          more (if (= more 1) "" "s") (+ offset (length shown)))
+                "")))))
 
 (defun lispm-tools--replace (text old new all)
   "TEXT with OLD replaced by NEW: the single occurrence, or ALL of them."

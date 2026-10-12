@@ -144,6 +144,9 @@ Each is called with the agent and returns a string or nil.  The
 prompt is frozen when the session starts: changing it later would
 invalidate the model's cached prefix.")
 
+(defvar lispm-session-end-functions nil
+  "Abnormal hook run with an agent whose session is closing.")
+
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
 
@@ -184,7 +187,8 @@ invalidate the model's cached prefix.")
   ;; Runtime state.
   (state 'idle)              ; idle, requesting, acting, waiting
   status                     ; short description of the current activity
-  buffer                     ; session buffer
+  buffer                     ; session buffer: the org transcript
+  view                       ; chat buffer showing the session, if any
   process                    ; request in flight
   inbox                      ; FIFO of pending inputs (plists)
   (pending (make-hash-table :test #'equal)) ; tool-use id -> call plist

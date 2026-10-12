@@ -16,6 +16,7 @@ implementation:
 |---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
+| Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
@@ -126,6 +127,18 @@ prefix-matched as well. Therefore:
   the reasoning and the cache after the edit*, which is exactly the semantics "the buffer is
   the context" calls for.
 
+*Storage is not the interface.* The org buffer is the right store (exact, editable,
+diffable, archived) but a poor place to hold a conversation: you would type into the record
+itself, and approving a call would mean editing a heading. So people talk to an agent in a
+chat ([[file:lispm-chat.el][lispm-chat.el]]) laid out like Claude Code's terminal interface, and the org buffer stays
+out of sight under a hidden buffer name. The chat owns nothing: it is a view, redrawn from the
+org buffer (throttled, from the first item that changed) whenever that buffer or the agent's
+state changes. Your message goes through ~lispm-tell~ like any other input; the chat's input
+area is not part of the context, so a draft is never sent by accident. Tool calls are shown by
+kind (~Read(path)~ with a line count, ~Update(path)~ with its diff, ~Bash(command)~ with its
+first lines of output), and ~TAB~ shows any of them in full. ~/transcript~ opens the org
+document for the edits above; ~lispm-interface~ set to ~org~ makes it the interface again.
+
 * 3. Tool calls as Emacs actions
 
 #+begin_src emacs-lisp
@@ -187,11 +200,14 @@ the audit log of what each agent learned and did, and a wrong memory is one ~git
 maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval. One
 extra rule: *writes outside the agent's root always ask*, whatever the policy says.
 
-*Approval is an org TODO state.* A call that needs approval appears as
+*Approval is an org TODO state.* A call that needs approval is recorded as
 ~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
 
-- ~C-c C-y~ (~lispm-review~): y to approve, n to deny (optionally with a reason, which is
-  passed on to the model), a to allow that tool for the rest of the Emacs session;
+- in the chat, a box shows the command or diff and the ~why~ and asks as Claude Code does:
+  ~1~ yes, ~2~ yes and don't ask again for this tool, ~3~ no and say what to do instead (the
+  answer is passed on to the model);
+- in the org transcript, ~C-c C-y~ (~lispm-review~): y to approve, n to deny (optionally with
+  a reason), a to allow that tool for the rest of the Emacs session;
 - or change the TODO state directly with ~C-c C-t a~ or ~C-c C-t n~;
 - or work through ~M-x lispm-agenda~, an org agenda view of WAITING calls across all agents.
 
@@ -339,8 +355,12 @@ To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
 
 * 10. Known limitations and next steps
 
-- *Drafts are context*: if another agent's message arrives while the user is typing under
-  ~* User~, the draft is sent along as a user message.
+- *Drafts are context in the org interface*: with ~lispm-interface~ set to ~org~, if another
+  agent's message arrives while the user is typing under ~* User~, the draft is sent along as
+  a user message. The chat keeps drafts out of the transcript.
+- *The chat redraws by re-reading the transcript*: a redraw parses the org buffer again
+  (only when it changed) and redraws from the first item that differs. That is cheap for
+  ordinary sessions; very long ones would want incremental parsing.
 - *Session-level backend switches lose reasoning*: thinking blocks only go back to the
   Messages shape, and reasoning text from Chat Completions servers is never sent back, so a
   session that changes backend mid-way continues without the earlier reasoning.

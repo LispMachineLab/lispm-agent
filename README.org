@@ -3,9 +3,11 @@
 
 #+HTML: <p align="center"><img src="assets/logo/lispm-mark-dark-v5.png" alt="LispM emblem" width="200" /></p>
 
-LispM runs AI agents inside Emacs rather than beside it: the context is an org buffer, tools
-are Elisp functions, approvals are org TODO states, memory is org files under git, and agents
-are woken by Emacs hooks and delegate work to each other. See [[file:DESIGN.org][DESIGN.org]] for the design.
+LispM runs AI agents inside Emacs rather than beside it. You talk to an agent in a chat
+laid out like Claude Code's; underneath, the conversation is stored as an org document that is
+also the agent's context, tools are Elisp functions, approvals are org TODO states, memory is
+org files under git, and agents are woken by Emacs hooks and delegate work to each other. See
+[[file:DESIGN.org][DESIGN.org]] for the design.
 
 The name comes from the Lisp Machine (LispM): an environment where everything was a live Lisp
 object and the editor and the system were one. Back then its inhabitants were programs; here
@@ -29,16 +31,30 @@ model ~gpt-5.5~).
 LispM is used the way Claude Code and Codex are: an agent works in a project, one
 conversation per agent, and you can run several and come back to any of them.
 
-1. In any project, ~M-x lispm~ starts a new agent there, in its own session buffer (role
+1. In any project, ~M-x lispm~ starts a new agent there and opens its chat (role
    ~assistant~; ~C-u M-x lispm~ picks another role). Start as many as you like.
-2. Write your request under the last ~* User~ heading and press ~C-c RET~.
-3. The reply flows into the buffer. Tool calls that need approval appear as
-   ~** WAITING edit_file ...~, with a diff preview and the model's reason (~why~). Review them
-   with ~C-c C-y~: y approves, n denies (optionally with a reason), a allows that tool for the
-   rest of the Emacs session. ~C-c C-t a~ / ~C-c C-t n~ works too.
-4. ~C-c C-k~ aborts the current turn. Killing the buffer ends the agent; its session stays on
-   disk, and ~M-x lispm-resume~ brings back any recorded session (those of the current
-   project first). Opening a session file resumes it as well.
+2. Type at the ~>~ prompt at the bottom and press ~RET~; ~S-RET~ or ~C-j~ starts a new line,
+   ~M-p~ / ~M-n~ recall what you sent. Messages sent while the agent works are queued.
+3. The reply streams in above the prompt: what the agent says (~⏺~), each tool call as
+   ~⏺ Read(file)~ with a one-line result (~TAB~ on it shows it in full), edits as diffs. A
+   call that needs approval opens a box with the command or diff and the model's reason;
+   answer ~1~ (yes), ~2~ (yes, and don't ask again for that tool) or ~3~ (no, and say what
+   to do instead), or pick with the arrow keys and ~RET~.
+4. ~C-c C-c~ interrupts. ~/~ starts a command (~/help~ lists them): ~/clear~, ~/compact~,
+   ~/resume~, ~/model~, ~/diff~, ~/undo~, ~/memory~, ~/cost~, ~/agents~, ~/transcript~,
+   ~/exit~.
+5. Killing the chat ends the agent; its session stays on disk, and ~M-x lispm-resume~ brings
+   back any recorded session (those of the current project first).
+
+| Key                 | In the chat                                                      |
+|---------------------+------------------------------------------------------------------|
+| ~RET~               | send; with nothing written, answer the approval prompt           |
+| ~S-RET~, ~C-j~      | new line                                                         |
+| ~TAB~               | show the item at point in full, or briefly again; complete ~/~   |
+| ~1~ ~2~ ~3~         | answer the approval prompt                                       |
+| ~M-p~, ~M-n~        | previous and next message sent                                   |
+| ~C-c C-c~           | interrupt the agent                                              |
+| ~C-c C-t~           | open the org transcript                                          |
 
 | Command                | What it does                                                       |
 |------------------------+--------------------------------------------------------------------|
@@ -51,15 +67,25 @@ conversation per agent, and you can run several and come back to any of them.
 | ~lispm-ask-region~     | ask the project's agent about the region                           |
 | ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
 | ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
-| ~lispm-review~         | review pending calls (~C-c C-y~ in a session)                      |
+| ~lispm-review~         | review pending calls (~C-c C-y~ in an org transcript)              |
 | ~lispm-turn-diff~      | show what an agent changed in its last turn                        |
 | ~lispm-revert-turn~    | undo every edit an agent made in its last turn                     |
 | ~lispm-show-request~   | show the full request that will be sent to the model next          |
 | ~lispm-history~        | git history of memory, tasks and sessions                          |
 
-The session buffer is the context: delete a subtree and the agent forgets it; tag a message
-~:ignore:~ and it is no longer sent; headings of your own, such as ~* Notes~, are private
-annotations.
+** The org transcript
+
+The chat is only the interface. The conversation itself is an org document under
+~lispm-directory~, and that document is the context: every request is built from it, and the
+chat is redrawn from it whenever it changes. ~/transcript~ (~C-c C-t~) opens it. Delete a
+subtree and the agent forgets it; tag a message ~:ignore:~ and it is no longer sent; headings
+of your own, such as ~* Notes~, are private annotations. Tool calls are TODO entries
+(~WAITING~, ~DONE~, ~DENIED~, ...), so changing a waiting call's state approves or denies it,
+and ~M-x lispm-agenda~ lists every call awaiting approval.
+
+To work in the org document directly instead of the chat, set ~lispm-interface~ to ~org~:
+write under the last ~* User~ heading, send with ~C-c RET~, review calls with ~C-c C-y~, abort
+with ~C-c C-k~.
 
 * Agents, roles and sessions
 
@@ -164,6 +190,7 @@ make compile
 | lispm-memory.el        | memory.org and tasks.org, git audit trail                       |
 | lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
 | lispm-collab.el        | multi-agent collaboration tools                                 |
+| lispm-chat.el          | the chat interface, drawn from the org transcript               |
 | lispm.el               | entry commands, dashboard, mode line                            |
 
 * License

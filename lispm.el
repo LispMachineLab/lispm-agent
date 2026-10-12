@@ -36,6 +36,8 @@
 ;;                  long ones are handed over to a summary (lispm-runtime.el);
 ;;   context        an org buffer (lispm-transcript.el), read on every
 ;;                  request, so editing the buffer edits the context;
+;;   interface      a chat laid out like Claude Code's, drawn from that
+;;                  org buffer (lispm-chat.el);
 ;;   tools          Emacs Lisp functions over buffers, files, processes
 ;;                  and Emacs itself (lispm-tools.el);
 ;;   permissions    tool calls are org TODO entries: WAITING until the
@@ -62,6 +64,7 @@
 (require 'lispm-memory)
 (require 'lispm-runtime)
 (require 'lispm-collab)
+(require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
 
@@ -71,6 +74,28 @@
   "A general assistant for whatever the user is doing in Emacs.")
 
 ;;;; Starting, resuming and switching
+
+(defcustom lispm-interface 'chat
+  "How LispM shows you an agent.
+`chat' is a conversation laid out like Claude Code's terminal
+interface, drawn from the session's org document, which stays out of
+sight (/transcript shows it).  `org' shows that org document itself:
+you write under its last heading and send with C-c RET."
+  :type '(choice (const :tag "Chat" chat) (const :tag "Org transcript" org))
+  :group 'lispm)
+
+(defun lispm-agent-display-buffer (agent)
+  "The buffer showing AGENT, as `lispm-interface' says."
+  (if (eq lispm-interface 'chat)
+      (lispm-chat agent)
+    (lispm-session-buffer agent)))
+
+(defun lispm-show (agent)
+  "Show AGENT, ready for your next message; return its buffer."
+  (let ((buffer (lispm-agent-display-buffer agent)))
+    (pop-to-buffer buffer)
+    (goto-char (point-max))
+    buffer))
 
 (defvar lispm--last-role nil "Name of the role last chosen.")
 
@@ -90,7 +115,7 @@
 
 (defun lispm--current-or-read (prompt)
   "The agent of the current session buffer, or one read with PROMPT."
-  (or lispm-session-agent (lispm--read-agent prompt)))
+  (or lispm-session-agent lispm-chat-agent (lispm--read-agent prompt)))
 
 (defun lispm--project-agent ()
   "A running agent working in the current project, the most recent first."
@@ -103,15 +128,13 @@
 The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
   (interactive (list (and current-prefix-arg (lispm--read-role "Role"))))
-  (pop-to-buffer (lispm-agent-buffer (lispm-start role directory)))
-  (goto-char (point-max)))
+  (lispm-show (lispm-start role directory)))
 
 ;;;###autoload
 (defun lispm-resume (session)
   "Resume a recorded SESSION, sessions of the current project first."
   (interactive (list (lispm--read-session "Resume session: ")))
-  (pop-to-buffer (lispm-agent-buffer (lispm-resume-file (plist-get session :file))))
-  (goto-char (point-max)))
+  (lispm-show (lispm-resume-file (plist-get session :file))))
 
 (defun lispm--age (time)
   "A short age for TIME, float seconds."
@@ -150,17 +173,17 @@ ROLE.  DIRECTORY defaults to the current project's root."
 (defun lispm-switch (agent)
   "Switch to the session of a running AGENT."
   (interactive (list (lispm--read-agent "Switch to agent: ")))
-  (pop-to-buffer (lispm-session-buffer agent))
-  (goto-char (point-max)))
+  (lispm-show agent))
 
 (defun lispm-new-session ()
   "Start a fresh session like the current one: same role, same project.
 A standing agent starts a new conversation; otherwise a new agent starts."
   (interactive)
   (let ((agent (lispm--buffer-agent)))
-    (if (lispm-agent-standing agent)
-        (pop-to-buffer (lispm-session-buffer agent t))
-      (lispm (lispm-agent-role agent) (lispm-agent-root agent)))))
+    (cond ((eq lispm-interface 'chat) (lispm-chat-clear agent nil))
+          ((lispm-agent-standing agent)
+           (pop-to-buffer (lispm-session-buffer agent t)))
+          (t (lispm (lispm-agent-role agent) (lispm-agent-root agent))))))
 
 ;;;###autoload
 (defun lispm-ask (agent text)
@@ -169,7 +192,7 @@ AGENT is the running agent of the current project, or a new one."
   (interactive (let ((agent (or (lispm--project-agent) (lispm-start))))
                  (list agent (read-string (format "Ask %s: " (lispm-agent-name agent))))))
   (lispm-tell agent text)
-  (display-buffer (lispm-agent-buffer agent)))
+  (display-buffer (lispm-agent-display-buffer agent)))
 
 ;;;###autoload
 (defun lispm-ask-region (beg end text)

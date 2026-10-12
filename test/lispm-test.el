@@ -458,7 +458,7 @@ BODY can use `port' and `log', the file the server records requests in."
             (lispm-tell agent "Look around" :callback (lambda (r) (setq reply r)))
             (should (lispm-test--wait (lambda () reply) 10))
             ;; The final answer quotes both tool results.
-            (should (string-prefix-p "Read:      1\thello\n" reply))
+            (should (string-prefix-p "Read:      1\thello | " reply))
             (should (string-match-p " | .*project/?\na\\.txt\\'" reply))
             (should (equal (lispm-agent-usage agent) usage))
             (let ((text (lispm-test--transcript agent)))
@@ -508,7 +508,7 @@ BODY can use `port' and `log', the file the server records requests in."
           (file (expand-file-name "a.txt" project)))
       (with-temp-file file (insert "one\ntwo\nthree\n"))
       (should (equal (lispm-test--call agent "read_file" '((path . "a.txt") (offset . 2) (limit . 1)))
-                     '("     2\ttwo\n[... 2 more lines; continue with offset 3]" . nil)))
+                     '("     2\ttwo\n[... 1 more line; continue with offset 3]" . nil)))
       ;; Reads see unsaved buffer edits.
       (with-current-buffer (find-file-noselect file)
         (goto-char (point-max))
@@ -1002,6 +1002,219 @@ BODY can use `port' and `log', the file the server records requests in."
       (kill-buffer "*lispm-diff*")
       (kill-buffer "*lispm-request: tester*")
       (kill-buffer "*lispm-agents*"))))
+
+;;;; Chat
+
+(defun lispm-test--chat-text (chat)
+  "The text of CHAT, brought up to date."
+  (lispm-chat-redraw chat)
+  (with-current-buffer chat (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun lispm-test--chat-type (chat text)
+  "Write TEXT in CHAT's input and send it."
+  (with-current-buffer chat
+    (lispm-chat-set-input text)
+    (lispm-chat-return)))
+
+(defun lispm-test--chat-key (chat key)
+  "Press KEY in CHAT, the input being empty."
+  (with-current-buffer chat
+    (goto-char (point-max))
+    (call-interactively (keymap-lookup lispm-chat-mode-map key))))
+
+(ert-deftest lispm-test-chat-items ()
+  "The chat reads the conversation, and only it, out of the org document."
+  (with-temp-buffer
+    (insert (lispm-transcript-header "t" '(("agent" . "t")))
+            (lispm-transcript-section "System" "be brief")
+            (lispm-transcript-section "Summary" "Earlier, we met.")
+            (lispm-transcript-section "User" "* starred\nhello")
+            "* User :ignore:\nnot sent\n"
+            (lispm-transcript-section "Message from bob" "ping")
+            (lispm-transcript-section "Event: timer" "tick")
+            "* Assistant\n")
+    (org-mode)
+    (lispm-transcript-insert-blocks
+     (list (lispm-test--thinking "Pondering deeply" "sig")
+           (lispm-test--text "Let me look.")
+           (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+     (lambda (_) "WAITING"))
+    (insert (lispm-transcript-section "Note" "Continued elsewhere."))
+    (let ((items (lispm-chat-items (current-buffer))))
+      (should (equal (mapcar (lambda (i) (plist-get i :kind)) items)
+                     '(summary user user event thought text tool note)))
+      (should (equal (plist-get (nth 1 items) :text) "* starred\nhello"))
+      (should (equal (plist-get (nth 2 items) :from) "bob"))
+      (should (equal (plist-get (nth 4 items) :text) "Pondering deeply"))
+      (should (equal (plist-get (nth 6 items) :state) "WAITING"))
+      (should (equal (plist-get (nth 6 items) :input) '((path . "a.txt"))))))
+  ;; A response streaming in.
+  (with-temp-buffer
+    (insert (lispm-transcript-section "User" "hi"))
+    (let ((start (point-marker)))
+      (insert "* Assistant\n"
+              (propertize "weighing options" 'face 'shadow) "\n"
+              "Here is a\n* heading-like line\n"
+              (propertize "-> edit_file ...\n" 'face 'shadow))
+      (setq lispm--live (cons start (point-marker))))
+    (let ((items (lispm-chat-items (current-buffer))))
+      (should (equal (mapcar (lambda (i) (plist-get i :kind)) items) '(user thought text tool)))
+      (should (equal (plist-get (nth 2 items) :text) "Here is a\n* heading-like line"))
+      (should (equal (plist-get (nth 3 items) :state) "WRITING")))))
+
+(ert-deftest lispm-test-chat-streaming ()
+  "A response streams into the chat; an edit before it still shows."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (session (lispm-agent-buffer agent)))
+      (with-current-buffer session
+        (goto-char (point-max))
+        (insert "hello\n"))
+      (lispm--live-begin agent)
+      (lispm--live-insert agent 'text "Partial")
+      (should (string-match-p "^> hello\n\n⏺ Partial$" (lispm-test--chat-text chat)))
+      (lispm--live-insert agent 'text " answer")
+      (should (string-match-p "^⏺ Partial answer$" (lispm-test--chat-text chat)))
+      (with-current-buffer session
+        (goto-char (point-min))
+        (search-forward "hello")
+        (replace-match "howdy"))
+      (should (string-match-p "^> howdy$" (lispm-test--chat-text chat)))
+      (lispm--live-delete agent)
+      (should-not (string-match-p "Partial" (lispm-test--chat-text chat))))))
+
+(ert-deftest lispm-test-chat-turn ()
+  "A turn through the chat: send, see the calls, approve with 1, expand, commands."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let* ((agent (lispm-start 'assistant project))
+           (name (lispm-agent-name agent))
+           (chat (lispm-chat agent))
+           (session (lispm-agent-buffer agent)))
+      (setq lispm-test--scripts
+            `((,name
+               ,(lispm-test--msg "tool_use" (lispm-test--text "Reading.")
+                                 (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t2" "edit_file"
+                                                   '((why . "Greet Lisp") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done, **greeted**.")))))
+      ;; The org document is storage, out of sight; the chat is what shows.
+      (should (string-prefix-p " " (buffer-name session)))
+      (should (eq (buffer-local-value 'major-mode chat) 'lispm-chat-mode))
+      (should (string-match-p "Welcome to LispM" (lispm-test--chat-text chat)))
+      (lispm-test--chat-type chat "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "^> Greet lisp$" text))
+        (should (string-match-p "^⏺ Reading\\.$" text))
+        (should (string-match-p "^⏺ Read(a\\.txt)\n  ⎿  Read 1 line$" text))
+        (should (string-match-p "⏺ Update(a\\.txt)\n  ⎿  Waiting for your approval…" text))
+        (should (string-match-p "│ Edit file" text))
+        (should (string-match-p "│   -hello world" text))
+        (should (string-match-p "│   \\+hello lisp" text))
+        (should (string-match-p "Do you want to make this edit to a\\.txt\\?" text))
+        (should (string-match-p "❯ 1\\. Yes" text)))
+      ;; The drawn conversation cannot be edited; typing there goes to the input.
+      (with-current-buffer chat
+        (goto-char (point-min))
+        (should-error (insert "x") :type 'text-read-only))
+      (lispm-test--chat-key chat "1")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p
+                 "⏺ Update(a\\.txt)\n  ⎿  Updated a\\.txt with 1 addition and 1 removal" text))
+        (should (string-match-p "^⏺ Done, greeted\\.$" text))
+        (should-not (string-match-p "Do you want" text)))
+      ;; TAB shows a result in full.
+      (with-current-buffer chat
+        (goto-char (point-min))
+        (search-forward "Read(a.txt)")
+        (lispm-chat-toggle))
+      (should (string-match-p "⎿       1\thello world" (lispm-test--chat-text chat)))
+      ;; Slash commands and history.
+      (lispm-test--chat-type chat "/model other-model")
+      (should (equal (lispm-agent-model agent) "other-model"))
+      (with-current-buffer chat
+        (lispm-chat-history-previous)
+        (should (equal (lispm-chat--input) "/model other-model"))
+        (lispm-chat-set-input ""))
+      ;; Closing the chat ends the agent and its session.
+      (kill-buffer chat)
+      (should-not (buffer-live-p session))
+      (should-not (lispm-get-agent name t)))))
+
+(ert-deftest lispm-test-chat-approval-answers ()
+  "2 approves a tool for good, 3 denies with what to do instead."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell" '((why . "w") (command . "echo one"))))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t2" "write_file"
+                                                   '((why . "w") (path . "b.txt") (content . "b\n"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (string-match-p "│ Bash command +│\n│ +│\n│   echo one" (lispm-test--chat-text chat)))
+      (lispm-test--chat-key chat "2")
+      (should (member "run_shell" (lispm-agent-allowed agent)))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
+                                                (equal (car (lispm--waiting-calls agent)) "t2")))))
+      (should (string-match-p "Do you want to write b\\.txt\\?" (lispm-test--chat-text chat)))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "use the scratch buffer")))
+        (lispm-test--chat-key chat "3"))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (file-exists-p (expand-file-name "b.txt" project)))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "⏺ Bash(echo one)\n  ⎿  one" text))
+        (should (string-match-p "⏺ Write(b\\.txt)\n  ⎿  The user denied this call\\. Their reason: use the scratch buffer"
+                                text)))
+      ;; A standing agent outlives its chat.
+      (kill-buffer chat)
+      (should (lispm-get-agent 'tester t)))))
+
+(ert-deftest lispm-test-chat-busy ()
+  "While the agent works the chat shows it, queues what you send, and interrupts."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent)))
+      (setq lispm-test--scripts '((tester hang)))
+      (lispm-test--chat-type chat "first")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'requesting))))
+      (lispm-test--chat-type chat "second")
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "Thinking… ([0-9]+s · C-c C-c to interrupt)" text))
+        (should (string-match-p "^> second\n  ⎿  queued" text)))
+      (with-current-buffer chat (lispm-chat-interrupt))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((text (lispm-test--chat-text chat)))
+        (should-not (string-match-p "Thinking…" text))
+        (should (string-match-p "Aborted by the user" text))))))
+
+(ert-deftest lispm-test-chat-commands ()
+  "M-x lispm opens a chat; /clear starts over; the org interface remains."
+  (lispm-test-env
+    (let ((default-directory project))
+      (with-current-buffer (lispm)
+        (should (eq major-mode 'lispm-chat-mode))
+        (let* ((agent lispm-chat-agent)
+               (old-chat (current-buffer))
+               (new-chat (lispm-chat--command agent "/clear")))
+          (should-not (buffer-live-p old-chat))
+          (should-not (lispm-get-agent (lispm-agent-name agent) t))
+          (with-current-buffer new-chat
+            (should (eq major-mode 'lispm-chat-mode))
+            (should-not (eq lispm-chat-agent agent)))))
+      (let ((lispm-interface 'org))
+        (with-current-buffer (lispm)
+          (should (bound-and-true-p lispm-session-mode)))))))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here
