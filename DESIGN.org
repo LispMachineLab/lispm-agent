@@ -24,6 +24,7 @@ implementation:
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
+| Model APIs                | two API shapes behind one internal format                        | [[file:lispm-api.el][lispm-api.el]], [[file:lispm-openai.el][lispm-openai.el]], [[file:lispm-anthropic.el][lispm-anthropic.el]]   |
 
 The name comes from the Lisp Machines (CONS, CADR, Symbolics Genera, ...): environments where
 the editor, the operating system and the programs were all live Lisp objects in one image.
@@ -226,25 +227,58 @@ Concurrency:
 - Every agent's system prompt lists the one-line descriptions of the others, so the model
   knows whom to delegate to.
 
-* 8. Model backends
+* 8. Model backends: two API shapes
 
-A backend is an endpoint speaking the Anthropic Messages API, configured in ~lispm-backends~.
-Each backend declares which features it handles faithfully:
+LispM speaks both shapes model servers offer: OpenAI Chat Completions, the most widely
+implemented (OpenAI, Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, rotom, ...), and Anthropic
+Messages. Internally there is a single conversation format, the Messages shape transcripts
+parse into. Each API shape is an adapter that translates requests out and responses back,
+registered in ~lispm-api-shapes~ with its path, request builder, headers and stream decoder.
+Supporting another shape, such as OpenAI's Responses API, means adding one entry.
 
-| Feature             | Meaning                                                  | anthropic | rotom |
-|---------------------+----------------------------------------------------------+-----------+-------|
-| ~streaming~         | server-sent events, shown live in the buffer             | yes       | no    |
-| ~adaptive-thinking~ | progress-update thinking blocks, thinking prefix binding | yes       | no    |
-| ~fallbacks~         | server-side refusal fallbacks                            | yes       | no    |
-| ~eager-input~       | tool input streamed without buffering                    | yes       | no    |
-| ~tool-errors~       | the ~is_error~ flag of tool results                      | yes       | no    |
+Translation to and from Chat Completions ([[file:lispm-openai.el][lispm-openai.el]]):
 
-The default backend is the local *Rotom* gateway (~http://127.0.0.1:14550~, default model
-~gpt-5.5~), which serves GPT, Grok and other models behind one endpoint. Testing surfaced a few
-problems in its translation layer, so rotom gets plain requests:
+| Messages shape                              | Chat Completions                                             |
+|---------------------------------------------+--------------------------------------------------------------|
+| system prompt                               | a leading ~system~ message                                   |
+| text blocks                                 | message ~content~                                            |
+| ~tool_use~ blocks                           | the assistant message's ~tool_calls~ (arguments as JSON text) |
+| ~tool_result~ blocks                        | one ~tool~ message per result; failures prefixed ~Error:~    |
+| thinking and other Messages-only blocks     | not sent                                                     |
+| a ~reasoning~ block, shown, never sent back | ~reasoning_content~ or ~reasoning~ in responses              |
+| stop reason ~tool_use~, ~max_tokens~, ~refusal~ | finish reason ~tool_calls~, ~length~, ~content_filter~   |
+
+Streamed tool calls arrive as fragments keyed by index; the decoder assembles them, so parallel
+calls work whatever order their fragments interleave in.
+
+A backend (~lispm-backends~) names an endpoint, its shape and the features to use:
+
+| Feature                 | Shape     | Meaning                                                     |
+|-------------------------+-----------+-------------------------------------------------------------|
+| ~streaming~             | both      | server-sent events, shown live in the buffer                |
+| ~reasoning-effort~      | openai    | send the agent's effort as ~reasoning_effort~               |
+| ~max-completion-tokens~ | openai    | call the output limit ~max_completion_tokens~ (OpenAI's API) |
+| ~stream-usage~          | openai    | ask for token usage while streaming                         |
+| ~adaptive-thinking~     | anthropic | progress-update thinking blocks, thinking prefix binding    |
+| ~fallbacks~             | anthropic | server-side refusal fallbacks                               |
+| ~eager-input~           | anthropic | tool input streamed without buffering                       |
+| ~tool-errors~           | anthropic | the ~is_error~ flag of tool results                         |
+
+| Preset             | Shape     | Features                                                       |
+|--------------------+-----------+----------------------------------------------------------------|
+| ~rotom~ (default)  | openai    | streaming, reasoning-effort                                    |
+| ~rotom-messages~   | anthropic | none                                                           |
+| ~openai~           | openai    | streaming, reasoning-effort, max-completion-tokens, stream-usage |
+| ~anthropic~        | anthropic | all of the above for its shape                                 |
+
+The default backend is the local *Rotom* gateway (~http://127.0.0.1:14550/v1~, default model
+~gpt-5.5~), which serves GPT, Grok and other models behind both shapes. Its Chat Completions
+side streams faithfully, parallel tool calls included, though it reports no token usage while
+streaming. Its Messages side, ~rotom-messages~, has translation problems, so it gets plain
+requests:
 
 - When streaming, *the arguments of parallel tool calls are lost* (the tool blocks arrive,
-  their ~input_json_delta~ events do not), so rotom requests are not streamed
+  their ~input_json_delta~ events do not), so its requests are not streamed
   ([[https://github.com/RyanKung/rotom/issues/18][rotom#18]]);
 - the upstream rejects the ~is_error~ field, so failures are marked with an ~Error:~ prefix in
   the result text instead ([[https://github.com/RyanKung/rotom/issues/19][rotom#19]]);
@@ -257,17 +291,18 @@ problems in its translation layer, so rotom gets plain requests:
   tool calls of any response that was not cut short (~max_tokens~, ~refusal~);
 - unknown ~claude-*~ model names are mapped to ~--model-fallback~ (currently gpt-5.5).
 
-To use the first-party API: ~(setq lispm-backend 'anthropic)~, with ~ANTHROPIC_API_KEY~ set or
-an auth-source entry for ~api.anthropic.com~. The default model is ~claude-opus-5-5~, and all
-features in the table are enabled, including server-side refusal fallbacks
+To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
+~ANTHROPIC_API_KEY~ set or an auth-source entry for ~api.anthropic.com~. The default model is
+~claude-opus-5-5~, with every Messages feature enabled, including server-side refusal fallbacks
 (~fallbacks: "default"~).
 
 * 9. Known limitations and next steps
 
 - *Drafts are context*: if another agent's message arrives while the user is typing under
   ~* User~, the draft is sent along as a user message.
-- *No live streaming with rotom*: responses are rendered when complete; the header line shows
-  the agent's state meanwhile.
+- *Session-level backend switches lose reasoning*: thinking blocks only go back to the
+  Messages shape, and reasoning text from Chat Completions servers is never sent back, so a
+  session that changes backend mid-way continues without the earlier reasoning.
 - *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
   are not journaled. Next step: snapshot the project's git repository with ~git stash create~
   at the start of each turn, extending rollback to any file change.

@@ -44,7 +44,9 @@
 ;;   * Event: after-save-hook       input from a hook the user set up
 ;;
 ;; Any other top-level heading (say "* Notes") is the user's own and is
-;; not sent; neither is any message tagged :ignore:.
+;; not sent; neither is any message tagged :ignore:, nor reasoning text
+;; from Chat Completions servers (a "reasoning" block), which is shown
+;; but never sent back.
 ;;
 ;; Text written by the model round-trips byte for byte: models bind
 ;; their reasoning to the exact conversation prefix, so a transcript
@@ -120,6 +122,7 @@
              (concat "Thinking: " (lispm--oneline text 70))
            "Thinking")))
       ("redacted_thinking" "Redacted thinking")
+      ("reasoning" (concat "Reasoning: " (lispm--oneline (alist-get 'text block) 70)))
       ("fallback"
        (format "Fallback: %s -> %s"
                (alist-get 'model (alist-get 'from block))
@@ -330,6 +333,7 @@ Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-IDS)."
                   (t
                    (push (lispm-transcript--tool-result id "(no result recorded)" t)
                          results)))))
+         ((equal (cdr (assoc "BLOCK" props)) "reasoning"))
          ((assoc "BLOCK" props)
           (when-let* ((json (lispm-transcript--block bbeg own-end))
                       (raw (ignore-errors (lispm--json-decode json))))

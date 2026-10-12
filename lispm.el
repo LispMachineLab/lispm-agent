@@ -180,7 +180,7 @@
                      (if (> waiting 0) (number-to-string waiting) "")
                      (let ((n (length (lispm-agent-inbox a)))) (if (> n 0) (number-to-string n) ""))
                      (format "%d/%d/%d" (nth 0 usage) (nth 1 usage) (nth 2 usage))
-                     (lispm-agent-model* a)
+                     (or (lispm-agent-model* a) "")
                      (or (lispm-agent-description a) "")))))
    (lispm-agents)))
 

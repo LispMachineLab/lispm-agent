@@ -37,6 +37,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 
 (defgroup lispm nil
@@ -51,28 +52,45 @@ makes to its memory, and every turn of every session, is a commit."
   :type 'directory)
 
 (defcustom lispm-backends
-  '((rotom :url "http://127.0.0.1:14550" :model "gpt-5.5")
-    (anthropic :url "https://api.anthropic.com" :model "claude-opus-5-5"
+  '((rotom :api openai :url "http://127.0.0.1:14550/v1" :model "gpt-5.5"
+           :features (streaming reasoning-effort))
+    (rotom-messages :api anthropic :url "http://127.0.0.1:14550" :model "gpt-5.5")
+    (openai :api openai :url "https://api.openai.com/v1" :model "gpt-5.5"
+            :key openai
+            :features (streaming reasoning-effort max-completion-tokens stream-usage))
+    (anthropic :api anthropic :url "https://api.anthropic.com" :model "claude-opus-5-5"
                :key anthropic
                :features (streaming adaptive-thinking fallbacks eager-input tool-errors)))
-  "Model endpoints speaking the Anthropic Messages API, by name.
+  "Model endpoints, by name.
 Each entry is (NAME . PLIST) with keys
-  :url       base URL; requests go to URL/v1/messages
-  :model     default model for agents that do not name one
-  :key       nil (no key), a string, a function returning one, or
-             `anthropic' (ANTHROPIC_API_KEY or auth-source)
-  :features  parts of the API the endpoint handles faithfully:
-             `streaming' (server-sent events; without it responses
-             arrive whole), `adaptive-thinking' (progress-update
-             thinking blocks, preserved-thinking binding),
-             `fallbacks' (server-side
-             refusal fallbacks), `eager-input' (tool input streamed
-             unbuffered) and `tool-errors' (the is_error flag on tool
-             results; without it, failures are marked in the text).
-The default, `rotom', is a local gateway that serves many upstream
-models (GPT, Grok, ...) behind the same API.  It gets plain requests:
-its translation loses the arguments of parallel tool calls when
-streaming (RyanKung/rotom#18) and rejects is_error (#19)."
+  :api         the API shape the endpoint speaks: `openai' (Chat
+               Completions; requests go to URL/chat/completions) or
+               `anthropic' (Messages; requests go to URL/v1/messages)
+  :url         base URL, as the respective official SDKs take it
+  :model       default model for agents that do not name one
+  :max-tokens  output limit, overriding `lispm-max-tokens'
+  :key         nil (no key), a string, a function returning one,
+               `openai' (OPENAI_API_KEY or auth-source),
+               `anthropic' (ANTHROPIC_API_KEY or auth-source) or
+               `auth-source' (looked up by the URL's host)
+  :key-env     name of an environment variable holding the key
+  :features    what to use of the endpoint.  For both shapes:
+               `streaming' (server-sent events; without it responses
+               arrive whole).  For `openai': `reasoning-effort' (send
+               the agent's effort), `max-completion-tokens' (name the
+               output limit so, as OpenAI's own API requires) and
+               `stream-usage' (ask for token usage while streaming).
+               For `anthropic': `adaptive-thinking' (progress-update
+               thinking blocks, preserved-thinking binding),
+               `fallbacks' (server-side refusal fallbacks),
+               `eager-input' (tool input streamed unbuffered) and
+               `tool-errors' (the is_error flag on tool results;
+               without it, failures are marked in the text).
+The default, `rotom', is a local gateway serving many upstream models
+\(GPT, Grok, ...) behind both shapes.  Its Chat Completions side
+streams faithfully; its Messages side, `rotom-messages', gets plain
+requests, as its translation loses the arguments of parallel tool
+calls when streaming (RyanKung/rotom#18) and rejects is_error (#19)."
   :type '(alist :key-type symbol :value-type plist))
 
 (defcustom lispm-backend 'rotom
@@ -280,6 +298,22 @@ and false `:false', so a decoded value encodes back to the same JSON."
      ((vectorp object) (lispm--json-encode object))
      (t (let ((s (lispm--json-encode (vector object))))
           (substring s 1 -1))))))
+
+(defun lispm--sse-split (text)
+  "Split TEXT, the unparsed part of a server-sent event stream, into events.
+Return (PAYLOADS . REST): the data of each complete event, in order,
+and the incomplete remainder."
+  (let ((start 0) payloads)
+    (while (string-match "\r?\n\r?\n" text start)
+      (let ((event (substring text start (match-beginning 0))))
+        (setq start (match-end 0))
+        (let ((data (mapconcat (lambda (line) (string-remove-prefix " " (substring line 5)))
+                               (seq-filter (lambda (line) (string-prefix-p "data:" line))
+                                           (split-string event "\r?\n"))
+                               "\n")))
+          (unless (string-empty-p data)
+            (push data payloads)))))
+    (cons (nreverse payloads) (substring text start))))
 
 (defun lispm--truncate (string limit)
   "Shorten STRING to about LIMIT characters, keeping its head and tail."

@@ -1,5 +1,6 @@
 EMACS ?= emacs
-ELS = lispm-core.el lispm-transcript.el lispm-api.el lispm-tools.el \
+ELS = lispm-core.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
+      lispm-api.el lispm-tools.el \
       lispm-memory.el lispm-runtime.el lispm-collab.el lispm.el
 
 .PHONY: all compile test clean
