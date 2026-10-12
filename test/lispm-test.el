@@ -942,6 +942,39 @@ stand in."
         (remhash "greet_tool" lispm-tools--registry)
         (fmakunbound 'lispm-test-greet-helper)))))
 
+(ert-deftest lispm-test-agent-aware-schemas ()
+  "A tool's description computed for the request sees the agent, also when loaded later.
+The tool comes from a source prepared asynchronously, as a server that
+starts is, so its schema is made outside the call that loaded it."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (lispm-tool-sources
+            (list (lambda ()
+                    (list (list :name "late" :description "A source that takes a moment."
+                                :pending t
+                                :prepare (lambda (callback) (run-at-time 0.01 nil callback nil))
+                                :provides (lambda (name) (equal name "whose_tool"))))))))
+      (lispm-register-tool
+       (lispm-tool--create
+        :name "whose_tool" :deferred t :permission 'read
+        :description (lambda () (format "For %s." (and lispm-current-agent
+                                                       (lispm-agent-name lispm-current-agent))))
+        :input-schema '((type . "object") (properties))
+        :function (lambda (_input) "mine")))
+      (unwind-protect
+          (progn
+            (setq lispm-test--scripts
+                  `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "search_tools"
+                                                                           '((query . "select:whose_tool"))))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+            (lispm-tell agent "Find whose_tool")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let* ((last (car lispm-test--requests))
+                   (tool (seq-find (lambda (tool) (equal (alist-get 'name tool) "whose_tool"))
+                                   (alist-get 'tools last))))
+              (should (equal (alist-get 'description tool) "For tester."))))
+        (remhash "whose_tool" lispm-tools--registry)))))
+
 (ert-deftest lispm-test-web-skill ()
   "The web skill searches and reads pages (here through url.el, from a local server)."
   (lispm-test-env
