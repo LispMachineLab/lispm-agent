@@ -22,12 +22,16 @@
 ;; Several agents share one Emacs: the same buffers, files and event
 ;; loop.  They coordinate through three tools:
 ;;
-;;   list_agents   who else is here, and what they are doing;
+;;   list_agents   who else is here, what they are doing, and which
+;;                 roles helpers can be started from;
 ;;   send_message  fire and forget: the text lands in the other agent's
 ;;                 inbox and becomes a "* Message from X" turn;
 ;;   ask_agent     delegation: the caller's call stays pending (other
 ;;                 agents and the user keep working) until the other
 ;;                 agent's turn ends; its final reply is the result.
+;;                 Asking a role rather than an agent starts a helper
+;;                 of that role in the caller's project, which retires
+;;                 once it has replied: a subagent.
 ;;
 ;; Shared state needs no locks: the event loop is single-threaded, and
 ;; edits are exact-text replacements, which fail instead of clobbering
@@ -44,7 +48,7 @@
 (defun lispm-collab--target (name)
   "The agent called NAME, which must not be the acting agent."
   (let ((agent (or (lispm-get-agent name t)
-                   (error "No agent named %s; list_agents shows who exists" name))))
+                   (error "No agent or role named %s; list_agents shows them" name))))
     (when (eq agent lispm-current-agent)
       (error "That is you"))
     agent))
@@ -57,29 +61,47 @@
       (setq agent (lispm-agent-waiting-on agent)))
     (eq agent from)))
 
+(defun lispm-collab--roles ()
+  "Description of the roles helpers can be started from."
+  (mapconcat (lambda (role)
+               (format "- %s: %s" (lispm-role-name role)
+                       (or (lispm-role-description role) "(no description)")))
+             (lispm-roles) "\n"))
+
 (defun lispm-collab--prompt (agent)
   "System prompt section introducing AGENT's colleagues."
   (let ((others (remq agent (lispm-agents))))
-    (when others
-      (concat "# Other agents in this Emacs\n"
-              "Delegate with ask_agent, notify with send_message.\n"
-              (mapconcat (lambda (a)
-                           (format "- %s: %s" (lispm-agent-name a)
-                                   (or (lispm-agent-description a) "(no description)")))
-                         others "\n")))))
+    (concat "# Other agents\n"
+            "ask_agent delegates to a running agent, or to a helper it starts from a"
+            " role; send_message notifies a running agent.\n"
+            (if others
+                (concat "Running:\n"
+                        (mapconcat (lambda (a)
+                                     (format "- %s (%s, in %s): %s" (lispm-agent-name a)
+                                             (lispm-agent-role a)
+                                             (abbreviate-file-name (lispm-agent-root a))
+                                             (or (lispm-agent-description a) "")))
+                                   others "\n")
+                        "\n")
+              "")
+            "Roles:\n" (lispm-collab--roles))))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-collab--prompt)
 
 (lispm-deftool list_agents ()
-  "List the agents in this Emacs: their role, state and current activity."
+  "List the running agents (role, project, state, activity) and the roles
+helpers can be started from."
   :permission comm
-  (mapconcat (lambda (a)
-               (format "%s%s: %s [%s%s]" (lispm-agent-name a)
-                       (if (eq a lispm-current-agent) " (you)" "")
-                       (or (lispm-agent-description a) "no description")
-                       (lispm-agent-state a)
-                       (if (lispm-agent-status a) (concat ", " (lispm-agent-status a)) "")))
-             (lispm-agents) "\n"))
+  (concat "Running agents:\n"
+          (mapconcat (lambda (a)
+                       (format "- %s%s (%s, in %s) [%s%s]" (lispm-agent-name a)
+                               (if (eq a lispm-current-agent) " (you)" "")
+                               (lispm-agent-role a)
+                               (abbreviate-file-name (lispm-agent-root a))
+                               (lispm-agent-state a)
+                               (if (lispm-agent-status a) (concat ", " (lispm-agent-status a)) "")))
+                     (lispm-agents) "\n")
+          "\nRoles:\n" (lispm-collab--roles)))
 
 (lispm-deftool send_message
     ((to string "Name of the receiving agent.")
@@ -94,15 +116,18 @@ when you need the answer to continue."
             (if (lispm-agent-busy-p target) ", who is busy and will read it next" ""))))
 
 (lispm-deftool ask_agent
-    ((agent string "Name of the agent to ask.")
+    ((agent string "A running agent, or a role to start a helper from (see list_agents).")
      (request string "What you need, self-contained: they cannot see your transcript."))
-  "Delegate a request to another agent and wait for its final reply,
-which becomes the result of this call.  Use it to get work done by
-an agent better placed for it (see list_agents)."
+  "Delegate a request and wait for the final reply, which becomes the
+result of this call.  Ask a running agent better placed for it, or
+name a role to start a helper of that role in your project; the
+helper retires once it has replied."
   :permission comm
   :async t
-  (let ((me lispm-current-agent)
-        (target (lispm-collab--target agent)))
+  (let* ((me lispm-current-agent)
+         (helper (and (not (lispm-get-agent agent t)) (lispm-get-role agent t)
+                      (lispm-start (intern agent) (lispm-agent-root me))))
+         (target (or helper (lispm-collab--target agent))))
     (when (lispm-collab--cycle-p me target)
       (error "%s is (indirectly) waiting on you; asking it would deadlock" agent))
     (setf (lispm-agent-waiting-on me) target)
@@ -111,7 +136,10 @@ an agent better placed for it (see list_agents)."
                 :callback (lambda (reply)
                             (when (eq (lispm-agent-waiting-on me) target)
                               (setf (lispm-agent-waiting-on me) nil))
-                            (funcall done (format "%s replied:\n%s" agent reply))))
+                            (when helper
+                              (run-at-time 0 nil #'lispm-retire helper))
+                            (funcall done (format "%s replied:\n%s"
+                                                  (lispm-agent-name target) reply))))
     nil))
 
 (provide 'lispm-collab)

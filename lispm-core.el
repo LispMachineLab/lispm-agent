@@ -19,14 +19,14 @@
 
 ;;; Commentary:
 
-;; The agent object model.  An agent is a long-lived value inside the
+;; The object model.  A role is a kind of agent: instructions, tools, a
+;; permission policy saying which tool classes run freely, need approval
+;; or are forbidden, and a model.  An agent is one conversation (one
+;; session) carried on by a role in one project: a value inside the
 ;; running Emacs, not a process outside it.  It has
 ;;
-;;   - an identity: name, one-line description, role instructions and
-;;     a root directory it works in;
-;;   - a capability set: the tools it may call and a permission policy
-;;     saying which tool classes run freely, need approval, or are
-;;     forbidden;
+;;   - an identity: name, session id, role and project root;
+;;   - the capabilities of its role;
 ;;   - runtime state: its session buffer (an org transcript), the
 ;;     request in flight, an inbox of pending inputs, tool calls awaiting
 ;;     approval, and a journal of the edits it made, per turn.
@@ -147,15 +147,44 @@ invalidate the model's cached prefix.")
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
 
+;;;; Roles and agents
+;;
+;; A role is a kind of agent: instructions, tools, permission policy and
+;; model.  An agent is one conversation (one session) carried on by a
+;; role in one project, the way a process runs a program.  Starting an
+;; agent in a project is what starting Claude Code or Codex there is;
+;; several can run at once, and a recorded one can be resumed.  Agents
+;; declared with `lispm-defagent' are standing: they keep one
+;; conversation going across Emacs sessions, and hooks and timers wake
+;; them up.
+
+(defcustom lispm-default-role 'assistant
+  "Role of agents started without choosing one."
+  :type 'symbol)
+
+(cl-defstruct (lispm-role (:constructor lispm-role--create)
+                          (:copier nil))
+  "A kind of agent: the template agents are started from."
+  name description instructions tools policy backend model effort)
+
+(defvar lispm--roles nil
+  "Alist of (NAME . ROLE) in definition order.")
+
 (cl-defstruct (lispm-agent (:constructor lispm-agent--create)
                            (:copier nil))
-  "An agent living in this Emacs."
-  ;; Identity and capabilities, set by `lispm-defagent'.
-  name description instructions root tools policy backend model effort
+  "An agent: one conversation, in one project, carried on by a role."
+  ;; Identity.
+  name                       ; symbol, unique among live agents
+  id                         ; session id, kept across continuation files
+  role                       ; name of the role it was started from
+  root                       ; project directory it works in
+  standing                   ; non-nil for agents declared with `lispm-defagent'
+  ;; Capabilities, copied from its role.
+  description instructions tools policy backend model effort
   ;; Runtime state.
   (state 'idle)              ; idle, requesting, acting, waiting
   status                     ; short description of the current activity
-  buffer                     ; current session buffer
+  buffer                     ; session buffer
   process                    ; request in flight
   inbox                      ; FIFO of pending inputs (plists)
   (pending (make-hash-table :test #'equal)) ; tool-use id -> call plist
@@ -167,50 +196,144 @@ invalidate the model's cached prefix.")
   journal                    ; alist TURN -> edit snapshots
   allowed                    ; tool names approved for this Emacs session
   waiting-on                 ; agent this one awaits (ask_agent)
+  compacting                 ; non-nil while the session is handed over
   triggers                   ; hook and timer subscriptions
   (usage (list 0 0 0)))      ; input, output, cache-read tokens
 
 (defvar lispm--agents nil
-  "Alist of (NAME . AGENT) in definition order.")
+  "Alist of (NAME . AGENT) of the live agents, oldest first.")
+
+(defun lispm-roles ()
+  "Return all defined roles."
+  (mapcar #'cdr lispm--roles))
+
+(defun lispm-get-role (role &optional noerror)
+  "Return the role designated by ROLE: a role, a symbol or a string.
+Signal an error if there is none, unless NOERROR."
+  (cond ((lispm-role-p role) role)
+        ((alist-get (if (stringp role) (intern role) role) lispm--roles))
+        (noerror nil)
+        (t (user-error "No role named %s" role))))
 
 (defun lispm-agents ()
-  "Return all defined agents."
+  "Return the live agents."
   (mapcar #'cdr lispm--agents))
 
 (defun lispm-get-agent (agent &optional noerror)
-  "Return the agent designated by AGENT: an agent, a symbol or a string.
+  "Return the agent designated by AGENT: an agent, a name or a session id.
 Signal an error if there is none, unless NOERROR."
   (cond ((lispm-agent-p agent) agent)
-        ((alist-get (if (stringp agent) (intern agent) agent) lispm--agents))
+        ((and (symbolp agent) (alist-get agent lispm--agents)))
+        ((and (stringp agent)
+              (or (alist-get (intern agent) lispm--agents)
+                  (seq-find (lambda (a) (equal (lispm-agent-id a) agent)) (lispm-agents)))))
         (noerror nil)
         (t (user-error "No agent named %s" agent))))
 
-(defun lispm-register-agent (name &rest props)
-  "Define or redefine the agent NAME from PROPS.
-PROPS are :description, :instructions, :root, :tools (a list of tool
-names, or t for all), :policy, :backend, :model and :effort.  Redefining a
-live agent keeps its runtime state."
-  (let ((agent (or (alist-get name lispm--agents)
-                   (let ((new (lispm-agent--create :name name)))
-                     (setq lispm--agents
-                           (append lispm--agents (list (cons name new))))
-                     new))))
-    (setf (lispm-agent-description agent) (plist-get props :description)
-          (lispm-agent-instructions agent) (plist-get props :instructions)
-          (lispm-agent-root agent) (file-name-as-directory
-                                    (expand-file-name
-                                     (or (plist-get props :root) "~/")))
-          (lispm-agent-tools agent) (if (plist-member props :tools)
-                                        (plist-get props :tools)
-                                      t)
-          (lispm-agent-policy agent) (plist-get props :policy)
-          (lispm-agent-backend agent) (plist-get props :backend)
-          (lispm-agent-model agent) (plist-get props :model)
-          (lispm-agent-effort agent) (plist-get props :effort))
+(defun lispm--apply-role (agent role)
+  "Give AGENT the capabilities of ROLE."
+  (setf (lispm-agent-role agent) (lispm-role-name role)
+        (lispm-agent-description agent) (lispm-role-description role)
+        (lispm-agent-instructions agent) (lispm-role-instructions role)
+        (lispm-agent-tools agent) (lispm-role-tools role)
+        (lispm-agent-policy agent) (lispm-role-policy role)
+        (lispm-agent-backend agent) (lispm-role-backend role)
+        (lispm-agent-model agent) (lispm-role-model role)
+        (lispm-agent-effort agent) (lispm-role-effort role))
+  agent)
+
+(defun lispm-register-role (name &rest props)
+  "Define or redefine the role NAME from PROPS.
+PROPS are :description, :instructions, :tools (a list of tool names,
+or t for all), :policy, :backend, :model and :effort.  Live agents of
+the role take on the new definition at once."
+  (let ((role (or (alist-get name lispm--roles)
+                  (let ((new (lispm-role--create :name name)))
+                    (setq lispm--roles (append lispm--roles (list (cons name new))))
+                    new))))
+    (setf (lispm-role-description role) (plist-get props :description)
+          (lispm-role-instructions role) (plist-get props :instructions)
+          (lispm-role-tools role) (if (plist-member props :tools) (plist-get props :tools) t)
+          (lispm-role-policy role) (plist-get props :policy)
+          (lispm-role-backend role) (plist-get props :backend)
+          (lispm-role-model role) (plist-get props :model)
+          (lispm-role-effort role) (plist-get props :effort))
+    (dolist (agent (lispm-agents))
+      (when (eq (lispm-agent-role agent) name)
+        (lispm--apply-role agent role)))
+    role))
+
+(defmacro lispm-defrole (name &rest props)
+  "Define a role NAME.
+An optional leading string is its one-line description.  The other
+PROPS are as for `lispm-register-role'.
+
+  (lispm-defrole reviewer
+    \"Reviews changes for bugs; never edits.\"
+    :tools \='(read_file search_files list_directory recall))"
+  (declare (indent 1) (doc-string 2))
+  (when (stringp (car props))
+    (setq props (cons :description props)))
+  `(lispm-register-role ',name ,@props))
+
+(defun lispm--new-id ()
+  "A fresh session id: the time, and random digits."
+  (format "%s-%04x" (format-time-string "%Y%m%d-%H%M%S") (random #x10000)))
+
+(defun lispm--project-name (root)
+  "Short name of the project at ROOT."
+  (let ((dir (directory-file-name (expand-file-name root))))
+    (if (equal dir (directory-file-name (expand-file-name "~")))
+        "~"
+      (file-name-nondirectory dir))))
+
+(defun lispm--free-name (base)
+  "BASE, or BASE<N>, whichever no live agent is called; a symbol."
+  (let ((name base) (n 1))
+    (while (alist-get (intern name) lispm--agents)
+      (setq name (format "%s<%d>" base (cl-incf n))))
+    (intern name)))
+
+(cl-defun lispm-make-agent (role root &key name id standing)
+  "Make a live agent of ROLE working in ROOT, and return it.
+NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id."
+  (let* ((role (lispm-get-role role))
+         (agent (lispm-agent--create
+                 :name (or name (lispm--free-name
+                                 (format "%s@%s" (lispm-role-name role)
+                                         (lispm--project-name root))))
+                 :id (or id (lispm--new-id))
+                 :root (file-name-as-directory (expand-file-name root))
+                 :standing standing)))
+    (lispm--apply-role agent role)
+    (setq lispm--agents (append lispm--agents
+                                (list (cons (lispm-agent-name agent) agent))))
     agent))
 
+(defun lispm-forget-agent (agent)
+  "Remove AGENT from the live agents."
+  (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents)))
+
+(defun lispm-register-agent (name &rest props)
+  "Declare the standing agent NAME and return it.
+PROPS are :root (default home) and either :role, the name of a role,
+or role properties as for `lispm-register-role', which then define a
+role NAME.  Redeclaring a live agent keeps its runtime state."
+  (let* ((role (if (plist-get props :role)
+                   (lispm-get-role (plist-get props :role))
+                 (apply #'lispm-register-role name
+                        (cl-loop for (key value) on props by #'cddr
+                                 unless (memq key '(:role :root))
+                                 append (list key value)))))
+         (root (file-name-as-directory (expand-file-name (or (plist-get props :root) "~/"))))
+         (agent (or (alist-get name lispm--agents)
+                    (lispm-make-agent role root :name name :standing t))))
+    (setf (lispm-agent-root agent) root
+          (lispm-agent-standing agent) t)
+    (lispm--apply-role agent role)))
+
 (defmacro lispm-defagent (name &rest props)
-  "Define an agent NAME.
+  "Declare a standing agent NAME: one conversation that goes on.
 An optional leading string is its one-line description.  The other
 PROPS are as for `lispm-register-agent'.
 
@@ -218,7 +341,7 @@ PROPS are as for `lispm-register-agent'.
     \"Writes and fixes Emacs Lisp.\"
     :root \"~/src/lispm/\"
     :instructions \"Keep changes small; run the tests after editing.\"
-    :policy \\='((write . auto)))"
+    :policy \='((write . auto)))"
   (declare (indent 1) (doc-string 2))
   (when (stringp (car props))
     (setq props (cons :description props)))
@@ -239,10 +362,21 @@ PROPS are as for `lispm-register-agent'.
   "Effort level AGENT uses."
   (or (lispm-agent-effort agent) lispm-effort))
 
-(defun lispm-agent-directory (agent)
-  "Directory of AGENT's memory, tasks and sessions, created on demand."
-  (let ((dir (expand-file-name (format "agents/%s/" (lispm-agent-name agent))
-                               lispm-directory)))
+(defun lispm--slug (directory)
+  "A file name standing for DIRECTORY: its path with separators replaced."
+  (replace-regexp-in-string "[^[:alnum:]._]" "-"
+                            (directory-file-name (expand-file-name directory))))
+
+(defun lispm-project-directory (root)
+  "Directory of the sessions, tasks and memory of the project at ROOT.
+Created on demand, under `lispm-directory', not in the project."
+  (let ((dir (expand-file-name (concat "projects/" (lispm--slug root) "/") lispm-directory)))
+    (make-directory dir t)
+    dir))
+
+(defun lispm-role-directory (role)
+  "Directory of the memory of ROLE (a name), created on demand."
+  (let ((dir (expand-file-name (format "roles/%s/" role) lispm-directory)))
     (make-directory dir t)
     dir))
 

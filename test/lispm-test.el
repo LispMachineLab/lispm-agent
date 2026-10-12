@@ -44,7 +44,8 @@ returning one, or `hang' (never answer).")
                      (if (null step)
                          (funcall (plist-get callbacks :on-error)
                                   '(:status 400 :type "test_error" :message "script exhausted"))
-                       (funcall (plist-get callbacks :on-delta) 'text "streaming...")
+                       (when-let* ((on-delta (plist-get callbacks :on-delta)))
+                         (funcall on-delta 'text "streaming..."))
                        (funcall (plist-get callbacks :on-done)
                                 (if (functionp step) (funcall step body) step))))))
     nil))
@@ -73,6 +74,7 @@ BODY can use `project', a scratch directory for agents to work in."
                                 lispm-backends))
           (lispm-backend 'test)
           (lispm--agents nil)
+          (lispm--roles (copy-sequence lispm--roles))
           (lispm-api-function #'lispm-test--fake-api)
           (lispm-test--scripts nil)
           (lispm-test--requests nil))
@@ -127,7 +129,7 @@ BODY can use `project', a scratch directory for agents to work in."
                         (lispm-test--tool "call-xyz-0" "list_buffers" nil)
                         '((type . "fallback") (from (model . "a")) (to (model . "b"))))))
     (with-temp-buffer
-      (insert (lispm-transcript-header "t")
+      (insert (lispm-transcript-header "t" '(("agent" . "t")))
               (lispm-transcript-section "System" "be brief\n* really")
               (lispm-transcript-section "User" "hello")
               "* Assistant\n")
@@ -160,7 +162,7 @@ BODY can use `project', a scratch directory for agents to work in."
 (ert-deftest lispm-test-transcript-pending-and-prefixes ()
   "Calls without results are pending; messages from agents and events are labeled."
   (with-temp-buffer
-    (insert (lispm-transcript-header "t")
+    (insert (lispm-transcript-header "t" '(("agent" . "t")))
             (lispm-transcript-section "Message from boss" "do it")
             (lispm-transcript-section "Event: after-save-hook" "a.el saved")
             "* Assistant\n")
@@ -682,6 +684,153 @@ BODY can use `port' and `log', the file the server records requests in."
         (should (equal (alist-get 'content (aref messages 0))
                        [((type . "text") (text . "new topic"))]))))))
 
+;;;; Agents and sessions
+
+(ert-deftest lispm-test-start-and-resume ()
+  "Agents start per project like Claude Code sessions, and resume from their files."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "AGENTS.md" project) (insert "Answer in haiku.\n"))
+    (let* ((default-directory project)
+           (first (lispm-start))
+           (second (lispm-start)))
+      (should (eq (lispm-agent-name first) 'assistant@project))
+      (should (eq (lispm-agent-name second) 'assistant@project<2>))
+      (should (equal (lispm-agent-root first) project))
+      (should-not (equal (lispm-agent-id first) (lispm-agent-id second)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Old pond.")))
+              (assistant@project<2> ,(lispm-test--msg "end_turn" (lispm-test--text "Frog jumps.")))))
+      (lispm-tell first "Write about a pond\nin a haiku")
+      (lispm-tell second "Write about a frog")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p first))
+                                                (funcall (lispm-test--idle-p second))
+                                                (= (length lispm-test--requests) 2)))))
+      ;; Project instructions reach the system prompt.
+      (should (string-match-p "# Project instructions (AGENTS.md)\nAnswer in haiku\\."
+                              (alist-get 'system (car lispm-test--requests))))
+      ;; Both sessions are listed, newest first, titled by their first prompt.
+      (let ((sessions (lispm-sessions)))
+        (should (equal (sort (mapcar (lambda (s) (plist-get s :title)) sessions) #'string<)
+                       '("Write about a frog" "Write about a pond")))
+        (should (equal (plist-get (car sessions) :root) project))
+        (should (equal (plist-get (car sessions) :role) "assistant")))
+      ;; Closing a session ends its agent; opening the file brings it back.
+      (let ((id (lispm-agent-id first))
+            (file (buffer-file-name (lispm-agent-buffer first))))
+        (kill-buffer (lispm-agent-buffer first))
+        (should-not (memq first (lispm-agents)))
+        (let ((revived (lispm-resume-file file)))
+          (should (equal (lispm-agent-id revived) id))
+          (should (eq (lispm-agent-name revived) 'assistant@project))
+          (should (eq (lispm-agent-role revived) 'assistant))
+          (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Splash.")))
+                lispm-test--scripts)
+          (lispm-tell revived "And then?")
+          (should (lispm-test--wait (lispm-test--idle-p revived)))
+          ;; The whole conversation went out again.
+          (should (equal (mapcar (lambda (m) (alist-get 'role m))
+                                 (alist-get 'messages (car lispm-test--requests)))
+                         '("user" "assistant" "user")))
+          (should (equal (lispm-session-files id) (list file)))
+          ;; Renaming changes the listed title.
+          (lispm-rename-session file "Pond poems")
+          (should (equal (plist-get (seq-find (lambda (s) (equal (plist-get s :id) id))
+                                              (lispm-sessions))
+                                    :title)
+                         "Pond poems")))))))
+
+(ert-deftest lispm-test-standing-agent ()
+  "A standing agent keeps one conversation: it resumes it, even after its buffer closed."
+  (lispm-test-env
+    (let ((agent (lispm-defagent keeper "Keeps going." :root project)))
+      (should (lispm-agent-standing agent))
+      (setq lispm-test--scripts
+            `((keeper ,(lispm-test--msg "end_turn" (lispm-test--text "one"))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "two")))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((file (buffer-file-name (lispm-agent-buffer agent))))
+        (kill-buffer (lispm-agent-buffer agent))
+        (should (memq agent (lispm-agents)))
+        (lispm-tell agent "second")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (equal (buffer-file-name (lispm-agent-buffer agent)) file))
+        (should (= (length (alist-get 'messages (car lispm-test--requests))) 3))))))
+
+(ert-deftest lispm-test-ask-role ()
+  "Asking a role starts a helper in the caller's project, which retires after replying."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes.")
+    (let ((boss (lispm-defagent boss :root project)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Approved.")))
+              (reviewer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Yes, ship it.")))))
+      (lispm-tell boss "get a review")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (= (length lispm-test--requests) 3)
+                                                (null (cdr (lispm-agents)))))))
+      (should (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss)))
+      (should (equal (alist-get 'content (aref (alist-get 'content
+                                                          (aref (alist-get 'messages (car lispm-test--requests)) 2))
+                                               0))
+                     "reviewer@project replied:\nYes, ship it."))
+      ;; The helper's session stays on record.
+      (should (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project")) (lispm-sessions))))))
+
+(ert-deftest lispm-test-compaction ()
+  "A long session is handed over: memory saved, a summary written, the turn continued."
+  (lispm-test-env
+    (let* ((default-directory project)
+           (lispm-compact-threshold nil)
+           (agent (lispm-start)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Let's go to Kyoto."))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "m1" "remember"
+                                                              '((title . "Trip") (content . "Kyoto in May"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Saved."))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "The user plans a trip to Kyoto."))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Booked.")))))
+      (lispm-tell agent "Plan a trip")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((old (buffer-file-name (lispm-agent-buffer agent)))
+            (lispm-compact-threshold 10))
+        ;; The user types the next request; it is carried over to the continuation.
+        (with-current-buffer (lispm-agent-buffer agent)
+          (goto-char (point-max))
+          (insert "Book it")
+          (lispm-send))
+        (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p agent))
+                                                  (= (length lispm-test--requests) 5)))))
+        (let* ((requests (reverse lispm-test--requests))
+               (summary-request (nth 3 requests))
+               (final (nth 4 requests)))
+          ;; The summary is asked for without tools, after the whole conversation.
+          (should-not (assq 'tools summary-request))
+          (should (equal (alist-get 'text (aref (alist-get 'content (car (last (append (alist-get 'messages summary-request) nil)))) 0))
+                         lispm--summary-prompt))
+          ;; The continuation starts from the summary, followed by the request.
+          (should (equal (alist-get 'messages final)
+                         [((role . "user")
+                           (content . [((type . "text")
+                                        (text . "[Summary of the earlier conversation, handed over to this session]\nThe user plans a trip to Kyoto."))
+                                       ((type . "text") (text . "Book it"))]))])))
+        (let ((new (buffer-file-name (lispm-agent-buffer agent))))
+          (should-not (equal new old))
+          (should (string-match-p (regexp-quote (format "#+lispm_previous: [[file:%s]]" old))
+                                  (lispm--file-text new)))
+          (should (string-match-p "\\* Note\nContinued in \\[\\[file:" (lispm--file-text old)))
+          (should (string-match-p "Booked\\." (lispm--file-text new)))
+          (should (string-match-p "\\* Trip\n" (lispm--file-text (lispm-memory-file agent))))
+          ;; Still one session, listed by its newest file under its first title.
+          (should (equal (mapcar (lambda (s) (list (plist-get s :file) (plist-get s :title)))
+                                 (lispm-sessions))
+                         (list (list new "Plan a trip"))))
+          (should-not (lispm-agent-compacting agent)))))))
+
 ;;;; Collaboration
 
 (ert-deftest lispm-test-ask-agent ()
@@ -754,10 +903,10 @@ BODY can use `port' and `log', the file the server records requests in."
       (should (equal (lispm-test--call agent "remember"
                                        '((title . "Indentation") (content . "* Two spaces\nalways")
                                          (tags . ["style" "user pref"])))
-                     '("Saved memory \"Indentation\"." . nil)))
+                     '("Saved project memory \"Indentation\"." . nil)))
       (should (equal (car (lispm-test--call agent "remember"
                                             '((title . "indentation") (content . "Two spaces, no tabs"))))
-                     "Updated memory \"indentation\"."))
+                     "Updated project memory \"indentation\"."))
       (lispm-test--call agent "remember" '((title . "Editor") (content . "Uses Emacs 31")))
       (should (equal (car (lispm-test--call agent "recall" '((query . "TABS two"))))
                      "## indentation\nTwo spaces, no tabs"))
@@ -773,6 +922,13 @@ BODY can use `port' and `log', the file the server records requests in."
         (should (string-match-p (concat id " DONE Write docs\n  README first\n  - \\[.*\\] shipped")
                                 (car (lispm-test--call agent "task_list" '((include_done . t))))))
         (should (cdr (lispm-test--call agent "task_update" `((id . ,id) (state . "WIP"))))))
+      (should (equal (car (lispm-test--call agent "remember"
+                                            '((title . "Prefers terse replies") (content . "Short answers.")
+                                              (scope . "role"))))
+                     "Saved role memory \"Prefers terse replies\"."))
+      (should (file-exists-p (lispm-memory-file agent 'role)))
+      (should (string-match-p "## Prefers terse replies (role memory)\nShort answers\."
+                              (car (lispm-test--call agent "recall" '((query . "terse"))))))
       (let ((prompt (lispm-system-prompt agent)))
         (should (string-match-p "# Your long-term memory\n.*\n- indentation$" prompt)))
       (should (string-match-p "^\\* indentation$"
@@ -784,17 +940,18 @@ BODY can use `port' and `log', the file the server records requests in."
           (should (lispm-test--wait settled 10))
           ;; One burst of changes, one commit listing each of them.
           (should (equal (shell-command-to-string "git log -1 --format='%an%n%B'")
-                         (concat "keeper\nkeeper: 6 changes\n\n"
+                         (concat "keeper\nkeeper: 7 changes\n\n"
                                  "keeper: remember \"Indentation\"\n"
                                  "keeper: update memory \"indentation\"\n"
                                  "keeper: remember \"Editor\"\n"
                                  "keeper: forget \"Editor\"\n"
                                  "keeper: add task " id "\n"
-                                 "keeper: task " id " -> DONE\n\n")))
+                                 "keeper: task " id " -> DONE\n"
+                                 "keeper: remember \"Prefers terse replies\"\n\n")))
           (lispm-test--call agent "remember" '((title . "Later") (content . "x")))
           (should (lispm-test--wait settled 10))
           (should (equal (shell-command-to-string "git log --format=%s")
-                         "keeper: remember \"Later\"\nkeeper: 6 changes\n")))))))
+                         "keeper: remember \"Later\"\nkeeper: 7 changes\n")))))))
 
 ;;;; Commands
 
@@ -817,7 +974,7 @@ BODY can use `port' and `log', the file the server records requests in."
       (should (string-match-p "\"note\": \"Nothing to send"
                               (with-current-buffer "*lispm-request: tester*" (buffer-string))))
       (lispm-dashboard)
-      (should (string-match-p "tester +idle" (with-current-buffer "*lispm-agents*" (buffer-string))))
+      (should (string-match-p "tester +tester +project +idle" (with-current-buffer "*lispm-agents*" (buffer-string))))
       (lispm-mode-line-mode 1)
       (unwind-protect
           (progn

@@ -25,8 +25,11 @@
 ;;
 ;; Layout of a session buffer:
 ;;
-;;   #+title: coder 2026-10-12 17:30
-;;   #+lispm_agent: coder
+;;   #+title: coder@lispm 2026-10-12 17:30
+;;   #+lispm_agent: coder@lispm      the agent, with its session id, role
+;;   #+lispm_id: 20261012-173000-9f3a and project root, so sessions can be
+;;   #+lispm_role: coder              listed and resumed
+;;   #+lispm_root: ~/src/lispm/
 ;;   #+todo: WAITING(w) APPROVED(a) RUNNING(r) | DONE(d) DENIED(n) FAILED(f)
 ;;   * System                       the system prompt, frozen per session
 ;;   * User                         a user message
@@ -42,6 +45,7 @@
 ;;   *** Result                     the tool's output (or *** Error)
 ;;   * Message from reviewer        input from another agent
 ;;   * Event: after-save-hook       input from a hook the user set up
+;;   * Summary                      what an earlier session handed over
 ;;
 ;; Any other top-level heading (say "* Notes") is the user's own and is
 ;; not sent; neither is any message tagged :ignore:, nor reasoning text
@@ -70,12 +74,29 @@
 
 ;;;; Rendering
 
-(defun lispm-transcript-header (agent-name)
-  "File header of a new session of the agent AGENT-NAME."
-  (concat (format "#+title: %s %s\n" agent-name
-                  (format-time-string "%Y-%m-%d %H:%M"))
-          (format "#+lispm_agent: %s\n" agent-name)
+(defun lispm-transcript-header (title keywords)
+  "File header of a session titled TITLE.
+KEYWORDS is an alist of (NAME . VALUE) recorded as #+lispm_NAME lines."
+  (concat (format "#+title: %s\n" title)
+          (mapconcat (pcase-lambda (`(,name . ,value)) (format "#+lispm_%s: %s\n" name value))
+                     keywords "")
           lispm-transcript-todo-line))
+
+(defun lispm-transcript-keywords ()
+  "The #+lispm_ keywords at the start of the current buffer, as an alist.
+Keys are strings without the prefix, such as \"id\" or \"root\"."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((limit (save-excursion (if (re-search-forward "^\\* " nil t)
+                                       (match-beginning 0)
+                                     (point-max))))
+            keywords)
+        (while (re-search-forward "^#\\+lispm_\\([a-z_]+\\): *\\(.*?\\) *$" limit t)
+          (push (cons (match-string-no-properties 1) (match-string-no-properties 2))
+                keywords))
+        (nreverse keywords)))))
 
 (defun lispm-transcript--body (text)
   "TEXT as a section body that `lispm-transcript--text' reads back exactly."
@@ -281,6 +302,8 @@ own notes."
     (cond ((string-match-p "\\`system\\'" title) 'system)
           ((string-match-p "\\`user\\'" title) '(user . ""))
           ((string-match-p "\\`assistant\\'" title) 'assistant)
+          ((string-match-p "\\`summary\\'" title)
+           '(user . "[Summary of the earlier conversation, handed over to this session]\n"))
           ((string-match "\\`message from \\(.+\\)\\'" title)
            (cons 'user (format "[Message from agent %s]\n" (match-string 1 title))))
           ((string-match "\\`event: *\\(.+\\)\\'" title)

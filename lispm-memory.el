@@ -19,17 +19,21 @@
 
 ;;; Commentary:
 
-;; Each agent keeps two org files in its directory under
-;; `lispm-directory':
+;; Memory has two levels, like the project and user instructions of
+;; other agent tools, both org files under `lispm-directory':
 ;;
-;;   memory.org  durable knowledge, one heading per fact, with tags and
-;;               CREATED/UPDATED properties;
-;;   tasks.org   a TODO list (TODO NEXT BLOCKED | DONE CANCELLED) whose
-;;               entries have short IDs the agent refers to.
+;;   projects/<project>/memory.org  what the agents of a project learn
+;;                                  about it, shared by all of them;
+;;   roles/<role>/memory.org        what agents of a role learn that holds
+;;                                  everywhere, such as the user's tastes.
 ;;
-;; Both are ordinary org files: the user can read and edit them, put
-;; tasks.org in `org-agenda-files' to see an agent's work in their own
-;; agenda, or hand an agent a task by adding a TODO.  The whole
+;; One heading per fact, with tags and CREATED/UPDATED properties.  Each
+;; project also has a task list, projects/<project>/tasks.org (TODO NEXT
+;; BLOCKED | DONE CANCELLED), whose entries have short IDs.
+;;
+;; All are ordinary org files: the user can read and edit them, put the
+;; task lists in `org-agenda-files' to see the agents' work in their own
+;; agenda, or hand agents a task by adding a TODO.  The whole
 ;; directory is a git repository; every memory change and every
 ;; finished turn is a commit authored by the agent, so `git log' is
 ;; the audit trail of what each agent learned and did, and a bad
@@ -48,13 +52,18 @@ The repository is `lispm-directory' itself."
   :type 'boolean
   :group 'lispm)
 
-(defun lispm-memory-file (agent)
-  "AGENT's memory file."
-  (expand-file-name "memory.org" (lispm-agent-directory agent)))
+(defun lispm-memory-file (agent &optional scope role)
+  "File of AGENT's memory in SCOPE.
+SCOPE `project' (the default) is shared by the agents of its project;
+`role' by the agents of its role, or of ROLE, across projects."
+  (expand-file-name "memory.org"
+                    (if (eq scope 'role)
+                        (lispm-role-directory (or role (lispm-agent-role agent)))
+                      (lispm-project-directory (lispm-agent-root agent)))))
 
 (defun lispm-tasks-file (agent)
-  "AGENT's task file."
-  (expand-file-name "tasks.org" (lispm-agent-directory agent)))
+  "File of the tasks of AGENT's project."
+  (expand-file-name "tasks.org" (lispm-project-directory (lispm-agent-root agent))))
 
 (defun lispm-memory--visit (file header)
   "Buffer visiting FILE, created with HEADER if new."
@@ -66,16 +75,26 @@ The repository is `lispm-directory' itself."
         (let ((inhibit-message t)) (save-buffer))))
     buffer))
 
-(defun lispm-memory--buffer (agent)
-  "Buffer of AGENT's memory."
-  (lispm-memory--visit (lispm-memory-file agent)
-                       (format "#+title: Memory of %s\n" (lispm-agent-name agent))))
+(defun lispm-memory--buffer (agent &optional scope role)
+  "Buffer of AGENT's memory in SCOPE (see `lispm-memory-file')."
+  (lispm-memory--visit (lispm-memory-file agent scope role)
+                       (if (eq scope 'role)
+                           (format "#+title: Memory of the %s role\n"
+                                   (or role (lispm-agent-role agent)))
+                         (format "#+title: Memory of %s\n"
+                                 (abbreviate-file-name (lispm-agent-root agent))))))
+
+(defun lispm-memory--scope-entries (agent scope &optional role)
+  "Entries of AGENT's memory in SCOPE (or ROLE's), without creating its file."
+  (and (file-exists-p (lispm-memory-file agent scope role))
+       (mapcar (lambda (e) (plist-put e :scope scope))
+               (lispm-memory--entries (lispm-memory--buffer agent scope role)))))
 
 (defun lispm-tasks--buffer (agent)
-  "Buffer of AGENT's tasks."
+  "Buffer of the tasks of AGENT's project."
   (lispm-memory--visit (lispm-tasks-file agent)
                        (format "#+title: Tasks of %s\n#+todo: TODO NEXT BLOCKED | DONE CANCELLED\n"
-                               (lispm-agent-name agent))))
+                               (abbreviate-file-name (lispm-agent-root agent)))))
 
 (defun lispm-memory--entries (buffer)
   "Top-level entries of the org BUFFER, as plists.
@@ -119,9 +138,10 @@ Keys: :title :tags :todo :id :body :beg :end."
 
 ;;;; Memory
 
-(defun lispm-memory-remember (agent title content &optional tags)
-  "Store CONTENT under TITLE in AGENT's memory, replacing an entry of that title."
-  (let* ((buffer (lispm-memory--buffer agent))
+(defun lispm-memory-remember (agent title content &optional tags scope)
+  "Store CONTENT under TITLE in AGENT's memory in SCOPE.
+An entry of that title is replaced."
+  (let* ((buffer (lispm-memory--buffer agent scope))
          (title (lispm--oneline title 120))
          (existing (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
                              (lispm-memory--entries buffer)))
@@ -145,22 +165,29 @@ Keys: :title :tags :todo :id :body :beg :end."
     (lispm-memory--save buffer)
     (lispm-git-commit agent (format "%s: %s \"%s\"" (lispm-agent-name agent)
                                     (if existing "update memory" "remember") title))
-    (format "%s memory \"%s\"." (if existing "Updated" "Saved") title)))
+    (format "%s %s memory \"%s\"." (if existing "Updated" "Saved")
+            (if (eq scope 'role) "role" "project") title)))
 
-(defun lispm-memory--format (entry)
-  "ENTRY of a memory file as text for the model."
-  (concat "## " (plist-get entry :title)
+(defun lispm-memory--label (entry)
+  "Title of a memory ENTRY, with its tags and, for role memory, its scope."
+  (concat (plist-get entry :title)
           (if (plist-get entry :tags)
               (format " [%s]" (string-join (plist-get entry :tags) ", "))
             "")
-          "\n" (plist-get entry :body)))
+          (if (eq (plist-get entry :scope) 'role) " (role memory)" "")))
 
-(defun lispm-memory-recall (agent query)
-  "Entries of AGENT's memory matching every word of QUERY."
-  (let* ((entries (and (file-exists-p (lispm-memory-file agent))
-                       (lispm-memory--entries (lispm-memory--buffer agent))))
+(defun lispm-memory--format (entry)
+  "ENTRY of a memory file as text for the model."
+  (concat "## " (lispm-memory--label entry) "\n" (plist-get entry :body)))
+
+(defun lispm-memory-recall (agent query &optional role)
+  "Entries of AGENT's memory matching every word of QUERY.
+Project memory comes first, then the memory of AGENT's role, or of ROLE."
+  (let* ((entries (append (lispm-memory--scope-entries agent 'project)
+                          (lispm-memory--scope-entries
+                           agent 'role (and role (lispm-role-name (lispm-get-role role))))))
          (words (split-string (downcase query) "[ \t\n,]+" t))
-         (titles (lambda (es) (mapconcat (lambda (e) (concat "- " (plist-get e :title))) es "\n")))
+         (titles (lambda (es) (mapconcat (lambda (e) (concat "- " (lispm-memory--label e))) es "\n")))
          (hits (seq-filter
                 (lambda (e)
                   (let ((haystack (downcase (concat (plist-get e :title) " "
@@ -174,10 +201,11 @@ Keys: :title :tags :todo :id :body :beg :end."
           (t (mapconcat #'lispm-memory--format (seq-take hits 20) "\n\n")))))
 
 (defun lispm-memory-forget (agent title)
-  "Delete the entry TITLE from AGENT's memory."
-  (let* ((buffer (lispm-memory--buffer agent))
-         (entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
-                          (lispm-memory--entries buffer))))
+  "Delete the entry TITLE from AGENT's project memory, or else its role memory."
+  (let* ((entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
+                          (append (lispm-memory--scope-entries agent 'project)
+                                  (lispm-memory--scope-entries agent 'role))))
+         (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope)))))
     (unless entry (error "No memory titled \"%s\"" title))
     (with-current-buffer buffer
       (delete-region (plist-get entry :beg) (plist-get entry :end)))
@@ -311,23 +339,19 @@ calls of one response, become one commit listing each of them."
 ;;;; System prompt
 
 (defun lispm-memory--prompt (agent)
-  "System prompt section listing AGENT's memories and open tasks."
-  (let ((memories (and (file-exists-p (lispm-memory-file agent))
-                       (lispm-memory--entries (lispm-memory--buffer agent))))
+  "System prompt section listing AGENT's memories and its project's open tasks."
+  (let ((memories (append (lispm-memory--scope-entries agent 'project)
+                          (lispm-memory--scope-entries agent 'role)))
         (tasks (lispm-tasks-list agent)))
     (string-join
      (delq nil
            (list (when memories
                    (concat "# Your long-term memory\n"
-                           "Titles of what you saved in earlier sessions; `recall` reads them.\n"
-                           (mapconcat (lambda (e)
-                                        (concat "- " (plist-get e :title)
-                                                (if (plist-get e :tags)
-                                                    (format " [%s]" (string-join (plist-get e :tags) ", "))
-                                                  "")))
+                           "Titles of what was saved in earlier sessions; `recall` reads them.\n"
+                           (mapconcat (lambda (e) (concat "- " (lispm-memory--label e)))
                                       (seq-take memories 200) "\n")))
                  (unless (equal tasks "No tasks.")
-                   (concat "# Your open tasks\n" tasks))))
+                   (concat "# Open tasks of this project\n" tasks))))
      "\n\n")))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-memory--prompt)
@@ -337,34 +361,37 @@ calls of one response, become one commit listing each of them."
 (lispm-deftool remember
     ((title string "Short, specific title, one line.")
      (content string "The fact, preference or lesson, self-contained.")
-     (tags array "Optional tags, e.g. [\"project\", \"preference\"]."
-           :optional t :items ((type . "string"))))
-  "Save something to your long-term memory, an org file that persists
-across sessions (versioned in git).  Use it for durable knowledge:
-the user's preferences, project conventions, lessons learned.  Saving
-under an existing title replaces that entry.  Do not store transient
-state of the current task."
+     (tags array "Optional tags, e.g. [\"build\", \"preference\"]."
+           :optional t :items ((type . "string")))
+     (scope string "project (default): about this project, shared with every agent working in it. role: true everywhere, e.g. the user's general preferences; shared with agents of your role in all projects."
+            :optional t :enum ("project" "role")))
+  "Save something to long-term memory, org files that persist across
+sessions (versioned in git).  Use it for durable knowledge: project
+conventions, the user's preferences, lessons learned.  Saving under an
+existing title replaces that entry.  Do not store transient state of
+the current task."
   :permission memory
-  (lispm-memory-remember lispm-current-agent title content (append tags nil)))
+  (lispm-memory-remember lispm-current-agent title content (append tags nil)
+                         (if (equal scope "role") 'role 'project)))
 
 (lispm-deftool recall
     ((query string "Words to look for; entries containing all of them are returned. An empty string lists all titles.")
-     (agent string "Read another agent's memory instead of yours." :optional t))
-  "Search long-term memory: yours, or another agent's."
+     (role string "Also read the role memory of another role instead of yours." :optional t))
+  "Search long-term memory: this project's, then your role's."
   :permission memory
-  (lispm-memory-recall (if agent (lispm-get-agent agent) lispm-current-agent) query))
+  (lispm-memory-recall lispm-current-agent query role))
 
 (lispm-deftool forget
     ((title string "Exact title of the memory to delete."))
-  "Delete an entry from your long-term memory, e.g. when it is wrong or obsolete."
+  "Delete an entry from long-term memory, e.g. when it is wrong or obsolete."
   :permission memory
   (lispm-memory-forget lispm-current-agent title))
 
 (lispm-deftool task_add
     ((title string "What needs doing, one line.")
      (notes string "Details, context, acceptance criteria." :optional t))
-  "Add a task to your task list, which persists across sessions and
-shows in the user's org agenda.  Use it for work that will not be
+  "Add a task to this project's task list, which persists across sessions,
+is shared by the project's agents and shows in the user's org agenda.  Use it for work that will not be
 finished in this turn.  Returns the task ID."
   :permission memory
   (format "Added task %s." (lispm-tasks-add lispm-current-agent title notes)))

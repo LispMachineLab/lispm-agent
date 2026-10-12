@@ -26,21 +26,29 @@ model ~gpt-5.5~).
 
 * Getting started
 
-1. ~M-x lispm~ and pick ~assistant~ (the built-in general agent). This opens an org session
-   buffer.
+LispM is used the way Claude Code and Codex are: an agent works in a project, one
+conversation per agent, and you can run several and come back to any of them.
+
+1. In any project, ~M-x lispm~ starts a new agent there, in its own session buffer (role
+   ~assistant~; ~C-u M-x lispm~ picks another role). Start as many as you like.
 2. Write your request under the last ~* User~ heading and press ~C-c RET~.
 3. The reply flows into the buffer. Tool calls that need approval appear as
    ~** WAITING edit_file ...~, with a diff preview and the model's reason (~why~). Review them
    with ~C-c C-y~: y approves, n denies (optionally with a reason), a allows that tool for the
    rest of the Emacs session. ~C-c C-t a~ / ~C-c C-t n~ works too.
-4. ~C-c C-k~ aborts the current turn.
+4. ~C-c C-k~ aborts the current turn. Killing the buffer ends the agent; its session stays on
+   disk, and ~M-x lispm-resume~ brings back any recorded session (those of the current
+   project first). Opening a session file resumes it as well.
 
 | Command                | What it does                                                       |
 |------------------------+--------------------------------------------------------------------|
-| ~lispm~                | open or switch to an agent's session                               |
-| ~lispm-new-session~    | start a fresh session (the old one stays on disk)                  |
-| ~lispm-ask~            | give an agent a request from the minibuffer, staying where you are |
-| ~lispm-ask-region~     | ask about the region                                               |
+| ~lispm~                | start a new agent in the current project                           |
+| ~lispm-resume~         | resume a recorded session                                          |
+| ~lispm-switch~         | switch to a running agent                                          |
+| ~lispm-new-session~    | a fresh session like the current one: same role, same project      |
+| ~lispm-compact~        | hand the session over to a continuation holding a summary          |
+| ~lispm-ask~            | give the project's agent a request from the minibuffer             |
+| ~lispm-ask-region~     | ask the project's agent about the region                           |
 | ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
 | ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
 | ~lispm-review~         | review pending calls (~C-c C-y~ in a session)                      |
@@ -53,7 +61,35 @@ The session buffer is the context: delete a subtree and the agent forgets it; ta
 ~:ignore:~ and it is no longer sent; headings of your own, such as ~* Notes~, are private
 annotations.
 
-* Defining agents
+* Agents, roles and sessions
+
+- A *role* is a kind of agent: instructions, tools, permission policy, model. ~assistant~ is
+  built in; define more with ~lispm-defrole~.
+- An *agent* is one conversation carried on by a role in one project: agent and session are
+  the same thing. Its name is ~ROLE@PROJECT~ (~assistant@lispm~, ~assistant@lispm<2>~, ...).
+- A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, so a project set up
+  for Codex or Claude Code needs nothing more.
+- A conversation that grows long is handed over before the next turn: the agent first saves
+  what should outlive it to memory and tasks, then writes a summary, and the conversation
+  continues in a new file that starts from the summary and links back to the old one
+  (~lispm-compact-threshold~; ~M-x lispm-compact~ does it on demand).
+- Everything lives under ~lispm-directory~ (~/.emacs.d/lispm/~), a git repository:
+  ~projects/<project>/sessions/~, ~projects/<project>/memory.org~ and ~tasks.org~ (shared by
+  the project's agents), and ~roles/<role>/memory.org~ (what a role learns everywhere).
+
+#+begin_src emacs-lisp
+(lispm-defrole reviewer
+  "Reviews changes for bugs; never edits."
+  :tools '(read_file search_files list_directory read_buffer recall remember send_message))
+#+end_src
+
+Permission classes: ~read~, ~memory~ and ~comm~ run automatically by default; ~write~ and
+~exec~ need approval (see ~lispm-default-policy~).
+
+* Standing agents
+
+Agents declared in your configuration are *standing*: each keeps one conversation going, which
+it resumes after Emacs restarts, and hooks and timers can wake it up.
 
 #+begin_src emacs-lisp
 (lispm-defagent coder
@@ -62,35 +98,19 @@ annotations.
   :instructions "Keep changes small. After editing, run `make test` and report the result."
   :policy '((write . auto)))          ; writes inside the root run without asking (outside, they still ask)
 
-(lispm-defagent reviewer
-  "Reviews changes for bugs; never edits."
-  :root "~/src/lispm/"
-  :tools '(read_file search_files list_directory read_buffer recall remember send_message))
-#+end_src
-
-Permission classes: ~read~, ~memory~ and ~comm~ run automatically by default; ~write~ and
-~exec~ need approval (see ~lispm-default-policy~).
-
-* Keeping agents at work
-
-#+begin_src emacs-lisp
 ;; Wake coder when a compilation fails.
 (lispm-watch 'coder 'compilation-finish-functions
   :when (lambda (_buffer status) (string-match-p "abnormally" status))
   :prompt "The compilation failed. Read *compilation*, find the cause and fix it.")
 
-;; Have reviewer look at every saved .el file.
-(lispm-watch 'reviewer 'after-save-hook
-  :when (lambda () (derived-mode-p 'emacs-lisp-mode))
-  :prompt (lambda () (format "%s was just saved. Review the change." buffer-file-name)))
-
 ;; On a timer.
 (lispm-every 'coder 3600 "Look at your open tasks and move one forward.")
 #+end_src
 
-Agents collaborate through ~ask_agent~ (delegate and wait for the reply) and ~send_message~
-(notify). An agent's tasks live in ~agents/<name>/tasks.org~ and can join your agenda:
-~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
+Agents collaborate through ~ask_agent~ and ~send_message~. ~ask_agent~ delegates to a running
+agent and waits for its reply; given a role instead, it starts a helper of that role in the
+same project, which retires once it has replied (a subagent). Project task lists can join your
+agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
 
 * Backends
 
@@ -121,7 +141,7 @@ use. The presets:
 #+end_src
 
 Each agent can also set its own ~:backend~, ~:model~ and ~:effort~, so agents on different
-providers can work together. ~C-h v lispm-backends~ documents every option; section 8 of
+providers can work together. ~C-h v lispm-backends~ documents every option; section 9 of
 DESIGN.org explains the translation between the shapes.
 
 * Tests

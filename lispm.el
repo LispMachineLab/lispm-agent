@@ -26,16 +26,22 @@
 
 ;;; Commentary:
 
-;; LispM runs AI agents inside Emacs instead of beside it.  The parts
-;; an agent harness usually provides are Emacs objects here:
+;; LispM runs AI agents inside Emacs instead of beside it.  They are
+;; used as Claude Code and Codex are: M-x lispm starts an agent in the
+;; current project, one conversation each, several at once if you like,
+;; and M-x lispm-resume brings back any recorded session.  The parts an
+;; agent harness usually provides are Emacs objects here:
 ;;
+;;   agents         one session of a role in a project (lispm-core.el);
+;;                  long ones are handed over to a summary (lispm-runtime.el);
 ;;   context        an org buffer (lispm-transcript.el), read on every
 ;;                  request, so editing the buffer edits the context;
 ;;   tools          Emacs Lisp functions over buffers, files, processes
 ;;                  and Emacs itself (lispm-tools.el);
 ;;   permissions    tool calls are org TODO entries: WAITING until the
 ;;                  user changes their state (lispm-runtime.el);
-;;   memory, tasks  org files under git (lispm-memory.el);
+;;   memory, tasks  org files under git, per project and per role
+;;                  (lispm-memory.el);
 ;;   execution      the Emacs event loop: processes, hooks and timers
 ;;                  wake agents up (lispm-runtime.el);
 ;;   collaboration  agents message and delegate to each other
@@ -59,55 +65,118 @@
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
 
-(lispm-defagent assistant
-  "A general assistant for whatever the user is doing in Emacs."
-  :root "~/")
+;;;; Roles
 
-(defvar lispm--last-agent nil "Name of the agent last chosen.")
+(lispm-defrole assistant
+  "A general assistant for whatever the user is doing in Emacs.")
+
+;;;; Starting, resuming and switching
+
+(defvar lispm--last-role nil "Name of the role last chosen.")
+
+(defun lispm--read-role (prompt)
+  "Read a role name with PROMPT; return the symbol."
+  (let* ((names (mapcar (lambda (r) (symbol-name (lispm-role-name r))) (lispm-roles)))
+         (default (if (member lispm--last-role names) lispm--last-role
+                    (symbol-name lispm-default-role))))
+    (setq lispm--last-role (completing-read (format-prompt prompt default) names nil t nil nil default))
+    (intern lispm--last-role)))
 
 (defun lispm--read-agent (prompt)
-  "Read an agent name with PROMPT."
-  (unless lispm--agents (user-error "No agents; define one with `lispm-defagent'"))
-  (let* ((names (mapcar (lambda (a) (symbol-name (lispm-agent-name a))) (lispm-agents)))
-         (default (if (member lispm--last-agent names) lispm--last-agent (car names)))
-         (name (completing-read (format-prompt prompt default) names nil t nil nil default)))
-    (setq lispm--last-agent name)
-    (lispm-get-agent name)))
+  "Read the name of a running agent with PROMPT; return the agent."
+  (let ((names (mapcar (lambda (a) (symbol-name (lispm-agent-name a))) (lispm-agents))))
+    (unless names (user-error "No agent is running; start one with M-x lispm"))
+    (lispm-get-agent (completing-read prompt names nil t))))
 
 (defun lispm--current-or-read (prompt)
   "The agent of the current session buffer, or one read with PROMPT."
   (or lispm-session-agent (lispm--read-agent prompt)))
 
+(defun lispm--project-agent ()
+  "A running agent working in the current project, the most recent first."
+  (let ((root (file-name-as-directory (expand-file-name (lispm--project-root)))))
+    (seq-find (lambda (a) (equal (lispm-agent-root a) root)) (reverse (lispm-agents)))))
+
 ;;;###autoload
-(defun lispm (agent)
-  "Switch to AGENT's session, starting one if needed."
-  (interactive (list (lispm--read-agent "Agent")))
-  (pop-to-buffer (lispm-session-buffer (lispm-get-agent agent)))
+(defun lispm (&optional role directory)
+  "Start a new agent in the current project, as starting Claude Code there would.
+The agent has `lispm-default-role'; with a prefix argument, choose
+ROLE.  DIRECTORY defaults to the current project's root."
+  (interactive (list (and current-prefix-arg (lispm--read-role "Role"))))
+  (pop-to-buffer (lispm-agent-buffer (lispm-start role directory)))
   (goto-char (point-max)))
 
 ;;;###autoload
-(defun lispm-new-session (agent)
-  "Start a fresh session of AGENT; the old one stays on disk."
-  (interactive (list (lispm--current-or-read "New session of")))
-  (pop-to-buffer (lispm-session-buffer (lispm-get-agent agent) t))
+(defun lispm-resume (session)
+  "Resume a recorded SESSION, sessions of the current project first."
+  (interactive (list (lispm--read-session "Resume session: ")))
+  (pop-to-buffer (lispm-agent-buffer (lispm-resume-file (plist-get session :file))))
   (goto-char (point-max)))
+
+(defun lispm--age (time)
+  "A short age for TIME, float seconds."
+  (let ((seconds (- (float-time) time)))
+    (cond ((< seconds 3600) (format "%dm" (/ seconds 60)))
+          ((< seconds 86400) (format "%dh" (/ seconds 3600)))
+          (t (format "%dd" (/ seconds 86400))))))
+
+(defun lispm--read-session (prompt)
+  "Read a recorded session with PROMPT; return its description."
+  (let* ((root (file-name-as-directory (expand-file-name (lispm--project-root))))
+         (sessions (lispm-sessions))
+         (sessions (append (seq-filter (lambda (s) (equal (file-name-as-directory (plist-get s :root)) root)) sessions)
+                           (seq-remove (lambda (s) (equal (file-name-as-directory (plist-get s :root)) root)) sessions)))
+         (table (make-hash-table :test #'equal))
+         (labels (mapcar (lambda (s)
+                           (let ((label (format "%-16s %-5s %s  %s"
+                                                (truncate-string-to-width
+                                                 (lispm--project-name (plist-get s :root)) 16)
+                                                (lispm--age (plist-get s :time))
+                                                (lispm--oneline (plist-get s :title) 60)
+                                                (propertize (plist-get s :id) 'face 'shadow))))
+                             (puthash label s table)
+                             label))
+                         sessions)))
+    (unless labels (user-error "No recorded sessions"))
+    (gethash (completing-read prompt
+                              (lambda (string pred action)
+                                (if (eq action 'metadata)
+                                    '(metadata (display-sort-function . identity))
+                                  (complete-with-action action labels string pred)))
+                              nil t)
+             table)))
+
+;;;###autoload
+(defun lispm-switch (agent)
+  "Switch to the session of a running AGENT."
+  (interactive (list (lispm--read-agent "Switch to agent: ")))
+  (pop-to-buffer (lispm-session-buffer agent))
+  (goto-char (point-max)))
+
+(defun lispm-new-session ()
+  "Start a fresh session like the current one: same role, same project.
+A standing agent starts a new conversation; otherwise a new agent starts."
+  (interactive)
+  (let ((agent (lispm--buffer-agent)))
+    (if (lispm-agent-standing agent)
+        (pop-to-buffer (lispm-session-buffer agent t))
+      (lispm (lispm-agent-role agent) (lispm-agent-root agent)))))
 
 ;;;###autoload
 (defun lispm-ask (agent text)
-  "Give AGENT the request TEXT without leaving the current buffer."
-  (interactive (let ((agent (lispm--read-agent "Ask agent")))
+  "Give AGENT the request TEXT without leaving the current buffer.
+AGENT is the running agent of the current project, or a new one."
+  (interactive (let ((agent (or (lispm--project-agent) (lispm-start))))
                  (list agent (read-string (format "Ask %s: " (lispm-agent-name agent))))))
   (lispm-tell agent text)
-  (display-buffer (lispm-agent-buffer (lispm-get-agent agent))))
+  (display-buffer (lispm-agent-buffer agent)))
 
 ;;;###autoload
-(defun lispm-ask-region (agent beg end text)
-  "Ask AGENT about the region from BEG to END: TEXT plus the region."
-  (interactive (let ((agent (lispm--read-agent "Ask agent")))
-                 (list agent (region-beginning) (region-end)
-                       (read-string (format "Ask %s about the region: "
-                                            (lispm-agent-name agent))))))
-  (lispm-ask agent
+(defun lispm-ask-region (beg end text)
+  "Ask the current project's agent about the region from BEG to END."
+  (interactive (list (region-beginning) (region-end)
+                     (read-string "Ask about the region: ")))
+  (lispm-ask (or (lispm--project-agent) (lispm-start))
              (format "%s\n\nThis concerns lines %d-%d of %s:\n\n%s"
                      text (line-number-at-pos beg) (line-number-at-pos end)
                      (if buffer-file-name
@@ -149,8 +218,8 @@
       (vc-print-root-log))))
 
 (defun lispm-agenda-files ()
-  "Task files of all agents, for `org-agenda-files'."
-  (mapcar #'lispm-tasks-file (lispm-agents)))
+  "Task files of all projects, for `org-agenda-files'."
+  (file-expand-wildcards (expand-file-name "projects/*/tasks.org" lispm-directory)))
 
 (defun lispm-agenda ()
   "Show the tool calls awaiting approval in every live session."
@@ -174,6 +243,8 @@
            (usage (lispm-agent-usage a)))
        (list (lispm-agent-name a)
              (vector (symbol-name (lispm-agent-name a))
+                     (symbol-name (lispm-agent-role a))
+                     (lispm--project-name (lispm-agent-root a))
                      (propertize (symbol-name (lispm-agent-state a))
                                  'face (if (> waiting 0) 'warning 'default))
                      (or (lispm-agent-status a) "")
@@ -192,9 +263,10 @@
 
 (define-derived-mode lispm-dashboard-mode tabulated-list-mode "λ Agents"
   "List of agents and what they are doing."
-  (setq tabulated-list-format [("Agent" 12 t) ("State" 10 t) ("Activity" 28 nil)
+  (setq tabulated-list-format [("Agent" 20 t) ("Role" 10 t) ("Project" 14 t)
+                               ("State" 10 t) ("Activity" 28 nil)
                                ("Wait" 5 t) ("Inbox" 6 t) ("Tokens in/out/cached" 22 nil)
-                               ("Model" 16 t) ("Role" 0 nil)]
+                               ("Model" 16 t) ("Description" 0 nil)]
         tabulated-list-entries #'lispm--dashboard-entries)
   (tabulated-list-init-header))
 
@@ -209,7 +281,7 @@
 (defun lispm-dashboard-visit ()
   "Visit the session of the agent at point."
   (interactive)
-  (lispm (tabulated-list-get-id)))
+  (lispm-switch (lispm-get-agent (tabulated-list-get-id))))
 
 (defun lispm-dashboard-abort ()
   "Abort the turn of the agent at point."

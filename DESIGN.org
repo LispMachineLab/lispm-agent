@@ -14,7 +14,7 @@ implementation:
 
 | Harness capability        | Emacs abstraction                                                | Implementation                                          |
 |---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
-| Agent                     | a ~cl-defstruct~ object in a global registry                     | [[file:lispm-core.el][lispm-core.el]]: ~lispm-agent~, ~lispm-defagent~                |
+| Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
@@ -23,6 +23,7 @@ implementation:
 | Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
+| Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
 | Model APIs                | two API shapes behind one internal format                        | [[file:lispm-api.el][lispm-api.el]], [[file:lispm-openai.el][lispm-openai.el]], [[file:lispm-anthropic.el][lispm-anthropic.el]]   |
 
@@ -32,34 +33,51 @@ LispM revives that idea inside Emacs, with agents as the new inhabitants.
 
 * 1. The agent object model
 
+Two objects, after the Lisp Machine's process and program:
+
+- A *role* is a kind of agent: one-line description, instructions, tools, permission policy,
+  backend, model, effort. ~assistant~ is built in.
+- An *agent* is one conversation carried on by a role in one project. *Agent and session are
+  the same thing*, as a process is one run of a program: starting an agent in a project is
+  what starting Claude Code or Codex there is. Several agents can work in one project at once
+  (~assistant@lispm~, ~assistant@lispm<2>~), and a recorded one can be resumed.
+
 #+begin_src emacs-lisp
-(lispm-defagent coder
-  "Fixes bugs in Emacs Lisp."              ; one-line description: what other agents see
-  :root "~/src/lispm/"                     ; working directory: relative paths, permission boundary
-  :instructions "Keep changes small; run the tests after editing." ; role, part of the system prompt
-  :tools t                                 ; capabilities: a list of tool names, or t for all
-  :policy '((write . auto))                ; permission policy, overriding the defaults
+(lispm-defrole reviewer
+  "Reviews changes for bugs; never edits."            ; what other agents see
+  :instructions "Point out bugs with file:line; do not edit."
+  :tools '(read_file search_files list_directory recall) ; capabilities, or t for all
+  :policy '((write . deny))                            ; overrides the default policy
   :backend 'rotom :model "gpt-5.5" :effort "medium")
+
+(lispm-start 'reviewer "~/src/lispm/")   ; M-x lispm does this for the current project
 #+end_src
 
-An agent has three parts:
+An agent holds:
 
-- *Identity*: name, description, instructions, root.
-- *Capabilities*: the tools it may call, and a policy saying which calls run at once, which
-  wait for approval and which are refused.
+- *Identity*: name (~ROLE@PROJECT~), session id, role, project root.
+- *Capabilities*, copied from its role; redefining a role updates its live agents, the way
+  redefining a function changes what running code calls.
 - *Runtime state*: its session buffer, the request in flight, an inbox, the table of pending
   tool calls, the edit snapshots of the current turn (the journal), the tools the user allowed
   for this Emacs session, the agent it is waiting on (~waiting-on~), its hook and timer
   subscriptions, and its token usage.
 
 The state machine has four states: ~idle~ → ~requesting~ (waiting for the model) → ~acting~
-(running tools) or ~waiting~ (awaiting approval) → ... → ~idle~. Re-evaluating
-~lispm-defagent~ updates identity and capabilities without disturbing the runtime state: an
-agent's definition can be changed while it runs, like any other Elisp.
+(running tools) or ~waiting~ (awaiting approval) → ... → ~idle~; a fifth, ~compacting~, covers
+a handover (section 8). *An agent is a value, not a process of the operating system*: it needs
+no thread; "thinking" is a curl subprocess, "awaiting approval" an entry in a hash table. Ten
+agents at work at once cost almost nothing.
 
-*An agent is a value, not a process.* It needs no thread of its own: "thinking" is a curl
-subprocess, "awaiting approval" is an entry with ~:status ask~ in a hash table. Ten agents at
-work at once cost almost nothing.
+*Life cycle.* A session file records its agent's name, id, role and root in its header, so
+sessions are listed (~lispm-sessions~, newest first, titled by their first prompt) and resumed
+(~lispm-resume~, or simply opening the file). Killing a session buffer ends its agent; the file
+stays.
+
+*Standing agents.* Agents declared with ~lispm-defagent~ (with a root, and a role or inline role
+properties) are the long-lived collaborators of the vision: each keeps one conversation going,
+resumed after Emacs restarts, and hooks and timers wake it up (section 6). Long life comes from
+memory, tasks and that continued conversation, which handovers keep within bounds (section 8).
 
 * 2. Context: the buffer is the context
 
@@ -86,7 +104,9 @@ What follows from this:
 - *Editing the buffer edits the context.* Delete a subtree and the model forgets it; tag a
   message ~:ignore:~ and it is no longer sent; add ~* Notes~ anywhere for private annotations.
 - *The context is visible, foldable, searchable and archived*: a session is a file under
-  ~agents/<name>/sessions/~. Reopening a session file resumes the session.
+  ~projects/<project>/sessions/~ in ~lispm-directory~. Reopening a session file resumes it.
+- A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, as Codex and Claude
+  Code read them.
 - ~M-x lispm-show-request~ shows the exact JSON of the next request: what the model sees is
   always inspectable.
 
@@ -139,19 +159,22 @@ prefix-matched as well. Therefore:
 
 * 4. Memory: org and git
 
-Each agent has, under ~lispm-directory/agents/<name>/~:
+Memory has two levels, as the project and user instructions of other agent tools do, both org
+files under ~lispm-directory~:
 
-- ~memory.org~: long-term memory, one heading per fact, with tags and ~CREATED~/~UPDATED~
-  properties. Tools: ~remember~, ~recall~, ~forget~. ~recall~ can also read *another agent's*
-  memory, so knowledge is shared between agents.
-- ~tasks.org~: a TODO list (~TODO NEXT BLOCKED | DONE CANCELLED~) with short IDs. Tools:
-  ~task_add~, ~task_update~, ~task_list~. Add ~(lispm-agenda-files)~ to ~org-agenda-files~ and
-  the agents' tasks show up in the user's own agenda; writing a TODO there by hand hands an
-  agent work.
-- ~sessions/*.org~: every session.
+- ~projects/<project>/memory.org~: what the agents of a project learn about it, shared by all
+  of them. The default scope of ~remember~.
+- ~roles/<role>/memory.org~: what agents of a role learn that holds everywhere, such as the
+  user's preferences (~remember~ with ~scope: "role"~).
 
-When a session starts, the memory titles and open tasks are snapshotted into the system prompt;
-details are fetched on demand with ~recall~.
+One heading per fact, with tags and ~CREATED~/~UPDATED~ properties. ~recall~ searches the
+project's memory, then the role's (or another role's); ~forget~ deletes. Each project also has a
+TODO list, ~projects/<project>/tasks.org~ (~TODO NEXT BLOCKED | DONE CANCELLED~) with short IDs:
+~task_add~, ~task_update~, ~task_list~. Add ~(lispm-agenda-files)~ to ~org-agenda-files~ and the
+agents' tasks show up in the user's own agenda; writing a TODO there by hand hands agents work.
+
+When a session starts, the memory titles and the project's open tasks are snapshotted into the
+system prompt; details are fetched on demand with ~recall~.
 
 The whole ~lispm-directory~ is a git repository. Memory and task changes are committed in
 bursts (the tool calls of one response become one commit whose message lists each change), and
@@ -210,12 +233,14 @@ Agents do not only answer when asked. Any Emacs hook or timer can wake one up:
 Agents share one Emacs: the same buffers, the same files, the same event loop. Collaboration
 needs only three tools:
 
-- ~list_agents~: who is here and what they are doing;
+- ~list_agents~: who is running, in which project, doing what, and which roles exist;
 - ~send_message~: delivered to the other agent's inbox, where it becomes a
   ~* Message from X~ turn;
 - ~ask_agent~: *delegation*. The caller's tool call stays pending (an asynchronous tool); when
   the other agent's turn ends, its final reply becomes the result. The caller occupies no
-  thread and blocks no one meanwhile.
+  thread and blocks no one meanwhile. Named a role instead of an agent, ~ask_agent~ starts a
+  helper of that role in the caller's project and retires it once it has replied: a subagent,
+  whose session stays on record.
 
 Concurrency:
 
@@ -224,10 +249,30 @@ Concurrency:
   first, the replacement fails and asks the model to re-read: *optimistic concurrency*.
 - *Deadlock detection*: ~ask_agent~ follows the ~waiting-on~ chain and refuses a request that
   would close a cycle.
-- Every agent's system prompt lists the one-line descriptions of the others, so the model
-  knows whom to delegate to.
+- Every agent's system prompt lists the running agents and the roles, so the model knows
+  whom to delegate to.
 
-* 8. Model backends: two API shapes
+* 8. Handing over: long conversations
+
+A conversation cannot grow forever, least of all a standing agent's. When a session's estimated
+size passes ~lispm-compact-threshold~ (default 120k tokens), the next turn first hands it over:
+
+1. the agent gets one turn to save what should outlive the conversation: durable knowledge with
+   ~remember~, unfinished work with ~task_add~ (~lispm-compact-save-memory~);
+2. it writes a handoff summary (goals, decisions, state of the work, next steps), in a request
+   without tools;
+3. the conversation continues in a new file of the same session (same agent, same id), whose
+   first section, ~* Summary~, holds the summary and whose header links back to the old file;
+   the old file ends with a link forward, and the system prompt is rebuilt, so memory saved in
+   step 1 is in it; the session keeps its title in session lists;
+4. the input that triggered the handover starts the first turn there.
+
+~M-x lispm-compact~ hands over on demand, like Claude Code's ~/compact~. This is the "simple
+compaction" model vendors recommend: nothing of the old conversation is replayed but the
+summary, so no stale reasoning is sent and the prompt cache restarts once, at the handover.
+Handovers happen only between turns, and only for sessions that hold a response.
+
+* 9. Model backends: two API shapes
 
 LispM speaks both shapes model servers offer: OpenAI Chat Completions, the most widely
 implemented (OpenAI, Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, rotom, ...), and Anthropic
@@ -292,7 +337,7 @@ To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
 ~claude-opus-5-5~, with every Messages feature enabled, including server-side refusal fallbacks
 (~fallbacks: "default"~).
 
-* 9. Known limitations and next steps
+* 10. Known limitations and next steps
 
 - *Drafts are context*: if another agent's message arrives while the user is typing under
   ~* User~, the draft is sent along as a user message.
@@ -302,9 +347,9 @@ To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
 - *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
   are not journaled. Next step: snapshot the project's git repository with ~git stash create~
   at the start of each turn, extending rollback to any file change.
-- *Context growth*: there is no compaction yet. Direction: subtree-level "summary folding" in
-  org (replacing a stretch of history with a summary node), and server-side compaction with
-  the first-party API.
+- *Handovers happen between turns only*: a single turn that outgrows the model's context still
+  fails. Directions: handing over at request boundaries inside a turn, and server-side
+  compaction with the first-party API.
 - *More Emacs-native tools*: xref/LSP queries, magit operations, org-babel execution, window
   layout: each is just a ~lispm-deftool~ away.
 - *A shared blackboard*: an org file every agent can read and write, as a collaboration
