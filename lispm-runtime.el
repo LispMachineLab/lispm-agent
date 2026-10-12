@@ -80,6 +80,13 @@ Use it for notifications, e.g. with the alert package."
 (defvar-local lispm-session-agent nil
   "The agent whose session this buffer holds.")
 
+(defface lispm-placeholder '((t :inherit shadow :slant italic))
+  "Face of the hint shown where the next message is written."
+  :group 'lispm)
+
+(defvar-local lispm--placeholder nil
+  "Overlay of the hint after an empty input heading, if shown.")
+
 (defvar-local lispm--live nil
   "Markers (START . END) of the response being streamed in, or nil.")
 
@@ -204,6 +211,8 @@ Tool calls awaiting approval are WAITING headings: review them with
           (setq lispm-session-agent (or lispm--visiting (lispm--session-agent))))
         (add-hook 'org-after-todo-state-change-hook #'lispm--todo-state-changed nil t)
         (add-hook 'kill-buffer-hook #'lispm--session-killed nil t)
+        (add-hook 'after-change-functions #'lispm--update-placeholder nil t)
+        (lispm--update-placeholder)
         (setq-local header-line-format '(:eval (lispm--header-line)))
         (let ((agent lispm-session-agent))
           (when agent
@@ -214,7 +223,24 @@ Tool calls awaiting approval are WAITING headings: review them with
             (setf (lispm-agent-buffer agent) (current-buffer)))))
     (remove-hook 'org-after-todo-state-change-hook #'lispm--todo-state-changed t)
     (remove-hook 'kill-buffer-hook #'lispm--session-killed t)
+    (remove-hook 'after-change-functions #'lispm--update-placeholder t)
+    (when (overlayp lispm--placeholder) (delete-overlay lispm--placeholder))
     (kill-local-variable 'header-line-format)))
+
+(defun lispm--update-placeholder (&rest _)
+  "Show a hint after the input heading while nothing is written under it."
+  (let ((input (and lispm-session-mode (lispm--input-heading-p))))
+    (if (not input)
+        (when (overlayp lispm--placeholder)
+          (delete-overlay lispm--placeholder)
+          (setq lispm--placeholder nil))
+      (let ((end (save-excursion (goto-char input) (line-end-position))))
+        (unless (overlayp lispm--placeholder)
+          (setq lispm--placeholder (make-overlay end end nil t nil))
+          (overlay-put lispm--placeholder 'after-string
+                       (propertize "   type your message below, then C-c RET to send"
+                                   'face 'lispm-placeholder)))
+        (move-overlay lispm--placeholder end end)))))
 
 (defun lispm-session-maybe-enable ()
   "Enable `lispm-session-mode' in org buffers that are agent sessions."

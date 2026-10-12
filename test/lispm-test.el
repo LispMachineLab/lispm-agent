@@ -739,6 +739,22 @@ BODY can use `port' and `log', the file the server records requests in."
                                     :title)
                          "Pond poems")))))))
 
+(ert-deftest lispm-test-placeholder ()
+  "An empty input heading shows a hint, which is display only and goes once typing starts."
+  (lispm-test-env
+    (let* ((default-directory project)
+           (agent (lispm-start)))
+      (with-current-buffer (lispm-agent-buffer agent)
+        (should (overlayp lispm--placeholder))
+        (should (string-match-p "C-c RET to send" (overlay-get lispm--placeholder 'after-string)))
+        (should (= (overlay-start lispm--placeholder) (1- (point-max))))
+        (should-not (string-match-p "C-c RET" (buffer-string)))
+        (goto-char (point-max))
+        (insert "hi")
+        (should-not lispm--placeholder)
+        (delete-region (- (point-max) 2) (point-max))
+        (should (overlayp lispm--placeholder))))))
+
 (ert-deftest lispm-test-standing-agent ()
   "A standing agent keeps one conversation: it resumes it, even after its buffer closed."
   (lispm-test-env
