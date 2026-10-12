@@ -1,0 +1,280 @@
+#+title: LispM: Design of an Emacs-native Agent Runtime
+#+startup: content
+
+* The thesis
+
+In the usual agent architecture the editor is a client of the agent: the loop, memory,
+permissions and scheduling live in an external harness. LispM turns this around: *Emacs is
+the harness*. An agent is a long-lived Lisp object inside the Emacs process. Its context is a
+buffer, its tools are Lisp functions, its approvals are org TODO states, and its heartbeat is
+the Emacs event loop.
+
+The table maps harness capabilities to Emacs abstractions. It doubles as an index of the
+implementation:
+
+| Harness capability        | Emacs abstraction                                                | Implementation                                          |
+|---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
+| Agent                     | a ~cl-defstruct~ object in a global registry                     | [[file:lispm-core.el][lispm-core.el]]: ~lispm-agent~, ~lispm-defagent~                |
+| Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
+| Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lispm-tools.el][lispm-tools.el]]                                          |
+| Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
+| Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
+| Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lispm-memory.el][lispm-memory.el]]                                         |
+| Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
+| Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
+| Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
+| Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
+
+The name comes from the Lisp Machines (CONS, CADR, Symbolics Genera, ...): environments where
+the editor, the operating system and the programs were all live Lisp objects in one image.
+LispM revives that idea inside Emacs, with agents as the new inhabitants.
+
+* 1. The agent object model
+
+#+begin_src emacs-lisp
+(lispm-defagent coder
+  "Fixes bugs in Emacs Lisp."              ; one-line description: what other agents see
+  :root "~/src/lispm/"                     ; working directory: relative paths, permission boundary
+  :instructions "Keep changes small; run the tests after editing." ; role, part of the system prompt
+  :tools t                                 ; capabilities: a list of tool names, or t for all
+  :policy '((write . auto))                ; permission policy, overriding the defaults
+  :backend 'rotom :model "gpt-5.5" :effort "medium")
+#+end_src
+
+An agent has three parts:
+
+- *Identity*: name, description, instructions, root.
+- *Capabilities*: the tools it may call, and a policy saying which calls run at once, which
+  wait for approval and which are refused.
+- *Runtime state*: its session buffer, the request in flight, an inbox, the table of pending
+  tool calls, the edit snapshots of the current turn (the journal), the tools the user allowed
+  for this Emacs session, the agent it is waiting on (~waiting-on~), its hook and timer
+  subscriptions, and its token usage.
+
+The state machine has four states: ~idle~ → ~requesting~ (waiting for the model) → ~acting~
+(running tools) or ~waiting~ (awaiting approval) → ... → ~idle~. Re-evaluating
+~lispm-defagent~ updates identity and capabilities without disturbing the runtime state: an
+agent's definition can be changed while it runs, like any other Elisp.
+
+*An agent is a value, not a process.* It needs no thread of its own: "thinking" is a curl
+subprocess, "awaiting approval" is an entry with ~:status ask~ in a hash table. Ten agents at
+work at once cost almost nothing.
+
+* 2. Context: the buffer is the context
+
+This is the central decision: *the session org buffer is the single source of truth for the
+agent's context*. Before every model request the runtime parses the whole buffer into
+~messages~:
+
+#+begin_example
+* System                     the system prompt, frozen when the session starts
+* User                       a user message
+* Assistant                  a model response, one child heading per content block
+** Reply                     a text block
+** Thinking: ...             thinking and other blocks, kept as raw JSON (folded)
+** DONE edit_file  a.el      a tool call; its TODO state is its approval/execution state
+*** Preview                  the diff shown while the call awaits approval
+*** Result                   the tool's output (or *** Error)
+* Message from reviewer      a message from another agent
+* Event: after-save-hook     an event produced by a hook or timer
+* Notes                      the user's own notes: unknown headings are never sent
+#+end_example
+
+What follows from this:
+
+- *Editing the buffer edits the context.* Delete a subtree and the model forgets it; tag a
+  message ~:ignore:~ and it is no longer sent; add ~* Notes~ anywhere for private annotations.
+- *The context is visible, foldable, searchable and archived*: a session is a file under
+  ~agents/<name>/sessions/~. Reopening a session file resumes the session.
+- ~M-x lispm-show-request~ shows the exact JSON of the next request: what the model sees is
+  always inspectable.
+
+*The tension with model-side mechanisms (a key trade-off).* Current models bind their thinking
+blocks to a byte-identical conversation prefix (preserved thinking), and prompt caching is
+prefix-matched as well. Therefore:
+
+- Text the model produced must *round-trip byte for byte*. Bodies use org's source-block
+  escaping (a comma before lines starting with ~*~ or ~#+~) and end in exactly one newline,
+  which the parser strips. Thinking and other blocks are stored verbatim as JSON. The test
+  ~lispm-test-transcript-roundtrip~ checks this.
+- The system prompt and the tool list are frozen when a session starts (the memory index is
+  snapshotted at that point too) and never rewritten afterwards.
+- If the user edits history, requests to the first-party API carry
+  ~prefix_mismatch_behavior: "drop_block"~: the thinking after the edit point is dropped and the
+  cache is rebuilt from there, but the request succeeds. *Editing history is allowed; it costs
+  the reasoning and the cache after the edit*, which is exactly the semantics "the buffer is
+  the context" calls for.
+
+* 3. Tool calls as Emacs actions
+
+#+begin_src emacs-lisp
+(lispm-deftool edit_file
+    ((path string "File to edit.")
+     (old-text string "Exact text to replace.")
+     (new-text string "Replacement text.")
+     (replace-all boolean "Replace every occurrence." :optional t))
+  "Replace text in a file..."
+  :permission write                          ; permission class
+  :preview #'lispm-tools--edit-preview       ; diff shown before approval
+  ...)
+#+end_src
+
+- The parameter list generates the JSON Schema; kebab-case parameters appear in snake_case to
+  the model. Inputs are validated against the schema before the call; failures go back to the
+  model as error results.
+- *Tools of class write and exec get an extra required parameter, ~why~*: one sentence in
+  which the model justifies the call. It appears in the approval UI and in the transcript, and
+  is the smallest unit of explainability.
+- Tools act on *live Emacs state*, not on disk: ~read_file~ reads the buffer (unsaved edits
+  included); ~edit_file~ makes an exact text replacement in the buffer visiting the file, as
+  *one undo step of its own*, then saves. The user sees edits happen and undoes one with ~C-/~.
+- Built-in tools: ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
+  ~describe_symbol~ (read); ~edit_file~ ~write_file~ ~edit_buffer~ (write); ~run_shell~
+  ~eval_elisp~ (exec); memory, task and collaboration tools are described below.
+- ~eval_elisp~ is the most Emacs-native tool of all: the agent can reach anything in Emacs
+  (magit, org, LSP, windows, ...). It needs approval by default.
+- Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
+  callback; meanwhile Emacs and the other agents keep running.
+
+* 4. Memory: org and git
+
+Each agent has, under ~lispm-directory/agents/<name>/~:
+
+- ~memory.org~: long-term memory, one heading per fact, with tags and ~CREATED~/~UPDATED~
+  properties. Tools: ~remember~, ~recall~, ~forget~. ~recall~ can also read *another agent's*
+  memory, so knowledge is shared between agents.
+- ~tasks.org~: a TODO list (~TODO NEXT BLOCKED | DONE CANCELLED~) with short IDs. Tools:
+  ~task_add~, ~task_update~, ~task_list~. Add ~(lispm-agenda-files)~ to ~org-agenda-files~ and
+  the agents' tasks show up in the user's own agenda; writing a TODO there by hand hands an
+  agent work.
+- ~sessions/*.org~: every session.
+
+When a session starts, the memory titles and open tasks are snapshotted into the system prompt;
+details are fetched on demand with ~recall~.
+
+The whole ~lispm-directory~ is a git repository. Memory and task changes are committed in
+bursts (the tool calls of one response become one commit whose message lists each change), and
+every finished turn commits the session. The committer is the agent itself, so ~git log~ is
+the audit log of what each agent learned and did, and a wrong memory is one ~git revert~ away.
+
+* 5. Permissions, approval and explainability
+
+*Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~write~ ~exec~); a policy
+maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval. One
+extra rule: *writes outside the agent's root always ask*, whatever the policy says.
+
+*Approval is an org TODO state.* A call that needs approval appears as
+~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
+
+- ~C-c C-y~ (~lispm-review~): y to approve, n to deny (optionally with a reason, which is
+  passed on to the model), a to allow that tool for the rest of the Emacs session;
+- or change the TODO state directly with ~C-c C-t a~ or ~C-c C-t n~;
+- or work through ~M-x lispm-agenda~, an org agenda view of WAITING calls across all agents.
+
+Approval *never blocks*: the agent sits in ~waiting~ while the user and the other agents carry
+on; the mode line shows ~λ[coder!]~ when something awaits approval.
+
+*Explainability* comes in four layers: the ~why~ of every write or exec call; the transcript
+itself (every call's input, state and result); ~lispm-show-request~ (the raw request the model
+sees); the git history and per-turn diffs (~lispm-turn-diff~).
+
+*Trust boundary*: messages from other agents (~[Message from agent X]~) and hook events
+(~[Event: ...]~) are defined in the system prompt as requests from colleagues, not as
+instructions from the user. Writes and commands they lead to go through the same approval
+policy.
+
+* 6. Continuous operation: hooks and the event loop
+
+Agents do not only answer when asked. Any Emacs hook or timer can wake one up:
+
+#+begin_src emacs-lisp
+;; Have coder look at failed compilations.
+(lispm-watch 'coder 'compilation-finish-functions
+  :when (lambda (_buf status) (string-match-p "abnormally" status))
+  :prompt "The compilation failed. Read the *compilation* buffer, find the cause and fix it.")
+
+;; Review the task list every hour.
+(lispm-every 'planner 3600 "Look at your open tasks and move one of them forward.")
+#+end_src
+
+- A trigger produces an ~* Event: ...~ input in the agent's inbox; idle agents process their
+  inbox in order. Events of the same name are coalesced in the inbox, and bursts of hook runs
+  are debounced.
+- *Hook runs an agent caused itself do not wake it* (~lispm-current-agent~ is bound while its
+  tools run), and the runtime saving its own files is not an event either. This prevents
+  save → trigger → edit → save loops.
+
+* 7. Multi-agent collaboration
+
+Agents share one Emacs: the same buffers, the same files, the same event loop. Collaboration
+needs only three tools:
+
+- ~list_agents~: who is here and what they are doing;
+- ~send_message~: delivered to the other agent's inbox, where it becomes a
+  ~* Message from X~ turn;
+- ~ask_agent~: *delegation*. The caller's tool call stays pending (an asynchronous tool); when
+  the other agent's turn ends, its final reply becomes the result. The caller occupies no
+  thread and blocks no one meanwhile.
+
+Concurrency:
+
+- *No locks are needed*: the event loop is single-threaded and each tool call is atomic.
+  Edits replace exact old text with new text; if someone else (or the user) changed that text
+  first, the replacement fails and asks the model to re-read: *optimistic concurrency*.
+- *Deadlock detection*: ~ask_agent~ follows the ~waiting-on~ chain and refuses a request that
+  would close a cycle.
+- Every agent's system prompt lists the one-line descriptions of the others, so the model
+  knows whom to delegate to.
+
+* 8. Model backends
+
+A backend is an endpoint speaking the Anthropic Messages API, configured in ~lispm-backends~.
+Each backend declares which features it handles faithfully:
+
+| Feature             | Meaning                                                  | anthropic | rotom |
+|---------------------+----------------------------------------------------------+-----------+-------|
+| ~streaming~         | server-sent events, shown live in the buffer             | yes       | no    |
+| ~adaptive-thinking~ | progress-update thinking blocks, thinking prefix binding | yes       | no    |
+| ~fallbacks~         | server-side refusal fallbacks                            | yes       | no    |
+| ~eager-input~       | tool input streamed without buffering                    | yes       | no    |
+| ~tool-errors~       | the ~is_error~ flag of tool results                      | yes       | no    |
+
+The default backend is the local *Rotom* gateway (~http://127.0.0.1:14550~, default model
+~gpt-5.5~), which serves GPT, Grok and other models behind one endpoint. Testing surfaced a few
+problems in its translation layer, so rotom gets plain requests:
+
+- When streaming, *the arguments of parallel tool calls are lost* (the tool blocks arrive,
+  their ~input_json_delta~ events do not), so rotom requests are not streamed
+  ([[https://github.com/RyanKung/rotom/issues/18][rotom#18]]);
+- the upstream rejects the ~is_error~ field, so failures are marked with an ~Error:~ prefix in
+  the result text instead ([[https://github.com/RyanKung/rotom/issues/19][rotom#19]]);
+- the Anthropic object form of ~tool_choice~ (e.g. ~{"type":"auto"}~) is rejected with a 400
+  and ~disable_parallel_tool_use~ is ignored
+  ([[https://github.com/RyanKung/rotom/issues/20][rotom#20]]), so LispM does not send
+  ~tool_choice~;
+- streamed responses sometimes report ~end_turn~ after a tool call
+  ([[https://github.com/RyanKung/rotom/issues/21][rotom#21]]), so the runtime executes the
+  tool calls of any response that was not cut short (~max_tokens~, ~refusal~);
+- unknown ~claude-*~ model names are mapped to ~--model-fallback~ (currently gpt-5.5).
+
+To use the first-party API: ~(setq lispm-backend 'anthropic)~, with ~ANTHROPIC_API_KEY~ set or
+an auth-source entry for ~api.anthropic.com~. The default model is ~claude-opus-5-5~, and all
+features in the table are enabled, including server-side refusal fallbacks
+(~fallbacks: "default"~).
+
+* 9. Known limitations and next steps
+
+- *Drafts are context*: if another agent's message arrives while the user is typing under
+  ~* User~, the draft is sent along as a user message.
+- *No live streaming with rotom*: responses are rendered when complete; the header line shows
+  the agent's state meanwhile.
+- *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
+  are not journaled. Next step: snapshot the project's git repository with ~git stash create~
+  at the start of each turn, extending rollback to any file change.
+- *Context growth*: there is no compaction yet. Direction: subtree-level "summary folding" in
+  org (replacing a stretch of history with a summary node), and server-side compaction with
+  the first-party API.
+- *More Emacs-native tools*: xref/LSP queries, magit operations, org-babel execution, window
+  layout: each is just a ~lispm-deftool~ away.
+- *A shared blackboard*: an org file every agent can read and write, as a collaboration
+  medium more durable than messages.

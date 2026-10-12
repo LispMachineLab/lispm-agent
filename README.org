@@ -1,0 +1,121 @@
+#+title: LispM — a Lisp Machine for agents
+#+startup: content
+
+LispM runs AI agents inside Emacs rather than beside it: the context is an org buffer, tools
+are Elisp functions, approvals are org TODO states, memory is org files under git, and agents
+are woken by Emacs hooks and delegate work to each other. See [[file:DESIGN.org][DESIGN.org]] for the design.
+
+The name comes from the Lisp Machine (LispM): an environment where everything was a live Lisp
+object and the editor and the system were one. Back then its inhabitants were programs; here
+they are agents. In code, the package name and prefix are all lowercase: ~lispm~.
+
+* Installation
+
+Requires Emacs 29.1+ (developed on 31.1), curl, and an endpoint speaking the Anthropic Messages
+API. By default LispM uses the local Rotom gateway (~http://127.0.0.1:14550~, model ~gpt-5.5~).
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/src/lispm")      ; git clone https://github.com/RyanKung/lispm
+(require 'lispm)
+(lispm-mode-line-mode 1)          ; show busy agents and pending approvals in the mode line
+#+end_src
+
+* Getting started
+
+1. ~M-x lispm~ and pick ~assistant~ (the built-in general agent). This opens an org session
+   buffer.
+2. Write your request under the last ~* User~ heading and press ~C-c RET~.
+3. The reply flows into the buffer. Tool calls that need approval appear as
+   ~** WAITING edit_file ...~, with a diff preview and the model's reason (~why~). Review them
+   with ~C-c C-y~: y approves, n denies (optionally with a reason), a allows that tool for the
+   rest of the Emacs session. ~C-c C-t a~ / ~C-c C-t n~ works too.
+4. ~C-c C-k~ aborts the current turn.
+
+| Command                | What it does                                                       |
+|------------------------+--------------------------------------------------------------------|
+| ~lispm~                | open or switch to an agent's session                               |
+| ~lispm-new-session~    | start a fresh session (the old one stays on disk)                  |
+| ~lispm-ask~            | give an agent a request from the minibuffer, staying where you are |
+| ~lispm-ask-region~     | ask about the region                                               |
+| ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
+| ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
+| ~lispm-review~         | review pending calls (~C-c C-y~ in a session)                      |
+| ~lispm-turn-diff~      | show what an agent changed in its last turn                        |
+| ~lispm-revert-turn~    | undo every edit an agent made in its last turn                     |
+| ~lispm-show-request~   | show the full request that will be sent to the model next          |
+| ~lispm-history~        | git history of memory, tasks and sessions                          |
+
+The session buffer is the context: delete a subtree and the agent forgets it; tag a message
+~:ignore:~ and it is no longer sent; headings of your own, such as ~* Notes~, are private
+annotations.
+
+* Defining agents
+
+#+begin_src emacs-lisp
+(lispm-defagent coder
+  "Writes and fixes Emacs Lisp in this repository."
+  :root "~/src/lispm/"
+  :instructions "Keep changes small. After editing, run `make test` and report the result."
+  :policy '((write . auto)))          ; writes inside the root run without asking (outside, they still ask)
+
+(lispm-defagent reviewer
+  "Reviews changes for bugs; never edits."
+  :root "~/src/lispm/"
+  :tools '(read_file search_files list_directory read_buffer recall remember send_message))
+#+end_src
+
+Permission classes: ~read~, ~memory~ and ~comm~ run automatically by default; ~write~ and
+~exec~ need approval (see ~lispm-default-policy~).
+
+* Keeping agents at work
+
+#+begin_src emacs-lisp
+;; Wake coder when a compilation fails.
+(lispm-watch 'coder 'compilation-finish-functions
+  :when (lambda (_buffer status) (string-match-p "abnormally" status))
+  :prompt "The compilation failed. Read *compilation*, find the cause and fix it.")
+
+;; Have reviewer look at every saved .el file.
+(lispm-watch 'reviewer 'after-save-hook
+  :when (lambda () (derived-mode-p 'emacs-lisp-mode))
+  :prompt (lambda () (format "%s was just saved. Review the change." buffer-file-name)))
+
+;; On a timer.
+(lispm-every 'coder 3600 "Look at your open tasks and move one forward.")
+#+end_src
+
+Agents collaborate through ~ask_agent~ (delegate and wait for the reply) and ~send_message~
+(notify). An agent's tasks live in ~agents/<name>/tasks.org~ and can join your agenda:
+~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
+
+* Backends
+
+#+begin_src emacs-lisp
+(setq lispm-backend 'rotom)                 ; default: the local Rotom gateway
+(setq lispm-model "grok-4.6")               ; another model (list them with `rotom models`)
+(setq lispm-backend 'anthropic)             ; first-party API: claude-opus-5-5, needs ANTHROPIC_API_KEY
+#+end_src
+
+Backend features and Rotom's known issues are described in section 8 of DESIGN.org. Each agent
+can also set its own ~:backend~, ~:model~ and ~:effort~.
+
+* Tests
+
+#+begin_src sh
+make test      # ERT: a fake model drives whole turns; a local fake SSE server drives the real curl transport
+make compile
+#+end_src
+
+* Files
+
+| File                   | Contents                                                        |
+|------------------------+-----------------------------------------------------------------|
+| lispm-core.el          | agent object model, registry, configuration                     |
+| lispm-transcript.el    | byte-exact round trip between org sessions and the Messages API |
+| lispm-api.el           | curl transport, SSE decoding, backend features                  |
+| lispm-tools.el         | ~lispm-deftool~, permissions, built-in tools, edit journal       |
+| lispm-memory.el        | memory.org and tasks.org, git audit trail                       |
+| lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
+| lispm-collab.el        | multi-agent collaboration tools                                 |
+| lispm.el               | entry commands, dashboard, mode line                            |
+
