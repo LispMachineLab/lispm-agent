@@ -916,6 +916,40 @@ stand in."
                               (lispm-test--transcript agent)))
       (should (lispm-test--input-heading-p agent)))))
 
+(ert-deftest lispm-test-org-approval-keeps-transcript ()
+  "Approving with `org-todo' changes the call's keyword and nothing else.
+The response's earlier blocks keep their case: ids, signatures and
+text go back to the model byte for byte."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let ((agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use" (lispm-test--thinking "Plan it" "sig-a")
+                                 (lispm-test--text "Editing a.txt.")
+                                 (lispm-test--tool "t1" "edit_file"
+                                                   '((why . "w") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((before (lispm-test--transcript agent)))
+        (with-current-buffer (lispm-agent-buffer agent)
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* WAITING edit_file")
+          (org-todo "APPROVED"))
+        (let ((after (lispm-test--transcript agent))
+              (case-fold-search nil))
+          (should (equal (replace-regexp-in-string "^\\*\\* APPROVED " "** WAITING " after)
+                         before))))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (alist-get 'content (aref (alist-get 'messages (car lispm-test--requests)) 1))
+                     (vector (lispm-test--thinking "Plan it" "sig-a")
+                             (lispm-test--text "Editing a.txt.")
+                             (lispm-test--tool "t1" "edit_file"
+                                               '((why . "w") (path . "a.txt")
+                                                 (old_text . "world") (new_text . "lisp")))))))))
+
 (defun lispm-test--input-heading-p (agent)
   "Whether AGENT's session ends with an empty input heading."
   (with-current-buffer (lispm-agent-buffer agent) (lispm--input-heading-p)))
@@ -985,6 +1019,39 @@ stand in."
         (should (equal (alist-get 'content (aref messages 0))
                        [((type . "text") (text . "new topic"))]))))))
 
+(ert-deftest lispm-test-tools-frozen-per-session ()
+  "The tool list is frozen when a session starts, like the system prompt.
+A tool defined later does not change the request prefix of sessions
+already running, unless the agent's tools grow on purpose
+\(`lispm-tools-changed-functions'); new tools then come after the others."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (names (lambda (body) (mapcar (lambda (tool) (alist-get 'name tool))
+                                        (alist-get 'tools body)))))
+      (unwind-protect
+          (progn
+            (setq lispm-test--scripts
+                  `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "one"))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "two"))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "three")))))
+            (lispm-tell agent "first")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (lispm-deftool lispm_test_probe ()
+              "A tool defined while a session runs."
+              "ok")
+            (lispm-tell agent "second")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (run-hook-with-args 'lispm-tools-changed-functions agent)
+            (lispm-tell agent "third")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let ((requests (reverse lispm-test--requests)))
+              (should (= (length requests) 3))
+              (should (equal (alist-get 'tools (nth 1 requests))
+                             (alist-get 'tools (nth 0 requests))))
+              (should (equal (funcall names (nth 2 requests))
+                             (append (funcall names (nth 0 requests)) '("lispm_test_probe"))))))
+        (remhash "lispm_test_probe" lispm-tools--registry)))))
+
 ;;;; Agents and sessions
 
 (ert-deftest lispm-test-start-and-resume ()
@@ -1039,6 +1106,100 @@ stand in."
                                               (lispm-sessions))
                                     :title)
                          "Pond poems")))))))
+
+(defun lispm-test--crash (agent)
+  "Save AGENT's session, then end it as an Emacs crash would.
+The file keeps what was saved; whatever stopping the agent writes is
+undone on disk.  Return the session file."
+  (let* ((buffer (lispm-agent-buffer agent))
+         (file (buffer-file-name buffer))
+         (saved (progn (with-current-buffer buffer (save-buffer))
+                       (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+    (kill-buffer buffer)
+    (let ((coding-system-for-write 'utf-8))
+      (write-region saved nil file nil 'silent))
+    file))
+
+(ert-deftest lispm-test-resume-suspended-calls ()
+  "A session saved mid-turn resumes its calls from the transcript.
+A call awaiting approval can still be approved; a running call, whose
+process died with Emacs, is recorded as interrupted."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let* ((default-directory project)
+           (agent (lispm-start)))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell"
+                                                   '((why . "w") (command . "sleep 30")))
+                                 (lispm-test--tool "t2" "edit_file"
+                                                   '((why . "w") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp")))))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let* ((file (lispm-test--crash agent))
+             (revived (progn
+                        ;; The file holds the turn as it was saved.
+                        (should (string-match-p "^\\*\\* RUNNING run_shell" (lispm--file-text file)))
+                        (lispm-resume-file file))))
+        ;; The call awaiting approval is known again ...
+        (should (equal (lispm--waiting-calls revived) '("t2")))
+        (should (eq (lispm-agent-state revived) 'waiting))
+        ;; ... the one that was running is not left without a result ...
+        (should (string-match-p "^\\*\\* FAILED run_shell" (lispm-test--transcript revived)))
+        ;; ... and approving the org way finishes the turn.
+        (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+              lispm-test--scripts)
+        (with-current-buffer (lispm-agent-buffer revived)
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* WAITING edit_file")
+          (org-todo "APPROVED"))
+        (should (lispm-test--wait (lispm-test--idle-p revived) 2))
+        (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+        (let ((results (alist-get 'content
+                                  (aref (alist-get 'messages (car lispm-test--requests)) 2))))
+          (should (string-match-p "interrupted" (alist-get 'content (aref results 0))))
+          (should (equal (alist-get 'content (aref results 1))
+                         "Replaced 1 occurrence in a.txt.")))))))
+
+(ert-deftest lispm-test-resume-call-to-late-tool ()
+  "A resumed call gets its tool when it runs, not when the session opens.
+Tools of MCP servers are registered only once the servers have
+started, after the session opened."
+  (lispm-test-env
+    (lispm-deftool lispm_test_late ()
+      "A tool registered late, as an MCP server's are."
+      :permission write
+      "late ok")
+    (unwind-protect
+        (let* ((default-directory project)
+               (agent (lispm-start)))
+          (setq lispm-test--scripts
+                `((assistant@project
+                   ,(lispm-test--msg "tool_use" (lispm-test--tool "l1" "lispm_test_late" '((why . "w")))))))
+          (lispm-tell agent "Use the late tool")
+          (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+          (let ((file (lispm-test--crash agent)))
+            ;; Emacs restarts: the tool's server has not started yet.
+            (remhash "lispm_test_late" lispm-tools--registry)
+            (let ((revived (lispm-resume-file file)))
+              (should (equal (lispm--waiting-calls revived) '("l1")))
+              (lispm-deftool lispm_test_late ()
+                "A tool registered late, as an MCP server's are."
+                :permission write
+                "late ok")
+              (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+                    lispm-test--scripts)
+              (lispm-resolve revived "l1" 'approve)
+              (should (lispm-test--wait (lispm-test--idle-p revived)))
+              (should (equal (alist-get 'content
+                                        (aref (alist-get 'content
+                                                         (aref (alist-get 'messages (car lispm-test--requests)) 2))
+                                              0))
+                             "late ok")))))
+      (remhash "lispm_test_late" lispm-tools--registry))))
 
 (ert-deftest lispm-test-placeholder ()
   "An empty input heading shows a hint, which is display only and goes once typing starts."
@@ -1096,6 +1257,33 @@ stand in."
                      "reviewer@project replied:\nYes, ship it."))
       ;; The helper's session stays on record.
       (should (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project")) (lispm-sessions))))))
+
+(ert-deftest lispm-test-helper-policy-bounded-by-caller ()
+  "A helper may do no more than the agent that asked for it.
+Its policy is the stricter of its role's and its caller's."
+  (lispm-test-env
+    (lispm-defrole coder "Writes code." :policy '((write . auto)))
+    (let ((reviewer (lispm-defagent reviewer :root project :policy '((write . deny)))))
+      (setq lispm-test--scripts
+            `((reviewer ,(lispm-test--msg "tool_use"
+                                          (lispm-test--tool "t1" "ask_agent"
+                                                            '((agent . "coder") (request . "Write x.txt"))))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Asked.")))
+              (coder@project ,(lispm-test--msg "tool_use"
+                                               (lispm-test--tool "c1" "write_file"
+                                                                 '((why . "asked to") (path . "x.txt")
+                                                                   (content . "written\n"))))
+                             ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell reviewer "Get x.txt written")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p reviewer))
+                                                (= (length lispm-test--requests) 4)
+                                                (null (cdr (lispm-agents)))))))
+      (should-not (file-exists-p (expand-file-name "x.txt" project)))
+      (let* ((helper-request (seq-find (lambda (body)
+                                         (eq (lispm-test--agent-name body) 'coder@project))
+                                       lispm-test--requests))
+             (results (alist-get 'content (aref (alist-get 'messages helper-request) 2))))
+        (should (string-match-p "Denied by policy" (alist-get 'content (aref results 0))))))))
 
 (ert-deftest lispm-test-compaction ()
   "A long session is handed over: memory saved, a summary written, the turn continued."

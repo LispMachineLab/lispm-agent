@@ -142,7 +142,8 @@ it resumes after Emacs restarts, and hooks and timers can wake it up.
 
 Agents collaborate through ~ask_agent~ and ~send_message~. ~ask_agent~ delegates to a running
 agent and waits for its reply; given a role instead, it starts a helper of that role in the
-same project, which retires once it has replied (a subagent). Project task lists can join your
+same project, which retires once it has replied (a subagent) and may do no more than the agent
+that asked for it. Project task lists can join your
 agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
 
 * Backends

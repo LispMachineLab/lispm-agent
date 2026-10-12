@@ -424,7 +424,9 @@ IMAGES are files the result holds besides TEXT."
 
 (defun lispm-transcript--parse-assistant (beg end)
   "Parse an assistant section body between BEG and END.
-Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-IDS)."
+Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
+call a plist (:id :name :input :state :pos), :pos being where its
+heading starts."
   (let* ((children (lispm-transcript--sections 2 beg end))
          (lead (string-trim (buffer-substring-no-properties
                              beg (if children (caar children) end))))
@@ -457,7 +459,10 @@ Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-IDS)."
                    (push (apply #'lispm-transcript--tool-result id result)
                          results))
                   ((member (plist-get heading :todo) '("WAITING" "APPROVED" "RUNNING"))
-                   (push id pending))
+                   (push (list :id id :name (cdr (assoc "TOOL" props))
+                               :input (if (consp input) input nil)
+                               :state (plist-get heading :todo) :pos hbeg)
+                         pending))
                   (t
                    (push (lispm-transcript--tool-result id "(no result recorded)" t)
                          results)))))
@@ -488,7 +493,8 @@ Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-IDS)."
   "Parse the current session buffer.
 Return a plist: :system (the system prompt), :messages (Messages API
 messages, oldest first), :pending (ids of tool calls without a result
-yet) and :last-role."
+yet), :pending-calls (those calls, as `lispm-transcript--parse-assistant'
+describes them) and :last-role."
   (save-excursion
     (save-restriction
       (widen)
@@ -509,18 +515,19 @@ yet) and :last-role."
                                                 (concat prefix text)))))
                          messages))))
               ('assistant
-               (pcase-let ((`(,blocks ,results ,ids)
+               (pcase-let ((`(,blocks ,results ,calls)
                             (lispm-transcript--parse-assistant bbeg end)))
                  (when blocks
                    (push `((role . "assistant") (content . ,(vconcat blocks))) messages))
                  (when results
                    (push `((role . "user") (content . ,(vconcat results))) messages))
-                 (setq pending (append pending ids)))))))
+                 (setq pending (append pending calls)))))))
         (setq messages (lispm-transcript--load-images
                         (lispm-transcript--normalize (nreverse messages))))
         (list :system system
               :messages messages
-              :pending pending
+              :pending (mapcar (lambda (call) (plist-get call :id)) pending)
+              :pending-calls pending
               :last-role (alist-get 'role (car (last messages))))))))
 
 (provide 'lispm-transcript)

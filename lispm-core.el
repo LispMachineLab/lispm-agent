@@ -189,6 +189,7 @@ That happens when search_tools loads deferred tools for it.")
   standing                   ; non-nil for agents declared with `lispm-defagent'
   ;; Capabilities, copied from its role.
   description instructions tools policy backend model effort
+  ceiling                    ; policy it may not exceed: its caller's, for a helper
   ;; Runtime state.
   (state 'idle)              ; idle, requesting, acting, waiting
   status                     ; short description of the current activity
@@ -390,11 +391,33 @@ Created on demand, under `lispm-directory', not in the project."
     (make-directory dir t)
     dir))
 
+(defconst lispm--policy-actions '(deny ask auto)
+  "Policy actions, from the strictest to the most permissive.")
+
+(defun lispm--stricter (a b)
+  "The stricter of the policy actions A and B.
+An unknown action counts as the strictest, as `deny' does."
+  (let ((rank (lambda (action) (or (cl-position action lispm--policy-actions) 0))))
+    (if (<= (funcall rank a) (funcall rank b)) a b)))
+
 (defun lispm-policy-action (agent permission)
-  "Action AGENT's policy prescribes for tools of class PERMISSION."
-  (or (alist-get permission (lispm-agent-policy agent))
-      (alist-get permission lispm-default-policy)
-      'ask))
+  "Action AGENT's policy prescribes for tools of class PERMISSION.
+An agent with a ceiling gets the stricter of its own policy's action
+and the ceiling's."
+  (let ((action (or (alist-get permission (lispm-agent-policy agent))
+                    (alist-get permission lispm-default-policy)
+                    'ask))
+        (ceiling (lispm-agent-ceiling agent)))
+    (if ceiling
+        (lispm--stricter action (alist-get permission ceiling 'ask))
+      action)))
+
+(defun lispm-policy (agent)
+  "AGENT's effective policy: an alist from each permission class to its action."
+  (mapcar (lambda (class) (cons class (lispm-policy-action agent class)))
+          (delete-dups (mapcar #'car (append lispm-default-policy
+                                             (lispm-agent-policy agent)
+                                             (lispm-agent-ceiling agent))))))
 
 (defun lispm-set-state (agent state &optional status)
   "Set AGENT's STATE and STATUS, and tell whoever is watching."
