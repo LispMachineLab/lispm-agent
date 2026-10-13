@@ -1,0 +1,124 @@
+#+title: lispm-emacs
+
+LispM's Emacs distribution: Emacs set up as a workspace for coding agents, ready from the first
+start.  [[https://github.com/RyanKung/lispm][LispM]] runs agents inside Emacs; lispm-emacs gives them a
+place to work, and puts Claude Code, Codex and Hermes beside them when you have those installed.
+
+* What you get
+
+The frame is laid out as Mac OS 9 laid out its desktop, in the forms of its Platinum appearance,
+while every colour comes from the theme (Dracula by default).
+
+- *A menu bar* along the top: the λ menu at its left end (new agents, sessions, shells, the
+  browser, settings), then a title per sidebar view (Files, Agents, Shells, Buffers, Web), lit
+  while its view is shown.  At its right end the Application menu names the current workspace
+  and lists the others.
+- *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
+  collapse box.  Only the active window shows stripes and boxes.  The close box puts the window's
+  buffer away, the zoom box gives the window the whole main area and back, the collapse box rolls
+  it up to its title bar, and the title pops up the workspace's buffers.
+- *A sidebar laid out as a Finder list*: a header holding the view's buttons, column headings,
+  disclosure triangles, and one row per item with its date or place in the right-hand column.
+  The agents view lists every agent session, running or recorded, grouped by project: LispM's,
+  and those of Claude Code, Codex and Hermes when their CLI is on ~PATH~.  Click one to resume it
+  where it ran.
+- *A main area* that keeps agent chats and terminals on the left and the files they open on the
+  right, and *a workspace per project*, owning that project's buffers.
+- *Agents that see Emacs*: Claude Code connects over its IDE protocol, Codex and Hermes over MCP,
+  and all of them can read the selection, the open and unsaved files, and Flymake's diagnostics.
+- *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot,
+  tree-sitter modes and doom-modeline.
+- *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
+  configuration files, SPC is the leader key, and terminals, chats and the sidebar keep Emacs keys
+  so the programs in them get every key.
+
+Title bars and menus are set in Charcoal when it is installed, else Chicago or Geneva; lists in
+Geneva.  macOS still ships Geneva.
+
+* Installation
+
+Requires Emacs 30.1 or later (31 recommended), git and curl, on macOS or GNU/Linux.
+
+Try it without touching your configuration:
+
+#+begin_src sh
+git clone https://github.com/RyanKung/lispm-emacs ~/lispm-emacs
+emacs --init-directory ~/lispm-emacs
+#+end_src
+
+or make it your configuration (move an existing =~/.emacs.d= and =~/.emacs= out of the way first):
+
+#+begin_src sh
+git clone https://github.com/RyanKung/lispm-emacs ~/.emacs.d
+emacs
+#+end_src
+
+The first start asks whether you edit with vim or Emacs keys, installs the packages (a few
+minutes, once), and offers to install the icon font the sidebar and tabs draw with.
+
+Then give LispM a model: with ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment
+nothing more is needed; for any other server, local or hosted, see LispM's
+[[https://github.com/RyanKung/lispm#backends][Backends]] and put the settings in your =personal.el=.
+
+Optional, and picked up when present:
+
+- [[https://github.com/anthropics/claude-code][Claude Code]] (~claude~), Codex (~codex~) and Hermes
+  (~hermes~) on ~PATH~;
+- the Maple Mono NF CN font, whose glyphs keep terminal columns aligned, CJK included
+  (=brew install --cask font-maple-mono-nf-cn= on macOS);
+- a spell checker (aspell, hunspell or ispell) for Flyspell;
+- an Emacs built with xwidgets, for the embedded browser.
+
+* Keys
+
+| Key                 | Does                                                       |
+|---------------------+------------------------------------------------------------|
+| =C-c a l=           | start a LispM agent in this project (=C-u= to pick a role) |
+| =C-c a c=, =x=, =h= | start Claude Code, Codex or Hermes in this project         |
+| =C-c a s=           | resume any recorded session                                |
+| =C-c a a=           | show or hide the agents view (or click Agents)             |
+| =C-c a r=           | put a reference to the region into a running agent's input |
+| =C-c t=             | a new terminal                                             |
+| =C-c d=             | Dirvish, the file manager                                  |
+| =C-x b=, =C-s=      | switch buffer, search the buffer (Consult)                 |
+| =C-.=               | act on the thing at point (Embark)                         |
+
+On macOS the Command key is Meta, so Command-C and Command-V copy and paste everywhere, terminals
+included.  With vim keys, =SPC= opens the leader: =SPC e= find a file, =SPC b= switch buffer,
+=SPC g= Magit, =SPC t= a terminal, =SPC f r= ripgrep, and =which-key= shows the rest.
+
+* Your own settings
+
+Put them in =personal.el= next to =init.el= (git ignores it); it is loaded after lispm-emacs is
+set up, so it can change anything.  To pick the other editing style later, customize
+~lme-editing-style~.
+
+An existing configuration can use lispm-emacs as a library instead:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "~/src/lispm-emacs/lisp")
+(setq lme-editing-style 'vim)           ; or 'emacs; nil asks
+(require 'lme)
+(lme-setup)
+;; ... your settings
+#+end_src
+
+LispM comes from a checkout on ~load-path~ when there is one, and is otherwise installed from
+GitHub.
+
+* Updating
+
+#+begin_src sh
+git -C ~/.emacs.d pull
+#+end_src
+
+then =M-x package-upgrade-all= for the packages and =M-x package-vc-upgrade= for LispM.
+
+* Tests
+
+=make test= runs the ERT tests in batch; =make compile= byte-compiles every module against the
+installed packages.
+
+* License
+
+GPL-3.0-or-later.  See [[file:LICENSE][LICENSE]].
