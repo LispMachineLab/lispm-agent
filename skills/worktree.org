@@ -1,0 +1,263 @@
+#+title: Work in git worktrees
+#+description: Delegate a change to a helper working in a git worktree of its own, on a branch of its own, so that parallel or risky work stays apart from your checkout until you merge it.
+
+Agents share one Emacs and, by default, one checkout: what a helper started by ~ask_agent~
+edits is edited in your files at once.  When that is not what you want, this skill gives the
+helper a git worktree of its own: a second checkout of the same repository, on a new branch.
+It needs git, and a project that is a git repository.
+
+* When
+
+- Several helpers change the same files at the same time, each on its own part of the work.
+- A change you may not keep: an experiment, a large refactoring, a fix to try out.
+- Work you want to review as a branch, as a whole, before it reaches your checkout.
+
+Plain ~ask_agent~ is better for small changes you will keep, and for work that only reads.
+
+* Delegating
+
+~worktree_ask~ ROLE REQUEST [NAME] [BASE] makes a worktree in ~lispm-worktree-directory~
+(~~/.lispm/worktrees/PROJECT/NAME/~), on the new branch ~lispm/NAME~ made from your ~HEAD~ or
+from BASE, starts a helper of ROLE there, hands it REQUEST and waits for its final reply, as
+~ask_agent~ does with a role.  The helper may do no more than you, and retires once it has
+replied.  It is told to commit its work on its branch.
+
+Several ~worktree_ask~ calls in one step run side by side.  Give each a NAME that says what
+it is for (~fix-parser~, ~try-cache~).
+
+Changes you have not committed are not in the new worktree: commit what the helper must see
+first.
+
+The helper's project is yours: it shares your project's memory, tasks and session list.
+
+* What comes back
+
+The helper's reply, then where its work is: the worktree, the branch, its commits, what it left
+uncommitted, and the changes against the base.  A helper that changed nothing leaves nothing
+behind: its worktree and branch are removed.
+
+* Taking the work
+
+With ~run_shell~, in your own checkout:
+
+- look at it: ~git log -p HEAD..lispm/NAME~, or ~git diff HEAD...lispm/NAME~;
+- if the helper left changes uncommitted, commit them in its worktree first
+  (~git -C WORKTREE commit -am ...~, adding new files with ~git -C WORKTREE add~);
+- take it: ~git merge lispm/NAME~, or ~git cherry-pick~ some of its commits;
+- then ~worktree_remove~ NAME: it removes the worktree, and the branch once merged.
+
+To drop the work instead, ~worktree_remove~ NAME with FORCE: its uncommitted changes and its
+unmerged branch are deleted too.  Do that only when the work is not wanted, or the user says so.
+
+~worktree_list~ shows the worktrees made so far, also those of earlier sessions.
+
+* Care
+
+- Merge one helper's branch at a time; on a conflict, resolve it or ask the user.
+- A worktree has the files git tracks, not the ignored ones: a helper may have to build or
+  install what the project needs before running its tests.
+- The user may want to see a branch before it is merged: say which, and where.
+
+* The code
+
+#+begin_src emacs-lisp :lispm load
+(require 'lispm-collab)
+
+(defvar lispm-worktree-directory "~/.lispm/worktrees/"
+  "Directory of the worktrees worktree_ask makes, each as PROJECT/NAME/.")
+
+(defvar lispm-worktree-branch-prefix "lispm/"
+  "Prefix of the names of their branches.")
+
+(defun lispm-worktree--git (directory &rest args)
+  "Output of git ARGS run in DIRECTORY; signal an error with git's if it fails."
+  (let ((default-directory (file-name-as-directory (expand-file-name directory)))
+        (process-environment (lispm--git-environment)))
+    (with-temp-buffer
+      (unless (eql 0 (apply #'call-process "git" nil t nil args))
+        (error "git %s: %s" (car args) (string-trim (buffer-string))))
+      (string-trim-right (buffer-string)))))
+
+(defun lispm-worktree--git-async (directory args callback)
+  "Run git ARGS in DIRECTORY; then call CALLBACK with nil, or git's complaint."
+  (let* ((default-directory (file-name-as-directory (expand-file-name directory)))
+         (process-environment (lispm--git-environment))
+         (buffer (generate-new-buffer " *lispm-worktree*" t)))
+    (make-process
+     :name "lispm-worktree" :buffer buffer :noquery t :connection-type 'pipe
+     :command (cons "git" args)
+     :sentinel (lambda (process _event)
+                 (unless (process-live-p process)
+                   (let ((output (with-current-buffer buffer (string-trim (buffer-string)))))
+                     (kill-buffer buffer)
+                     (funcall callback (unless (eql 0 (process-exit-status process))
+                                         (format "git %s: %s" (car args) output)))))))))
+
+(defun lispm-worktree--repository (root)
+  "Where ROOT is in its git repository: (TOP . PREFIX).
+TOP is the top of the worktree, PREFIX the path from there to ROOT."
+  (let ((lines (split-string (condition-case nil
+                                 (lispm-worktree--git root "rev-parse" "--show-toplevel" "--show-prefix")
+                               (error (error "%s is not in a git repository"
+                                             (abbreviate-file-name root))))
+                             "\n")))
+    (cons (file-name-as-directory (car lines)) (or (cadr lines) ""))))
+
+(defun lispm-worktree--list (root)
+  "The worktrees of ROOT's repository in `lispm-worktree-directory'.
+Each is (NAME PATH BRANCH)."
+  (let ((under (expand-file-name lispm-worktree-directory)) trees)
+    (dolist (entry (split-string (lispm-worktree--git root "worktree" "list" "--porcelain") "\n\n" t))
+      (when (string-match "^worktree \\(.+\\)$" entry)
+        (let ((path (file-name-as-directory (match-string 1 entry))))
+          (when (file-in-directory-p path under)
+            (push (list (file-name-nondirectory (directory-file-name path)) path
+                        (and (string-match "^branch refs/heads/\\(.+\\)$" entry)
+                             (match-string 1 entry)))
+                  trees)))))
+    (nreverse trees)))
+
+(defun lispm-worktree--buffers (path)
+  "Buffers visiting files in the worktree at PATH."
+  (seq-filter (lambda (buffer)
+                (when-let* ((file (buffer-file-name buffer)))
+                  (file-in-directory-p file path)))
+              (buffer-list)))
+
+(defun lispm-worktree--state (path base)
+  "What the worktree at PATH holds that the commit BASE does not; nil if nothing."
+  (let ((commits (lispm-worktree--git path "log" "--oneline" (concat base "..HEAD")))
+        (status (lispm-worktree--git path "status" "--porcelain"))
+        (unsaved (seq-filter #'buffer-modified-p (lispm-worktree--buffers path))))
+    (unless (and (string-empty-p commits) (string-empty-p status) (null unsaved))
+      (let ((stat (lispm-worktree--git path "diff" "--stat" base)))
+        (concat (unless (string-empty-p commits) (format "Commits:\n%s\n" commits))
+                (unless (string-empty-p status) (format "Uncommitted:\n%s\n" status))
+                (when unsaved
+                  (format "Unsaved buffers: %s\n" (mapconcat #'buffer-name unsaved ", ")))
+                (unless (string-empty-p stat)
+                  (format "Changes from %s:\n%s\n" (substring base 0 7) stat)))))))
+
+(defun lispm-worktree--remove (root path branch force callback)
+  "Remove the worktree at PATH, then its BRANCH if merged, or if FORCE.
+FORCE also discards the changes not committed there.  Git runs in
+ROOT.  CALLBACK gets a report, and non-nil as second argument if the
+worktree stays."
+  (let ((buffers (lispm-worktree--buffers path)))
+    (when (and (not force) (seq-some #'buffer-modified-p buffers))
+      (error "Buffers visiting files in %s have unsaved changes" (abbreviate-file-name path)))
+    (dolist (buffer buffers)
+      (with-current-buffer buffer (set-buffer-modified-p nil))
+      (kill-buffer buffer)))
+  (lispm-worktree--git-async
+   root `("worktree" "remove" ,@(and force '("--force")) ,path)
+   (lambda (problem)
+     (cond (problem (funcall callback problem t))
+           ((null branch)
+            (funcall callback (format "Removed the worktree %s." (abbreviate-file-name path))))
+           ((ignore-errors (lispm-worktree--git root "branch" (if force "-D" "-d") branch) t)
+            (funcall callback (format "Removed the worktree %s and its branch %s."
+                                      (abbreviate-file-name path) branch)))
+           (t (funcall callback (format "Removed the worktree %s; its branch %s stays, \
+not being merged (force deletes it)." (abbreviate-file-name path) branch)))))))
+
+(defun lispm-worktree--brief (path branch base request)
+  "REQUEST, preceded by what a helper working in the worktree at PATH must know."
+  (format "You work in a git worktree of your own, %s, on the branch %s, made from %s.  \
+What you change there stays apart from the checkout of the agent asking until it merges \
+your branch.  Commit your work on %s before you reply, if you may run git; what you leave \
+uncommitted is reported as it is.\n\n%s"
+          (abbreviate-file-name path) branch base branch request))
+
+(defun lispm-worktree--finish (helper reply root path branch base done)
+  "Report HELPER's REPLY and its work in the worktree at PATH through DONE.
+A worktree left as it was made, from the commit BASE, is removed with
+its BRANCH.  Git runs in ROOT."
+  (let ((head (format "%s replied:\n%s\n\n" (lispm-agent-name helper) reply))
+        (name (file-name-nondirectory (directory-file-name path))))
+    (condition-case err
+        (if-let* ((state (lispm-worktree--state path base)))
+            (funcall done (format "%sIts work is in the worktree %s, on the branch %s, made from %s.\n%s\
+Take it from there (the worktree skill says how); worktree_remove %s removes it."
+                                  head (abbreviate-file-name path) branch (substring base 0 7)
+                                  state name))
+          (lispm-worktree--remove
+           root path branch t
+           (lambda (report &optional problem)
+             (funcall done (concat head (if problem
+                                            report
+                                          "It changed nothing, so its worktree and branch are removed."))))))
+      (error (funcall done (concat head (error-message-string err)) t)))))
+
+(lispm-deftool worktree_ask
+    ((role string "The role to start the helper from (see list_agents).")
+     (request string "What you need, self-contained: the helper cannot see your transcript.")
+     (name string "Name of the worktree, and of its branch after lispm/; default: the role and a number."
+           :optional t)
+     (base string "Commit, branch or tag the branch starts from; default: your HEAD." :optional t))
+  "Delegate a request to a helper of ROLE working in a git worktree of its
+own, on a new branch, and wait for its final reply.  Your checkout is
+untouched meanwhile, so several helpers can change the same files at
+once.  The result says where the work is; a helper that changed
+nothing leaves nothing behind."
+  :permission write
+  :async t
+  (let* ((me lispm-current-agent)
+         (role* (or (lispm-get-role role t)
+                    (error "No role named %s; list_agents shows the roles" role)))
+         (root (lispm-agent-root me))
+         (repository (lispm-worktree--repository root))
+         (name (or name (format "%s-%04x" role (random #x10000))))
+         (branch (concat lispm-worktree-branch-prefix name))
+         (path (expand-file-name (format "%s/%s/" (lispm--project-name (lispm--main-worktree (car repository)))
+                                         name)
+                                 lispm-worktree-directory))
+         (base (or base "HEAD"))
+         (sha (condition-case nil
+                  (lispm-worktree--git root "rev-parse" "--verify" (concat base "^{commit}"))
+                (error (error "No commit %s here" base)))))
+    (unless (string-match-p "\\`[[:alnum:]][[:alnum:]._-]*\\'" name)
+      (error "A worktree name is letters, digits, dots, dashes and underscores"))
+    (when (file-exists-p path)
+      (error "%s exists already; choose another name" (abbreviate-file-name path)))
+    (make-directory (file-name-parent-directory path) t)
+    (lispm-worktree--git-async
+     root (list "worktree" "add" "-b" branch path sha)
+     (lambda (problem)
+       (if problem
+           (funcall done problem t)
+         (condition-case err
+             (lispm-delegate me role* (lispm-worktree--brief path branch base request)
+                             (lambda (helper reply)
+                               (lispm-worktree--finish helper reply root path branch sha done))
+                             :root (expand-file-name (cdr repository) path))
+           (error
+            (ignore-errors (lispm-worktree--remove root path branch t #'ignore))
+            (funcall done (error-message-string err) t))))))))
+
+(lispm-deftool worktree_list ()
+  "List the worktrees worktree_ask made in your repository: their names,
+branches and places, and whether changes are left uncommitted there."
+  (let ((trees (lispm-worktree--list (lispm-tools--root))))
+    (if (null trees)
+        "No worktrees."
+      (mapconcat (pcase-lambda (`(,name ,path ,branch))
+                   (format "- %s: branch %s, %s%s" name (or branch "(none)") (abbreviate-file-name path)
+                           (cond ((not (file-directory-p path)) " (missing)")
+                                 ((string-empty-p (lispm-worktree--git path "status" "--porcelain")) "")
+                                 (t " (uncommitted changes)"))))
+                 trees "\n"))))
+
+(lispm-deftool worktree_remove
+    ((name string "The worktree's name, as worktree_list shows it.")
+     (force boolean "Discard the changes not committed there, and delete the branch even if not merged."
+            :optional t))
+  "Remove a worktree worktree_ask made, and its branch once merged into
+yours.  Changes not committed there stop it, unless FORCE."
+  :permission write
+  :async t
+  (let* ((root (lispm-tools--root))
+         (tree (or (assoc name (lispm-worktree--list root))
+                   (error "No worktree %s; worktree_list shows them" name))))
+    (lispm-worktree--remove root (nth 1 tree) (nth 2 tree) force done)))
+#+end_src

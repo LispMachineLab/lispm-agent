@@ -109,6 +109,9 @@ What follows from this:
   message ~:ignore:~ and it is no longer sent; add ~* Notes~ anywhere for private annotations.
 - *The context is visible, foldable, searchable and archived*: a session is a file under
   ~projects/<project>/sessions/~ in ~lispm-directory~. Reopening a session file resumes it.
+  A linked git worktree is the project of its main worktree (~lispm--main-worktree~ reads
+  the ~.git~ file and ~commondir~ git leaves there, without running git), so its agents share
+  the main one's sessions, memory and tasks.
 - A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, as Codex and Claude
   Code read them.
 - ~M-x lispm-show-request~ shows the exact JSON of the next request: what the model sees is
@@ -310,6 +313,11 @@ Concurrency:
   would close a cycle.
 - Every agent's system prompt lists the running agents and the roles, so the model knows
   whom to delegate to.
+- *Isolation, when wanted*: optimistic concurrency keeps agents from clobbering each other,
+  not from seeing each other's half-done work. A helper can work apart instead, in a git
+  worktree of its own (the ~worktree~ skill, section 11). Delegation itself is
+  ~lispm-delegate~, which ~ask_agent~ and the skill's ~worktree_ask~ share: same ceiling,
+  same deadlock check, same retirement.
 
 * 8. Handing over: long conversations
 
@@ -457,6 +465,19 @@ the same code eww uses to show pages. A widget's events, the results of its scri
 them, wait until something wakes Emacs's event loop, so a timer watches the load and keeps
 the loop turning. Its tools have the permission class ~web~, which asks by default: a fetch
 can carry data out.
+
+The second is ~worktree~: delegating to a helper that works in a git worktree of its own, on a
+branch of its own (~worktree_ask~, ~worktree_list~, ~worktree_remove~). It is a skill rather
+than part of the core because it depends on git's toolchain, as ~web~ depends on a browser:
+an agent that needs it loads it, and the rest of LispM does not assume a repository. What the
+core keeps is what is not about git commands: delegation with a root of the caller's choosing
+(~lispm-delegate~), and the rule that a linked worktree is its main worktree's project
+(section 2).
+The worktrees are made with git itself, asynchronously: Emacs 31's ~vc-add-working-tree~
+prompts for the branch, and Emacs 30 has no such function. A helper is told to commit its
+work on its branch; when it replies, the result lists its commits, what it left uncommitted
+and the changes against the base, or, if it changed nothing, its worktree and branch are
+removed at once.
 
 * 12. Known limitations and next steps
 

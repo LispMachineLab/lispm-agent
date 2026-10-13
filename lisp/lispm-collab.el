@@ -36,6 +36,9 @@
 ;;                 gets the stricter of its role's and its caller's
 ;;                 policy.
 ;;
+;; Delegating is `lispm-delegate', for other tools too: the worktree
+;; skill's worktree_ask starts its helper in a git worktree of its own.
+;;
 ;; Shared state needs no locks: the event loop is single-threaded, and
 ;; edits are exact-text replacements, which fail instead of clobbering
 ;; when someone else changed the text first (optimistic concurrency).
@@ -48,11 +51,12 @@
 (require 'lispm-tools)
 (require 'lispm-runtime)
 
-(defun lispm-collab--target (name)
-  "The agent called NAME, which must not be the acting agent."
+(defun lispm-collab--target (name &optional caller)
+  "The agent NAME designates, which must not be CALLER (default: the acting agent).
+NAME is as for `lispm-get-agent'."
   (let ((agent (or (lispm-get-agent name t)
                    (error "No agent or role named %s; list_agents shows them" name))))
-    (when (eq agent lispm-current-agent)
+    (when (eq agent (or caller lispm-current-agent))
       (error "That is you"))
     agent))
 
@@ -63,6 +67,34 @@
       (push agent seen)
       (setq agent (lispm-agent-waiting-on agent)))
     (eq agent from)))
+
+(cl-defun lispm-delegate (caller agent request callback &key root)
+  "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
+AGENT is a running agent or its name, or a role or the name of one no
+running agent has: a helper of that role then starts in ROOT (default:
+CALLER's root), may do no more than CALLER, and retires once it has
+replied.  CALLBACK gets the agent that replied and its final reply.
+Return that agent."
+  (let* ((role (cond ((lispm-role-p agent) agent)
+                     ((and (stringp agent) (not (lispm-get-agent agent t)))
+                      (lispm-get-role agent t))))
+         (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
+         (target (or helper (lispm-collab--target agent caller))))
+    (when (lispm-collab--cycle-p caller target)
+      (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-agent-name target)))
+    ;; Delegating must not widen what the caller may do.
+    (when helper
+      (setf (lispm-agent-ceiling helper) (lispm-policy caller)))
+    (setf (lispm-agent-waiting-on caller) target)
+    (lispm-tell target request
+                :from (lispm-agent-name caller)
+                :callback (lambda (reply)
+                            (when (eq (lispm-agent-waiting-on caller) target)
+                              (setf (lispm-agent-waiting-on caller) nil))
+                            (when helper
+                              (run-at-time 0 nil #'lispm-retire helper))
+                            (funcall callback target reply)))
+    target))
 
 (defun lispm-collab--roles ()
   "Description of the roles helpers can be started from."
@@ -127,26 +159,10 @@ name a role to start a helper of that role in your project; the
 helper retires once it has replied."
   :permission comm
   :async t
-  (let* ((me lispm-current-agent)
-         (helper (and (not (lispm-get-agent agent t)) (lispm-get-role agent t)
-                      (lispm-start (intern agent) (lispm-agent-root me))))
-         (target (or helper (lispm-collab--target agent))))
-    (when (lispm-collab--cycle-p me target)
-      (error "%s is (indirectly) waiting on you; asking it would deadlock" agent))
-    ;; Delegating must not widen what the caller may do.
-    (when helper
-      (setf (lispm-agent-ceiling helper) (lispm-policy me)))
-    (setf (lispm-agent-waiting-on me) target)
-    (lispm-tell target request
-                :from (lispm-agent-name me)
-                :callback (lambda (reply)
-                            (when (eq (lispm-agent-waiting-on me) target)
-                              (setf (lispm-agent-waiting-on me) nil))
-                            (when helper
-                              (run-at-time 0 nil #'lispm-retire helper))
-                            (funcall done (format "%s replied:\n%s"
-                                                  (lispm-agent-name target) reply))))
-    nil))
+  (lispm-delegate lispm-current-agent agent request
+                  (lambda (target reply)
+                    (funcall done (format "%s replied:\n%s" (lispm-agent-name target) reply))))
+  nil)
 
 (provide 'lispm-collab)
 ;;; lispm-collab.el ends here

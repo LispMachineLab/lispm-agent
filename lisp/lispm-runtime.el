@@ -375,7 +375,7 @@ Emacs's lock files (.#NAME) and other dot files are left out."
                 (lambda (file)
                   (equal (cdr (assoc "agent" (lispm--file-keywords file))) name))
                 (lispm--session-files-in
-                 (format "projects/%s/sessions/*.org" (lispm--slug (lispm-agent-root agent)))))
+                 (expand-file-name "*.org" (lispm--sessions-directory (lispm-agent-root agent)))))
                (lambda (a b) (time-less-p (file-attribute-modification-time (file-attributes b))
                                           (file-attribute-modification-time (file-attributes a))))))))
 
