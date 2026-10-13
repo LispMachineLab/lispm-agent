@@ -73,6 +73,8 @@
 (declare-function lme-agent--running-buffers "lme-agent-list" ())
 (declare-function lme-agent--session-buffer "lme-agent-list" (id))
 (declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
+(declare-function lme-popup-menu "lme-popup" (items &optional x y align))
+(declare-function lme-popup--frame-xy "lme-popup" (position))
 (defvar tabspaces-default-tab)
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
@@ -1087,26 +1089,29 @@ is running in a terminal cannot be deleted."
     ('directory (lme-agent--in-main-window #'dired (plist-get session :cwd)))))
 
 (defun lme-agent-list-context-menu (event)
-  "Pop up the actions for the session clicked by mouse EVENT."
+  "Pop up the actions for the session clicked by mouse EVENT.
+It is drawn as Mac OS 9's contextual menus were, see `lme-popup-menu'."
   (interactive "e")
   (let* ((posn (event-start event))
          (session (with-current-buffer (window-buffer (posn-window posn))
                     (get-text-property (posn-point posn) 'lme-agent-session))))
     (when session
-      (when-let* ((action (x-popup-menu
-                           event
-                           `(,(lme-sidebar--one-line (plist-get session :title) 40)
-                             (""
-                              ("Resume" . resume)
-                              ("Rename…" . rename)
-                              (,(if (lme-agent--archived-p session) "Unarchive" "Archive")
-                               . archive)
-                              ("Delete…" . delete)
-                              "--"
-                              ("Copy session ID" . copy)
-                              ("Open transcript" . transcript)
-                              ("Open directory" . directory))))))
-        (lme-agent-session-act action session)))))
+      (pcase-let ((`(,x . ,y) (lme-popup--frame-xy event)))
+        (lme-popup-menu
+         (mapcar (lambda (entry)
+                   (if (eq entry 'separator)
+                       entry
+                     (list :label (car entry)
+                           :action (lambda () (lme-agent-session-act (cdr entry) session)))))
+                 `(("Resume" . resume)
+                   ("Rename…" . rename)
+                   (,(if (lme-agent--archived-p session) "Unarchive" "Archive") . archive)
+                   ("Delete…" . delete)
+                   separator
+                   ("Copy Session ID" . copy)
+                   ("Open Transcript" . transcript)
+                   ("Open Directory" . directory)))
+         (1+ x) (1+ y))))))
 
 (defun lme-agent-list--session-at-point ()
   "Return the session of the sidebar entry at point."

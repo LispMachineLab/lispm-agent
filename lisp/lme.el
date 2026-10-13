@@ -143,6 +143,7 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lme-setup-keymapping)
     (lme-setup-interface)
     (lme-setup-platinum)
+    (lme-popup-enable)
     (lme-setup-langs)
     (lme-setup-ai)
     (lme-setup-lispm)

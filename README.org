@@ -39,8 +39,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   colour, and a count of the items at the bottom.  The agents view lists every agent session,
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
-- *Menus and alerts*: the λ menu, the Application menu and a title bar's buffer menu drop as
-  Mac OS 9's menus did, with check marks, separators and key equivalents; closing a modified
+- *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu and every
+  right-click menu (Emacs's context menu, the sidebar's) drop as Mac OS 9's menus did, with
+  check marks, separators, key equivalents and hierarchical submenus; closing a modified
   document asks to save it (Return saves, Escape cancels, Command-D doesn't save), closing a
   running session or deleting one asks first, each in an alert with the caution, stop or note
   icon and the default button ringed.

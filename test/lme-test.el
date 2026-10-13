@@ -347,6 +347,29 @@ while held."
   (should-not (lme-popup--keyboard-p [C-M-drag-mouse-1]))
   (should-not (lme-popup--keyboard-p [menu-bar file open])))
 
+(ert-deftest lme-test-keymap-items ()
+  "A menu keymap becomes menu items: labels, conditions, checks, submenus."
+  (let ((map (make-sparse-keymap "Test"))
+        (sub (make-sparse-keymap "Sub")))
+    (define-key sub [inner] '(menu-item "Inner" ignore))
+    ;; Bindings added later come first, as Emacs shows them.
+    (define-key map [last] '(menu-item "Last" ignore :enable nil))
+    (define-key map [sub] `(menu-item "More" ,sub))
+    (define-key map [sep] '(menu-item "--"))
+    (define-key map [hidden] '(menu-item "Hidden" ignore :visible nil))
+    (define-key map [toggle] '(menu-item "Toggle" ignore :button (:toggle . t)))
+    (define-key map [first] '(menu-item "First" ignore :keys "C-x f"))
+    (let ((items (lme-popup-keymap-items map)))
+      (should (equal (mapcar (lambda (item) (if (eq item 'separator) item (plist-get item :label)))
+                             items)
+                     '("First" "Toggle" separator "More" "Last")))
+      (should (equal (plist-get (nth 0 items) :key) "C-x f"))
+      (should (plist-get (nth 1 items) :checked))
+      (should-not (lme-popup--enabled-p (nth 4 items)))
+      (should (equal (mapcar (lambda (item) (plist-get item :label))
+                             (lme-popup--submenu (nth 3 items)))
+                     '("Inner"))))))
+
 (ert-deftest lme-test-popups-fall-back ()
   "Without a graphical display, menus and alerts ask in the minibuffer."
   (should-not (lme-popup-available-p))

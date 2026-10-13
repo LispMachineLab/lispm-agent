@@ -207,9 +207,10 @@ key equivalent.")
 
 (defun lme-popup--enabled-p (item)
   "Return non-nil when menu ITEM can be chosen.
-An item without :enabled is enabled; one with :enabled nil is not."
+It needs an action or a submenu; an item without :enabled is enabled,
+one with :enabled nil is not."
   (and (not (lme-popup--separator-p item))
-       (plist-get item :action)
+       (or (plist-get item :action) (plist-get item :submenu))
        (or (not (plist-member item :enabled)) (plist-get item :enabled))))
 
 (defun lme-popup--keyboard-p (keys)
@@ -224,8 +225,10 @@ Mouse, wheel and menu bar events do not count."
 (defun lme-popup--key (item)
   "Return the key equivalent shown for menu ITEM, or nil.
 It is the first key sequence typed on the keyboard that runs the item's
-command, as Mac OS 9 showed Command keys beside items."
-  (or (plist-get item :key)
+command, as Mac OS 9 showed Command keys beside items; an item holding a
+submenu shows the triangle pointing to it."
+  (or (and (plist-get item :submenu) "▸")
+      (plist-get item :key)
       (let ((action (plist-get item :action)))
         (when (and (symbolp action) (commandp action))
           (when-let* ((keys (seq-find #'lme-popup--keyboard-p (where-is-internal action))))
@@ -281,23 +284,6 @@ both when drawn and when measured."
               'face face 'lme-popup-index index)))))
      items "")))
 
-(defun lme-popup--menu-index (event frame items)
-  "Return the index of the enabled item of ITEMS under EVENT in menu FRAME."
-  (when-let* ((position (lme-popup--over event frame))
-              (point (posn-point position)))
-    (let ((index (with-current-buffer (window-buffer (posn-window position))
-                   (1- (line-number-at-pos point)))))
-      (when (and (< -1 index (length items)) (lme-popup--enabled-p (nth index items)))
-        index))))
-
-(defun lme-popup--step (items from direction)
-  "Return the index of the next enabled item of ITEMS from FROM in DIRECTION."
-  (let* ((count (length items))
-         (index (or from (if (> direction 0) -1 count))))
-    (cl-loop repeat count
-             do (setq index (mod (+ index direction) count))
-             when (lme-popup--enabled-p (nth index items)) return index)))
-
 (defun lme-popup-open-menu (items &optional x y align)
   "Show a menu of ITEMS placed by X, Y and ALIGN, see `lme-popup-menu'.
 Return its frame; nothing is read from the user."
@@ -312,54 +298,169 @@ Return its frame; nothing is read from the user."
       (lme-popup--show popup (if (eq align 'right) (- mx width) mx) my))
     popup))
 
+(defun lme-popup--submenu (item)
+  "Return the items of ITEM's submenu, or nil when it has none.
+A submenu given as a function is asked for its items only now."
+  (let ((submenu (plist-get item :submenu)))
+    (if (functionp submenu) (funcall submenu) submenu)))
+
+(defun lme-popup--step (items from direction)
+  "Return the index of the next enabled item of ITEMS from FROM in DIRECTION."
+  (let* ((count (length items))
+         (index (or from (if (> direction 0) -1 count))))
+    (cl-loop repeat count
+             do (setq index (mod (+ index direction) count))
+             when (lme-popup--enabled-p (nth index items)) return index)))
+
+;; An open menu is a level: its frame, items, width, the item under the
+;; mouse, and its place in the parent frame.  A submenu opens as another
+;; level beside the item that holds it; the deepest level comes first.
+
+(defun lme-popup--level (items x y &optional align)
+  "Open a menu level of ITEMS at X, Y, flush right at X when ALIGN is `right'."
+  (let* ((frame (lme-popup-open-menu items x y align))
+         (position (frame-position frame)))
+    (list :frame frame :items items :width (lme-popup--menu-width items) :highlight nil
+          :x (car position) :y (cdr position))))
+
+(defun lme-popup--draw-level (level)
+  "Redraw menu LEVEL with its item under the mouse highlighted."
+  (lme-popup--fill (plist-get level :frame)
+                   (lme-popup-menu-text (plist-get level :items) (plist-get level :width)
+                                        (plist-get level :highlight))))
+
+(defun lme-popup--row-y (level index)
+  "Return how far down menu LEVEL's frame its item INDEX starts, in pixels."
+  (let ((window (frame-root-window (plist-get level :frame))))
+    (with-current-buffer (window-buffer window)
+      (save-excursion
+        (goto-char (point-min))
+        (forward-line index)
+        (or (cdr (posn-x-y (posn-at-point (point) window))) 0)))))
+
+(defun lme-popup--level-index (event level)
+  "Return the index of the enabled item of LEVEL under EVENT, or nil."
+  (when-let* ((frame (plist-get level :frame))
+              (position (lme-popup--over event frame))
+              (point (posn-point position)))
+    (let ((index (with-current-buffer (window-buffer (posn-window position))
+                   (1- (line-number-at-pos point))))
+          (items (plist-get level :items)))
+      (when (and (< -1 index (length items)) (lme-popup--enabled-p (nth index items)))
+        index))))
+
 (defun lme-popup-menu (items &optional x y align)
   "Pop up ITEMS as a Mac OS 9 menu and run the action of the one chosen.
 X and Y place the menu in the selected frame, by default under the
 mouse; ALIGN `right' puts its right edge at X.  Each item is a plist
 \(:label STRING :action FUNCTION [:enabled BOOL] [:checked BOOL]
-[:key STRING]) or the symbol `separator'.  Return the item chosen, or
-nil when the menu was cancelled."
+[:key STRING] [:submenu ITEMS-OR-FUNCTION]) or the symbol `separator'.
+An item with a submenu opens it beside itself, as Mac OS 9's
+hierarchical menus did, when the mouse rests on it or Right is typed.
+Return the item chosen, or nil when the menu was cancelled."
   (if (not (lme-popup-available-p))
       (lme-popup--menu-fallback items)
-    (let* ((popup (lme-popup-open-menu items x y align))
-           (width (lme-popup--menu-width items))
-           (highlight nil)
-           (choice nil))
+    (let ((levels nil)
+          (choice nil))
       (unwind-protect
           (progn
-            (cl-flet ((redraw ()
-                        (lme-popup--fill popup (lme-popup-menu-text items width highlight))
-                        (redisplay t)))
-              (track-mouse
-                (catch 'done
-                  (while t
-                    (let ((event (lme-popup--read)))
-                      (cond
-                       ((lme-popup--cancel-p event) (throw 'done nil))
-                       ((lme-popup--confirm-p event)
-                        (when highlight (setq choice (nth highlight items)))
-                        (throw 'done nil))
-                       ((memq event '(down ?\C-n))
-                        (setq highlight (lme-popup--step items highlight 1)) (redraw))
-                       ((memq event '(up ?\C-p))
-                        (setq highlight (lme-popup--step items highlight -1)) (redraw))
-                       ((mouse-movement-p event)
-                        (let ((index (lme-popup--menu-index event popup items)))
-                          (unless (eql index highlight)
-                            (setq highlight index)
-                            (redraw))))
-                       ((lme-popup--press-p event)
-                        (unless (lme-popup--over event popup)
-                          (throw 'done nil)))
-                       ((lme-popup--release-p event)
-                        (when-let* ((index (lme-popup--menu-index event popup items)))
-                          ;; As Mac OS 9 did, the chosen item blinks once.
-                          (setq highlight nil) (redraw) (sit-for 0.05)
-                          (setq highlight index) (redraw) (sit-for 0.05)
-                          (setq choice (nth index items))
-                          (throw 'done nil))))))))))
-        (lme-popup--dispose popup))
+            (push (lme-popup--level items x y align) levels)
+            (setq choice (lme-popup--menu-loop (lambda () levels)
+                                               (lambda (new) (setq levels new)))))
+        (dolist (level levels)
+          (lme-popup--dispose (plist-get level :frame))))
       (lme-popup--run choice))))
+
+(defun lme-popup--menu-loop (get set)
+  "Read events for the open menu levels until one item is chosen; return it.
+GET returns the levels, deepest first, and SET replaces them; a level
+closed is disposed of here.  The keys act on the level in focus, which
+the mouse takes along and Right and Left move into a submenu and out:
+moving through a menu shows a submenu beside its item, as Mac OS 9 did,
+without entering it."
+  (let ((focus (car (funcall get))))
+    (cl-labels
+        ((levels () (funcall get))
+         (redraw (level) (lme-popup--draw-level level) (redisplay t))
+         (close-to (level)
+           ;; Close every level deeper than LEVEL.
+           (let ((open (levels)))
+             (while (and open (not (eq (car open) level)))
+               (lme-popup--dispose (plist-get (car open) :frame))
+               (setq open (cdr open)))
+             (funcall set open)))
+         (highlight (level index)
+           (unless (eql (plist-get level :highlight) index)
+             (close-to level)
+             (plist-put level :highlight index)
+             (redraw level)
+             (let ((item (and index (nth index (plist-get level :items)))))
+               (when-let* ((submenu (and item (lme-popup--submenu item))))
+                 (funcall set (cons (lme-popup--level
+                                     submenu
+                                     (+ (plist-get level :x) (plist-get level :width) -2)
+                                     (+ (plist-get level :y) (lme-popup--row-y level index) -1))
+                                    (levels)))))))
+         (item (level)
+           (when-let* ((index (plist-get level :highlight)))
+             (nth index (plist-get level :items))))
+         (child (level)
+           ;; The level opened from LEVEL's highlighted item, if any.
+           (let ((open (levels)) (found nil))
+             (while (and open (cdr open))
+               (when (eq (cadr open) level) (setq found (car open)))
+               (setq open (cdr open)))
+             found))
+         (enter (level)
+           ;; Move the focus into the submenu LEVEL's item opened.
+           (when-let* ((inner (child level)))
+             (setq focus inner)
+             (highlight inner (lme-popup--step (plist-get inner :items) nil 1))))
+         (under (event)
+           (seq-find (lambda (level) (lme-popup--over event (plist-get level :frame)))
+                     (levels))))
+      (track-mouse
+        (catch 'done
+          (while t
+            (let ((event (lme-popup--read)))
+              (cond
+               ((lme-popup--cancel-p event) (throw 'done nil))
+               ((memq event '(down ?\C-n))
+                (highlight focus (lme-popup--step (plist-get focus :items)
+                                                  (plist-get focus :highlight) 1)))
+               ((memq event '(up ?\C-p))
+                (highlight focus (lme-popup--step (plist-get focus :items)
+                                                  (plist-get focus :highlight) -1)))
+               ((memq event '(right ?\C-f))
+                (enter focus))
+               ((memq event '(left ?\C-b))
+                (let ((parent (cadr (memq focus (levels)))))
+                  (when parent
+                    (close-to focus)
+                    (plist-put focus :highlight nil)
+                    (redraw focus)
+                    (setq focus parent))))
+               ((lme-popup--confirm-p event)
+                (let ((chosen (item focus)))
+                  (cond ((null chosen))
+                        ((lme-popup--submenu chosen) (enter focus))
+                        (t (throw 'done chosen)))))
+               ((mouse-movement-p event)
+                (when-let* ((level (under event)))
+                  (setq focus level)
+                  (highlight level (lme-popup--level-index event level))))
+               ((lme-popup--press-p event)
+                (unless (under event)
+                  (throw 'done nil)))
+               ((lme-popup--release-p event)
+                (when-let* ((level (under event))
+                            (index (lme-popup--level-index event level))
+                            (chosen (nth index (plist-get level :items))))
+                  (unless (lme-popup--submenu chosen)
+                    ;; As Mac OS 9 did, the chosen item blinks once.
+                    (plist-put level :highlight nil) (redraw level) (sit-for 0.05)
+                    (plist-put level :highlight index) (redraw level) (sit-for 0.05)
+                    (throw 'done chosen))))))))))))
 
 (defun lme-popup--run (item)
   "Run the action of menu ITEM, when there is one; return ITEM."
@@ -368,11 +469,144 @@ nil when the menu was cancelled."
   item)
 
 (defun lme-popup--menu-fallback (items)
-  "Choose among ITEMS in the minibuffer, as a menu where none can be drawn."
-  (let* ((choices (seq-filter #'lme-popup--enabled-p items))
-         (label (completing-read "Menu: " (mapcar (lambda (item) (plist-get item :label)) choices)
-                                 nil t)))
-    (lme-popup--run (seq-find (lambda (item) (equal (plist-get item :label) label)) choices))))
+  "Choose among ITEMS in the minibuffer, as a menu where none can be drawn.
+Submenus are followed down, their items' labels joined with \" › \"."
+  (let ((choices nil))
+    (cl-labels ((collect (items prefix)
+                  (dolist (item items)
+                    (cond ((lme-popup--submenu item)
+                           (collect (lme-popup--submenu item)
+                                    (concat prefix (plist-get item :label) " › ")))
+                          ((lme-popup--enabled-p item)
+                           (push (cons (concat prefix (plist-get item :label)) item)
+                                 choices))))))
+      (collect items ""))
+    (let ((label (completing-read "Menu: " (reverse choices) nil t)))
+      (lme-popup--run (cdr (assoc label choices))))))
+
+;;;; Emacs's menus
+
+(defun lme-popup--eval (form)
+  "Return FORM's value, nil when it signals: a menu item's condition."
+  (condition-case nil (eval form t) (error nil)))
+
+(defun lme-popup--keymap-item (binding)
+  "Return the menu item of BINDING, an entry of a menu keymap, or nil.
+A separator becomes `separator'; an item hidden by its :visible form, or
+an entry that is not a menu item, nothing."
+  (pcase binding
+    ((pred stringp)
+     (when (string-prefix-p "--" binding) 'separator))
+    (`(menu-item ,name . ,rest)
+     (let ((name (if (stringp name) name (lme-popup--eval name)))
+           (real (car rest))
+           (props (cdr rest)))
+       (cond
+        ((and (plist-member props :visible)
+              (not (lme-popup--eval (plist-get props :visible))))
+         nil)
+        ((and (stringp name) (string-prefix-p "--" name)) 'separator)
+        ((not (stringp name)) nil)
+        (t
+         (let* ((real (if-let* ((filter (plist-get props :filter)))
+                          (funcall filter real)
+                        real))
+                (submenu (and real (keymapp real) (not (commandp real))
+                              (lme-popup--keymap-map real)))
+                (button (plist-get props :button)))
+           `(:label ,name
+             :action ,(unless submenu real)
+             ,@(when submenu
+                 `(:submenu ,(let ((map submenu))
+                               (lambda () (lme-popup-keymap-items map)))))
+             :enabled ,(and (or submenu real)
+                            (or (not (plist-member props :enable))
+                                (lme-popup--eval (plist-get props :enable)))
+                            t)
+             ,@(when button `(:checked ,(and (lme-popup--eval (cdr button)) t)))
+             ,@(when-let* ((keys (plist-get props :keys)))
+                 `(:key ,(substitute-command-keys keys)))))))))
+    (`(,(and name (pred stringp)) . ,rest)
+     (if (string-prefix-p "--" name)
+         'separator
+       (let ((real (if (stringp (car-safe rest)) (cdr rest) rest)))
+         (lme-popup--keymap-item `(menu-item ,name ,real)))))))
+
+(defun lme-popup--keymap-map (binding)
+  "Return BINDING as a keymap, following a symbol to its function."
+  (let ((map (indirect-function binding)))
+    (and (keymapp map) map)))
+
+(defun lme-popup-keymap-items (keymap)
+  "Return the items of menu KEYMAP, as `lme-popup-menu' takes them.
+Items come in the keymap's order, as Emacs shows them; separators are
+not doubled nor left at either end."
+  (let ((items nil) (seen nil))
+    (map-keymap (lambda (key binding)
+                  (unless (memq key seen)
+                    (push key seen)
+                    (when-let* ((item (lme-popup--keymap-item binding)))
+                      (push item items))))
+                (lme-popup--keymap-map keymap))
+    (let ((cleaned nil))
+      (dolist (item (nreverse items))
+        (unless (and (eq item 'separator)
+                     (or (null cleaned) (eq (car cleaned) 'separator)))
+          (push item cleaned)))
+      (when (eq (car cleaned) 'separator) (pop cleaned))
+      (nreverse cleaned))))
+
+(defun lme-popup--frame-xy (position)
+  "Return POSITION as (X . Y) in its frame: an event, a posn, or nil (the mouse)."
+  (let ((posn (cond ((posnp position) position)
+                    ((eventp position) (event-start position))
+                    ((integerp position) (posn-at-point position))
+                    (t nil))))
+    (if-let* ((window (and posn (posn-window posn)))
+              ((windowp window))
+              (xy (posn-x-y posn)))
+        (let ((edges (window-pixel-edges window))
+              (body (window-body-pixel-edges window)))
+          (cons (+ (car body) (car xy))
+                (+ (if (memq (posn-area posn) '(mode-line header-line tab-line))
+                       (nth 1 edges)
+                     (nth 1 body))
+                   (cdr xy))))
+      (cdr (mouse-pixel-position)))))
+
+(defun lme-popup-keymap-menu (keymap &optional position)
+  "Pop up menu KEYMAP at POSITION as a Mac OS 9 menu and run what is chosen.
+POSITION is an event, a posn, a buffer position or nil for the mouse."
+  (pcase-let ((`(,x . ,y) (lme-popup--frame-xy position)))
+    (lme-popup-menu (lme-popup-keymap-items keymap) (1+ x) (1+ y))))
+
+(defun lme-popup-context-menu (event)
+  "Pop up the context menu for mouse EVENT, as Mac OS 9's contextual menus.
+The menu is Emacs's own, `context-menu-map', drawn as a Platinum menu."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (when (windowp window)
+      (select-window window))
+    (lme-popup-keymap-menu (context-menu-map event) event)))
+
+(defun lme-popup--popup-menu (popup-menu menu &optional position prefix from-menu-bar)
+  "Draw MENU as a Mac OS 9 menu where `popup-menu' would pop up a native one.
+POPUP-MENU is the original, called for menus from the menu bar, lists
+of keymaps, and where no popup can be drawn; POSITION, PREFIX and
+FROM-MENU-BAR are its arguments."
+  (let ((map (cond ((keymapp menu) menu)
+                   ((and (consp menu) (stringp (car menu)))
+                    (easy-menu-create-menu (car menu) (cdr menu))))))
+    (if (or from-menu-bar (not map) (not (lme-popup-available-p)))
+        (funcall popup-menu menu position prefix from-menu-bar)
+      (let ((current-prefix-arg prefix))
+        (plist-get (lme-popup-keymap-menu map position) :action)))))
+
+(defun lme-popup-enable ()
+  "Draw right-click menus and `popup-menu's as Mac OS 9 menus."
+  (keymap-global-set "<down-mouse-3>" #'lme-popup-context-menu)
+  (keymap-global-set "<mouse-3>" #'ignore)
+  (advice-add 'popup-menu :around #'lme-popup--popup-menu))
 
 ;;;; Alerts
 
