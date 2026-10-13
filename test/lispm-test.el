@@ -1078,6 +1078,159 @@ starts is, so its schema is made outside the call that loaded it."
       (should (string-match-p "timeout" (car result)))
       (should (cdr result)))))
 
+(ert-deftest lispm-test-tool-interrupted ()
+  "C-g interrupts a call, also where Emacs inhibits quitting; the call fails."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project)))
+      (lispm-register-tool
+       (lispm-tool--create :name "lispm_test_quit" :description "Quit." :params nil
+                           :function (lambda () (signal 'quit nil))))
+      (unwind-protect
+          (progn
+            (should (equal (lispm-test--call agent "lispm_test_quit" nil)
+                           (cons lispm-tools--interrupted t)))
+            (should (equal (lispm-test--call agent "eval_elisp" '((code . "(signal 'quit nil)")))
+                           (cons lispm-tools--interrupted t)))
+            ;; Timers and process sentinels, where calls run, inhibit quitting.
+            (should (equal (let ((inhibit-quit t))
+                             (lispm-test--call agent "eval_elisp" '((code . "inhibit-quit"))))
+                           '("=> nil" . nil))))
+        (remhash "lispm_test_quit" lispm-tools--registry)))))
+
+(ert-deftest lispm-test-interrupted-call-in-turn ()
+  "A call interrupted with C-g fails, and the turn goes on."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((exec . auto))))
+          reply)
+      ;; As if C-g were pressed while the call runs: from the timer that
+      ;; delivers the response, where quitting is inhibited.
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "eval_elisp"
+                                                   '((why . "w")
+                                                     (code . "(setq quit-flag t) (dotimes (_ 100000) (ignore)) 'finished"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Stopped.")))))
+      (lispm-tell agent "loop" :callback (lambda (r) (setq reply r)))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not quit-flag)
+      (should (equal reply "Stopped."))
+      (should (string-match-p "^\\*\\* FAILED eval_elisp" (lispm-test--transcript agent)))
+      (let ((results (alist-get 'content (aref (alist-get 'messages (car lispm-test--requests)) 2))))
+        (should (string-match-p "Interrupted: the user pressed C-g"
+                                (alist-get 'content (aref results 0))))))))
+
+(defmacro lispm-test--never-asking (&rest body)
+  "Run BODY, failing if it asks the user anything."
+  (declare (indent 0))
+  `(cl-letf* ((asked (lambda (&rest args) (error "Asked the user: %S" args)))
+              ((symbol-function 'yes-or-no-p) asked)
+              ((symbol-function 'y-or-n-p) asked)
+              ((symbol-function 'ask-user-about-supersession-threat) asked)
+              ((symbol-function 'read-char-choice) asked))
+     ,@body))
+
+(defun lispm-test--change-on-disk (file text)
+  "Make FILE hold TEXT, as another program would, a moment later."
+  (call-process "sh" nil nil nil "-c" "printf %s \"$1\" > \"$2\"" "sh" text file)
+  ;; Within a second, a file's time may not tell the change.
+  (set-file-times file (time-add nil 10)))
+
+(defun lispm-test--disk (file)
+  "FILE's text on disk, whatever buffer visits it."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (buffer-string)))
+
+(ert-deftest lispm-test-files-changed-on-disk ()
+  "Tools see a file as it is on disk although a buffer visits it, and never ask."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+          (file (expand-file-name "a.txt" project)))
+      (lispm-test--never-asking
+        (with-temp-file file (insert "one\n"))
+        (find-file-noselect file)
+        ;; A buffer without unsaved changes is reverted.
+        (lispm-test--change-on-disk file "two\n")
+        (should (equal (lispm-test--call agent "read_file" '((path . "a.txt")))
+                       '("     1\ttwo" . nil)))
+        (should (equal (with-current-buffer (find-buffer-visiting file) (buffer-string)) "two\n"))
+        (lispm-test--change-on-disk file "three\n")
+        (should (equal (lispm-test--call agent "edit_file"
+                                         '((path . "a.txt") (old_text . "three") (new_text . "3")))
+                       '("Replaced 1 occurrence in a.txt." . nil)))
+        (should (equal (lispm-test--disk file) "3\n"))
+        ;; Searches read the file, not an out-of-date buffer.
+        (lispm-test--change-on-disk file "four\n")
+        (let (result)
+          (let ((lispm-current-agent agent))
+            (lispm-tool-invoke (lispm-get-tool "search_files") '((pattern . "four"))
+                               (lambda (text errorp) (setq result (cons text errorp)))))
+          (should (lispm-test--wait (lambda () result)))
+          (should (equal result '("a.txt:1:four" . nil))))
+        ;; Unsaved changes and a change on disk: a conflict, reported, nothing lost.
+        (with-current-buffer (find-buffer-visiting file)
+          (revert-buffer t t t)
+          (goto-char (point-max))
+          (insert "mine\n"))
+        (lispm-test--change-on-disk file "five\n")
+        (let ((result (lispm-test--call agent "edit_file"
+                                        '((path . "a.txt") (old_text . "five") (new_text . "5")))))
+          (should (cdr result))
+          (should (string-match-p "changed on disk.*unsaved changes" (car result))))
+        (should (equal (lispm-test--disk file) "five\n"))
+        (should (equal (with-current-buffer (find-buffer-visiting file) (buffer-string))
+                       "four\nmine\n"))
+        (should (string-match-p "\\`\\[open in Emacs, unsaved changes; the file changed on disk too\\]\n.*four"
+                                (car (lispm-test--call agent "read_file" '((path . "a.txt"))))))
+        ;; A file deleted on disk is gone, whatever its buffer holds.
+        (with-current-buffer (find-buffer-visiting file) (revert-buffer t t t))
+        (delete-file file)
+        (should (string-match-p "No such file" (car (lispm-test--call agent "read_file" '((path . "a.txt"))))))
+        (should (string-match-p "No such file"
+                                (car (lispm-test--call agent "edit_file"
+                                                       '((path . "a.txt") (old_text . "five")
+                                                         (new_text . "5"))))))
+        (should (equal (lispm-test--call agent "write_file" '((path . "a.txt") (content . "six\n")))
+                       '("Created a.txt." . nil)))
+        (should (equal (lispm-test--disk file) "six\n"))))))
+
+(ert-deftest lispm-test-shell-reverts-buffers ()
+  "After a shell command, buffers show what it did to their files."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (clean (expand-file-name "clean.txt" project))
+          (edited (expand-file-name "edited.txt" project))
+          result)
+      (lispm-test--never-asking
+        (with-temp-file clean (insert "old\n"))
+        (with-temp-file edited (insert "old\n"))
+        (find-file-noselect clean)
+        (with-current-buffer (find-file-noselect edited) (insert "mine\n"))
+        (let ((lispm-current-agent agent))
+          (lispm-tool-invoke (lispm-get-tool "run_shell")
+                             ;; touch -t: a later time than the buffers know, within a second.
+                             '((command . "printf 'new\\n' > clean.txt; printf 'new\\n' > edited.txt; touch -t 203001010000 clean.txt edited.txt"))
+                             (lambda (text errorp) (setq result (cons text errorp)))))
+        (should (lispm-test--wait (lambda () result)))
+        (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "new\n"))
+        ;; Unsaved changes are left alone.
+        (should (equal (with-current-buffer (find-buffer-visiting edited) (buffer-string)) "mine\nold\n"))))))
+
+(ert-deftest lispm-test-memory-changed-on-disk ()
+  "Memory a person changed on disk, by hand or with git, is kept, without a question."
+  (lispm-test-env
+    (let ((agent (lispm-defagent keeper :root project)))
+      (lispm-test--never-asking
+        (lispm-test--call agent "remember" '((title . "First") (content . "a")))
+        (let ((file (lispm-memory-file agent)))
+          (lispm-test--change-on-disk file (concat (lispm-test--disk file) "* By hand\nb\n"))
+          (should-not (cdr (lispm-test--call agent "remember" '((title . "Second") (content . "c")))))
+          (let ((text (lispm-test--disk file)))
+            (should (string-match-p "^\\* First$" text))
+            (should (string-match-p "^\\* By hand$" text))
+            (should (string-match-p "^\\* Second$" text))))))))
+
 ;;;; The loop
 
 (ert-deftest lispm-test-turn-with-approval ()

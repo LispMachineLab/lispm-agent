@@ -66,8 +66,10 @@ SCOPE `project' (the default) is shared by the agents of its project;
   (expand-file-name "tasks.org" (lispm-project-directory (lispm-agent-root agent))))
 
 (defun lispm-memory--visit (file header)
-  "Buffer visiting FILE, created with HEADER if new."
-  (let ((buffer (find-file-noselect file)))
+  "Buffer visiting FILE, created with HEADER if new.
+The user may change the file too, by hand or with git: a buffer out of
+date is brought up to date first (see `lispm-tools--sync')."
+  (let ((buffer (lispm-tools--visit file)))
     (with-current-buffer buffer
       (when (zerop (buffer-size))
         (insert header)
