@@ -673,8 +673,8 @@ Code blocks lose their fences and keep their lines as they are."
 (defun lispm-chat-no ()
   "Deny the call, saying what to do instead; or stop at the condition."
   (interactive)
-  (if (lispm-chat--condition)
-      (lispm-chat-restart 'abort)
+  (if-let* ((condition (lispm-chat--condition)))
+      (lispm-chat-restart (lispm--stop-restart condition))
     (let ((id (lispm-chat--waiting))
           (reason (read-string "What should it do instead? (optional) ")))
       (lispm-resolve lispm-chat-agent id 'deny reason)))

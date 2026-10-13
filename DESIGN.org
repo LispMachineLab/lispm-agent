@@ -285,17 +285,23 @@ calls is only a cache of what the transcript says.
 
 *Restarts: a stopped turn waits.* On a Lisp Machine an error does not end the computation: the
 debugger shows it and offers proceed options. In LispM a turn that stops early, because a request
-failed after its retries or could not be made (no backend, say), or because it reached
-~lispm-max-steps~, does not end either: it waits at a *condition*, as a call waits for approval,
+failed after its retries or could not be made (no backend, say), because it reached
+~lispm-max-steps~, or because a response was cut short, refused or paused, does not end
+either: it waits at a *condition*, as a call waits for approval,
 until a *restart* is chosen (~lispm-signal~, ~lispm-condition-types~). The condition is a
 top-level heading, ~* WAITING Condition: Request failed~, whose properties name its type, its
 id and its restarts and whose body is the message. No role claims it, so the model never sees
 it. Its restarts:
 
-| Condition        | Restarts, default first                                                  |
-|------------------+--------------------------------------------------------------------------|
-| ~request-failed~ | ~retry~ the same request; ~use-model~: another backend or model; ~abort~ |
-| ~step-limit~     | ~continue~ for as many requests again; ~abort~                           |
+| Condition           | Signaled when                                        | Restarts, default first                                   |
+|---------------------+------------------------------------------------------+-----------------------------------------------------------|
+| ~request-failed~    | a request fails after its retries, or cannot be made | ~retry~; ~use-model~: another backend or model; ~abort~   |
+| ~step-limit~        | a turn reaches ~lispm-max-steps~ requests            | ~continue~ for as many again; ~abort~                     |
+| ~output-limit~      | a response hits the output limit                     | ~retry-larger~: drop it, twice the limit; ~keep~; ~abort~ |
+| ~context-full~      | a response fills the context window                  | ~compact~, then go on; ~keep~; ~abort~                    |
+| ~refused~           | the model refuses                                    | ~retry~: drop it, ask again; ~abort~                      |
+| ~paused~            | the model pauses (~pause_turn~)                      | ~continue~; ~abort~                                       |
+| ~compaction-failed~ | a handover fails                                     | ~retry~; ~skip~: carry on in the long session             |
 
 They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
 in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
@@ -305,11 +311,19 @@ written in the chat, one written in org under a new ~* User~ heading after the c
 ~/clear~, ~/compact~. In Lisp, ~lispm-restart~ chooses one, and handlers choose without asking,
 as ~handler-bind~ would, at once or after a delay, at most so many times in a turn, then perhaps
 another restart: ~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
-started go by ~lispm-condition-handlers~, none by default: they wait for the user. Turns started
+started go by ~lispm-condition-handlers~: they wait for the user, except that a paused response
+goes on. Turns started
 by another agent's message (a helper's) or by an event (a hook, a timer) go by
 ~lispm-unattended-condition-handlers~, since nobody may be watching and someone, or the next
 event, waits for them: by default a failed request is tried again twice, a minute apart, then
-the turn stops, as one reaching the step limit does at once.
+the turn stops, as one reaching the step limit or refused does at once; a response cut short is
+asked for again with twice the limit, or the session handed over, once; a paused one goes on; a
+failed handover is skipped. Dropping a response (~retry-larger~, ~refused~'s ~retry~,
+~compact~) tags its ~* Assistant~ section ~:ignore:~: it stays on record, no longer sent; a
+raised limit holds for the rest of the turn. ~keep~ and ~continue~ tell the model to go on in an
+~* Event:~ of their own. ~compact~ hands the session over in the middle of the turn, which goes
+on from the summary; a condition that stops a turn in its middle says so (~:RESUME: t~), so that
+~skip~ goes on with it.
 
 A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
 given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and
@@ -560,9 +574,10 @@ removed at once.
 - *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
   are not journaled. Next step: snapshot the project's git repository with ~git stash create~
   at the start of each turn, extending rollback to any file change.
-- *Handovers happen between turns only*: a single turn that outgrows the model's context still
-  fails. Directions: handing over at request boundaries inside a turn, and server-side
-  compaction with the first-party API.
+- *Handovers inside a turn wait for a response to fill the context*: a turn that outgrows the
+  model's context hands over once a response stops with the window full (~context-full~), not
+  before; a request whose input alone is too large fails instead (~request-failed~). Direction:
+  server-side compaction with the first-party API.
 - *More Emacs-native tools*: xref/LSP queries, magit operations, org-babel execution, window
   layout: each is just a ~lispm-deftool~ away.
 - *A shared blackboard*: an org file every agent can read and write, as a collaboration

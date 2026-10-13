@@ -110,15 +110,17 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
   "A top-level section with heading TITLE and body TEXT."
   (concat "* " title "\n" (lispm-transcript--body text)))
 
-(defun lispm-transcript-condition (title id type restarts message)
+(defun lispm-transcript-condition (title id type restarts message &optional resume)
   "Section of a condition awaiting a restart.
 TITLE says what happened; ID and TYPE identify the condition, RESTARTS
-are the names of the restarts it offers, MESSAGE says why."
+are the names of the restarts it offers, MESSAGE says why.  RESUME
+non-nil records that it stopped a turn in the middle, not between two."
   (concat "* WAITING Condition: " title "\n"
           ":PROPERTIES:\n"
           ":CONDITION: " (symbol-name type) "\n"
           ":CONDITION_ID: " id "\n"
           ":RESTARTS: " (mapconcat #'symbol-name restarts " ") "\n"
+          (if resume ":RESUME: t\n" "")
           ":END:\n"
           (lispm-transcript--body message)))
 
@@ -497,7 +499,7 @@ heading starts."
 Nil if that section is not a condition.  Otherwise a plist: :id,
 :type, :title, :state (its TODO keyword), :restarts, :restart (the
 one chosen, once it is) and :value (the value it was given, if any),
-:message and :pos (HBEG)."
+:resume (see `lispm-transcript-condition'), :message and :pos (HBEG)."
   (let* ((heading (lispm-transcript--heading hbeg))
          (title (or (plist-get heading :title) "")))
     (when (string-match "\\`Condition: \\(.*\\)\\'" title)
@@ -515,6 +517,7 @@ one chosen, once it is) and :value (the value it was given, if any),
               :restarts (mapcar #'intern (split-string (or (cdr (assoc "RESTARTS" props)) "")))
               :restart (and restart (intern restart))
               :value (and value (ignore-errors (car (read-from-string value))))
+              :resume (and (assoc "RESUME" props) t)
               :message (lispm-transcript--text text end)
               :pos hbeg)))))
 
