@@ -180,7 +180,9 @@
    'platinum
    `(lme-platinum-colors '(:chrome ,platinum :header ,platinum-light
                            :light ,white :shade ,shadow :frame ,frame
-                           :muted ,muted :accent ,lavender))))
+                           :muted ,muted :accent ,lavender
+                           ;; Mac OS 8's default desktop, its blue-violet.
+                           :desktop "#6666AA"))))
 
 (provide-theme 'platinum)
 

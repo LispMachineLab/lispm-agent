@@ -121,10 +121,12 @@ See `lme-platinum--derive-palette'.")
 CONTENT and TEXT are the editor's background and foreground, DIM its
 dimmed text, ACCENT its highlight colour.  The chrome is the content a
 shade darker; a bevel's lit edge leans toward the text, its shaded edge
-toward black, and frames are darker still."
+toward black, and frames are darker still.  The desktop behind the
+windows is the content tinted with the accent."
   (let ((chrome (lme-tab-bar--blend content "#000000" 0.25)))
     (list :content content :text text :dim dim :accent accent
           :chrome chrome
+          :desktop (lme-tab-bar--blend content accent 0.25)
           :header (lme-tab-bar--blend chrome content 0.5)
           :light (lme-tab-bar--blend chrome text 0.3)
           :shade (lme-tab-bar--blend chrome "#000000" 0.6)
@@ -600,11 +602,14 @@ box held down, if any."
 
 ;;;; Title bar commands
 
+(declare-function lme-desktop-show "lme-desktop" (&optional window))
+
 (defun lme-platinum-close-window (window)
   "Close WINDOW as Mac OS closed a window: put its document away.
 A sidebar is hidden.  Otherwise WINDOW's buffer is killed, once an
 alert has asked about unsaved changes or a running process, and WINDOW
-goes too when other windows remain in the main area."
+goes too when other windows remain in the main area; the last one shows
+the desktop."
   (cond
    ((buffer-local-value 'lme-platinum-close-function (window-buffer window))
     (funcall (buffer-local-value 'lme-platinum-close-function (window-buffer window)) window))
@@ -616,9 +621,13 @@ goes too when other windows remain in the main area."
       (when (lme-platinum--confirm-close buffer)
         (let ((kill-buffer-query-functions nil))
           (kill-buffer buffer))
-        (when (and (window-live-p window)
-                   (cdr (lme-main-area--windows)))
-          (delete-window window)))))))
+        ;; The main area's last window uncovers the desktop, as closing
+        ;; Mac OS 9's last window did; any other window goes.
+        (when (window-live-p window)
+          (if (cdr (lme-main-area--windows))
+              (delete-window window)
+            (when (fboundp 'lme-desktop-show)
+              (lme-desktop-show window)))))))))
 
 (defun lme-platinum--confirm-close (buffer)
   "Ask, as Mac OS 9 asked, whether BUFFER may close; return non-nil if so.
@@ -764,7 +773,7 @@ Where images cannot be shown, a plain λ stands in."
     (:label "Send Region to Agent" :action lme-agent-send-region :enabled ,(use-region-p))
     separator
     (:label "New Shell" :action lme-shell-new)
-    ,@(when (lme-platinum--browser-p) '((:label "Browser" :action lme-browser)))
+    ,@(when (lme-platinum--browser-p) '((:label "Browser" :action lme-browser-show)))
     (:label "Magit Status" :action magit-status)
     separator
     (:label "Dracula" :action ,(lambda () (lme-set-theme 'dracula))
@@ -1050,14 +1059,15 @@ only its empty track."
 
 (defun lme-platinum--scroll-window-p (window)
   "Return non-nil when WINDOW gets a scroll bar.
-Every window of the main area does but sessions and the browser's page;
-of side windows, only the sidebar's lists."
+Every window of the main area does but sessions, the browser's page and
+the desktop; of side windows, only the sidebar's lists."
   (let ((buffer (window-buffer window)))
     (and (not (window-minibuffer-p window))
          (not (window-parameter window 'lme-chrome))
          (not (lme-terminal-buffer-p buffer))
-         (not (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
-                                       'xwidget-webkit-mode))
+         (not (let ((mode (buffer-local-value 'major-mode buffer)))
+                (or (provided-mode-derived-p mode 'xwidget-webkit-mode)
+                    (provided-mode-derived-p mode 'lme-desktop-mode))))
          (or (not (window-parameter window 'window-side))
              (lme-sidebar-buffer-view buffer)
              (eq (buffer-local-value 'major-mode buffer) 'treemacs-mode)))))

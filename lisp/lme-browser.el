@@ -547,17 +547,21 @@ globe until the icon is known and when the page has none."
     (xwidget-webkit-browse-url lme-browser-home-url t))
   (lme-browser--sync t))
 
+(declare-function lme-desktop-show "lme-desktop" (&optional window))
+
 (defun lme-browser-close-tab (buffer)
   "Close browser tab BUFFER without asking, then show another tab.
-Closing the last tab opens a new one, so the browser never goes blank."
+Closing the last tab closes the browser window too, address and all, and
+uncovers the desktop, as closing Mac OS 9's last window did."
   (let ((window (lme-browser--window))
         (kill-buffer-query-functions nil))
     (kill-buffer buffer)
     (if-let* ((next (car (lme-browser--buffers))))
         (when (window-live-p window) (set-window-buffer window next))
+      (when-let* ((address (lme-browser--address-window)))
+        (delete-window address))
       (when (window-live-p window)
-        (with-selected-window window
-          (xwidget-webkit-browse-url lme-browser-home-url t)))))
+        (lme-desktop-show window))))
   (lme-browser--sync t))
 
 ;;;;; Layout and synchronisation
@@ -634,24 +638,31 @@ The address window is fitted to its lines, see `lme-browser--fit-address'."
     (unless lme-browser--sync-timer
       (setq lme-browser--sync-timer (run-with-timer 0.7 0.7 #'lme-browser--sync)))))
 
+(defun lme-browser-show ()
+  "Show the browser: its workspace, with the most recent tab in the main area
+under the address window, opening `lme-browser-home-url' when there is no
+tab.  The desktop's Browser icon runs this."
+  (interactive)
+  (let ((fresh (lme-workspace-enter lme-browser-workspace-name))
+        (browser (car (lme-browser--buffers))))
+    (cond ((and browser fresh) (lme-workspace-show-alone browser))
+          (browser (unless (get-buffer-window browser)
+                     (select-window (lme-agent--main-window))
+                     (pop-to-buffer-same-window browser)))
+          (t (select-window (lme-agent--main-window))
+             (xwidget-webkit-browse-url lme-browser-home-url t)
+             (when fresh (tabspaces-reset-buffer-list))))
+    (lme-browser--ensure-layout))
+  (force-mode-line-update t))
+
 (defun lme-browser ()
   "Switch to the browser workspace, or back to the previous one when there.
-The workspace shows the most recent browser tab in the main area under the
-address window, opening `lme-browser-home-url' when there is no tab."
+The menu bar's Web title runs this; see `lme-browser-show'."
   (interactive)
   (if (lme-browser-workspace-p)
-      (tab-bar-switch-to-recent-tab)
-    (let ((fresh (lme-workspace-enter lme-browser-workspace-name))
-          (browser (car (lme-browser--buffers))))
-      (cond ((and browser fresh) (lme-workspace-show-alone browser))
-            (browser (unless (get-buffer-window browser)
-                       (select-window (lme-agent--main-window))
-                       (pop-to-buffer-same-window browser)))
-            (t (select-window (lme-agent--main-window))
-               (xwidget-webkit-browse-url lme-browser-home-url t)
-               (when fresh (tabspaces-reset-buffer-list))))
-      (lme-browser--ensure-layout)))
-  (force-mode-line-update t))
+      (progn (tab-bar-switch-to-recent-tab)
+             (force-mode-line-update t))
+    (lme-browser-show)))
 
 (defun lme-browser--arrow-pointer (buffer)
   "Show the arrow mouse pointer over the page in browser BUFFER.

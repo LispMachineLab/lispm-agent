@@ -16,11 +16,16 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   for the browser.  At its right end, Emacs's own load average, mail flag, battery and time,
   each a title with a menu of its own (the Mail menu reads, composes and checks mail), then the
   Application menu, which names the current workspace and lists the others.
+- *A desktop* behind the windows, in the theme's colours tinted with its accent (Mac OS 8's
+  blue-violet under Platinum): Emacs starts on it, a new workspace opens on it, and closing the
+  last window uncovers it.  Its icons stand down the right edge as Mac OS 9's did, the home disk
+  and the browser at the top and the Trash in the bottom corner; click one to select it,
+  double-click it (or press Return) to open it.
 - *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
   collapse box.  Only the active window shows stripes and boxes, and a box is pressed, not
   clicked: it sinks while held and acts when let go over it.  The close box puts the window's
-  buffer away, the zoom box gives the window the whole main area and back, and the collapse box
-  rolls it up to its title bar.  Double-click a title bar to roll the window up (or zoom one alone
+  buffer away (the last window's leaves the desktop), the zoom box gives the window the whole
+  main area and back, and the collapse box rolls it up to its title bar.  Double-click a title bar to roll the window up (or zoom one alone
   in its column); drag it onto another window to swap the two (sessions only with sessions);
   Command-click it for the workspace's buffers.
 - *Scroll bars*: Mac OS 9's, down each window's right edge: arrow boxes at both ends, a recessed
@@ -41,9 +46,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
 - *A browser*, when Emacs is built with xwidgets, in a workspace of its own: click Web to go to
-  it and again to come back.  Its window is a Mac OS 9 browser window: a title bar naming the
-  page, a toolbar of bevel buttons, the address in an edit field and a row of tabs.  A view
-  asked for while browsing opens back in the project's workspace.
+  it and again to come back, or open it from the desktop; closing its last tab leaves the
+  desktop.  Its window is a Mac OS 9 browser window: a title bar naming the page, a toolbar of
+  bevel buttons, the address in an edit field and a row of tabs.  A view asked for while
+  browsing opens back in the project's workspace.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents

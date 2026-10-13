@@ -214,6 +214,66 @@ front; without xwidgets it is left out."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
     (should-not (memq 'lme-view-web (lme-test--menu-bar-titles)))))
 
+(ert-deftest lme-test-desktop-darkens-selected-icons ()
+  "A selected icon is its SVG with every colour halved."
+  (should (equal (lme-desktop--darken "<rect fill=\"#FF8040\"/><rect fill=\"#000000\"/>")
+                 "<rect fill=\"#7F4020\"/><rect fill=\"#000000\"/>")))
+
+(ert-deftest lme-test-desktop-items ()
+  "The browser's icon shows where the browser can run; the Trash is last."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home trash))))
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home browser trash)))))
+
+(ert-deftest lme-test-desktop-selects-and-names ()
+  "The arrow keys step through the icons, wrapping; the selected name is
+inverted."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (save-window-excursion
+      (lme-desktop-show)
+      (with-current-buffer (lme-desktop-buffer)
+        (setq lme-desktop--selected nil)
+        (lme-desktop-select-next)
+        (should (eq lme-desktop--selected 'home))
+        (lme-desktop-select-previous)
+        (should (eq lme-desktop--selected 'trash))
+        (lme-desktop-select-previous)
+        (should (eq lme-desktop--selected 'home))
+        (goto-char (point-min))
+        (search-forward "Home")
+        (should (eq (get-text-property (1- (point)) 'face) 'lme-desktop-label-selected))
+        (search-forward "Trash")
+        (should (eq (get-text-property (1- (point)) 'face) 'lme-desktop-label))
+        (should (eq (get-text-property (1- (point)) 'lme-desktop-item) 'trash))
+        (lme-desktop-deselect)
+        (should-not lme-desktop--selected)))))
+
+(ert-deftest lme-test-closing-the-last-window-shows-the-desktop ()
+  "The close box takes a window away while others remain in the main area;
+the last one uncovers the desktop."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((first (generate-new-buffer " lme-test-first"))
+          (second (generate-new-buffer " lme-test-second")))
+      (set-window-buffer (selected-window) first)
+      (let ((other (split-window-right)))
+        (set-window-buffer other second)
+        (lme-platinum-close-window other)
+        (should-not (window-live-p other))
+        (should-not (buffer-live-p second))
+        (lme-platinum-close-window (selected-window))
+        (should-not (buffer-live-p first))
+        (should (lme-desktop-p (selected-window)))))))
+
+(ert-deftest lme-test-new-workspace-opens-on-the-desktop ()
+  "A workspace opened onto *scratch* shows the desktop instead."
+  (save-window-excursion
+    (delete-other-windows)
+    (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+    (lme-desktop--on-new-workspace)
+    (should (lme-desktop-p))))
+
 (ert-deftest lme-test-views-leave-the-browser ()
   "A view asked for in the browser's workspace opens in the one used before."
   (let ((left nil))
