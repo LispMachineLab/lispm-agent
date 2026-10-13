@@ -1914,6 +1914,48 @@ Its policy is the stricter of its role's and its caller's."
         (should-not (string-match-p "Thinking…" text))
         (should (string-match-p "Aborted by the user" text))))))
 
+(ert-deftest lispm-test-chat-line-numbers ()
+  "The welcome box and rules fit beside line numbers, and follow the room left."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (window (selected-window)))
+      (cl-flet ((room ()
+                  ;; The columns text can use: the body less the line numbers.
+                  (with-selected-window window
+                    (- (window-body-width window)
+                       (ceiling (line-number-display-width 'columns)))))
+                (widest ()
+                  ;; The widest line drawn above the prompt.
+                  (with-current-buffer chat
+                    (apply #'max (mapcar #'string-width
+                                         (split-string (buffer-substring-no-properties
+                                                        (point-min) lispm-chat--prompt-start)
+                                                       "\n"))))))
+        (save-window-excursion
+          (set-window-buffer window chat)
+          ;; Margins narrow the body as a smaller window would.  Splitting
+          ;; the window would too, but batch Emacs aborts when asked for the
+          ;; line numbers of a window just split.
+          (set-window-margins window 20 0)
+          (with-current-buffer chat (display-line-numbers-mode 1))
+          (should (> (with-selected-window window (line-number-display-width)) 0))
+          (lispm-chat-redraw chat)
+          (should (<= (widest) (room)))
+          ;; A window that changes size is drawn at its new width.  Batch
+          ;; Emacs does not run `window-size-change-functions', so this
+          ;; calls the chat's own as they would.
+          (let ((wide (widest)))
+            (set-window-margins window 30 0)
+            (lispm-chat--resized window)
+            (should (lispm-test--wait (lambda () (< (widest) wide))))
+            (should (<= (widest) (room))))
+          ;; Line numbers turned off leave more room, drawn on.
+          (let ((narrow (widest)))
+            (with-current-buffer chat (display-line-numbers-mode -1))
+            (should (lispm-test--wait (lambda () (> (widest) narrow))))
+            (should (<= (widest) (room)))))))))
+
 (ert-deftest lispm-test-chat-commands ()
   "M-x lispm opens a chat; /clear starts over; the org interface remains."
   (lispm-test-env

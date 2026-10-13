@@ -313,9 +313,11 @@ unless it was edited."
 ;;;; Drawing items
 
 (defun lispm-chat--width ()
-  "Width to draw rules and boxes at."
+  "Width to draw rules and boxes at.
+That is the columns text can use beside line numbers, less one kept for
+the numbers gaining a digit as the chat grows."
   (let ((window (get-buffer-window (current-buffer) t)))
-    (max 40 (min 100 (1- (if window (window-body-width window) 80))))))
+    (max 40 (min 100 (1- (if window (window-max-chars-per-line window) 80))))))
 
 (defun lispm-chat--indent (text prefix &optional first)
   "TEXT with PREFIX before each line, or FIRST before the first one.
@@ -1217,6 +1219,7 @@ Write at the bottom and press RET; / starts a command (/help lists them).
   (add-hook 'after-change-functions #'lispm-chat--update-footer nil t)
   (add-hook 'kill-buffer-hook #'lispm-chat--killed nil t)
   (add-hook 'window-size-change-functions #'lispm-chat--resized nil t)
+  (add-hook 'display-line-numbers-mode-hook #'lispm-chat--resized nil t)
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (propertize lispm-chat-prompt 'face 'lispm-chat-accent 'read-only t
@@ -1234,9 +1237,11 @@ Write at the bottom and press RET; / starts a command (/help lists them).
       (setq lispm-chat--busy-since (float-time)))
     (lispm-chat--redraw)))
 
-(defun lispm-chat--resized (window)
-  "Redraw the chat in WINDOW at its new width."
-  (with-current-buffer (window-buffer window)
+(defun lispm-chat--resized (&optional window)
+  "Redraw the chat in WINDOW, or the current one, at its new width.
+Run when a window shows it anew or at another size, and when line
+numbers come or go."
+  (with-current-buffer (if window (window-buffer window) (current-buffer))
     (when (and lispm-chat-agent lispm-chat--drawn)
       (lispm-chat--schedule lispm-chat-agent))))
 
