@@ -196,29 +196,23 @@ box runs the buffer's own close function."
   "Return the keys of the menu bar's left end."
   (mapcar #'car (lme-platinum-menu-bar)))
 
-(ert-deftest lme-test-browser-menus-replace-views ()
-  "The browser's workspace puts its own menus in the menu bar, the views
-leave it, and no Web title stands among the views elsewhere."
-  (let ((lme-platinum-application-menus-functions '(lme-browser-application-menus)))
-    (cl-letf (((symbol-function 'lme-browser-workspace-p) #'ignore))
-      (let ((titles (lme-test--menu-bar-titles)))
-        (should (memq 'lme-view-files titles))
-        (should-not (memq 'lme-view-web titles))
-        (should-not (memq 'lme-browser-file titles))))
-    (cl-letf (((symbol-function 'lme-browser-workspace-p) #'always))
-      (should (equal (lme-test--menu-bar-titles)
-                     '(lme-lambda lme-browser-file lme-browser-go lme-browser-window))))))
-
-(ert-deftest lme-test-browser-menu-items ()
-  "Without a page, the browser's menus offer a new tab, not page commands."
-  (cl-letf (((symbol-function 'lme-browser--window) #'ignore))
-    (let ((file (lme-browser--file-items)))
-      (should (lme-popup--enabled-p (seq-find (lambda (item) (equal (plist-get item :label) "New Tab"))
-                                              file)))
-      (should-not (lme-popup--enabled-p (seq-find (lambda (item)
-                                                    (equal (plist-get item :label) "Close Tab"))
-                                                  file))))
-    (should-not (seq-some #'lme-popup--enabled-p (lme-browser--go-items)))))
+(ert-deftest lme-test-web-title ()
+  "Web follows the views where the browser can run, lit while it is in
+front; without xwidgets it is left out."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always)
+            ((symbol-function 'lme-browser-workspace-p) #'ignore))
+    (let ((bar (lme-platinum-menu-bar)))
+      (should (equal (last (mapcar #'car bar) 2) '(lme-view-buffers lme-view-web)))
+      (should-not (text-property-any 0 (length (nth 2 (car (last bar))))
+                                     'face 'lme-platinum-menu-title-active
+                                     (nth 2 (car (last bar)))))))
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always)
+            ((symbol-function 'lme-browser-workspace-p) #'always))
+    (let ((web (nth 2 (car (last (lme-platinum-menu-bar))))))
+      (should (memq 'lme-platinum-menu-title-active
+                    (ensure-list (get-text-property 0 'face web))))))
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (should-not (memq 'lme-view-web (lme-test--menu-bar-titles)))))
 
 (ert-deftest lme-test-views-leave-the-browser ()
   "A view asked for in the browser's workspace opens in the one used before."

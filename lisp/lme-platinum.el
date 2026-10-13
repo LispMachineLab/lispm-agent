@@ -795,50 +795,25 @@ Where images cannot be shown, a plain λ stands in."
   "Return non-nil when the embedded browser can run in this Emacs."
   (and (fboundp 'lme-xwidget-available-p) (lme-xwidget-available-p)))
 
-(defvar lme-platinum-application-menus-functions nil
-  "Functions giving the menus of the frontmost application, tried in turn.
-Each takes no argument and returns the menus the selected workspace puts
-in the menu bar after the λ menu, as a list of (KEY TITLE ITEMS), ITEMS a
-function returning the items `lme-popup-menu' takes; or nil, which leaves
-the menu bar the sidebar's view titles.  The browser's workspace gives its
-own, as Mac OS 9's menu bar held the frontmost application's menus.")
-
-(defun lme-platinum--application-menu (key items left)
-  "Return a command dropping menu KEY, whose ITEMS a function returns.
-LEFT is the pixel position of its title's left edge, where the menu drops."
-  (lambda ()
-    (interactive)
-    (lme-platinum--with-open-menu key
-      (lme-popup-menu (funcall items) left (lme-platinum--menu-y)))))
-
 (defun lme-platinum-menu-bar ()
-  "Return the left end of the menu bar: the λ menu, then the frontmost
-application's menus, see `lme-platinum-application-menus-functions', or
-else a title per sidebar view, highlighted while the sidebar shows it."
-  (let ((lambda-title (lme-platinum--menu-title
-                       'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
-                       "LispM" (eq lme-platinum--open-menu 'lme-lambda))))
-    (cons
-     lambda-title
-     (if-let* ((menus (run-hook-with-args-until-success
-                       'lme-platinum-application-menus-functions)))
-         (let ((left (string-pixel-width (nth 2 lambda-title))))
-           (mapcar (pcase-lambda (`(,key ,title ,items))
-                     (let ((item (lme-platinum--menu-title
-                                  key title (lme-platinum--application-menu key items left)
-                                  title (eq lme-platinum--open-menu key))))
-                       (setq left (+ left (string-pixel-width (nth 2 item))))
-                       item))
-                   menus))
-       (let ((shown (lme-sidebar-current-view)))
-         (mapcar (lambda (view)
-                   (let ((spec (cdr view)))
-                     (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
-                                               (plist-get spec :title)
-                                               (plist-get spec :command)
-                                               (plist-get spec :help)
-                                               (eq (car view) shown))))
-                 lme-sidebar-views))))))
+  "Return the left end of the menu bar: the λ menu, a title per view, Web.
+A view's title is highlighted while the sidebar shows it, and Web while
+the browser is in front; Web shows where Emacs can run the browser."
+  (let ((shown (lme-sidebar-current-view)))
+    (append
+     (list (lme-platinum--menu-title 'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
+                                     "LispM" (eq lme-platinum--open-menu 'lme-lambda)))
+     (mapcar (lambda (view)
+               (let ((spec (cdr view)))
+                 (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
+                                           (plist-get spec :title)
+                                           (plist-get spec :command)
+                                           (plist-get spec :help)
+                                           (eq (car view) shown))))
+             lme-sidebar-views)
+     (when (lme-platinum--browser-p)
+       (list (lme-platinum--menu-title 'lme-view-web "Web" 'lme-browser "Browser"
+                                       (lme-browser-workspace-p)))))))
 
 (defun lme-platinum-workspace-menu ()
   "Pop up the Application menu: the workspaces, the current one checked."

@@ -393,7 +393,6 @@ cells and split-pane dividers drawn with box characters stay straight."
   (add-hook 'buffer-list-update-hook #'lme-buffer-list--schedule-refresh)
   (add-hook 'xwidget-webkit-mode-hook #'lme-browser--setup)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-browser--on-workspace-select)
-  (add-hook 'lme-platinum-application-menus-functions #'lme-browser-application-menus)
   (with-eval-after-load 'xwidget
     (keymap-set xwidget-webkit-mode-map "C-l" #'lme-browser-focus-address))
   ;; Emacs opens on the desktop, as Mac OS did: no splash screen.

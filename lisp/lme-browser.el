@@ -23,10 +23,10 @@
 
 ;;; Commentary:
 
-;; The embedded WebKit browser: an application of its own, as Mac OS 9's
-;; browsers were, with its own workspace, its own menus in the menu bar and
-;; a browser window (title bar, toolbar, address field, tabs), and helpers
-;; that open URLs in it.  Requires an Emacs built with xwidgets.
+;; The embedded WebKit browser: its own workspace, reached from the menu
+;; bar's Web title, a Mac OS 9 browser window (title bar, toolbar, address
+;; field, tabs), and helpers that open URLs in it.  Requires an Emacs built
+;; with xwidgets.
 
 ;;; Code:
 
@@ -81,9 +81,6 @@
 ;;
 ;; The address window is a real buffer, so the address is edited in place.
 ;; A timer keeps it in step with the page while it is not being edited.
-;; While the workspace is frontmost, the menu bar holds the browser's own
-;; menus (File, Go, Window) instead of the sidebar's views, as Mac OS 9's
-;; menu bar held the frontmost application's.
 
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-webkit-uri "xwidget" (xwidget))
@@ -228,48 +225,6 @@ does: the address window shows the page's real address again at once."
   (interactive)
   (when-let* ((window (lme-browser--window)))
     (lme-browser-close-tab (window-buffer window))))
-
-;;;;; Menus
-
-(defun lme-browser--file-items ()
-  "Return the items of the browser's File menu."
-  (let ((page (and (lme-browser--window) t)))
-    `((:label "New Tab" :action lme-browser-new-tab)
-      (:label "Open Location…" :action lme-browser-focus-address)
-      (:label "Close Tab" :action lme-browser-close-shown-tab :enabled ,page)
-      separator
-      (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page))))
-
-(defun lme-browser--go-items ()
-  "Return the items of the browser's Go menu."
-  (let ((page (and (lme-browser--window) t)))
-    `((:label "Back" :action lme-browser-back :enabled ,page)
-      (:label "Forward" :action lme-browser-forward :enabled ,page)
-      (:label "Reload" :action lme-browser-reload :enabled ,page)
-      separator
-      (:label "Home" :action lme-browser-home :enabled ,page))))
-
-(defun lme-browser--window-items ()
-  "Return the items of the browser's Window menu: a tab each, the shown one
-checked, as Mac OS 9's Window menus listed an application's windows."
-  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
-    (mapcar (lambda (buffer)
-              (list :label (truncate-string-to-width (lme-browser--title buffer) 48 nil nil "…")
-                    :action (lambda () (lme-browser-select-tab buffer))
-                    :checked (eq buffer shown)))
-            (lme-browser--buffers))))
-
-(defconst lme-browser-menus
-  '((lme-browser-file "File" lme-browser--file-items)
-    (lme-browser-go "Go" lme-browser--go-items)
-    (lme-browser-window "Window" lme-browser--window-items))
-  "The browser's menus in the menu bar: (KEY TITLE ITEMS-FUNCTION).")
-
-(defun lme-browser-application-menus ()
-  "Return `lme-browser-menus' while the browser workspace is frontmost.
-This is one of `lme-platinum-application-menus-functions'."
-  (when (lme-browser-workspace-p)
-    lme-browser-menus))
 
 ;;;;; Address window
 

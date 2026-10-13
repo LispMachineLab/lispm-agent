@@ -675,8 +675,8 @@ runs, and the functions that test, show and hide it in the selected frame.")
 (defun lme-sidebar-select (view)
   "Show VIEW in the left sidebar, or hide the sidebar when VIEW is shown.
 Every other view is hidden first, so at most one is ever visible.  Views
-belong to the project workspaces: asked for in the browser's, which has
-its own menus instead, VIEW opens in the workspace used before it."
+belong to the project workspaces: asked for in the browser's, whose window
+fills its main area, VIEW opens in the workspace used before it."
   (when (and (fboundp 'lme-browser-workspace-p) (lme-browser-workspace-p)
              (tab-bar--tab-index-recent 1))
     (tab-bar-switch-to-recent-tab))
