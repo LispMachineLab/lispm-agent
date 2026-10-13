@@ -3,6 +3,10 @@
 ;; Copyright (C) 2026  Ryan.K
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
+;;; Commentary:
+
+;; The sample project of the LispM demo.
+
 ;;; Code:
 
 (defun slug-from-title (title)

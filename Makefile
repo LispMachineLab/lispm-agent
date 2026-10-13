@@ -24,9 +24,10 @@ compile: deps
 test: deps
 	$(EMACS) -Q --batch $(DEPS) -L . -L test -l test/lispm-test.el -f ert-run-tests-batch-and-exit
 
-# Record assets/demo/lispm-demo.gif and .mp4 again (needs vhs and a model).
+# Record assets/demo/lispm-demo.mp4 and .gif again, in your own Emacs
+# (macOS, ffmpeg and a model; see demo/record.sh).
 demo: deps
-	vhs demo/demo.tape
+	demo/record.sh
 
 clean:
 	rm -f *.elc test/*.elc

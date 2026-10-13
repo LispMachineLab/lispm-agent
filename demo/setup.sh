@@ -1,6 +1,6 @@
 #!/bin/sh
 # Prepare a scratch HOME holding a fresh copy of the sample project, for
-# demo/demo.tape: the agent edits that copy, and LispM keeps its sessions
+# demo/record.sh: the agent edits that copy, and LispM keeps its sessions
 # under $HOME/.emacs.d/lispm/, so recording leaves the checkout alone.
 set -eu
 demo=$(cd "$(dirname "$0")" && pwd)
