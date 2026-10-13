@@ -21,7 +21,7 @@
 
 ;; The OpenAI Chat Completions API is what most model servers speak:
 ;; OpenAI itself and the many compatible servers and gateways (Ollama,
-;; vLLM, LM Studio, llama.cpp, OpenRouter, rotom, ...).
+;; vLLM, LM Studio, llama.cpp, OpenRouter, ...).
 ;;
 ;; LispM keeps a single conversation format, the Messages shape its
 ;; transcripts parse into; this file translates requests into Chat

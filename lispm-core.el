@@ -52,11 +52,7 @@ makes to its memory, and every turn of every session, is a commit."
   :type 'directory)
 
 (defcustom lispm-backends
-  '((rotom :api openai :url "http://127.0.0.1:14550/v1" :model "gpt-5.5"
-           :features (streaming reasoning-effort))
-    (rotom-messages :api anthropic :url "http://127.0.0.1:14550" :model "gpt-5.5"
-                    :features (streaming tool-errors))
-    (openai :api openai :url "https://api.openai.com/v1" :model "gpt-5.5"
+  '((openai :api openai :url "https://api.openai.com/v1" :model "gpt-5.5"
             :key openai
             :features (streaming reasoning-effort max-completion-tokens stream-usage))
     (anthropic :api anthropic :url "https://api.anthropic.com" :model "claude-opus-5-5"
@@ -87,16 +83,26 @@ Each entry is (NAME . PLIST) with keys
                `eager-input' (tool input streamed unbuffered) and
                `tool-errors' (the is_error flag on tool results;
                without it, failures are marked in the text).
-The default, `rotom', is a local gateway serving many upstream models
-\(GPT, Grok, ...) behind both shapes: `rotom' is its Chat Completions
-side, `rotom-messages' its Messages side.  Use rotom 1.5.15 or later;
-earlier versions lose the arguments of parallel tool calls when
-streaming Messages (RyanKung/rotom#18) and reject is_error (#19)."
+The presets are the two first-party APIs.  Any other server speaking
+either shape, local (Ollama, vLLM, LM Studio, llama.cpp) or hosted
+\(OpenRouter, a gateway), takes an entry of its own."
   :type '(alist :key-type symbol :value-type plist))
 
-(defcustom lispm-backend 'rotom
-  "Backend for agents that do not name one; a key of `lispm-backends'."
-  :type 'symbol)
+(defcustom lispm-backend nil
+  "Backend for agents that do not name one; a key of `lispm-backends'.
+nil means the first of `lispm-backends' whose API key is set in the
+environment: OPENAI_API_KEY for `openai', ANTHROPIC_API_KEY for
+`anthropic', or the variable an entry names with :key-env.  A backend
+that needs no key, such as a server on this machine, must be named."
+  :type '(choice (const :tag "The first with an API key in the environment" nil)
+                 symbol))
+
+(defconst lispm-key-sources
+  '((openai "OPENAI_API_KEY" "api.openai.com")
+    (anthropic "ANTHROPIC_API_KEY" "api.anthropic.com"))
+  "The :key values standing for a first-party API's key: where to find it.
+Each entry is (KEY VARIABLE HOST): the environment VARIABLE, else the
+auth-source entry for HOST.")
 
 (defcustom lispm-model nil
   "Default model for agents that do not name one.
@@ -372,11 +378,31 @@ PROPS are as for `lispm-register-agent'.
     (setq props (cons :description props)))
   `(lispm-register-agent ',name ,@props))
 
+(defun lispm--key-variable (backend)
+  "The environment variable that holds BACKEND's API key, or nil."
+  (or (plist-get backend :key-env)
+      (nth 1 (assq (plist-get backend :key) lispm-key-sources))))
+
+(defun lispm-backend-name (&optional agent)
+  "Name of the backend AGENT uses, or that agents use by default; or nil.
+See `lispm-backend'."
+  (or (and agent (lispm-agent-backend agent))
+      lispm-backend
+      (car (seq-find (lambda (entry)
+                       (when-let* ((variable (lispm--key-variable (cdr entry)))
+                                   (value (getenv variable)))
+                         (not (string-empty-p value))))
+                     lispm-backends))))
+
 (defun lispm-agent-backend* (agent)
   "Plist of the backend AGENT uses."
-  (let ((name (or (lispm-agent-backend agent) lispm-backend)))
-    (or (alist-get name lispm-backends)
-        (user-error "Unknown backend %s (see `lispm-backends')" name))))
+  (let ((name (lispm-backend-name agent)))
+    (cond ((null name)
+           (user-error "No model backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY, \
+or set `lispm-backend' to an entry of `lispm-backends', where a server \
+of your own can be added"))
+          ((alist-get name lispm-backends))
+          (t (user-error "Unknown backend %s (see `lispm-backends')" name)))))
 
 (defun lispm-agent-model* (agent)
   "Model AGENT uses."

@@ -24,10 +24,8 @@ entries; last, the agent shows the diff beside the chat by evaluating Emacs Lisp
 
 * Installation
 
-Requires Emacs 30.1+ (developed on 31.1), curl, and a model endpoint speaking either the OpenAI
-Chat Completions API (most servers do) or the Anthropic Messages API. By default LispM uses the
-local Rotom gateway (1.5.15 or later) through Chat Completions (~http://127.0.0.1:14550/v1~,
-model ~gpt-5.5~).
+Requires Emacs 30.1+ (developed on 31.1), curl, and a model: any endpoint speaking either the
+OpenAI Chat Completions API (most servers do, local or hosted) or the Anthropic Messages API.
 
 LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA, which must be in
 ~package-archives~); installing LispM as a package installs it too:
@@ -38,6 +36,17 @@ LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA,
 (require 'lispm)
 (lispm-mode-line-mode 1)          ; show busy agents and pending approvals in the mode line
 #+end_src
+
+or, with ~use-package~:
+
+#+begin_src emacs-lisp
+(use-package lispm
+  :vc (:url "https://github.com/RyanKung/lispm" :rev :newest)
+  :config (lispm-mode-line-mode 1))
+#+end_src
+
+Then give it a model. With ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment,
+nothing more is needed; for any other server, local or hosted, see [[*Backends][Backends]].
 
 * Getting started
 
@@ -117,7 +126,8 @@ The file takes the place of another file in view, or a window is split off for i
 stays where it is. ~lispm-show-edits~ turns all of this off, ~lispm-edits-follow~ keeps changes
 to buffers out of view from being brought into it, and ~lispm-edits-speed~,
 ~lispm-edits-max-duration~ and ~lispm-edits-fade~ set the pace. A change streams in only when
-the backend streams tool calls' input piece by piece, as Rotom does on both sides since 1.5.16.
+the server streams a tool call's input piece by piece, as OpenAI's and Anthropic's APIs do;
+from one that sends it whole, the change shows once it is complete.
 
 * Agents, roles and sessions
 
@@ -174,19 +184,23 @@ agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~
 * Backends
 
 LispM speaks two API shapes: OpenAI Chat Completions, which almost every model server
-implements, and Anthropic Messages. A backend names an endpoint, its shape and the features to
-use. The presets:
+implements, and Anthropic Messages. It is tied to no provider: a backend names an endpoint, its
+shape and the features to use, and any server speaking either shape can be one. The presets are
+the two first-party APIs:
 
-| Backend          | Shape            | URL                         | Default model     | Key                 |
-|------------------+------------------+-----------------------------+-------------------+---------------------|
-| ~rotom~ (default)| Chat Completions | ~http://127.0.0.1:14550/v1~ | ~gpt-5.5~         | none                |
-| ~rotom-messages~ | Messages         | ~http://127.0.0.1:14550~    | ~gpt-5.5~         | none                |
-| ~openai~         | Chat Completions | ~https://api.openai.com/v1~ | ~gpt-5.5~         | ~OPENAI_API_KEY~    |
-| ~anthropic~      | Messages         | ~https://api.anthropic.com~ | ~claude-opus-5-5~ | ~ANTHROPIC_API_KEY~ |
+| Backend     | Shape            | URL                         | Default model     | Key                 |
+|-------------+------------------+-----------------------------+-------------------+---------------------|
+| ~openai~    | Chat Completions | ~https://api.openai.com/v1~ | ~gpt-5.5~         | ~OPENAI_API_KEY~    |
+| ~anthropic~ | Messages         | ~https://api.anthropic.com~ | ~claude-opus-5-5~ | ~ANTHROPIC_API_KEY~ |
+
+Keys come from the environment or from auth-source. Unless ~lispm-backend~ names one, agents use
+the first backend in ~lispm-backends~ whose key is set in the environment; with none, LispM says
+so when a message is sent. A server that needs no key, such as one on this machine, must be
+named.
 
 #+begin_src emacs-lisp
-(setq lispm-backend 'anthropic)             ; use another preset
-(setq lispm-model "grok-4.6")               ; another model (list rotom's with `rotom models`)
+(setq lispm-backend 'anthropic)             ; name the backend
+(setq lispm-model "claude-sonnet-5-5")      ; another model than the backend's default
 
 ;; Any other Chat Completions server: Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, ...
 (add-to-list 'lispm-backends
@@ -269,7 +283,7 @@ make compile   # warnings are errors; make deps, which both run first, installs 
 CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request.
 
 ~make demo~ records the demo above again (~assets/demo/~) in your own Emacs, with your
-configuration but none of its state, a real model through the default backend and ffmpeg
+configuration but none of its state, a real model through the backend it chooses, and ffmpeg
 (macOS); [[file:demo/record.el][demo/record.el]] is the script.
 
 * Files

@@ -595,10 +595,13 @@ Code blocks lose their fences and keep their lines as they are."
          ""
          (propertize (format "  cwd: %s" (abbreviate-file-name (lispm-agent-root agent)))
                      'face 'lispm-chat-dim)
-         (propertize (format "  model: %s via %s · role: %s"
-                             (or (lispm-agent-model* agent) "?")
-                             (or (lispm-agent-backend agent) lispm-backend)
-                             (lispm-agent-role agent))
+         (propertize (if (lispm-backend-name agent)
+                         (format "  model: %s via %s · role: %s"
+                                 (or (lispm-agent-model* agent) "?")
+                                 (lispm-backend-name agent)
+                                 (lispm-agent-role agent))
+                       (format "  no model backend (see `lispm-backend') · role: %s"
+                               (lispm-agent-role agent)))
                      'face 'lispm-chat-dim))
    (min 64 (lispm-chat--width)) 'lispm-chat-accent))
 
@@ -1131,7 +1134,7 @@ Return the chat of the new conversation."
   "Show AGENT's model, or switch it to ARGUMENT."
   (if (string-empty-p argument)
       (message "%s uses %s via %s" (lispm-agent-name agent)
-               (lispm-agent-model* agent) (or (lispm-agent-backend agent) lispm-backend))
+               (lispm-agent-model* agent) (lispm-backend-name agent))
     (setf (lispm-agent-model agent) argument)
     (with-current-buffer (lispm-agent-view agent)
       (lispm-chat--redraw))
