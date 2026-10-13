@@ -52,6 +52,7 @@
 (require 'lme-packages)
 (require 'lme-interface)
 (require 'lme-platinum)
+(require 'lme-popup)
 (require 'lme-sidebar)
 (require 'lme-browser)
 (require 'lme-languages)

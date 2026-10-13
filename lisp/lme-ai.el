@@ -72,6 +72,7 @@
 (declare-function lme-agent--buffer-agent "lme-agent-list" (buffer))
 (declare-function lme-agent--running-buffers "lme-agent-list" ())
 (declare-function lme-agent--session-buffer "lme-agent-list" (id))
+(declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
 (defvar tabspaces-default-tab)
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
@@ -1046,10 +1047,20 @@ is running in a terminal cannot be deleted."
   (let* ((agent (plist-get session :agent))
          (files (lme-agent--session-files session))
          (title (lme-sidebar--one-line (plist-get session :title) 40)))
-    (when (if (eq agent 'hermes)
-              (yes-or-no-p (format "Delete hermes session \"%s\" from Hermes's store? " title))
-            (yes-or-no-p (format "Move %s session \"%s\" (%d file%s) to Trash? "
-                                 agent title (length files) (if (cdr files) "s" ""))))
+    (when (eq 'delete
+              (lme-popup-alert
+               'stop
+               (if (eq agent 'hermes)
+                   (format "Delete the Hermes session “%s”?" title)
+                 (format "Move the %s session “%s” to the Trash?"
+                         (alist-get agent lme-agent-names (capitalize (symbol-name agent)))
+                         title))
+               `(("Cancel" cancel cancel)
+                 (,(if (eq agent 'hermes) "Delete" "Move to Trash") delete default))
+               (if (eq agent 'hermes)
+                   "Hermes removes it from its store; this cannot be undone."
+                 (format "Its %d file%s go%s to the Trash." (length files)
+                         (if (cdr files) "s" "") (if (cdr files) "" "es")))))
       (if (eq agent 'hermes)
           (lme-agent--hermes-run "sessions" "delete" "--yes" (plist-get session :id))
         (dolist (file files)

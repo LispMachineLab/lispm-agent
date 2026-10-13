@@ -587,17 +587,40 @@ box held down, if any."
 
 (defun lme-platinum-close-window (window)
   "Close WINDOW as Mac OS closed a window: put its document away.
-A sidebar is hidden.  Otherwise WINDOW's buffer is killed, with Emacs's
-usual questions about unsaved files and running processes, and WINDOW
+A sidebar is hidden.  Otherwise WINDOW's buffer is killed, once an
+alert has asked about unsaved changes or a running process, and WINDOW
 goes too when other windows remain in the main area."
   (if (window-parameter window 'window-side)
       (when-let* ((view (lme-sidebar-current-view)))
         (lme-sidebar-select view))
     (let ((buffer (window-buffer window)))
-      (when (kill-buffer buffer)
+      (when (lme-platinum--confirm-close buffer)
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buffer))
         (when (and (window-live-p window)
                    (cdr (lme-main-area--windows)))
           (delete-window window))))))
+
+(defun lme-platinum--confirm-close (buffer)
+  "Ask, as Mac OS 9 asked, whether BUFFER may close; return non-nil if so.
+A modified file asks to be saved first, and is saved when told to; a
+buffer whose process still runs asks before the process is stopped."
+  (let ((name (lme-platinum--buffer-title buffer))
+        (process (get-buffer-process buffer)))
+    (cond
+     ((and (buffer-file-name buffer) (buffer-modified-p buffer))
+      (pcase (lme-popup-alert
+              'caution (format "Save changes to the document “%s” before closing?" name)
+              '(("Don’t Save" discard nil ?\M-d) ("Cancel" cancel cancel) ("Save" save default))
+              "If you don’t save, your changes will be lost.")
+        ('save (with-current-buffer buffer (save-buffer)) t)
+        ('discard (with-current-buffer buffer (set-buffer-modified-p nil)) t)))
+     ((and process (process-live-p process))
+      (eq 'close (lme-popup-alert
+                  'caution (format "Close “%s”?" name)
+                  '(("Cancel" cancel cancel) ("Close" close default))
+                  "What runs in it will be stopped.")))
+     (t t))))
 
 (defun lme-platinum-zoom-window (window)
   "Zoom WINDOW to the whole main area, or back to where it was.
@@ -650,17 +673,14 @@ As Mac OS 9 popped up a window's path from its title, the title pops up
 the workspace's buffers, the one WINDOW shows checked.  The choice goes
 to WINDOW unless the main area's columns send it elsewhere: a session
 to the left, a file to the right."
-  (popup-menu
-   (cons "Buffers"
-         (mapcar (lambda (buffer)
-                   (vector (lme-platinum--buffer-title buffer)
-                           (lambda ()
-                             (interactive)
+  (lme-popup-menu
+   (mapcar (lambda (buffer)
+             (list :label (lme-platinum--buffer-title buffer)
+                   :action (lambda ()
                              (select-window window)
                              (switch-to-buffer buffer))
-                           :style 'radio
-                           :selected (eq buffer (window-buffer window))))
-                 (seq-take (lme-platinum--window-buffers window) 30)))))
+                   :checked (eq buffer (window-buffer window))))
+           (seq-take (lme-platinum--window-buffers window) 30))))
 
 ;;;; Menu bar
 
@@ -698,28 +718,55 @@ LABEL's own, so an icon keeps its font."
 Where images cannot be shown, a plain λ stands in."
   (if (display-images-p) (lme-platinum-icon 'lambda) "λ"))
 
+(declare-function lme-popup-menu "lme-popup" (items &optional x y align))
+(declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
+(declare-function lme-agent-installed-p "lme-ai" (agent))
+(defvar lme-theme)
+
+(defun lme-platinum--menu-y ()
+  "Return where a menu dropped from the menu bar starts: its bottom edge."
+  (tab-bar-height nil t))
+
+(defun lme-platinum-lambda-items ()
+  "Return the items of the λ menu, as `lme-popup-menu' takes them."
+  `((:label "About LispM" :action lme-platinum-about)
+    separator
+    ,@(when (fboundp 'lme-agent-lispm-new)
+        '((:label "New LispM Agent" :action lme-agent-lispm-new)))
+    ,@(mapcan (pcase-lambda (`(,agent ,label ,command))
+                (when (lme-agent-installed-p agent)
+                  (list (list :label label :action command))))
+              '((claude "New Claude Code Session" lme-agent-claude-new)
+                (codex "New Codex Session" lme-agent-codex-new)
+                (hermes "New Hermes Session" lme-agent-hermes-new)))
+    (:label "Resume Session…" :action lme-agent-sessions)
+    (:label "Send Region to Agent" :action lme-agent-send-region :enabled ,(use-region-p))
+    separator
+    (:label "New Shell" :action lme-shell-new)
+    ,@(when (fboundp 'lme-browser) '((:label "Browser" :action lme-browser)))
+    (:label "Magit Status" :action magit-status)
+    separator
+    (:label "Dracula" :action ,(lambda () (lme-set-theme 'dracula))
+            :checked ,(eq lme-theme 'dracula))
+    (:label "Platinum" :action ,(lambda () (lme-set-theme 'platinum))
+            :checked ,(eq lme-theme 'platinum))
+    separator
+    (:label "Editing Style…" :action ,(lambda () (customize-variable 'lme-editing-style)))
+    (:label "Customize lispm-emacs…" :action ,(lambda () (customize-group 'lispm-emacs)))))
+
 (defun lme-platinum-lambda-menu ()
   "Pop up the λ menu, LispM's counterpart of the Apple menu."
   (interactive)
   (lme-platinum--with-open-menu 'lme-lambda
-   (popup-menu
-   `("LispM"
-     ["New LispM Agent" lme-agent-lispm-new :visible (fboundp 'lme-agent-lispm-new)]
-     ["New Claude Code Session" lme-agent-claude-new :visible (lme-agent-installed-p 'claude)]
-     ["New Codex Session" lme-agent-codex-new :visible (lme-agent-installed-p 'codex)]
-     ["New Hermes Session" lme-agent-hermes-new :visible (lme-agent-installed-p 'hermes)]
-     ["Resume Session…" lme-agent-sessions]
-     ["Send Region to Agent" lme-agent-send-region :active (use-region-p)]
-     "---"
-     ["New Shell" lme-shell-new]
-     ["Browser" lme-browser :visible (fboundp 'lme-browser)]
-     ["Magit Status" magit-status]
-     "---"
-     ("Appearance"
-      ["Dracula" (lme-set-theme 'dracula) :style radio :selected (eq lme-theme 'dracula)]
-      ["Platinum" (lme-set-theme 'platinum) :style radio :selected (eq lme-theme 'platinum)])
-     ["Editing Style…" (customize-variable 'lme-editing-style)]
-     ["Customize lispm-emacs…" (customize-group 'lispm-emacs)]))))
+    (lme-popup-menu (lme-platinum-lambda-items) 4 (lme-platinum--menu-y))))
+
+(defun lme-platinum-about ()
+  "Tell which LispM and lispm-emacs this is, as About This Computer did."
+  (interactive)
+  (lme-popup-alert
+   'note "LispM, a Lisp Machine for agents, inside Emacs."
+   '(("OK" ok default))
+   (format "lispm-emacs, Emacs %s.  github.com/RyanKung/lispm-emacs" emacs-version)))
 
 (defun lme-platinum-menu-bar ()
   "Return the left end of the menu bar: the λ menu, then a title per view.
@@ -744,19 +791,20 @@ title while the browser workspace is selected."
 (defun lme-platinum-workspace-menu ()
   "Pop up the Application menu: the workspaces, the current one checked."
   (interactive)
-  (let ((current (tab-bar--current-tab-index)))
+  (let ((current (tab-bar--current-tab-index))
+        (tabs (funcall tab-bar-tabs-function)))
     (lme-platinum--with-open-menu 'lme-application
-     (popup-menu
-     `("Workspaces"
-       ,@(seq-map-indexed
-          (lambda (tab index)
-            (vector (alist-get 'name tab)
-                    (lambda () (interactive) (tab-bar-select-tab (1+ index)))
-                    :style 'radio :selected (= index current)))
-          (funcall tab-bar-tabs-function))
-       "---"
-       ["New Workspace" tab-bar-new-tab]
-       ["Close Workspace" tab-bar-close-tab :active (cdr (funcall tab-bar-tabs-function))])))))
+      (lme-popup-menu
+       `(,@(seq-map-indexed
+            (lambda (tab index)
+              (list :label (alist-get 'name tab)
+                    :action (lambda () (tab-bar-select-tab (1+ index)))
+                    :checked (= index current)))
+            tabs)
+         separator
+         (:label "New Workspace" :action tab-bar-new-tab)
+         (:label "Close Workspace" :action tab-bar-close-tab :enabled ,(and (cdr tabs) t)))
+       (- (frame-pixel-width) 4) (lme-platinum--menu-y) 'right))))
 
 (defvar tabspaces-default-tab)
 
@@ -1450,6 +1498,8 @@ it, as on every theme change, is idempotent."
                             :inherit 'lme-platinum-list :background chrome :foreground text
                             :height 0.9
                             :box '(:line-width (1 . 1) :style released-button))
+        ;; Menus and alerts are outlined as Mac OS 9's were.
+        (set-face-attribute 'child-frame-border nil :background (lme-platinum--color :frame))
         ;; Neighbouring windows meet as Mac OS 9's windows were framed: each
         ;; edge a dark outline, platinum between them.
         (set-face-attribute 'window-divider nil :foreground chrome)

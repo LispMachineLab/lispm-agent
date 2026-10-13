@@ -322,6 +322,59 @@ while held."
                                                  '((side . bottom)))))
         (should-not (lme-platinum--scroll-window-p side))))))
 
+(ert-deftest lme-test-menu-text ()
+  "A menu lists its items one to a line, separators as rules, checks marked."
+  (let* ((lme-platinum--palette (lme-platinum--derive-palette "#FFFFFF" "#000000"
+                                                              "#777777" "#6363CE"))
+         (items '((:label "One" :action ignore :checked t)
+                  separator
+                  (:label "Two" :action ignore :enabled nil)
+                  (:label "Three" :action ignore)))
+         (text (lme-popup-menu-text items 200 3)))
+    (should (= (length (split-string text "\n")) 4))
+    (should (string-search "✓" text))
+    (should (eq (get-text-property (string-search "Three" text) 'face text)
+                'lme-popup-item-highlight))
+    (should (eq (get-text-property (string-search "Two" text) 'face text)
+                'lme-popup-item-disabled))
+    ;; Moving down from One skips the separator and the disabled Two.
+    (should (= (lme-popup--step items 0 1) 3))
+    (should (= (lme-popup--step items 3 1) 0))))
+
+(ert-deftest lme-test-menu-keys ()
+  "Key equivalents are keyboard sequences only."
+  (should (lme-popup--keyboard-p (kbd "C-c a l")))
+  (should-not (lme-popup--keyboard-p [C-M-drag-mouse-1]))
+  (should-not (lme-popup--keyboard-p [menu-bar file open])))
+
+(ert-deftest lme-test-popups-fall-back ()
+  "Without a graphical display, menus and alerts ask in the minibuffer."
+  (should-not (lme-popup-available-p))
+  (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Two")))
+    (should (equal (plist-get (lme-popup-menu '((:label "One" :action ignore)
+                                                (:label "Two" :action ignore)))
+                              :label)
+                   "Two")))
+  (cl-letf (((symbol-function 'read-multiple-choice) (lambda (&rest _) '(?s "Save"))))
+    (should (eq (lme-popup-alert 'caution "Save?" '(("Cancel" cancel cancel)
+                                                   ("Save" save default)))
+                'save))))
+
+(ert-deftest lme-test-alert-text ()
+  "An alert shows its message, its detail and a button per choice."
+  (let* ((lme-platinum--palette (lme-platinum--derive-palette "#FFFFFF" "#000000"
+                                                              "#777777" "#6363CE"))
+         (text (lme-popup-alert-text 'caution "Save?" "Changes will be lost."
+                                     '(("Cancel" cancel cancel) ("Save" save default))
+                                     nil))
+         (buttons nil))
+    (should (string-search "Save?" text))
+    (should (string-search "Changes will be lost." text))
+    (dotimes (i (length text))
+      (when-let* ((value (get-text-property i 'lme-popup-button text)))
+        (cl-pushnew value buttons)))
+    (should (equal (sort buttons #'string<) '(cancel save)))))
+
 (ert-deftest lme-test-title-bar-clicks ()
   "A title bar brings its window forward, rolls up on a double click, and
 pops up its buffers on a Meta click."
