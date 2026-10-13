@@ -20,6 +20,7 @@ implementation:
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
+| Errors, recovery          | a turn stopped early waits at a condition heading for a restart  | ~lispm-signal~, ~lispm-restart~, ~lispm-condition-handlers~ |
 | Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lisp/lispm-memory.el][lispm-memory.el]]                                         |
 | Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
@@ -100,6 +101,7 @@ agent's context*. Before every model request the runtime parses the whole buffer
 *** Result                   the tool's output (or *** Error)
 * Message from reviewer      a message from another agent
 * Event: after-save-hook     an event produced by a hook or timer
+* WAITING Condition: ...     the turn stopped early, awaiting a restart (section 5)
 * Notes                      the user's own notes: unknown headings are never sent
 #+end_example
 
@@ -242,7 +244,7 @@ bursts (the tool calls of one response become one commit whose message lists eac
 every finished turn commits the session. The committer is the agent itself, so ~git log~ is
 the audit log of what each agent learned and did, and a wrong memory is one ~git revert~ away.
 
-* 5. Permissions, approval and explainability
+* 5. Permissions, approval, restarts and explainability
 
 *Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~write~ ~exec~); a policy
 maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval. One
@@ -280,6 +282,44 @@ session saved while calls await approval and opened again after Emacs restarted 
 goes on. Calls that were running are recorded as interrupted, their processes gone; if nothing
 awaits approval, the turn ends there without asking the model. The in-memory table of pending
 calls is only a cache of what the transcript says.
+
+*Restarts: a stopped turn waits.* On a Lisp Machine an error does not end the computation: the
+debugger shows it and offers proceed options. In LispM a turn that stops early, because a request
+failed after its retries or could not be made (no backend, say), or because it reached
+~lispm-max-steps~, does not end either: it waits at a *condition*, as a call waits for approval,
+until a *restart* is chosen (~lispm-signal~, ~lispm-condition-types~). The condition is a
+top-level heading, ~* WAITING Condition: Request failed~, whose properties name its type, its
+id and its restarts and whose body is the message. No role claims it, so the model never sees
+it. Its restarts:
+
+| Condition        | Restarts, default first                                                  |
+|------------------+--------------------------------------------------------------------------|
+| ~request-failed~ | ~retry~ the same request; ~use-model~: another backend or model; ~abort~ |
+| ~step-limit~     | ~continue~ for as many requests again; ~abort~                           |
+
+They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
+in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
+takes the default, to ~DENIED~ aborts; the agenda lists waiting conditions with waiting calls.
+Whatever the user asks of the agent next goes past the condition, stopping there: a message
+written in the chat, one written in org under a new ~* User~ heading after the condition,
+~/clear~, ~/compact~. In Lisp, ~lispm-restart~ chooses one, and handlers choose without asking,
+as ~handler-bind~ would, at once or after a delay, at most so many times in a turn, then perhaps
+another restart: ~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
+started go by ~lispm-condition-handlers~, none by default: they wait for the user. Turns started
+by another agent's message (a helper's) or by an event (a hook, a timer) go by
+~lispm-unattended-condition-handlers~, since nobody may be watching and someone, or the next
+event, waits for them: by default a failed request is tried again twice, a minute apart, then
+the turn stops, as one reaching the step limit does at once.
+
+A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
+given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and
+ends the turn with the note a turn stopped early always ended with, so the transcript is as it
+was before restarts existed. A condition survives a restart of Emacs like a call awaiting
+approval: reopening the session waits at it again, and since requests are built from the
+transcript, ~retry~ needs nothing else saved. Meanwhile the agent is busy: messages and events
+queue in its inbox, a helper's caller keeps waiting, and ~lispm-abort~ stops the turn there. A
+helper the user writes to does not retire once it has replied to its caller: it stays to answer
+them.
 
 *Explainability* comes in four layers: the ~why~ of every write or exec call; the transcript
 itself (every call's input, state and result); ~lispm-show-request~ (the raw request the model

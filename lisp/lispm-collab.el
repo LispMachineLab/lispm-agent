@@ -95,9 +95,16 @@ Return that agent."
                             (setf (lispm-agent-waiting-on caller)
                                   (cl-remove target (lispm-agent-waiting-on caller) :count 1))
                             (when helper
-                              (run-at-time 0 nil #'lispm-retire helper))
+                              (run-at-time 0 nil #'lispm-collab--retire helper))
                             (funcall callback target reply)))
     target))
+
+(defun lispm-collab--retire (helper)
+  "Retire HELPER, which has replied, unless the user has since written to it.
+Then it stays, to answer them, as an agent of its own."
+  (unless (seq-some (lambda (entry) (not (or (plist-get entry :from) (plist-get entry :event))))
+                    (lispm-agent-inbox helper))
+    (lispm-retire helper)))
 
 (defun lispm-collab--roles ()
   "Description of the roles helpers can be started from."

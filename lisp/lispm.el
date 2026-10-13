@@ -273,7 +273,7 @@ AGENT is the running agent of the current project, or a new one."
   "Rows of the agent dashboard."
   (mapcar
    (lambda (a)
-     (let ((waiting (length (lispm--waiting-calls a)))
+     (let ((waiting (length (lispm--awaiting a)))
            (usage (lispm-agent-usage a)))
        (list (lispm-agent-name a)
              (vector (symbol-name (lispm-agent-name a))
