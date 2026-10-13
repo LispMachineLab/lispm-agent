@@ -670,9 +670,16 @@ runs, and the functions that test, show and hide it in the selected frame.")
   (car (seq-find (lambda (view) (funcall (plist-get (cdr view) :visible)))
                  lme-sidebar-views)))
 
+(declare-function lme-browser-workspace-p "lme-browser" ())
+
 (defun lme-sidebar-select (view)
   "Show VIEW in the left sidebar, or hide the sidebar when VIEW is shown.
-Every other view is hidden first, so at most one is ever visible."
+Every other view is hidden first, so at most one is ever visible.  Views
+belong to the project workspaces: asked for in the browser's, which has
+its own menus instead, VIEW opens in the workspace used before it."
+  (when (and (fboundp 'lme-browser-workspace-p) (lme-browser-workspace-p)
+             (tab-bar--tab-index-recent 1))
+    (tab-bar-switch-to-recent-tab))
   (let ((current (lme-sidebar-current-view)))
     (dolist (entry lme-sidebar-views)
       (when (funcall (plist-get (cdr entry) :visible))

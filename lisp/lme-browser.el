@@ -23,9 +23,10 @@
 
 ;;; Commentary:
 
-;; The embedded WebKit browser: its own workspace, an address window with
-;; tabs, navigation and an editable address, and helpers that open URLs in
-;; it.  Requires an Emacs built with xwidgets.
+;; The embedded WebKit browser: an application of its own, as Mac OS 9's
+;; browsers were, with its own workspace, its own menus in the menu bar and
+;; a browser window (title bar, toolbar, address field, tabs), and helpers
+;; that open URLs in it.  Requires an Emacs built with xwidgets.
 
 ;;; Code:
 
@@ -70,14 +71,19 @@
 ;;;; Browser
 ;;
 ;; The embedded WebKit browser runs in the main area of a workspace of its
-;; own, under a one-line address window like a desktop browser's toolbar:
+;; own, laid out as a Mac OS 9 browser window:
 ;;
-;;   tab line    browser tabs, each closable, then "+" for a new tab
-;;   text line   back, forward, reload, then the editable address (RET)
-;;   below       the page
+;;   address window  title bar     the shown page's icon and title
+;;                   header line   toolbar: back, forward, reload, home
+;;                   text line     the address, in an edit field (RET)
+;;   page window     tab line      a bevel button per tab, then "+"
+;;                   below         the page
 ;;
 ;; The address window is a real buffer, so the address is edited in place.
 ;; A timer keeps it in step with the page while it is not being edited.
+;; While the workspace is frontmost, the menu bar holds the browser's own
+;; menus (File, Go, Window) instead of the sidebar's views, as Mac OS 9's
+;; menu bar held the frontmost application's.
 
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-webkit-uri "xwidget" (xwidget))
@@ -87,6 +93,12 @@
 (declare-function xwidget-webkit-forward "xwidget" ())
 (declare-function xwidget-webkit-reload "xwidget" ())
 (defvar xwidget-webkit-mode-map)
+(declare-function lme-sidebar--toolbar-button "lme-sidebar" (label command help row &optional face))
+(declare-function lme-sidebar--toolbar-buttons "lme-sidebar" (actions row))
+(declare-function lme-platinum-icon "lme-platinum" (name))
+(defvar lme-platinum-title)
+(defvar lme-platinum-icon)
+(defvar lme-platinum-close-function)
 
 (defconst lme-browser-workspace-name "Browser"
   "Name of the workspace holding the embedded browser.")
@@ -190,6 +202,75 @@ does: the address window shows the page's real address again at once."
       (funcall command))
     (lme-browser--sync t)))
 
+(defun lme-browser-back ()
+  "Go back a page in the shown browser tab."
+  (interactive)
+  (lme-browser--in-page #'xwidget-webkit-back))
+
+(defun lme-browser-forward ()
+  "Go forward a page in the shown browser tab."
+  (interactive)
+  (lme-browser--in-page #'xwidget-webkit-forward))
+
+(defun lme-browser-reload ()
+  "Load the shown browser tab's page again."
+  (interactive)
+  (lme-browser--in-page #'xwidget-webkit-reload))
+
+(defun lme-browser-home ()
+  "Go to `lme-browser-home-url' in the shown browser tab."
+  (interactive)
+  (lme-browser--in-page
+   (lambda () (xwidget-webkit-goto-uri (xwidget-at (point-min)) lme-browser-home-url))))
+
+(defun lme-browser-close-shown-tab ()
+  "Close the shown browser tab, see `lme-browser-close-tab'."
+  (interactive)
+  (when-let* ((window (lme-browser--window)))
+    (lme-browser-close-tab (window-buffer window))))
+
+;;;;; Menus
+
+(defun lme-browser--file-items ()
+  "Return the items of the browser's File menu."
+  (let ((page (and (lme-browser--window) t)))
+    `((:label "New Tab" :action lme-browser-new-tab)
+      (:label "Open Location…" :action lme-browser-focus-address)
+      (:label "Close Tab" :action lme-browser-close-shown-tab :enabled ,page)
+      separator
+      (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page))))
+
+(defun lme-browser--go-items ()
+  "Return the items of the browser's Go menu."
+  (let ((page (and (lme-browser--window) t)))
+    `((:label "Back" :action lme-browser-back :enabled ,page)
+      (:label "Forward" :action lme-browser-forward :enabled ,page)
+      (:label "Reload" :action lme-browser-reload :enabled ,page)
+      separator
+      (:label "Home" :action lme-browser-home :enabled ,page))))
+
+(defun lme-browser--window-items ()
+  "Return the items of the browser's Window menu: a tab each, the shown one
+checked, as Mac OS 9's Window menus listed an application's windows."
+  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+    (mapcar (lambda (buffer)
+              (list :label (truncate-string-to-width (lme-browser--title buffer) 48 nil nil "…")
+                    :action (lambda () (lme-browser-select-tab buffer))
+                    :checked (eq buffer shown)))
+            (lme-browser--buffers))))
+
+(defconst lme-browser-menus
+  '((lme-browser-file "File" lme-browser--file-items)
+    (lme-browser-go "Go" lme-browser--go-items)
+    (lme-browser-window "Window" lme-browser--window-items))
+  "The browser's menus in the menu bar: (KEY TITLE ITEMS-FUNCTION).")
+
+(defun lme-browser-application-menus ()
+  "Return `lme-browser-menus' while the browser workspace is frontmost.
+This is one of `lme-platinum-application-menus-functions'."
+  (when (lme-browser-workspace-p)
+    lme-browser-menus))
+
 ;;;;; Address window
 
 (defvar-local lme-browser--address-start nil
@@ -199,41 +280,51 @@ does: the address window shows the page's real address again at once."
   "Non-nil once the address was edited since the address buffer was filled.
 An edited address is kept while the page stays put; see `lme-browser--sync'.")
 
+(defvar-local lme-browser--field nil
+  "Overlay drawing the address as an edit field.")
+
 (defun lme-browser--note-address-edit (&rest _)
   "Record that the address was edited, from `after-change-functions'."
   (setq lme-browser--address-edited t))
 
+(defconst lme-browser-address-height 30
+  "Pixel height of the address line, the edit field and the toolbar around it.")
+
 (defun lme-browser--render-address (uri)
-  "Fill the address buffer with the navigation buttons and editable URI.
-Filling is not an edit: change hooks are inhibited and the edit mark cleared."
+  "Fill the address buffer with its label and the editable URI.
+The URI sits in an edit field, see `lme-browser--draw-field'.  Filling is
+not an edit: change hooks are inhibited and the edit mark cleared."
   (with-current-buffer (lme-browser--address-buffer)
     (setq lme-browser--address-edited nil)
     (let ((inhibit-read-only t)
           (inhibit-modification-hooks t))
       (erase-buffer)
-      (require 'nerd-icons)
-      (insert " ")
-      ;; Icons lit like chips under the mouse; no box, which would make the
-      ;; one-line address window taller than its line.
-      (pcase-dolist (`(,icon ,command ,help)
-                     `(("nf-cod-arrow_left" ,#'xwidget-webkit-back "Back")
-                       ("nf-cod-arrow_right" ,#'xwidget-webkit-forward "Forward")
-                       ("nf-cod-refresh" ,#'xwidget-webkit-reload "Reload")
-                       ("nf-cod-link_external" ,#'lme-browser-open-external
-                        "Open in the default browser")))
-        (lme-sidebar--insert-styled-button
-         (concat (propertize " " 'face 'default) (nerd-icons-codicon icon)
-                 (propertize " " 'face 'default))
-         (lambda () (lme-browser--in-page command))
-         help)
-        (insert " "))
-      (insert " ")
+      (insert (propertize " " 'display `(space :width (8) :height (,lme-browser-address-height)
+                                               :ascent 65))
+              (propertize "Address:" 'face 'lme-platinum-toolbar-label)
+              " ")
       (add-text-properties (point-min) (point)
                            '(read-only t rear-nonsticky (read-only)))
       (setq lme-browser--address-start (copy-marker (point)))
       (insert (or uri ""))
+      (lme-browser--draw-field)
       (when-let* ((window (get-buffer-window (current-buffer))))
         (set-window-point window (point-max))))))
+
+(defun lme-browser--draw-field ()
+  "Draw the address as Mac OS 9's edit text field: inset, in the list colour,
+reaching across the toolbar to a few pixels short of its right edge.
+The field grows as the address is typed at its end."
+  (unless lme-browser--field
+    (setq lme-browser--field (make-overlay 1 1 nil nil t))
+    (overlay-put lme-browser--field 'face 'lme-platinum-field)
+    (overlay-put lme-browser--field 'before-string
+                 (propertize " " 'face 'lme-platinum-field 'display '(space :width (4))))
+    ;; The cursor at the address's end stands on the field's blank rest.
+    (overlay-put lme-browser--field 'after-string
+                 (propertize " " 'face 'lme-platinum-field 'cursor t
+                             'display '(space :align-to (- right (12))))))
+  (move-overlay lme-browser--field lme-browser--address-start (point-max)))
 
 (defun lme-browser--edited-address ()
   "Return the address typed in the address buffer, or nil before its first render."
@@ -266,14 +357,43 @@ Filling is not an edit: change hooks are inhibited and the edit mark cleared."
   "RET" #'lme-browser-address-submit
   "C-l" #'lme-browser-focus-address)
 
+(defun lme-browser--toolbar ()
+  "Return the browser's toolbar, the address window's header line.
+Bevel buttons go back, forward, reload and home; one at the right end
+opens the page in the default browser."
+  (let ((trailing (lme-sidebar--toolbar-buttons
+                   '(("Open in Browser" lme-browser-open-external
+                      "Open the page in the default browser"))
+                   'header-line)))
+    (concat " "
+            (lme-sidebar--toolbar-buttons
+             '(("◀ Back" lme-browser-back "Go back a page")
+               ("Forward ▶" lme-browser-forward "Go forward a page")
+               ("Reload" lme-browser-reload "Load the page again")
+               ("Home" lme-browser-home "Go to the home page"))
+             'header-line)
+            (propertize " " 'display
+                        `(space :align-to (- right (,(+ (string-pixel-width trailing) 6)))))
+            trailing)))
+
+(defun lme-browser--close-window (_window)
+  "Close the browser window's shown tab, from its title bar's close box."
+  (lme-browser-close-shown-tab))
+
 (define-derived-mode lme-browser-address-mode fundamental-mode "Address"
   "Major mode of the browser's address window.
+Its title bar names the shown page, its header line is the toolbar and
+its one line the address.
 \\{lme-browser-address-mode-map}"
   (setq-local mode-line-format nil
-              header-line-format nil
+              header-line-format '(:eval (lme-browser--toolbar))
               truncate-lines t
               cursor-type 'bar
-              tab-line-format '(:eval (lme-browser--tab-line)))
+              lme-platinum-title lme-browser-workspace-name
+              lme-platinum-icon (lme-platinum-icon "globe")
+              lme-platinum-close-function #'lme-browser--close-window)
+  (face-remap-add-relative 'default 'lme-platinum-toolbar)
+  (face-remap-add-relative 'header-line 'lme-platinum-header)
   (display-line-numbers-mode -1)
   (visual-line-mode -1)
   (add-hook 'after-change-functions #'lme-browser--note-address-edit nil t))
@@ -340,11 +460,25 @@ draw as an empty box, so it is refused."
           (ignore-errors (base64-decode-string payload))
         (encode-coding-string (url-unhex-string payload) 'utf-8)))))
 
+(defun lme-browser--retitle ()
+  "Name the browser window after the shown page, with the page's icon.
+Each tab's window bottom is named after its page too, not after the
+buffer, whose name WebKit prefixes."
+  (dolist (buffer (lme-browser--buffers))
+    (with-current-buffer buffer
+      (setq lme-platinum-title (lme-browser--title buffer))))
+  (when-let* ((buffer (get-buffer lme-browser-address-buffer-name)))
+    (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+      (with-current-buffer buffer
+        (setq lme-platinum-title (if shown (lme-browser--title shown)
+                                   lme-browser-workspace-name)
+              lme-platinum-icon (or (and shown (lme-browser--favicon shown))
+                                    (lme-platinum-icon "globe")))))))
+
 (defun lme-browser--redraw-tabs ()
-  "Redraw the address window's tab line, leaving the address alone."
-  (when-let* ((address (lme-browser--address-window)))
-    (with-current-buffer (window-buffer address)
-      (force-mode-line-update))))
+  "Redraw the browser window's title bar and tabs, leaving the address alone."
+  (lme-browser--retitle)
+  (force-mode-line-update t))
 
 (defun lme-browser--store-favicon (icon data)
   "Record icon address ICON as fetched with DATA, nil on failure, and redraw."
@@ -423,41 +557,27 @@ was not looked up yet has its lookup started."
   (lambda () (interactive) (apply function args)))
 
 (defun lme-browser--tab-line ()
-  "Return the address window's tab line: one closable tab per page, then +.
-Each tab shows its page's icon before its title, or a globe until the
-icon is known and when the page has none."
-  (require 'nerd-icons)
-  (let* ((shown (and (lme-browser--window) (window-buffer (lme-browser--window))))
-         ;; Tabs are set in the editor's font and size, as buffer tabs are;
-         ;; the `tab-line' face beneath would otherwise shrink them.
-         (font `(:family ,(face-attribute 'default :family)
-                 :height ,(face-attribute 'default :height)))
-         (editor (face-background 'default nil t))
-         (bar (face-background 'tab-line nil t))
-         (active `(,@font :background ,editor
-                   :foreground ,(face-foreground 'default nil t)
-                   :box (:line-width (10 . 5) :color ,editor)))
-         (inactive `(,@font :background ,bar
-                     :foreground ,(lme-tab-bar--muted-color)
-                     :box (:line-width (10 . 5) :color ,bar))))
+  "Return the row of tabs atop the page: a bevel button per tab, then +.
+The shown tab's button is pushed in, as a Mac OS 9 group of bevel buttons
+showed its choice.  Each shows its page's icon before its title, or the
+globe until the icon is known and when the page has none."
+  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
     (concat
+     (propertize " " 'display '(space :width (6) :height (28) :ascent 65))
      (mapconcat
       (lambda (buffer)
-        (let ((face (if (eq buffer shown) active inactive)))
-          (concat
-           (lme-sidebar--toolbar-button
-            (concat (or (lme-browser--favicon buffer) (nerd-icons-codicon "nf-cod-globe"))
-                    " "
-                    (truncate-string-to-width (lme-browser--title buffer)
-                                              lme-browser-tab-width nil nil "…"))
-            (lme-browser--tab-command #'lme-browser-select-tab buffer)
-            (or (lme-browser--uri buffer) "Show this tab") 'tab-line face)
-           (lme-sidebar--toolbar-button
-            " ×" (lme-browser--tab-command #'lme-browser-close-tab buffer)
-            "Close this tab" 'tab-line face))))
+        (lme-sidebar--toolbar-button
+         (concat " " (or (lme-browser--favicon buffer) (lme-platinum-icon "globe")) " "
+                 (truncate-string-to-width (lme-browser--title buffer)
+                                           lme-browser-tab-width nil nil "…")
+                 " ")
+         (lme-browser--tab-command #'lme-browser-select-tab buffer)
+         (or (lme-browser--uri buffer) "Show this tab")
+         'tab-line
+         (when (eq buffer shown) 'lme-platinum-button-pressed)))
       (lme-browser--buffers) " ")
      " "
-     (lme-sidebar--toolbar-button "+" #'lme-browser-new-tab "New tab" 'tab-line))))
+     (lme-sidebar--toolbar-button " + " #'lme-browser-new-tab "New tab" 'tab-line))))
 
 (defun lme-browser-select-tab (buffer)
   "Show browser tab BUFFER in the browser window."
@@ -520,6 +640,7 @@ shows the page's address.  The timer stops once no address window is left."
                                          (window-buffer address))))
         (when (or force (not (equal state lme-browser--synced-state)))
           (setq lme-browser--synced-state state)
+          (lme-browser--redraw-tabs)
           (when (or force (not edited)
                     (and moved (not (eq address (selected-window)))))
             (lme-browser--render-address (car state)))
@@ -529,9 +650,17 @@ shows the page's address.  The timer stops once no address window is left."
       (cancel-timer lme-browser--sync-timer)
       (setq lme-browser--sync-timer nil))))
 
+(defun lme-browser--fit-address ()
+  "Fit the address window to its title bar, toolbar and address line.
+They are taller than text lines, so the window is fitted in pixels, then
+kept so."
+  (when-let* ((address (lme-browser--address-window)))
+    (let ((window-resize-pixelwise t))
+      (fit-window-to-buffer address nil nil nil nil t))))
+
 (defun lme-browser--ensure-layout ()
   "Put the address window above the browser window, once, and keep it synced.
-The address window is fitted to the height of its tab line and address."
+The address window is fitted to its lines, see `lme-browser--fit-address'."
   (when-let* ((window (lme-browser--window)))
     (unless (lme-browser--address-window)
       (let* ((window-min-height 1)
@@ -539,12 +668,14 @@ The address window is fitted to the height of its tab line and address."
         (set-window-buffer address (lme-browser--address-buffer))
         (set-window-parameter address 'lme-chrome t)
         (set-window-dedicated-p address t)))
+    ;; The address window wears the browser window's title bar, active
+    ;; while the page is.
+    (set-window-parameter (lme-browser--address-window) 'lme-platinum-title-for window)
     (lme-browser--sync t)
-    ;; The tab line's padded tabs are taller than a text line, so the window
-    ;; is fitted to its tab line and address line in pixels, then kept so.
-    (when-let* ((address (lme-browser--address-window)))
-      (let ((window-resize-pixelwise t))
-        (fit-window-to-buffer address nil nil nil nil t)))
+    ;; A new window's lines are measured right only once it was drawn, so
+    ;; it is fitted again after the next redisplay.
+    (lme-browser--fit-address)
+    (run-at-time 0 nil #'lme-browser--fit-address)
     (unless lme-browser--sync-timer
       (setq lme-browser--sync-timer (run-with-timer 0.7 0.7 #'lme-browser--sync)))))
 
@@ -584,10 +715,14 @@ Its tabs live in the address window, which stands at the top of the
 browser as its title bar, so the page shows neither a title bar of its own
 nor WebKit's title line.  The page is inserted after this mode hook runs,
 so the arrow pointer is applied once the current command finishes."
-  ;; The page title already labels its tab, so a title bar or WebKit's own
-  ;; title line would only repeat it.
-  (setq-local tab-line-format nil
+  ;; The browser window's title bar is the address window's, above the
+  ;; toolbar; the page's own top line holds the tabs, and WebKit's title
+  ;; line would only repeat the title.
+  (setq-local tab-line-format '(:eval (lme-browser--tab-line))
               header-line-format nil)
+  ;; The title bar above lights and dims with the page.
+  (add-hook 'window-selection-change-functions
+            (lambda (_) (force-mode-line-update t)) nil t)
   ;; The unified copy and paste keys act on the page's selection and its
   ;; focused field, not on the buffer, which holds only the view.
   (setq-local lme-copy-function #'xwidget-webkit-copy-selection-as-kill

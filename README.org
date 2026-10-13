@@ -12,10 +12,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then a
-  title per sidebar view (Files, Agents, Shells, Buffers, Web), lit while its view is shown.  At
-  its right end, Emacs's own load average, mail flag, battery and time, each a title with a
-  menu of its own (the Mail menu reads, composes and checks mail), then the Application menu,
-  which names the current workspace and lists the others.
+  title per sidebar view (Files, Agents, Shells, Buffers), lit while its view is shown.  At its
+  right end, Emacs's own load average, mail flag, battery and time, each a title with a menu of
+  its own (the Mail menu reads, composes and checks mail), then the Application menu, which
+  names the current workspace and lists the others.
 - *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
   collapse box.  Only the active window shows stripes and boxes, and a box is pressed, not
   clicked: it sinks while held and acts when let go over it.  The close box puts the window's
@@ -40,12 +40,17 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   colour, and a count of the items at the bottom.  The agents view lists every agent session,
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
-- *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu and every
-  right-click menu (Emacs's context menu, the sidebar's) drop as Mac OS 9's menus did, with
-  check marks, separators, key equivalents and hierarchical submenus; closing a modified
-  document asks to save it (Return saves, Escape cancels, Command-D doesn't save), closing a
-  running session or deleting one asks first, each in an alert with the caution, stop or note
-  icon and the default button ringed.
+- *A browser* that is an application of its own, as Mac OS 9's browsers were, when Emacs is built
+  with xwidgets: opened from the λ menu, reached and left from the Application menu.  While it
+  is in front, the menu bar holds its File, Go and Window menus instead of the views, and its
+  window has a title bar naming the page, a toolbar of bevel buttons, the address in an edit
+  field and a row of tabs.
+- *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
+  right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
+  package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
+  and hierarchical submenus; closing a modified document asks to save it (Return saves, Escape
+  cancels, Command-D doesn't save), closing a running session or deleting one asks first, each
+  in an alert with the caution, stop or note icon and the default button ringed.
 - *Details*: a thin insertion point (Evil's normal state keeps its block), and help over a
   control shown as Balloon Help.
 - *A main area* that keeps agent chats and terminals on the left and everything else, files

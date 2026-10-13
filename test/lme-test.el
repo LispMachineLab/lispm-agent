@@ -176,6 +176,60 @@ not a first start."
                                                '((side . left)))))
       (should (equal (lme-platinum--window-controls side) '(on off off))))))
 
+(ert-deftest lme-test-chrome-controls ()
+  "Chrome, such as the browser's address window, only closes, and its close
+box runs the buffer's own close function."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((chrome (split-window-below))
+          (closed nil))
+      (set-window-parameter chrome 'lme-chrome t)
+      (should (equal (lme-platinum--window-controls chrome) '(on off off)))
+      (with-temp-buffer
+        (setq-local lme-platinum-close-function (lambda (window) (setq closed window)))
+        (set-window-buffer chrome (current-buffer))
+        (lme-platinum-close-window chrome)
+        (should (eq closed chrome))
+        (should (buffer-live-p (current-buffer)))))))
+
+(defun lme-test--menu-bar-titles ()
+  "Return the keys of the menu bar's left end."
+  (mapcar #'car (lme-platinum-menu-bar)))
+
+(ert-deftest lme-test-browser-menus-replace-views ()
+  "The browser's workspace puts its own menus in the menu bar, the views
+leave it, and no Web title stands among the views elsewhere."
+  (let ((lme-platinum-application-menus-functions '(lme-browser-application-menus)))
+    (cl-letf (((symbol-function 'lme-browser-workspace-p) #'ignore))
+      (let ((titles (lme-test--menu-bar-titles)))
+        (should (memq 'lme-view-files titles))
+        (should-not (memq 'lme-view-web titles))
+        (should-not (memq 'lme-browser-file titles))))
+    (cl-letf (((symbol-function 'lme-browser-workspace-p) #'always))
+      (should (equal (lme-test--menu-bar-titles)
+                     '(lme-lambda lme-browser-file lme-browser-go lme-browser-window))))))
+
+(ert-deftest lme-test-browser-menu-items ()
+  "Without a page, the browser's menus offer a new tab, not page commands."
+  (cl-letf (((symbol-function 'lme-browser--window) #'ignore))
+    (let ((file (lme-browser--file-items)))
+      (should (lme-popup--enabled-p (seq-find (lambda (item) (equal (plist-get item :label) "New Tab"))
+                                              file)))
+      (should-not (lme-popup--enabled-p (seq-find (lambda (item)
+                                                    (equal (plist-get item :label) "Close Tab"))
+                                                  file))))
+    (should-not (seq-some #'lme-popup--enabled-p (lme-browser--go-items)))))
+
+(ert-deftest lme-test-views-leave-the-browser ()
+  "A view asked for in the browser's workspace opens in the one used before."
+  (let ((left nil))
+    (cl-letf (((symbol-function 'lme-browser-workspace-p) (lambda () (not left)))
+              ((symbol-function 'tab-bar--tab-index-recent) (lambda (&rest _) 0))
+              ((symbol-function 'tab-bar-switch-to-recent-tab) (lambda (&rest _) (setq left t)))
+              (lme-sidebar-views '((test :visible ignore :show ignore :hide ignore))))
+      (lme-sidebar-select 'test)
+      (should left))))
+
 (ert-deftest lme-test-palette-takes-named-colours ()
   "Colours a theme names replace the derived ones; the rest stay derived."
   (let* ((derived (lme-platinum--derive-palette "#282a36" "#f8f8f2" "#6272a4" "#bd93f9"))
