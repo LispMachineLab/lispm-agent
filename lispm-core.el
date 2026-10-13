@@ -157,6 +157,17 @@ That happens when search_tools loads deferred tools for it.")
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
 
+(defvar lispm-tool-input-functions nil
+  "Abnormal hook run while the model writes a tool call.
+Each is called with the agent and a plist: the call's :id and :name,
+and :json, its input as received so far, the beginning of a JSON
+object.  It runs whenever more of the input arrives.")
+
+(defvar lispm-buffer-change-functions nil
+  "Abnormal hook run after a tool changed a buffer's text.
+Each is called with the buffer, its old text and its new text;
+`lispm-current-agent' is the agent that made the change, if any.")
+
 ;;;; Roles and agents
 ;;
 ;; A role is a kind of agent: instructions, tools, permission policy and

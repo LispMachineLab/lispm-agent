@@ -304,7 +304,10 @@ arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
       (setf (nth 1 entry) name)
       (when on-delta (funcall on-delta 'tool name)))
     (when (stringp arguments)
-      (setf (nth 2 entry) (concat (nth 2 entry) arguments)))
+      (setf (nth 2 entry) (concat (nth 2 entry) arguments))
+      (when (and on-delta (nth 1 entry))
+        (funcall on-delta 'tool-input
+                 (list :id (nth 0 entry) :name (nth 1 entry) :json (nth 2 entry)))))
     (puthash index entry calls)))
 
 (defun lispm-openai-stream-complete-p (stream)

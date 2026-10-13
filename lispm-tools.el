@@ -70,8 +70,10 @@ is made and their arguments checked.  Tools from elsewhere, such as
 MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist,
 or a function returning one) and a FUNCTION taking the whole input.
 A DEFERRED tool is not offered to an agent until search_tools has
-found it for that agent."
-  name description params input-schema permission function async preview deferred)
+found it for that agent.  CHANGES, for a tool that changes a buffer,
+tells what a call would make of it (see `lispm-deftool')."
+  name description params input-schema permission function async preview deferred
+  changes)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -101,19 +103,25 @@ BODY may start with keyword options:
                      failure); its own value is ignored
   :preview FUNCTION  called with the same arguments; returns a string
                      (usually a diff) shown while the call awaits approval
+  :changes FUNCTION  for a tool that changes a buffer: called with the
+                     same arguments, returns (BUFFER . TEXT), the buffer
+                     the call would change and the text it would leave
+                     there; the change is then shown in BUFFER while the
+                     call is written and while it awaits approval
   :deferred t        offered only once search_tools finds it (see
                      `lispm-tool-sources'): for tools seldom needed
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview deferred
+  (let ((permission 'read) async preview changes deferred
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
         (:permission (setq permission (pop body)))
         (:async (setq async (pop body)))
         (:preview (setq preview (pop body)))
+        (:changes (setq changes (pop body)))
         (:deferred (setq deferred (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
@@ -123,6 +131,7 @@ is printed.  Signal an error to report a failure to the model."
        :permission ',permission
        :async ,async
        :preview ,preview
+       :changes ,changes
        :deferred ,deferred
        :function ,(if async
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
@@ -267,6 +276,13 @@ Synchronous tools call DONE before returning.  An asynchronous tool's
     (condition-case err
         (apply preview (lispm-tools--arguments tool input))
       (error (format "(no preview: %s)" (error-message-string err))))))
+
+(defun lispm-tool-would-change (tool input)
+  "What calling TOOL with INPUT would change: (BUFFER . TEXT), or nil.
+Nil for a tool that changes no buffer; an error if INPUT makes no
+valid call of TOOL."
+  (when-let* ((changes (lispm-tool-changes tool)))
+    (apply changes (lispm-tools--arguments tool input))))
 
 ;;;; Deferred tools
 ;;
@@ -571,6 +587,15 @@ outside the agent's root always ask, whatever the policy says."
           (if all count 1))))
 
 (defun lispm-tools--set-text (buffer text)
+  "Make BUFFER's text TEXT as one undo step, journaled and saved.
+Then tell `lispm-buffer-change-functions'."
+  (let ((old (lispm-tools--buffer-text buffer)))
+    (lispm-tools--replace-text buffer text)
+    ;; The change is made: whatever shows it must not undo the call.
+    (with-demoted-errors "LispM: showing a change: %S"
+      (run-hook-with-args 'lispm-buffer-change-functions buffer old text))))
+
+(defun lispm-tools--replace-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved."
   (with-current-buffer buffer
     (lispm-journal-snapshot buffer)
@@ -995,6 +1020,10 @@ as one undoable step and is then saved.  old_text must match the
 current contents exactly, so read the file first."
   :permission write
   :preview #'lispm-tools--edit-preview
+  :changes (lambda (path old-text new-text &optional replace-all)
+             (let ((buffer (find-file-noselect (lispm-tools--file path))))
+               (cons buffer (car (lispm-tools--replace (lispm-tools--buffer-text buffer)
+                                                       old-text new-text replace-all)))))
   (let* ((file (lispm-tools--file path))
          (buffer (find-file-noselect file))
          (edit (lispm-tools--replace (lispm-tools--buffer-text buffer)
@@ -1012,6 +1041,8 @@ for changes to existing files."
   :preview (lambda (path content)
              (let ((file (lispm-tools--file path)))
                (lispm--diff (lispm--file-text file) content (lispm-tools--label file))))
+  :changes (lambda (path content)
+             (cons (find-file-noselect (lispm-tools--file path)) content))
   (let* ((file (lispm-tools--file path))
          (existed (file-exists-p file)))
     (lispm-tools--set-text (find-file-noselect file) content)
@@ -1029,6 +1060,10 @@ For files use edit_file."
              (let ((old (lispm-tools--buffer-text (lispm-tools--buffer buffer))))
                (lispm--diff old (car (lispm-tools--replace old old-text new-text replace-all))
                             buffer)))
+  :changes (lambda (buffer old-text new-text &optional replace-all)
+             (let ((b (lispm-tools--buffer buffer)))
+               (cons b (car (lispm-tools--replace (lispm-tools--buffer-text b)
+                                                  old-text new-text replace-all)))))
   (let* ((b (lispm-tools--buffer buffer))
          (edit (lispm-tools--replace (lispm-tools--buffer-text b)
                                      old-text new-text replace-all)))

@@ -727,7 +727,12 @@ starting hold requests back so that their tools are there.")
                    (if (> attempt 0) (format "retry %d" attempt) "thinking"))
   (lispm--live-begin agent)
   (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent) body betas
-                       :on-delta (lambda (kind text) (lispm--live-insert agent kind text))
+                       :on-delta (lambda (kind text)
+                                   (if (eq kind 'tool-input)
+                                       (with-demoted-errors "LispM: %S"
+                                         (run-hook-with-args 'lispm-tool-input-functions
+                                                             agent text))
+                                     (lispm--live-insert agent kind text)))
                        :on-done (lambda (message) (lispm--on-message agent message))
                        :on-error (lambda (err) (lispm--on-error agent err body betas attempt)))))
     (when (processp proc)

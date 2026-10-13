@@ -95,6 +95,22 @@ To work in the org document directly instead of the chat, set ~lispm-interface~ 
 write under the last ~* User~ heading, send with ~C-c RET~, review calls with ~C-c C-y~, abort
 with ~C-c C-k~.
 
+** Edits, where they happen
+
+An agent's changes show in the buffers it changes. As soon as the model starts writing an edit,
+the file comes into view beside the chat and the change grows there as its text streams in,
+under a tag naming the agent; while the call awaits approval, the lines it would remove are
+struck out and the new ones laid over the buffer, so the change is judged where it would happen.
+A change that runs without asking is typed in behind the agent's cursor; either way, new text
+glows for a moment and removed lines fade. It is all display: the text is only ever what the
+tools make it.
+
+The file takes the place of another file in view, or a window is split off for it; the chat
+stays where it is. ~lispm-show-edits~ turns all of this off, ~lispm-edits-follow~ keeps changes
+to buffers out of view from being brought into it, and ~lispm-edits-speed~,
+~lispm-edits-max-duration~ and ~lispm-edits-fade~ set the pace. A change streams in only when
+the backend streams tool calls' input piece by piece, as Rotom does on both sides since 1.5.16.
+
 * Agents, roles and sessions
 
 - A *role* is a kind of agent: instructions, tools, permission policy, model. ~assistant~ is
@@ -254,6 +270,7 @@ CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every
 | lispm-openai.el        | the OpenAI Chat Completions shape                               |
 | lispm-anthropic.el     | the Anthropic Messages shape                                    |
 | lispm-tools.el         | ~lispm-deftool~, permissions, built-in tools, edit journal       |
+| lispm-edits.el         | edits shown where they happen: streamed, proposed, typed in      |
 | lispm-memory.el        | memory.org and tasks.org, git audit trail                       |
 | lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
 | lispm-collab.el        | multi-agent collaboration tools                                 |
