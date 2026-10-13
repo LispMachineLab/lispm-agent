@@ -133,9 +133,10 @@ It takes no focus, and hooks run for new frames do not see it."
     (redisplay t)))
 
 (defun lme-popup--read ()
-  "Read the next event, a quit included, without quitting."
+  "Read the next event, a quit included, without quitting.
+The click that opened the popup is not echoed as an unfinished key."
   (let* ((inhibit-quit t)
-         (event (read-event)))
+         (event (let ((echo-keystrokes 0)) (read-event))))
     (when (eq event ?\C-g)
       (setq quit-flag nil))
     event))
@@ -207,10 +208,10 @@ key equivalent.")
 
 (defun lme-popup--enabled-p (item)
   "Return non-nil when menu ITEM can be chosen.
-It needs an action or a submenu; an item without :enabled is enabled,
-one with :enabled nil is not."
+It needs an action, a submenu or a value to return; an item without
+:enabled is enabled, one with :enabled nil is not."
   (and (not (lme-popup--separator-p item))
-       (or (plist-get item :action) (plist-get item :submenu))
+       (or (plist-get item :action) (plist-get item :submenu) (plist-member item :value))
        (or (not (plist-member item :enabled)) (plist-get item :enabled))))
 
 (defun lme-popup--keyboard-p (keys)
@@ -361,16 +362,19 @@ hierarchical menus did, when the mouse rests on it or Right is typed.
 Return the item chosen, or nil when the menu was cancelled."
   (if (not (lme-popup-available-p))
       (lme-popup--menu-fallback items)
-    (let ((levels nil)
-          (choice nil))
+    (lme-popup--run (lme-popup-choose items x y align))))
+
+(defun lme-popup-choose (items &optional x y align)
+  "Pop up ITEMS as `lme-popup-menu' does, and return the item chosen.
+Nothing is run; nil means the menu was cancelled, or had no items."
+  (when items
+    (let ((levels nil))
       (unwind-protect
           (progn
             (push (lme-popup--level items x y align) levels)
-            (setq choice (lme-popup--menu-loop (lambda () levels)
-                                               (lambda (new) (setq levels new)))))
+            (lme-popup--menu-loop (lambda () levels) (lambda (new) (setq levels new))))
         (dolist (level levels)
-          (lme-popup--dispose (plist-get level :frame))))
-      (lme-popup--run choice))))
+          (lme-popup--dispose (plist-get level :frame)))))))
 
 (defun lme-popup--menu-loop (get set)
   "Read events for the open menu levels until one item is chosen; return it.
@@ -491,10 +495,11 @@ Submenus are followed down, their items' labels joined with \" › \"."
   "Return FORM's value, nil when it signals: a menu item's condition."
   (condition-case nil (eval form t) (error nil)))
 
-(defun lme-popup--keymap-item (binding)
+(defun lme-popup--keymap-item (binding &optional path)
   "Return the menu item of BINDING, an entry of a menu keymap, or nil.
-A separator becomes `separator'; an item hidden by its :visible form, or
-an entry that is not a menu item, nothing."
+PATH is the list of keys reaching BINDING, kept in the item's :path.  A
+separator becomes `separator'; an item hidden by its :visible form, or an
+entry that is not a menu item, nothing."
   (pcase binding
     ((pred stringp)
      (when (string-prefix-p "--" binding) 'separator))
@@ -517,9 +522,10 @@ an entry that is not a menu item, nothing."
                 (button (plist-get props :button)))
            `(:label ,name
              :action ,(unless submenu real)
+             :path ,path
              ,@(when submenu
                  `(:submenu ,(let ((map submenu))
-                               (lambda () (lme-popup-keymap-items map)))))
+                               (lambda () (lme-popup-keymap-items map path)))))
              :enabled ,(and (or submenu real)
                             (or (not (plist-member props :enable))
                                 (lme-popup--eval (plist-get props :enable)))
@@ -531,22 +537,24 @@ an entry that is not a menu item, nothing."
      (if (string-prefix-p "--" name)
          'separator
        (let ((real (if (stringp (car-safe rest)) (cdr rest) rest)))
-         (lme-popup--keymap-item `(menu-item ,name ,real)))))))
+         (lme-popup--keymap-item `(menu-item ,name ,real) path))))))
 
 (defun lme-popup--keymap-map (binding)
   "Return BINDING as a keymap, following a symbol to its function."
   (let ((map (indirect-function binding)))
     (and (keymapp map) map)))
 
-(defun lme-popup-keymap-items (keymap)
+(defun lme-popup-keymap-items (keymap &optional prefix)
   "Return the items of menu KEYMAP, as `lme-popup-menu' takes them.
-Items come in the keymap's order, as Emacs shows them; separators are
-not doubled nor left at either end."
+Items come in the keymap's order, as Emacs shows them, each with the
+:path of keys reaching it after PREFIX; separators are not doubled nor
+left at either end."
   (let ((items nil) (seen nil))
     (map-keymap (lambda (key binding)
                   (unless (memq key seen)
                     (push key seen)
-                    (when-let* ((item (lme-popup--keymap-item binding)))
+                    (when-let* ((item (lme-popup--keymap-item
+                                       binding (append prefix (list key)))))
                       (push item items))))
                 (lme-popup--keymap-map keymap))
     (let ((cleaned nil))
@@ -581,33 +589,116 @@ POSITION is an event, a posn, a buffer position or nil for the mouse."
   (pcase-let ((`(,x . ,y) (lme-popup--frame-xy position)))
     (lme-popup-menu (lme-popup-keymap-items keymap) (1+ x) (1+ y))))
 
+(defun lme-popup--local-right-click-p (position)
+  "Return non-nil when a right click at POSITION has a binding of its own.
+That is a [mouse-3] command of the buffer or text there, such as the
+project tree's or the agents sidebar's menu, which then opens instead."
+  (let ((binding (key-binding [mouse-3] t nil position)))
+    (and binding (not (eq binding (keymap-lookup global-map "<mouse-3>"))))))
+
 (defun lme-popup-context-menu (event)
   "Pop up the context menu for mouse EVENT, as Mac OS 9's contextual menus.
-The menu is Emacs's own, `context-menu-map', drawn as a Platinum menu."
+The menu is Emacs's own, `context-menu-map', drawn as a Platinum menu.
+Where the click has a right-click command of its own, that runs on the
+release instead; where the context menu is empty, nothing opens."
   (interactive "e")
-  (let ((window (posn-window (event-start event))))
-    (when (windowp window)
-      (select-window window))
-    (lme-popup-keymap-menu (context-menu-map event) event)))
+  (let* ((position (event-start event))
+         (window (posn-window position)))
+    (unless (lme-popup--local-right-click-p position)
+      (when (windowp window)
+        (select-window window))
+      (lme-popup-keymap-menu (context-menu-map event) event))))
 
-(defun lme-popup--popup-menu (popup-menu menu &optional position prefix from-menu-bar)
-  "Draw MENU as a Mac OS 9 menu where `popup-menu' would pop up a native one.
-POPUP-MENU is the original, called for menus from the menu bar, lists
-of keymaps, and where no popup can be drawn; POSITION, PREFIX and
-FROM-MENU-BAR are its arguments."
-  (let ((map (cond ((keymapp menu) menu)
-                   ((and (consp menu) (stringp (car menu)))
-                    (easy-menu-create-menu (car menu) (cdr menu))))))
-    (if (or from-menu-bar (not map) (not (lme-popup-available-p)))
-        (funcall popup-menu menu position prefix from-menu-bar)
-      (let ((current-prefix-arg prefix))
-        (plist-get (lme-popup-keymap-menu map position) :action)))))
+(defun lme-popup--pane-items (menu)
+  "Return the items of MENU, an `x-popup-menu' menu of panes.
+MENU is (TITLE (PANE-TITLE ITEM...)...); an ITEM (STRING . VALUE)
+returns VALUE when chosen, a lone STRING is a line that cannot be, and
+one beginning with -- a separator.  Panes are parted by separators, and
+titled when there are several."
+  (let ((panes (cdr menu))
+        (items nil))
+    (dolist (pane panes)
+      (when items (push 'separator items))
+      (when (and (cdr panes) (stringp (car pane)) (not (string-empty-p (car pane))))
+        (push (list :label (car pane) :enabled nil) items))
+      (dolist (entry (cdr pane))
+        (push (pcase entry
+                ((pred stringp)
+                 (if (or (string-empty-p entry) (string-prefix-p "--" entry))
+                     'separator
+                   (list :label entry :enabled nil)))
+                (`(,(and label (pred stringp)) . ,value)
+                 (list :label label :value value)))
+              items)))
+    (nreverse items)))
+
+(defun lme-popup--answer-paths (items)
+  "Return ITEMS, from a menu keymap, each answering with its key path.
+The items of their submenus answer the same way, when they open."
+  (dolist (item items items)
+    (when (consp item)
+      (if-let* ((inner (copy-sequence item))
+                ((plist-get item :submenu)))
+          (plist-put item :submenu
+                     (lambda () (lme-popup--answer-paths (lme-popup--submenu inner))))
+        (plist-put item :value (plist-get item :path))))))
+
+(defun lme-popup--x-menu-p (menu)
+  "Return non-nil when MENU, as `x-popup-menu' takes it, can be drawn here:
+a keymap, a list of keymaps, or a title and its panes."
+  (or (keymapp menu)
+      (and (consp menu) (keymapp (car menu)))
+      (and (consp menu) (stringp (car menu)) (seq-every-p #'consp (cdr menu)))))
+
+(defun lme-popup--x-items (menu)
+  "Return the items of MENU as `x-popup-menu' takes it.
+Keymap items answer with their key path, pane items with their value."
+  (cond ((keymapp menu)
+         (lme-popup--answer-paths (lme-popup-keymap-items menu)))
+        ((keymapp (car menu))
+         (let ((items nil))
+           (dolist (map menu)
+             (let ((more (lme-popup--x-items map)))
+               (when (and items more) (push 'separator items))
+               (setq items (append (reverse more) items))))
+           (nreverse items)))
+        (t (lme-popup--pane-items menu))))
+
+(defun lme-popup--x-position (position)
+  "Return POSITION, as `x-popup-menu' takes it, as (X . Y) in its frame.
+Offsets from a window are taken from its text area, where `popup-menu'
+measures a click or point."
+  (pcase position
+    ('t (cdr (mouse-pixel-position)))
+    (`((,x ,y) ,(and window (pred windowp)))
+     (let ((edges (window-body-pixel-edges window)))
+       (cons (+ (car edges) x) (+ (nth 1 edges) y))))
+    (`((,x ,y) ,(pred framep)) (cons x y))
+    (_ (lme-popup--frame-xy position))))
+
+(defun lme-popup--x-popup-menu (x-popup-menu position menu)
+  "Draw MENU as a Mac OS 9 menu where `x-popup-menu' would draw a native one.
+X-POPUP-MENU is the original, called without a POSITION (it then only
+computes key equivalents), where no popup can be drawn, and for menus
+it cannot read.  The value is what the original returns: the key path of
+the item chosen from a keymap, the value of one chosen from panes, nil
+when cancelled."
+  (if (not (and position (lme-popup-available-p) (lme-popup--x-menu-p menu)))
+      (funcall x-popup-menu position menu)
+    (pcase-let ((`(,x . ,y) (lme-popup--x-position position)))
+      (plist-get (lme-popup-choose (lme-popup--x-items menu) (1+ x) (1+ y)) :value))))
 
 (defun lme-popup-enable ()
-  "Draw right-click menus and `popup-menu's as Mac OS 9 menus."
+  "Draw right-click menus, and every menu `x-popup-menu' pops up, as Mac
+OS 9's menus.  A right click opens Emacs's context menu, or the right-click
+command of the place clicked."
+  ;; The palette exists only now, after `lme-setup-platinum': at load
+  ;; time and at the first theme's loading, the item faces kept the menu
+  ;; bar's taller padding.
+  (lme-popup-apply-faces)
   (keymap-global-set "<down-mouse-3>" #'lme-popup-context-menu)
   (keymap-global-set "<mouse-3>" #'ignore)
-  (advice-add 'popup-menu :around #'lme-popup--popup-menu))
+  (advice-add 'x-popup-menu :around #'lme-popup--x-popup-menu))
 
 ;;;; Alerts
 

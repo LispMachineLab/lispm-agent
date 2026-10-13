@@ -370,6 +370,65 @@ while held."
                              (lme-popup--submenu (nth 3 items)))
                      '("Inner"))))))
 
+(defun lme-test--choose (label)
+  "Return a stand-in for `lme-popup-choose' that picks the item LABEL.
+It follows submenus, as a click through a hierarchical menu does."
+  (lambda (items &rest _)
+    (named-let pick ((items items))
+      (seq-some (lambda (item)
+                  (when (consp item)
+                    (cond ((equal (plist-get item :label) label) item)
+                          ((plist-get item :submenu) (pick (lme-popup--submenu item))))))
+                items))))
+
+(ert-deftest lme-test-x-popup-menu-keymap ()
+  "A keymap popped up by `x-popup-menu' answers with the chosen key path,
+as the project tree's right-click menu looks its command up by it."
+  (let ((map (make-sparse-keymap "Tree"))
+        (sub (make-sparse-keymap "New")))
+    (define-key sub [file] '(menu-item "File" find-file))
+    (define-key map [new] `(menu-item "New" ,sub))
+    (define-key map [rename] '(menu-item "Rename" rename-file))
+    (cl-letf (((symbol-function 'lme-popup-available-p) #'always)
+              ((symbol-function 'lme-popup--x-position) (lambda (_) '(10 . 20)))
+              ((symbol-function 'lme-popup-choose) (lme-test--choose "File")))
+      (let ((choice (lme-popup--x-popup-menu #'ignore t map)))
+        (should (equal choice '(new file)))
+        (should (eq (lookup-key map (apply #'vector choice)) 'find-file))))
+    (cl-letf (((symbol-function 'lme-popup-available-p) #'always)
+              ((symbol-function 'lme-popup--x-position) (lambda (_) '(10 . 20)))
+              ((symbol-function 'lme-popup-choose) #'ignore))
+      (should-not (lme-popup--x-popup-menu #'ignore t map)))))
+
+(ert-deftest lme-test-x-popup-menu-panes ()
+  "A menu of panes answers with the chosen item's value; lone strings
+cannot be chosen, and panes are parted by separators."
+  (let ((menu '("Spelling" ("" ("teh" . teh) "Suggestions") ("Actions" ("Save" . save) "--"))))
+    (should (equal (mapcar (lambda (item) (if (consp item) (plist-get item :label) item))
+                           (lme-popup--pane-items menu))
+                   '("teh" "Suggestions" separator "Actions" "Save" separator)))
+    (should-not (lme-popup--enabled-p (nth 1 (lme-popup--pane-items menu))))
+    (cl-letf (((symbol-function 'lme-popup-available-p) #'always)
+              ((symbol-function 'lme-popup--x-position) (lambda (_) '(10 . 20)))
+              ((symbol-function 'lme-popup-choose) (lme-test--choose "Save")))
+      (should (eq (lme-popup--x-popup-menu #'ignore t menu) 'save)))))
+
+(ert-deftest lme-test-x-popup-menu-passes-through ()
+  "Without a position, or a display to draw on, the original menu runs."
+  (let ((map (make-sparse-keymap "Tree")))
+    (define-key map [rename] '(menu-item "Rename" rename-file))
+    (should (eq (lme-popup--x-popup-menu (lambda (&rest _) 'native) nil map) 'native))
+    (should (eq (lme-popup--x-popup-menu (lambda (&rest _) 'native) t map) 'native))))
+
+(ert-deftest lme-test-right-click-defers-to-local-command ()
+  "A buffer with a right-click command of its own keeps it."
+  (with-temp-buffer
+    (should-not (lme-popup--local-right-click-p nil))
+    (let ((map (make-sparse-keymap)))
+      (keymap-set map "<mouse-3>" #'rename-file)
+      (use-local-map map)
+      (should (lme-popup--local-right-click-p nil)))))
+
 (ert-deftest lme-test-popups-fall-back ()
   "Without a graphical display, menus and alerts ask in the minibuffer."
   (should-not (lme-popup-available-p))

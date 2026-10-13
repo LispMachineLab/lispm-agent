@@ -147,7 +147,7 @@ then =M-x package-upgrade-all= for the packages and =M-x package-vc-upgrade= for
 * Tests
 
 =make test= runs the ERT tests in batch; =make compile= byte-compiles every module against the
-installed packages.
+installed packages, to check for warnings, and leaves no =.elc= files behind.
 
 * License
 

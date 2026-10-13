@@ -371,7 +371,7 @@ position: as on Mac OS 9, moving off a button before letting go cancels."
     (set-window-parameter window 'lme-platinum-pressed target)
     (force-mode-line-update t)
     (redisplay t)
-    (let ((release (read-event)))
+    (let ((release (let ((echo-keystrokes 0)) (read-event))))
       (set-window-parameter window 'lme-platinum-pressed nil)
       (force-mode-line-update t)
       (when (and (consp release)
@@ -1203,7 +1203,7 @@ THUMB is its (TOP . LENGTH) when the drag began; FRAME holds the bar."
          (track (- height (* 2 width)))
          (length (cdr thumb)))
     (track-mouse
-      (while (mouse-movement-p (read-event))
+      (while (mouse-movement-p (let ((echo-keystrokes 0)) (read-event)))
         (let* ((top (max width (min (- height width length)
                                     (- (lme-platinum--scroll-mouse-y frame) grab))))
                (fraction (/ (float (- top width)) (max 1 (- track length)))))
