@@ -174,23 +174,30 @@ chrome of PALETTE."
       (lme-platinum--fill svg 0 (+ top (* 2 i) 1) width 1 (plist-get palette :shade)))
     svg))
 
-(defun lme-platinum-draw-box (palette kind height &optional modified disabled)
+(defun lme-platinum-draw-box (palette kind height &optional modified disabled pressed)
   "Return an SVG of a title bar box of KIND, `close', `zoom' or `collapse'.
 The box is `lme-platinum-box-size' square, framed and bevelled in PALETTE,
 centred in HEIGHT pixels.  MODIFIED puts a dot in a close box; DISABLED
-draws an empty frame in the dimmed colour."
+draws an empty frame in the dimmed colour; PRESSED draws the box pushed
+in, darker and lit from below, as while the mouse button is held on it."
   (let* ((s lme-platinum-box-size)
          (svg (svg-create s height))
          (y (/ (- height s) 2))
-         (frame (plist-get palette (if disabled :muted :frame))))
+         (frame (plist-get palette (if disabled :muted :frame)))
+         (lit (plist-get palette (if pressed :shade :light)))
+         (shaded (plist-get palette (if pressed :light :shade))))
     (lme-platinum--fill svg 0 0 s height (plist-get palette :chrome))
     (lme-platinum--fill svg 0 y s s frame)
-    (lme-platinum--fill svg 1 (1+ y) (- s 2) (- s 2) (plist-get palette :chrome))
+    (lme-platinum--fill svg 1 (1+ y) (- s 2) (- s 2)
+                        (if pressed
+                            (lme-tab-bar--blend (plist-get palette :chrome)
+                                                (plist-get palette :shade) 0.5)
+                          (plist-get palette :chrome)))
     (unless disabled
-      (lme-platinum--fill svg 1 (1+ y) (- s 2) 1 (plist-get palette :light))
-      (lme-platinum--fill svg 1 (1+ y) 1 (- s 2) (plist-get palette :light))
-      (lme-platinum--fill svg 1 (+ y s -2) (- s 2) 1 (plist-get palette :shade))
-      (lme-platinum--fill svg (- s 2) (1+ y) 1 (- s 2) (plist-get palette :shade))
+      (lme-platinum--fill svg 1 (1+ y) (- s 2) 1 lit)
+      (lme-platinum--fill svg 1 (1+ y) 1 (- s 2) lit)
+      (lme-platinum--fill svg 1 (+ y s -2) (- s 2) 1 shaded)
+      (lme-platinum--fill svg (- s 2) (1+ y) 1 (- s 2) shaded)
       (pcase kind
         ('zoom
          (lme-platinum--fill svg 3 (+ y 3) 6 1 frame)
@@ -229,12 +236,12 @@ tall and the content below never shifts when the focus moves."
                                                (plist-get lme-platinum--palette :chrome))
                            svg))))
 
-(defun lme-platinum--box (kind &optional modified disabled)
+(defun lme-platinum--box (kind &optional modified disabled pressed)
   "Return the image of a title bar box of KIND, see `lme-platinum-draw-box'."
-  (lme-platinum--image (list 'box kind modified disabled)
+  (lme-platinum--image (list 'box kind modified disabled pressed)
                        (lambda () (lme-platinum-draw-box lme-platinum--palette kind
                                                           lme-platinum-title-height
-                                                          modified disabled))))
+                                                          modified disabled pressed))))
 
 (defun lme-platinum-triangle (open)
   "Return a disclosure triangle as a string, pointing down when OPEN."
@@ -260,12 +267,15 @@ LispM's rainbow λ.  Where images cannot be shown, a blank stands in."
   (let ((file (if (eq name 'lambda)
                   (expand-file-name "icons/lispm-lambda.png" lme-directory)
                 (expand-file-name (format "icons/os9/%s.svg" name) lme-directory))))
+    ;; The icon carries a face of its own, so a button it sits in, such as
+    ;; a list row, does not underline it.
     (if (and (display-images-p) (file-readable-p file))
-        (propertize " " 'display
-                    (or (gethash file lme-platinum--icons)
-                        (puthash file (create-image file nil nil :height 16 :ascent 'center)
-                                 lme-platinum--icons)))
-      (propertize " " 'display '(space :width (16))))))
+        (propertize " " 'face 'lme-platinum-list
+                    'display (or (gethash file lme-platinum--icons)
+                                 (puthash file (create-image file nil nil :height 16
+                                                             :ascent 'center)
+                                          lme-platinum--icons)))
+      (propertize " " 'face 'lme-platinum-list 'display '(space :width (16))))))
 
 (defun lme-platinum-buffer-icon (buffer)
   "Return the Finder icon of BUFFER.
@@ -313,18 +323,82 @@ other buffer, a blank document."
     (interactive "e")
     (funcall command (posn-window (event-start event)))))
 
-(defun lme-platinum--clickable (string command help)
-  "Return STRING calling COMMAND on the clicked window, described by HELP.
-The press is bound too: unbound, it would reach `mouse-drag-tab-line',
-which tracks the mouse and swallows the release."
+(defun lme-platinum-press (position pressed-p command)
+  "Hold a button down from the press at POSITION until the mouse button rises.
+The button is drawn pushed in, through the window parameter
+`lme-platinum-pressed' that the drawing reads, until the release; COMMAND
+then runs, with no arguments, only when PRESSED-P accepts the release's
+position: as on Mac OS 9, moving off a button before letting go cancels."
+  (let ((window (posn-window position))
+        (target (lme-platinum--press-target position)))
+    (set-window-parameter window 'lme-platinum-pressed target)
+    (force-mode-line-update t)
+    (redisplay t)
+    (let ((release (read-event)))
+      (set-window-parameter window 'lme-platinum-pressed nil)
+      (force-mode-line-update t)
+      (when (and (consp release)
+                 (eq (event-basic-type release) 'mouse-1)
+                 (funcall pressed-p (event-end release)))
+        (funcall command)))))
+
+(defun lme-platinum--press-target (position)
+  "Return what the press at POSITION is on: the `lme-platinum-target' there."
+  (when-let* ((string (posn-string position)))
+    (get-text-property (cdr string) 'lme-platinum-target (car string))))
+
+(defun lme-platinum--same-target-p (position)
+  "Return a predicate true of positions on the same target as POSITION."
+  (let ((window (posn-window position))
+        (area (posn-area position))
+        (target (lme-platinum--press-target position)))
+    (lambda (release)
+      (and (eq (posn-window release) window)
+           (eq (posn-area release) area)
+           (equal (lme-platinum--press-target release) target)))))
+
+(defun lme-platinum--pressed-p (target)
+  "Return non-nil while TARGET is held down in the window being drawn."
+  (equal (window-parameter (selected-window) 'lme-platinum-pressed) target))
+
+(defun lme-platinum--box-button (string kind command help)
+  "Return STRING as title bar box KIND, which runs COMMAND with its window.
+HELP describes it.  It is pressed rather than clicked, see
+`lme-platinum-press'."
   (propertize string
               'help-echo help
-              'pointer 'hand
+              'lme-platinum-target kind
               'keymap (let ((map (make-sparse-keymap)))
-                        (keymap-set map "<tab-line> <down-mouse-1>" #'ignore)
-                        (keymap-set map "<tab-line> <mouse-1>"
-                                    (lme-platinum--window-command command))
+                        (keymap-set map "<tab-line> <down-mouse-1>"
+                                    (lambda (event)
+                                      (interactive "e")
+                                      (let ((start (event-start event)))
+                                        (lme-platinum-press
+                                         start (lme-platinum--same-target-p start)
+                                         (lambda () (funcall command (posn-window start)))))))
+                        (keymap-set map "<tab-line> <mouse-1>" #'ignore)
                         map)))
+
+(defvar lme-platinum--title-map
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "<tab-line> <down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> <mouse-1>"
+                (lme-platinum--window-command #'select-window))
+    (keymap-set map "<tab-line> <double-down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> <double-mouse-1>"
+                (lme-platinum--window-command #'lme-platinum-shade-or-zoom))
+    (keymap-set map "<tab-line> M-<down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> M-<mouse-1>"
+                (lme-platinum--window-command #'lme-platinum-title-menu))
+    map)
+  "Keymap of a title bar outside its boxes, as Mac OS 9's title bars
+behaved: a click brings the window forward, a double click rolls it up,
+and a Command click (Meta) pops up its buffers.")
+
+(defconst lme-platinum--title-help
+  (format "Double-click to roll up; %s-click for the window's buffers"
+          (if (eq system-type 'darwin) "⌘" "M"))
+  "Help shown over a title bar.")
 
 (defun lme-platinum--space (width)
   "Return a blank WIDTH pixels wide."
@@ -381,6 +455,7 @@ when another shares its column."
   "Return the title bar of WINDOW, drawn for its current state."
   (let* ((buffer (window-buffer window))
          (active (mode-line-window-selected-p))
+         (pressed (window-parameter window 'lme-platinum-pressed))
          (width (- (window-pixel-width window)
                    (window-right-divider-width window)
                    (window-scroll-bar-width window)))
@@ -388,18 +463,22 @@ when another shares its column."
          (title (lme-platinum--buffer-title buffer))
          (modified (and (buffer-file-name buffer) (buffer-modified-p buffer)))
          (controls (lme-platinum--window-controls window))
-         (key (list lme-platinum--generation width active icon title modified controls))
+         (key (list lme-platinum--generation width active icon title modified controls
+                    pressed))
          (cached (window-parameter window 'lme-platinum-title-bar)))
     (if (equal (car cached) key)
         (cdr cached)
-      (let ((bar (lme-platinum--draw-title-bar width active icon title modified controls)))
+      (let ((bar (lme-platinum--draw-title-bar width active icon title modified controls
+                                               pressed)))
         (set-window-parameter window 'lme-platinum-title-bar (cons key bar))
         bar))))
 
-(defun lme-platinum--draw-title-bar (width active icon title modified controls)
+(defun lme-platinum--draw-title-bar (width active icon title modified controls
+                                            &optional pressed)
   "Return a title bar WIDTH pixels wide for ICON and TITLE.
 ACTIVE draws the stripes and boxes; MODIFIED marks the close box;
-CONTROLS is a value of `lme-platinum--window-controls'."
+CONTROLS is a value of `lme-platinum--window-controls'; PRESSED names the
+box held down, if any."
   (let* ((face (if active 'lme-platinum-title 'lme-platinum-title-inactive))
          ;; The bar is a mode line construct, where % starts a directive.
          (label (concat (when icon (concat icon " "))
@@ -413,24 +492,28 @@ CONTROLS is a value of `lme-platinum--window-controls'."
                   (cond ((not active) (lme-platinum--space s))
                         ((eq state 'off)
                          (propertize " " 'display (lme-platinum--box kind nil t)))
-                        (t (lme-platinum--clickable
+                        (t (lme-platinum--box-button
                             (propertize " " 'display
-                                        (lme-platinum--box kind (and (eq kind 'close) modified)))
-                            command help))))
+                                        (lme-platinum--box kind (and (eq kind 'close) modified)
+                                                           nil (eq pressed kind)))
+                            kind command help))))
                 (stripes (pixels)
                   (if active
                       (propertize " " 'display (lme-platinum--stripes (max 1 pixels)))
-                    (lme-platinum--space pixels))))
+                    (lme-platinum--space pixels)))
+                (title-part (string)
+                  (propertize string 'keymap lme-platinum--title-map
+                              'help-echo lme-platinum--title-help)))
         (concat (propertize " " 'display (lme-platinum--strut 8))
                 (box 'close close #'lme-platinum-close-window "Close this window")
-                (lme-platinum--space 6)
-                (stripes left)
-                (lme-platinum--space 8)
-                (lme-platinum--clickable label #'lme-platinum-title-menu
-                                         "Click for this window's buffers")
-                (lme-platinum--space (+ 8 (- (nth 1 layout) (string-pixel-width label))))
-                (stripes right)
-                (lme-platinum--space 6)
+                (title-part
+                 (concat (lme-platinum--space 6)
+                         (stripes left)
+                         (lme-platinum--space 8)
+                         label
+                         (lme-platinum--space (+ 8 (- (nth 1 layout) (string-pixel-width label))))
+                         (stripes right)
+                         (lme-platinum--space 6)))
                 (box 'zoom zoom #'lme-platinum-zoom-window "Zoom this window")
                 (lme-platinum--space 4)
                 (box 'collapse collapse #'lme-platinum-collapse-window
@@ -494,6 +577,14 @@ Hidden buffers and the sidebar's lists are left out."
                   (tabspaces--buffer-list (window-frame window))
                 (buffer-list (window-frame window)))))
 
+(defun lme-platinum-shade-or-zoom (window)
+  "Roll WINDOW up or down, or zoom it when it cannot roll up.
+A double click on a title bar does this, as on Mac OS 9; a window alone
+in its column cannot roll up, so it zooms instead."
+  (if (or (window-parameter window 'lme-platinum-shade) (window-combined-p window))
+      (lme-platinum-collapse-window window)
+    (lme-platinum-zoom-window window)))
+
 (defun lme-platinum-title-menu (window)
   "Pop up the buffers WINDOW could show, and show the one chosen.
 As Mac OS 9 popped up a window's path from its title, the title pops up
@@ -513,6 +604,18 @@ to the left, a file to the right."
                  (seq-take (lme-platinum--window-buffers window) 30)))))
 
 ;;;; Menu bar
+
+(defvar lme-platinum--open-menu nil
+  "The menu bar item whose menu is popped up, drawn highlighted meanwhile.")
+
+(defmacro lme-platinum--with-open-menu (key &rest body)
+  "Run BODY, which pops up a menu, with menu bar item KEY highlighted."
+  (declare (indent 1))
+  `(let ((lme-platinum--open-menu ,key))
+     (force-mode-line-update t)
+     (redisplay t)
+     (unwind-protect (progn ,@body)
+       (force-mode-line-update t))))
 
 (defconst lme-platinum-menu-padding 10
   "Blank pixels on either side of a menu bar title.")
@@ -539,7 +642,8 @@ Where images cannot be shown, a plain λ stands in."
 (defun lme-platinum-lambda-menu ()
   "Pop up the λ menu, LispM's counterpart of the Apple menu."
   (interactive)
-  (popup-menu
+  (lme-platinum--with-open-menu 'lme-lambda
+   (popup-menu
    `("LispM"
      ["New LispM Agent" lme-agent-lispm-new :visible (fboundp 'lme-agent-lispm-new)]
      ["New Claude Code Session" lme-agent-claude-new :visible (lme-agent-installed-p 'claude)]
@@ -556,7 +660,7 @@ Where images cannot be shown, a plain λ stands in."
       ["Dracula" (lme-set-theme 'dracula) :style radio :selected (eq lme-theme 'dracula)]
       ["Platinum" (lme-set-theme 'platinum) :style radio :selected (eq lme-theme 'platinum)])
      ["Editing Style…" (customize-variable 'lme-editing-style)]
-     ["Customize lispm-emacs…" (customize-group 'lispm-emacs)])))
+     ["Customize lispm-emacs…" (customize-group 'lispm-emacs)]))))
 
 (defun lme-platinum-menu-bar ()
   "Return the left end of the menu bar: the λ menu, then a title per view.
@@ -565,7 +669,7 @@ title while the browser workspace is selected."
   (let ((shown (lme-sidebar-current-view)))
     (append
      (list (lme-platinum--menu-title 'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
-                                     "LispM"))
+                                     "LispM" (eq lme-platinum--open-menu 'lme-lambda)))
      (mapcar (lambda (view)
                (let ((spec (cdr view)))
                  (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
@@ -582,7 +686,8 @@ title while the browser workspace is selected."
   "Pop up the Application menu: the workspaces, the current one checked."
   (interactive)
   (let ((current (tab-bar--current-tab-index)))
-    (popup-menu
+    (lme-platinum--with-open-menu 'lme-application
+     (popup-menu
      `("Workspaces"
        ,@(seq-map-indexed
           (lambda (tab index)
@@ -592,7 +697,7 @@ title while the browser workspace is selected."
           (funcall tab-bar-tabs-function))
        "---"
        ["New Workspace" tab-bar-new-tab]
-       ["Close Workspace" tab-bar-close-tab :active (cdr (funcall tab-bar-tabs-function))]))))
+       ["Close Workspace" tab-bar-close-tab :active (cdr (funcall tab-bar-tabs-function))])))))
 
 (defvar tabspaces-default-tab)
 
@@ -608,7 +713,8 @@ for a project's.  Clicked, it lists every workspace."
                                           "disk"
                                         "folder"))
                    " " name " ▾")
-           #'lme-platinum-workspace-menu "Workspaces"))))
+           #'lme-platinum-workspace-menu "Workspaces"
+           (eq lme-platinum--open-menu 'lme-application)))))
 
 ;;;; Window bottoms
 
@@ -710,14 +816,42 @@ be resized; a side window cannot."
     (:eval (lme-platinum-mode-line-right)))
   "The mode line of every window: its bottom edge, laid out as Mac OS 9's.")
 
+;;;; Clock
+
+(defcustom lme-platinum-clock-format "%-I:%M %p"
+  "How the menu bar clock shows the time, for `format-time-string'.
+Mac OS 9's clock read like 10:42 PM; nil hides the clock."
+  :type '(choice string (const :tag "No clock" nil)))
+
+(defvar lme-platinum--clock-timer nil
+  "Timer redrawing the menu bar clock as each minute turns.")
+
+(defun lme-platinum-clock ()
+  "Return the menu bar clock, the time in `lme-platinum-clock-format'.
+It sits left of the Application menu, as Mac OS 9's did."
+  (when lme-platinum-clock-format
+    (list (lme-platinum--menu-title 'lme-clock
+                                    (format-time-string lme-platinum-clock-format)
+                                    #'ignore (format-time-string "%A, %e %B %Y")))))
+
+(defun lme-platinum--start-clock ()
+  "Redraw the menu bar at every turn of the minute."
+  (when (timerp lme-platinum--clock-timer)
+    (cancel-timer lme-platinum--clock-timer))
+  (setq lme-platinum--clock-timer
+        (run-at-time (- 60 (mod (float-time) 60)) 60 #'force-mode-line-update t)))
+
 ;;;; Lists
+
+(defconst lme-platinum-column-width 11
+  "Width in columns of a list's right-hand column, the one it is sorted by.")
 
 (defun lme-platinum-columns (name meta)
   "Return a list's column headings NAME and META as one line of bevels.
 META, the column the list is sorted by, is shaded as Mac OS 9 shaded it."
   (concat (propertize (concat " " name)
                       'face 'lme-platinum-column)
-          (propertize " " 'display '(space :align-to (- right 14))
+          (propertize " " 'display `(space :align-to (- right ,lme-platinum-column-width))
                       'face 'lme-platinum-column)
           (propertize (concat " " meta " ")
                       'face 'lme-platinum-column-sorted)
@@ -797,6 +931,11 @@ as the triangles take the theme's colour."
   "Face of a list window's header, below its title bar."
   :group 'lme-platinum)
 
+(defface lme-platinum-sorted nil
+  "Face of the column a list is sorted by: shaded down its length, as in
+Finder's list view."
+  :group 'lme-platinum)
+
 (defface lme-platinum-placard '((t :box (:line-width (1 . 1) :style released-button)))
   "Face of a placard on the active window's bottom edge."
   :group 'lme-platinum)
@@ -859,6 +998,16 @@ it, as on every theme change, is idempotent."
                             :foreground (lme-platinum--color :muted)
                             :box nil :overline 'unspecified :underline 'unspecified
                             :height 'unspecified)
+        (set-face-attribute 'lme-platinum-sorted nil
+                            :background (lme-tab-bar--blend (lme-platinum--color :content)
+                                                            chrome 0.3)
+                            :extend t)
+        ;; Balloon Help: a note in the list's type, on the header's grey.
+        ;; It carries no outline: macOS sizes a tooltip without its box,
+        ;; which would cut the right edge off.
+        (set-face-attribute 'tooltip nil
+                            :inherit 'lme-platinum-list :background header
+                            :foreground text :height 0.9 :box nil)
         (set-face-attribute 'lme-platinum-placard nil
                             :inherit 'lme-platinum-list :background header :foreground text
                             :height 0.95
@@ -902,7 +1051,9 @@ it, as on every theme change, is idempotent."
                             :inherit 'lme-platinum-list :background chrome :foreground text
                             :height 0.9
                             :box '(:line-width (1 . 1) :style released-button))
-        (set-face-attribute 'window-divider nil :foreground (lme-platinum--color :frame))
+        ;; Neighbouring windows meet as Mac OS 9's windows were framed: each
+        ;; edge a dark outline, platinum between them.
+        (set-face-attribute 'window-divider nil :foreground chrome)
         (set-face-attribute 'window-divider-first-pixel nil
                             :foreground (lme-platinum--color :frame))
         (set-face-attribute 'window-divider-last-pixel nil
@@ -918,11 +1069,23 @@ it, as on every theme change, is idempotent."
   (setq tab-bar-format '(lme-platinum-menu-bar
                          tab-bar-format-align-right
                          tab-bar-format-global
+                         lme-platinum-clock
                          lme-platinum-application-menu))
+  (lme-platinum--start-clock)
+  ;; Window frames: a dark outline on each window's edge, platinum between.
   (setq window-divider-default-places t
-        window-divider-default-right-width 1
-        window-divider-default-bottom-width 1)
+        window-divider-default-right-width 5
+        window-divider-default-bottom-width 5)
   (window-divider-mode 1)
+  ;; The insertion point is a thin bar, as Mac OS 9's was; Evil's normal
+  ;; state keeps its block.
+  (setq-default cursor-type '(bar . 2))
+  ;; Help over a control shows as Balloon Help, in Emacs's own frames.
+  (setq use-system-tooltips nil
+        tooltip-delay 0.6
+        tooltip-frame-parameters '((name . "tooltip")
+                                   (internal-border-width . 6)
+                                   (no-special-glyphs . t)))
   (lme-platinum-apply-faces)
   (add-hook 'enable-theme-functions #'lme-platinum-apply-faces)
   (with-eval-after-load 'treemacs

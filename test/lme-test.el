@@ -218,6 +218,82 @@ not a first start."
   (should (equal (lme-sidebar--count 1 "session") "1 session"))
   (should (equal (lme-sidebar--count 3 "session" "1 running") "3 sessions, 1 running")))
 
+(ert-deftest lme-test-pressed-box-is-inverted ()
+  "A box held down is lit from below and filled darker."
+  (let* ((palette (lme-platinum--derive-palette "#282a36" "#f8f8f2" "#6272a4" "#bd93f9"))
+         (up (format "%S" (lme-platinum-draw-box palette 'close 22)))
+         (down (format "%S" (lme-platinum-draw-box palette 'close 22 nil nil t))))
+    (should-not (equal up down))
+    ;; The fill of a pressed box is not the chrome.
+    (should (string-search (lme-tab-bar--blend (plist-get palette :chrome)
+                                               (plist-get palette :shade) 0.5)
+                           down))))
+
+(ert-deftest lme-test-press-runs-on-release-over-button ()
+  "A pressed button runs only when let go over it, and is drawn pushed in
+while held."
+  (save-window-excursion
+    (let* ((window (selected-window))
+           (press (list window 'tab-line '(0 . 0) 0))
+           (ran 0)
+           (held nil))
+      (cl-letf (((symbol-function 'redisplay)
+                 (lambda (&rest _) (setq held (window-parameter window 'lme-platinum-pressed))))
+                ((symbol-function 'lme-platinum--press-target) (lambda (_) 'close)))
+        ;; Let go over the button: it runs.
+        (cl-letf (((symbol-function 'read-event) (lambda (&rest _) (list 'mouse-1 press))))
+          (lme-platinum-press press (lambda (_) t) (lambda () (cl-incf ran))))
+        (should (= ran 1))
+        (should (eq held 'close))
+        (should-not (window-parameter window 'lme-platinum-pressed))
+        ;; Moved off before letting go: nothing runs.
+        (cl-letf (((symbol-function 'read-event) (lambda (&rest _) (list 'mouse-1 press))))
+          (lme-platinum-press press (lambda (_) nil) (lambda () (cl-incf ran))))
+        (should (= ran 1))))))
+
+(ert-deftest lme-test-title-bar-clicks ()
+  "A title bar brings its window forward, rolls up on a double click, and
+pops up its buffers on a Meta click."
+  (should (keymap-lookup lme-platinum--title-map "<tab-line> <mouse-1>"))
+  (should (keymap-lookup lme-platinum--title-map "<tab-line> <double-mouse-1>"))
+  (should (keymap-lookup lme-platinum--title-map "<tab-line> M-<mouse-1>")))
+
+(ert-deftest lme-test-shade-or-zoom ()
+  "A window alone in its column zooms; one sharing it rolls up."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((zoomed nil) (shaded nil))
+      (cl-letf (((symbol-function 'lme-platinum-zoom-window) (lambda (_) (setq zoomed t)))
+                ((symbol-function 'lme-platinum-collapse-window) (lambda (_) (setq shaded t))))
+        (lme-platinum-shade-or-zoom (selected-window))
+        (should (and zoomed (not shaded)))
+        (setq zoomed nil)
+        (lme-platinum-shade-or-zoom (split-window-below))
+        (should (and shaded (not zoomed)))))))
+
+(ert-deftest lme-test-clock ()
+  "The menu bar clock shows the time as Mac OS 9 did, or nothing."
+  (let ((lme-platinum-clock-format "%-I:%M %p"))
+    (should (string-match-p "\\`[0-9]\\{1,2\\}:[0-9]\\{2\\} [AP]M\\'"
+                            (substring-no-properties
+                             (string-trim (nth 2 (car (lme-platinum-clock))))))))
+  (let ((lme-platinum-clock-format nil))
+    (should-not (lme-platinum-clock))))
+
+(ert-deftest lme-test-age-short-date ()
+  "Old sessions are dated as Finder dated files; recent ones by their age."
+  (let ((now (float-time (encode-time '(0 0 12 13 10 2026 nil -1 nil)))))
+    (should (equal (lme-agent--age (- now 120) now) "2m"))
+    (should (equal (lme-agent--age (float-time (encode-time '(0 0 12 13 5 2026 nil -1 nil))) now)
+                   "5/13/26"))))
+
+(ert-deftest lme-test-row-shades-sorted-column ()
+  "A row's right-hand column carries the sorted column's face to the edge."
+  (cl-letf (((symbol-function 'lme-sidebar--column-pixels) (lambda () 100)))
+    (let ((row (lme-sidebar--row "" "name" "3h" 300)))
+      (should (string-search "3h" row))
+      (should (equal (get-text-property (1- (length row)) 'face row) 'lme-platinum-sorted)))))
+
 ;;;; Main area columns
 
 (defmacro lme-test--with-layout (&rest body)

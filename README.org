@@ -11,25 +11,33 @@ Two appearances come with it, asked for at the first start and switched from the
 and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
-  Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then a title per sidebar view (Files, Agents, Shells, Buffers, Web), lit
-  while its view is shown.  At its right end the Application menu names the current workspace
-  and lists the others.
+  Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then a
+  title per sidebar view (Files, Agents, Shells, Buffers, Web), lit while its view is shown.  At
+  its right end, a clock and the Application menu, which names the current workspace and lists
+  the others.
 - *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
-  collapse box.  Only the active window shows stripes and boxes.  The close box puts the window's
-  buffer away, the zoom box gives the window the whole main area and back, the collapse box rolls
-  it up to its title bar, and the title pops up the workspace's buffers.
+  collapse box.  Only the active window shows stripes and boxes, and a box is pressed, not
+  clicked: it sinks while held and acts when let go over it.  The close box puts the window's
+  buffer away, the zoom box gives the window the whole main area and back, and the collapse box
+  rolls it up to its title bar.  Double-click a title bar to roll the window up (or zoom one alone
+  in its column); Command-click it for the workspace's buffers.
+- *Window frames*: neighbouring windows meet as Mac OS 9's windows were framed, a dark outline
+  on each edge and platinum between.
 - *A bottom edge on every window*: placards for the buffer, its position, its diagnostics, its
   branch and its mode, and the grow box in the active window's corner.
-- *Finder's icons*: folders, a hard disk, text, picture and blank documents, and a compact
-  Macintosh for terminals, in the sidebar, the title bars and the project tree.
-- *A sidebar laid out as a Finder list*: a header holding the view's buttons, column headings,
-  disclosure triangles, one row per item with its date or place in the right-hand column, and a
-  count of the items at the bottom.
-  The agents view lists every agent session, running or recorded, grouped by project: LispM's,
-  and those of Claude Code, Codex and Hermes when their CLI is on ~PATH~.  Click one to resume it
-  where it ran.
-- *A main area* that keeps agent chats and terminals on the left and the files they open on the
-  right, and *a workspace per project*, owning that project's buffers.
+- *Finder's icons*: folders, a hard disk, text, picture and blank documents, a compact Macintosh
+  for terminals and a robot for the agents, in the sidebar, the title bars and the project tree.
+- *A sidebar laid out as a Finder list*: a header holding the view's bevel buttons, column
+  headings, disclosure triangles, one row per item with its date or place in the right-hand
+  column, shaded down its length as the sorted column was, the selected row in the highlight
+  colour, and a count of the items at the bottom.  The agents view lists every agent session,
+  running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
+  when their CLI is on ~PATH~.  Click one to resume it where it ran.
+- *Details*: a thin insertion point (Evil's normal state keeps its block), and help over a
+  control shown as Balloon Help.
+- *A main area* that keeps agent chats and terminals on the left and everything else, files
+  first, on the right, however a buffer is opened, and *a workspace per project*, owning that
+  project's buffers.
 - *Agents that see Emacs*: Claude Code connects over its IDE protocol, Codex and Hermes over MCP,
   and all of them can read the selection, the open and unsaved files, and Flymake's diagnostics.
 - *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot and
@@ -38,8 +46,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   configuration files, SPC is the leader key, and terminals, chats and the sidebar keep Emacs keys
   so the programs in them get every key.
 
-Title bars and menus are set in Charcoal when it is installed, else Chicago or Geneva; lists in
-Geneva.  macOS still ships Geneva.
+Title bars and menus are set in Charcoal when it is installed, else Chicago (ChicagoFLF, a free
+revival whose author considers it public domain, works too) or Geneva; lists in Geneva.  macOS
+still ships Geneva; the others are not distributed with lispm-emacs.
 
 * Installation
 

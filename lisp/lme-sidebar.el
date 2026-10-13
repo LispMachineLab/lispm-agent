@@ -67,15 +67,6 @@
    (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " text))
    width nil nil "…"))
 
-(defun lme-sidebar--toolbar-command (command)
-  "Return a mouse command running COMMAND in the window whose toolbar is clicked.
-Toolbar clicks do not select their window, so without this a command such as
-creating a file would act on the main window's buffer instead of the view."
-  (lambda (event)
-    (interactive "e")
-    (with-selected-window (posn-window (event-start event))
-      (call-interactively command))))
-
 (defun lme-ansi-apply-faces (&rest _)
   "Keep the two black ANSI colours legible on the active theme.
 Dracula draws ANSI black in the editor background and bright black in
@@ -98,19 +89,32 @@ function never sets, so re-running it is idempotent."
   "Return LABEL as a button calling COMMAND, described by HELP, on toolbar ROW.
 ROW is `tab-line' or `header-line', the window line the button sits in.
 FACE, by default `lme-platinum-button', styles the label and is layered
-under LABEL's own faces, so icons keep their Nerd Font family.
-The press is bound too: unbound, it reaches the global line-dragging command
-\(`mouse-drag-tab-line', `mouse-drag-header-line'), which tracks the mouse
-and swallows the release, so the click would never arrive."
-  (let ((styled (copy-sequence label)))
-    (add-face-text-property 0 (length styled) (or face 'lme-platinum-button) t styled)
+under LABEL's own faces, so icons keep their Nerd Font family.  The
+button is pressed rather than clicked: drawn pushed in while held, and
+run on release over it, see `lme-platinum-press'.  Built while its line
+is drawn, as toolbars are, it shows itself pushed in from the window's
+`lme-platinum-pressed'."
+  (let ((styled (copy-sequence label))
+        (target (cons row label)))
+    (add-face-text-property 0 (length styled)
+                            (if (lme-platinum--pressed-p target)
+                                'lme-platinum-button-pressed
+                              (or face 'lme-platinum-button))
+                            t styled)
     (propertize styled
-                'mouse-face 'highlight
                 'help-echo help
+                'lme-platinum-target target
                 'keymap (let ((map (make-sparse-keymap)))
-                          (keymap-set map (format "<%s> <down-mouse-1>" row) #'ignore)
-                          (keymap-set map (format "<%s> <mouse-1>" row)
-                                      (lme-sidebar--toolbar-command command))
+                          (keymap-set map (format "<%s> <down-mouse-1>" row)
+                                      (lambda (event)
+                                        (interactive "e")
+                                        (let ((start (event-start event)))
+                                          (lme-platinum-press
+                                           start (lme-platinum--same-target-p start)
+                                           (lambda ()
+                                             (with-selected-window (posn-window start)
+                                               (call-interactively command)))))))
+                          (keymap-set map (format "<%s> <mouse-1>" row) #'ignore)
                           map))))
 
 (defun lme-sidebar--toolbar-buttons (actions row)
@@ -124,6 +128,26 @@ pushed in, as a toggle that is on."
 
 (defvar-local lme-sidebar--faces nil
   "Face remapping cookies drawing this buffer as a list view.")
+
+(defvar-local lme-sidebar--header nil
+  "This list window's header: (ACTIONS REFRESH TITLE-ACTIONS).")
+
+(defun lme-sidebar--header-line ()
+  "Return the header of the list window being drawn, its buttons pressed or not.
+ACTIONS sit at its left end; TITLE-ACTIONS and the refresh button end a
+few pixels short of its right, their width measured, as bevels and icons
+are not whole columns."
+  (pcase-let* ((`(,actions ,refresh ,title-actions) lme-sidebar--header)
+               (trailing (concat (when title-actions
+                                   (concat (lme-sidebar--toolbar-buttons title-actions
+                                                                         'header-line)
+                                           " "))
+                                 (lme-sidebar--toolbar-button " ⟳ " refresh "Refresh"
+                                                              'header-line))))
+    (concat " " (lme-sidebar--toolbar-buttons actions 'header-line)
+            (propertize " " 'display
+                        `(space :align-to (- right (,(+ (string-pixel-width trailing) 6)))))
+            trailing)))
 
 (defun lme-sidebar-set-toolbar (view refresh actions &optional title-actions)
   "Give the current buffer the title bar and header of sidebar VIEW.
@@ -140,28 +164,26 @@ hold (LABEL COMMAND HELP [PRESSED]) entries, see
     (setq-local lme-sidebar--faces
                 (list (face-remap-add-relative 'default 'lme-platinum-list)
                       (face-remap-add-relative 'header-line 'lme-platinum-header))))
-  ;; The right-hand buttons end a few pixels short of the edge.  Their width
-  ;; is measured, as bevels and icons are not whole columns.
-  (let ((trailing (concat (when title-actions
-                            (concat (lme-sidebar--toolbar-buttons title-actions 'header-line) " "))
-                          (lme-sidebar--toolbar-button " ⟳ " refresh "Refresh" 'header-line))))
-    (setq-local header-line-format
-                (concat " " (lme-sidebar--toolbar-buttons actions 'header-line)
-                        (propertize " " 'display
-                                    `(space :align-to
-                                            (- right (,(+ (string-pixel-width trailing) 6)))))
-                        trailing))))
+  (setq-local lme-sidebar--header (list actions refresh title-actions)
+              header-line-format '(:eval (lme-sidebar--header-line))))
 
 (defun lme-sidebar--setup-buffer ()
   "Set up the current buffer as sidebar content.
 Visual line mode is turned off explicitly, so `global-visual-line-mode'
 leaves the buffer alone and an overlong title is truncated, not wrapped.
 Rows are spaced as Finder spaced its list.  The window's bottom edge
-counts the rows, from `lme-platinum-info', as Finder's counted items."
+counts the rows, from `lme-platinum-info', as Finder's counted items.
+A list shows no text cursor, whatever state Evil is in: the row at point
+is highlighted in the selection colour instead, as Finder showed the
+selected item."
   (visual-line-mode -1)
   (setq-local truncate-lines t
               cursor-type nil
               line-spacing 0.35)
+  (dolist (cursor '(evil-emacs-state-cursor evil-normal-state-cursor
+                    evil-motion-state-cursor))
+    (set (make-local-variable cursor) '(nil)))
+  (face-remap-add-relative 'hl-line 'region)
   (display-line-numbers-mode -1))
 
 (defun lme-sidebar--count (n singular &optional detail)
@@ -251,21 +273,38 @@ Every part of a row carries a face of its own: a part without one would
 take the `button' face of the row, underline and all."
   (propertize " " 'display spec 'face 'lme-platinum-list))
 
+(defun lme-sidebar--column-pixels ()
+  "Return the width in pixels of a list's right-hand column."
+  (* lme-platinum-column-width (frame-char-width)))
+
+(defun lme-sidebar--sorted-column (meta)
+  "Return the right-hand column of a row holding META, flush right.
+The column is shaded down its whole length, as Finder shaded the column
+a list was sorted by."
+  (let* ((meta (lme-platinum--fit (propertize (or meta "") 'face
+                                              (or (get-text-property 0 'face (or meta ""))
+                                                  'lme-platinum-list))
+                                  (- (lme-sidebar--column-pixels) 16)))
+         (meta-width (string-pixel-width meta)))
+    (add-face-text-property 0 (length meta) 'lme-platinum-sorted t meta)
+    (concat (lme-sidebar--blank `(space :align-to (- right ,lme-platinum-column-width)))
+            (propertize " " 'display `(space :align-to (- right (,(+ meta-width 10))))
+                        'face 'lme-platinum-sorted)
+            meta
+            (propertize " " 'display '(space :align-to right) 'face 'lme-platinum-sorted))))
+
 (defun lme-sidebar--row (lead name meta width)
   "Return a row of a list WIDTH pixels wide: LEAD, NAME, and META at its right.
-LEAD (indentation, a triangle or an icon) and META keep their size; NAME
-is shortened to fit between them."
-  (let* ((meta (or meta ""))
-         (meta-width (string-pixel-width (propertize meta 'face 'lme-platinum-list)))
-         (room (- width (string-pixel-width (propertize lead 'face 'lme-platinum-list))
-                  meta-width 36)))
+LEAD (indentation, a triangle or an icon) keeps its size; META sits in
+the right-hand column, see `lme-sidebar--sorted-column'; NAME is
+shortened to fit between them."
+  (let ((room (- width (string-pixel-width (propertize lead 'face 'lme-platinum-list))
+                 (lme-sidebar--column-pixels) 12)))
     (concat lead
             (lme-platinum--fit (propertize name 'face (or (get-text-property 0 'face name)
                                                           'lme-platinum-list))
                                (max 0 room))
-            (lme-sidebar--blank `(space :align-to (- right (,(+ meta-width 10)))))
-            meta
-            (lme-sidebar--blank '(space :align-to right)))))
+            (lme-sidebar--sorted-column meta))))
 
 (defun lme-sidebar--insert-entry (icon title meta action help &optional properties depth)
   "Insert a one-line row and make it one button calling ACTION.
@@ -319,8 +358,9 @@ described by HELP."
 
 (defun lme-sidebar--insert-heading (name)
   "Insert NAME as the heading of a group that does not fold."
-  (insert (propertize " " 'display '(space :width (8)))
+  (insert (lme-sidebar--blank '(space :width (8)))
           (propertize name 'face '(:inherit (shadow lme-platinum-list) :weight bold))
+          (lme-sidebar--sorted-column nil)
           "\n"))
 
 ;;;; Shell sidebar
@@ -361,8 +401,9 @@ The shell is the one Eat would start, run as an independent process."
     (setq lme-platinum-info (lme-sidebar--count (length shells) "shell"))
     (lme-sidebar--insert-columns "Name" "Directory")
     (if (null shells)
-        (insert (propertize " " 'display '(space :width (8)))
-                (propertize "No running shells" 'face 'shadow) "\n")
+        (insert (lme-sidebar--blank '(space :width (8)))
+                (propertize "No running shells" 'face 'shadow)
+                (lme-sidebar--sorted-column nil) "\n")
       (dolist (buffer shells)
         (let ((directory (buffer-local-value 'default-directory buffer)))
           (lme-sidebar--insert-entry

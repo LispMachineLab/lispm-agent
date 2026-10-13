@@ -506,12 +506,13 @@ and those of the agents running inside Emacs, see `lme-agent-emacs-agents'."
 ;;;; Presentation (pure)
 
 (defun lme-agent--age (time now)
-  "Return a short human age for TIME relative to NOW, both float seconds."
+  "Return a short human age for TIME relative to NOW, both float seconds.
+Past a month it is the date, short as Mac OS 9's Finder wrote it: 5/13/26."
   (let ((seconds (- now time)))
     (cond ((< seconds 3600) (format "%dm" (/ seconds 60)))
           ((< seconds 86400) (format "%dh" (/ seconds 3600)))
           ((< seconds (* 30 86400)) (format "%dd" (/ seconds 86400)))
-          (t (format-time-string "%Y-%m-%d" time)))))
+          (t (format-time-string "%-m/%-d/%y" time)))))
 
 (defun lme-agent--short-id (session)
   "Return the short form of SESSION's id that tells sessions apart.
