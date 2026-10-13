@@ -576,7 +576,7 @@ Outside any project treemacs falls back to the buffer's directory."
            :visible lme-sidebar--files-visible-p
            :show lme-sidebar--files-show
            :hide lme-sidebar--files-hide)
-    (agents :title "Agents" :icon lambda :command lme-sidebar-agents
+    (agents :title "Agents" :icon "robot" :command lme-sidebar-agents
             :help "Agent sessions"
             :visible lme-agent-list-visible-p
             :show lme-agent-list-show

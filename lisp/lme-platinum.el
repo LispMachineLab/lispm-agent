@@ -245,9 +245,10 @@ tall and the content below never shifts when the focus moves."
 ;;;; Icons
 ;;
 ;; Finder's small icons, drawn as sixteen-pixel SVGs in icons/os9: a
-;; folder, a hard disk, documents (text, picture, blank) and a compact
-;; Macintosh standing for a terminal.  Unlike the chrome, icons keep their
-;; own colours, as Mac OS 9's did whatever the appearance.
+;; folder, a hard disk, documents (text, picture, blank), a compact
+;; Macintosh standing for a terminal, and a small robot for the agents.
+;; Unlike the chrome, icons keep their own colours, as Mac OS 9's did
+;; whatever the appearance.
 
 (defvar lme-platinum--icons (make-hash-table :test #'equal)
   "Icon images by name.")
