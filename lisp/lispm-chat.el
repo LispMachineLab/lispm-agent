@@ -246,7 +246,20 @@
     (pcase-dolist (`(,hbeg ,bbeg ,send) (lispm-transcript--sections 1 beg end))
       (let* ((heading (lispm-transcript--heading hbeg))
              (title (or (plist-get heading :title) "")))
-        (unless (member "ignore" (plist-get heading :tags))
+        (if (member "ignore" (plist-get heading :tags))
+            ;; A response left out of the conversation, after it was cut
+            ;; short or refused: say it was there.
+            (when (string-match-p "\\`assistant\\'" title)
+              (let ((text (mapconcat (lambda (i) (or (plist-get i :text) ""))
+                                     (seq-filter (lambda (i) (eq (plist-get i :kind) 'text))
+                                                 (lispm-chat--assistant-items bbeg send))
+                                     " ")))
+                (push (list :kind 'note
+                            :text (if (string-blank-p text)
+                                      "A response, left out of the conversation."
+                                    (concat "Left out of the conversation: "
+                                            (lispm--oneline text 70))))
+                      items)))
           (cond
            ((string-match-p "\\`user\\'" title)
             (let ((text (lispm-chat--body bbeg send)))
@@ -259,6 +272,9 @@
            ((string-match "\\`event: *\\(.+\\)\\'" title)
             (push (list :kind 'event :name (match-string 1 title)
                         :text (lispm-chat--body bbeg send))
+                  items))
+           ((string-match-p "\\`from lispm\\'" title)
+            (push (list :kind 'user :from "LispM" :text (lispm-chat--body bbeg send))
                   items))
            ((string-match-p "\\`summary\\'" title)
             (push (list :kind 'summary :key (format "summary@%d" hbeg)

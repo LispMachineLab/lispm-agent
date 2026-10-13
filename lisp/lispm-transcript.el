@@ -46,6 +46,7 @@
 ;;   * Message from reviewer        input from another agent
 ;;   * Event: after-save-hook       input from a hook the user set up
 ;;   * Summary                      what an earlier session handed over
+;;   * From LispM                   LispM passing on a choice of the user's
 ;;   * WAITING Condition: ...       the turn stopped early, awaiting a
 ;;   :PROPERTIES:                   restart: retry, continue, abort...
 ;;   :CONDITION: request-failed     (`lispm-signal'); never sent
@@ -421,6 +422,8 @@ own notes."
           ((string-match-p "\\`assistant\\'" title) 'assistant)
           ((string-match-p "\\`summary\\'" title)
            '(user . "[Summary of the earlier conversation, handed over to this session]\n"))
+          ((string-match-p "\\`from lispm\\'" title)
+           '(user . "[From LispM, for the user]\n"))
           ((string-match "\\`message from \\(.+\\)\\'" title)
            (cons 'user (format "[Message from agent %s]\n" (match-string 1 title))))
           ((string-match "\\`event: *\\(.+\\)\\'" title)

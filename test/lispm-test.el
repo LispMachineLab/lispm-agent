@@ -2025,7 +2025,12 @@ started, after the session opened."
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (let ((sent (format "%S" (alist-get 'messages (car lispm-test--requests)))))
         (should (string-match-p "Partial" sent))
-        (should (string-match-p "\\[Event: cut short\\]\nYour last response was cut short" sent)))
+        (should (string-match-p "\\[From LispM, for the user\\]\nYour last response was cut short" sent)))
+      ;; The chat shows who said it.
+      (should (string-match-p "^LispM Your last response was cut short"
+                              (mapconcat (lambda (i) (concat (or (plist-get i :from) "") " "
+                                                             (or (plist-get i :text) "")))
+                                         (lispm-chat-items (lispm-agent-buffer agent)) "\n")))
       ;; Left as it is: the transcript a turn cut short always had.
       (setq lispm-test--scripts `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Again")))))
       (lispm-tell agent "go on")
@@ -2071,7 +2076,10 @@ started, after the session opened."
       (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal reply "Done."))
-      (should (string-match-p "\\[Event: paused\\]\nGo on\\." (format "%S" (car lispm-test--requests))))
+      ;; The paused response went back as it was: nothing after it.
+      (let ((messages (alist-get 'messages (car lispm-test--requests))))
+        (should (equal (alist-get 'role (aref messages (1- (length messages)))) "assistant"))
+        (should (string-match-p "Working" (format "%S" (aref messages (1- (length messages)))))))
       (should (string-match-p "^\\* DONE Condition: Response paused\n\\(?:.*\n\\)*:RESTART: continue\n"
                               (lispm-test--transcript agent))))))
 
@@ -2090,7 +2098,7 @@ started, after the session opened."
       (let ((old (lispm-agent-buffer agent)))
         (should (eq (progn (lispm-test--condition-id agent) (plist-get (lispm-agent-condition agent) :type))
                     'context-full))
-        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(compact keep abort)))
+        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(compact abort)))
         (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'compact)
         (should (lispm-test--wait (lispm-test--idle-p agent)))
         (should (equal reply "Done."))
@@ -2098,7 +2106,9 @@ started, after the session opened."
         ;; The summary was asked for without the response cut short.
         (should-not (string-match-p "Long" (format "%S" (alist-get 'messages (cadr lispm-test--requests)))))
         (let ((text (lispm-test--transcript agent)))
-          (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* Assistant\n\\*\\* Reply\nDone\\.\n\\* User\n\\'" text)))))))
+          ;; Told, as a handover between turns does first, to save what
+          ;; should outlive the session.
+          (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* From LispM\nYour context filled up in the middle of this turn\\(?:.*\n\\)*\\* Assistant\n\\*\\* Reply\nDone\\.\n\\* User\n\\'" text)))))))
 
 (ert-deftest lispm-test-condition-compaction-failed ()
   "A handover that fails waits; skipping it lets the input go on in the long session."
@@ -2116,11 +2126,9 @@ started, after the session opened."
       (lispm-tell agent "second" :callback (lambda (r) (setq reply r)))
       (let ((id (lispm-test--condition-id agent)))
         (should (eq (plist-get (lispm-agent-condition agent) :type) 'compaction-failed))
-        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(retry skip)))
+        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(retry skip abort)))
         (should (equal (plist-get (lispm-agent-condition agent) :message)
                        "Compaction failed: api_error: Boom"))
-        ;; Stopping there skips it: there is no turn to end.
-        (should (eq (lispm--stop-restart (lispm-agent-condition agent)) 'skip))
         (lispm-restart agent id 'skip))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal reply "Two."))
@@ -2165,6 +2173,68 @@ started, after the session opened."
       (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'skip)
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal reply "Done.")))))
+
+(ert-deftest lispm-test-condition-raised-limit-refused ()
+  "A raised output limit the server refuses goes back, so that retrying can work."
+  (lispm-test-with-conditions
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Partial"))
+                      ,(lispm-test--failure 400 "invalid_request_error" "max_tokens: too large")
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Whole.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (lispm-restart agent (lispm-test--condition-id agent) 'retry-larger)
+      (should (lispm-test--wait (lambda () (eq (plist-get (lispm-agent-condition agent) :type)
+                                               'request-failed))))
+      (should (string-match-p (format "The output limit raised to %d for this turn is back to %d\\."
+                                      (* 2 lispm-max-tokens) lispm-max-tokens)
+                              (plist-get (lispm-agent-condition agent) :message)))
+      (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'retry)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Whole."))
+      (should (= (alist-get 'max_tokens (car lispm-test--requests)) lispm-max-tokens))
+      ;; The chat says the cut response was there.
+      (should (string-match-p "Left out of the conversation: Partial"
+                              (mapconcat (lambda (i) (or (plist-get i :text) ""))
+                                         (lispm-chat-items (lispm-agent-buffer agent)) "\n"))))))
+
+(ert-deftest lispm-test-condition-compaction-stopped ()
+  "Stopping at a failed handover drops the input waiting for it; nothing ends a turn."
+  (lispm-test-with-conditions
+    (let ((lispm-compact-threshold 1)
+          (lispm-compact-save-memory nil)
+          (agent (lispm-defagent tester "Test agent." :root project))
+          told)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "One."))
+                      ,(lispm-test--failure 500 "api_error" "Boom")
+                      ,(lispm-test--failure 500 "api_error" "Boom again"))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      ;; Denied in org: the input is dropped, its sender told.
+      (lispm-tell agent "second" :callback (lambda (r) (setq told r)))
+      (lispm-test--condition-id agent)
+      (should (eq (lispm--stop-restart (lispm-agent-condition agent)) 'abort))
+      (with-current-buffer (lispm-agent-buffer agent)
+        (goto-char (point-min))
+        (re-search-forward "^\\* WAITING Condition")
+        (org-todo "DENIED"))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "stopped before handling this: Compaction failed: api_error: Boom" told))
+      (let ((text (lispm-test--transcript agent)))
+        (should-not (string-match-p "second" text))
+        (should-not (string-match-p "^\\* Note" text))
+        (should (string-match-p "^\\* Event: compaction\nCompaction failed: api_error: Boom\n\\* User\n\\'" text)))
+      ;; Interrupted: no turn is ended either.
+      (lispm-tell agent "third")
+      (lispm-test--condition-id agent)
+      (lispm-abort agent)
+      (should (funcall (lispm-test--idle-p agent)))
+      (let ((text (lispm-test--transcript agent)))
+        (should-not (string-match-p "^\\* Note" text))
+        (should (string-match-p "^\\* Event: stopped\nCompaction failed: api_error: Boom again\nAborted by the user\\.\n\\* User\n\\'"
+                                text))))))
 
 (ert-deftest lispm-test-condition-unattended-cut-short ()
   "Unattended, a response cut short is asked for again once, larger, then the turn stops."

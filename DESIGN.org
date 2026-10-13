@@ -101,6 +101,7 @@ agent's context*. Before every model request the runtime parses the whole buffer
 *** Result                   the tool's output (or *** Error)
 * Message from reviewer      a message from another agent
 * Event: after-save-hook     an event produced by a hook or timer
+* From LispM                 LispM passing on a choice of the user's (section 5)
 * WAITING Condition: ...     the turn stopped early, awaiting a restart (section 5)
 * Notes                      the user's own notes: unknown headings are never sent
 #+end_example
@@ -298,10 +299,10 @@ it. Its restarts:
 | ~request-failed~    | a request fails after its retries, or cannot be made | ~retry~; ~use-model~: another backend or model; ~abort~   |
 | ~step-limit~        | a turn reaches ~lispm-max-steps~ requests            | ~continue~ for as many again; ~abort~                     |
 | ~output-limit~      | a response hits the output limit                     | ~retry-larger~: drop it, twice the limit; ~keep~; ~abort~ |
-| ~context-full~      | a response fills the context window                  | ~compact~, then go on; ~keep~; ~abort~                    |
+| ~context-full~      | a response fills the context window                  | ~compact~, then go on; ~abort~                            |
 | ~refused~           | the model refuses                                    | ~retry~: drop it, ask again; ~abort~                      |
 | ~paused~            | the model pauses (~pause_turn~)                      | ~continue~; ~abort~                                       |
-| ~compaction-failed~ | a handover fails                                     | ~retry~; ~skip~: carry on in the long session             |
+| ~compaction-failed~ | a handover fails                                     | ~retry~; ~skip~: carry on in the long session; ~abort~    |
 
 They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
 in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
@@ -319,11 +320,16 @@ event, waits for them: by default a failed request is tried again twice, a minut
 the turn stops, as one reaching the step limit or refused does at once; a response cut short is
 asked for again with twice the limit, or the session handed over, once; a paused one goes on; a
 failed handover is skipped. Dropping a response (~retry-larger~, ~refused~'s ~retry~,
-~compact~) tags its ~* Assistant~ section ~:ignore:~: it stays on record, no longer sent; a
-raised limit holds for the rest of the turn. ~keep~ and ~continue~ tell the model to go on in an
-~* Event:~ of their own. ~compact~ hands the session over in the middle of the turn, which goes
-on from the summary; a condition that stops a turn in its middle says so (~:RESUME: t~), so that
-~skip~ goes on with it.
+~compact~) tags its ~* Assistant~ section ~:ignore:~: it stays on record, no longer sent, and the
+chat says it was left out. A raised limit holds for the rest of the turn, unless the server
+refuses it: then it is lowered again, and the failed request says so. ~keep~ tells the model to
+go on in a ~* From LispM~ section, LispM passing on the user's choice, which the system prompt
+says to follow as theirs; ~continue~ sends a paused response back as it is, which is how the
+API resumes it. ~compact~ hands the session over in the middle of the turn, which goes on from
+the summary, the agent first told to save what should outlive the session, as a handover between
+turns asks first; a condition that stops a turn in its middle says so (~:RESUME: t~), so that
+~skip~ goes on with it. Between turns, stopping at a failed handover drops the input that asked
+for it, telling whoever sent it, and records an event: there is no turn to end.
 
 A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
 given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and
