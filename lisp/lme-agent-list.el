@@ -43,6 +43,8 @@
                   (icon title meta action help &optional properties depth))
 (declare-function lme-sidebar--insert-group "lme-sidebar" (open name meta action help))
 (declare-function lme-sidebar--insert-columns "lme-sidebar" (name meta))
+(declare-function lme-sidebar--count "lme-sidebar" (n singular &optional detail))
+(defvar lme-platinum-info)
 (declare-function lme-sidebar-set-toolbar "lme-sidebar"
                   (view refresh actions &optional title-actions))
 (declare-function lme-sidebar--setup-buffer "lme-sidebar" ())
@@ -416,11 +418,14 @@ Archived sessions are left out unless `lme-agent-list--show-archived'."
      ;; The archive toggle shows the archived count, pressed while archived
      ;; sessions are listed.
      (when (> archived 0)
-       `((,(concat (nerd-icons-codicon "nf-cod-archive") (format " %d" archived))
+       `((,(format "%d Archived" archived)
           lme-agent-list-toggle-show-archived
           ,(if lme-agent-list--show-archived "Hide archived sessions"
              "Show archived sessions")
           ,lme-agent-list--show-archived))))
+    (setq lme-platinum-info
+          (lme-sidebar--count (length sessions) "session"
+                              (when running (format "%d running" (length running)))))
     (lme-sidebar--insert-columns "Name" "Modified")
     (dolist (group (lme-agent--group-by-directory sessions running))
       (lme-agent-list--insert-project group now running-ids))))

@@ -49,6 +49,25 @@ has not been made yet: the first start asks for it and saves the answer."
                  (const :tag "Emacs" emacs)
                  (const :tag "Ask at the next start" nil)))
 
+(defcustom lme-theme nil
+  "The colour theme: `dracula', or `platinum', Mac OS 9's Platinum greys.
+nil means the choice has not been made yet: the first start asks for it.
+Change it from the λ menu's Appearance submenu, or with `lme-set-theme'."
+  :type '(choice (const :tag "Dracula" dracula)
+                 (const :tag "Platinum" platinum)
+                 (const :tag "Ask at the next start" nil)))
+
+(defun lme-load-theme (theme)
+  "Make THEME, by default Dracula, the only colour theme enabled."
+  (mapc #'disable-theme custom-enabled-themes)
+  (load-theme (or theme 'dracula) t))
+
+(defun lme-set-theme (theme)
+  "Switch to colour THEME now and at every later start."
+  (interactive (list (intern (completing-read "Theme: " '("dracula" "platinum") nil t))))
+  (lme-load-theme theme)
+  (customize-save-variable 'lme-theme theme))
+
 (defcustom lme-user-file (locate-user-emacs-file "personal.el")
   "The user's own configuration, loaded after lispm-emacs is set up."
   :type 'file)

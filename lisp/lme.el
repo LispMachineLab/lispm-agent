@@ -43,7 +43,7 @@
 ;;   (lme-setup)
 ;;
 ;; The first start asks for the editing style (`lme-editing-style') and
-;; offers to install the icon font the sidebar and tabs draw with.
+;; the appearance (`lme-theme'), and offers to install the icon font.
 
 ;;; Code:
 
@@ -77,15 +77,31 @@ A key of `lme-sidebar-views'."
     (?v 'vim)
     (_ 'emacs)))
 
+(defun lme--read-theme ()
+  "Ask for the colour theme; return `dracula' or `platinum'."
+  (pcase (car (read-multiple-choice
+               "And which appearance?"
+               '((?d "dracula" "Dracula: light text on a dark background")
+                 (?p "platinum" "Platinum: Mac OS 9's greys, black on white"))))
+    (?p 'platinum)
+    (_ 'dracula)))
+
 (defun lme--first-start ()
   "Settle what the first start asks; return non-nil when this is it.
-The editing style is asked once and saved with Customize.  A batch Emacs
-asks nothing and edits with Emacs keys."
-  (unless lme-editing-style
-    (if noninteractive
-        (setq lme-editing-style 'emacs)
-      (customize-save-variable 'lme-editing-style (lme--read-editing-style)))
-    t))
+The editing style and the appearance are each asked once and saved with
+Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
+  (let ((first nil))
+    (unless lme-editing-style
+      (setq first t)
+      (if noninteractive
+          (setq lme-editing-style 'emacs)
+        (customize-save-variable 'lme-editing-style (lme--read-editing-style))))
+    (unless lme-theme
+      (setq first t)
+      (if noninteractive
+          (setq lme-theme 'dracula)
+        (customize-save-variable 'lme-theme (lme--read-theme))))
+    first))
 
 (defun lme--icon-font-installed-p ()
   "Return non-nil when the icon font of nerd-icons is installed."

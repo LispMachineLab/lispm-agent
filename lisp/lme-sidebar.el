@@ -83,12 +83,14 @@ pure black, so terminal programs' grey text (Codex streams its status
 and reasoning in bright black) vanished until selected.  Bright black
 takes the theme's own dimmed text colour, and black a shade below the
 background, as in Dracula's terminal palette.  Every terminal and
-compilation buffer reads these faces.  Colours come only from faces
-this function never sets, so re-running it is idempotent."
+compilation buffer reads these faces.  A light theme is left alone: on
+white, black is legible as it is.  Colours come only from faces this
+function never sets, so re-running it is idempotent."
   (require 'ansi-color)
-  (when-let* ((dim (face-foreground 'shadow nil t))
-              (black (lme-tab-bar--blend (face-background 'default nil t)
-                                        "#000000" 0.2)))
+  (when-let* ((background (face-background 'default nil t))
+              (dark (< (apply #'+ (or (lme-tab-bar--rgb background) '(1 1 1))) 1.5))
+              (dim (face-foreground 'shadow nil t))
+              (black (lme-tab-bar--blend background "#000000" 0.2)))
     (set-face-attribute 'ansi-color-bright-black nil :foreground dim :background dim)
     (set-face-attribute 'ansi-color-black nil :foreground black :background black)))
 
@@ -130,10 +132,9 @@ icon.  The header shows ACTIONS at its left end and, at its right end,
 TITLE-ACTIONS followed by a button calling REFRESH.  Both action lists
 hold (LABEL COMMAND HELP [PRESSED]) entries, see
 `lme-sidebar--toolbar-buttons'."
-  (require 'nerd-icons)
   (let ((spec (alist-get view lme-sidebar-views)))
     (setq-local lme-platinum-title (plist-get spec :title)
-                lme-platinum-icon (nerd-icons-codicon (plist-get spec :icon))))
+                lme-platinum-icon (lme-platinum-icon (plist-get spec :icon))))
   (kill-local-variable 'tab-line-format)
   (unless lme-sidebar--faces
     (setq-local lme-sidebar--faces
@@ -155,13 +156,19 @@ hold (LABEL COMMAND HELP [PRESSED]) entries, see
   "Set up the current buffer as sidebar content.
 Visual line mode is turned off explicitly, so `global-visual-line-mode'
 leaves the buffer alone and an overlong title is truncated, not wrapped.
-Rows are spaced as Finder spaced its list."
+Rows are spaced as Finder spaced its list.  The window's bottom edge
+counts the rows, from `lme-platinum-info', as Finder's counted items."
   (visual-line-mode -1)
   (setq-local truncate-lines t
               cursor-type nil
-              line-spacing 0.35
-              mode-line-format nil)
+              line-spacing 0.35)
   (display-line-numbers-mode -1))
+
+(defun lme-sidebar--count (n singular &optional detail)
+  "Return N SINGULAR things counted for a list window's bottom edge.
+DETAIL, when non-nil, follows after a comma."
+  (concat (format "%d %s%s" n singular (if (= n 1) "" "s"))
+          (when detail (concat ", " detail))))
 
 (defun lme-sidebar--display (buffer)
   "Show BUFFER as the left sidebar of this frame and return its window."
@@ -226,7 +233,7 @@ is shortened to fit between them."
   (let* ((meta (or meta ""))
          (meta-width (string-pixel-width (propertize meta 'face 'lme-platinum-list)))
          (room (- width (string-pixel-width (propertize lead 'face 'lme-platinum-list))
-                  meta-width 24)))
+                  meta-width 36)))
     (concat lead
             (lme-platinum--fit (propertize name 'face (or (get-text-property 0 'face name)
                                                           'lme-platinum-list))
@@ -264,13 +271,15 @@ row's text."
     (insert "\n")))
 
 (defun lme-sidebar--insert-group (open name meta action help)
-  "Insert a group's row: a disclosure triangle, OPEN or not, and bold NAME.
+  "Insert a group's row: a disclosure triangle, OPEN or not, a folder and NAME.
 META sits in the right-hand column; clicking the row calls ACTION,
 described by HELP."
   (let ((beg (point)))
     (insert (lme-sidebar--row
              (concat (lme-sidebar--blank '(space :width (8)))
                      (propertize (lme-platinum-triangle open) 'face 'lme-platinum-list)
+                     (lme-sidebar--blank '(space :width (6)))
+                     (lme-platinum-icon "folder")
                      (lme-sidebar--blank '(space :width (6))))
              (propertize (lme-sidebar--one-line name 200)
                          'face '(:inherit lme-platinum-list :weight bold))
@@ -321,11 +330,10 @@ The shell is the one Eat would start, run as an independent process."
   (let ((inhibit-read-only t)
         (shells (seq-filter #'lme-shell--buffer-p (buffer-list))))
     (erase-buffer)
-    (require 'nerd-icons)
     (lme-sidebar-set-toolbar
      'shells #'lme-shell-list-refresh
-     `((,(concat (nerd-icons-codicon "nf-cod-terminal") " New Shell")
-        lme-shell-new "New shell at the main window's project root")))
+     '(("New Shell" lme-shell-new "New shell at the main window's project root")))
+    (setq lme-platinum-info (lme-sidebar--count (length shells) "shell"))
     (lme-sidebar--insert-columns "Name" "Directory")
     (if (null shells)
         (insert (propertize " " 'display '(space :width (8)))
@@ -333,7 +341,7 @@ The shell is the one Eat would start, run as an independent process."
       (dolist (buffer shells)
         (let ((directory (buffer-local-value 'default-directory buffer)))
           (lme-sidebar--insert-entry
-           (nerd-icons-codicon "nf-cod-terminal")
+           (lme-platinum-icon "computer")
            (string-trim (buffer-name buffer) "\\*" "\\*")
            (file-name-nondirectory (directory-file-name directory))
            (apply-partially #'lme-sidebar-show-in-main buffer)
@@ -388,7 +396,6 @@ The shell is the one Eat would start, run as an independent process."
   '((files "Files") (terminals "Terminals") (other "Other"))
   "Groups of the open buffers sidebar, in display order, with their headings.")
 
-(declare-function nerd-icons-icon-for-buffer "nerd-icons" ())
 (defvar lme-agent-list-buffer-name)
 
 (defun lme-buffer-list--kind (buffer)
@@ -435,7 +442,7 @@ does.  The full directory is in the row's help."
          (directory (abbreviate-file-name (buffer-local-value 'default-directory buffer)))
          (place (file-name-nondirectory (directory-file-name directory))))
     (lme-sidebar--insert-entry
-     (with-current-buffer buffer (nerd-icons-icon-for-buffer))
+     (lme-platinum-buffer-icon buffer)
      title
      (pcase kind
        ('files (concat (when (buffer-modified-p buffer)
@@ -452,14 +459,13 @@ does.  The full directory is in the row's help."
 
 (defun lme-buffer-list--render ()
   "Render the open buffers, grouped by kind, into the current buffer."
-  (require 'nerd-icons)
   (let ((inhibit-read-only t)
         (lme-buffer-list--rendering t)
         (buffers (lme-buffer-list--candidates)))
     (erase-buffer)
     (lme-sidebar-set-toolbar 'buffers #'lme-buffer-list-refresh
-                            `((,(concat (nerd-icons-codicon "nf-cod-save_all") " Save All")
-                               save-some-buffers "Save modified file buffers")))
+                            '(("Save All" save-some-buffers "Save modified file buffers")))
+    (setq lme-platinum-info (lme-sidebar--count (length buffers) "buffer"))
     (lme-sidebar--insert-columns "Name" "Where")
     (pcase-dolist (`(,kind ,heading) lme-buffer-list-groups)
       (when-let* ((members (seq-filter (lambda (buffer) (eq (lme-buffer-list--kind buffer) kind))
@@ -528,17 +534,24 @@ rendering never schedules another."
 
 ;;;; Files sidebar
 
+(declare-function treemacs-current-workspace "treemacs-workspaces" ())
+(declare-function treemacs-workspace->projects "treemacs-workspaces" (workspace))
+(declare-function treemacs-project->path "treemacs-workspaces" (project))
+
+(defun lme-sidebar--files-info ()
+  "Return what the project tree's bottom edge says: the project shown."
+  (if-let* ((projects (treemacs-workspace->projects (treemacs-current-workspace))))
+      (abbreviate-file-name (treemacs-project->path (car projects)))
+    "No project"))
+
 (defun lme-sidebar--files-toolbar ()
-  "Give the project tree buffer its sidebar toolbar."
-  (require 'nerd-icons)
+  "Give the project tree buffer its sidebar toolbar and bottom edge."
+  (setq lme-platinum-info #'lme-sidebar--files-info)
   (lme-sidebar-set-toolbar
    'files #'treemacs-refresh
-   `((,(concat (nerd-icons-codicon "nf-cod-new_file") " File")
-      treemacs-create-file "New file in the selected directory")
-     (,(concat (nerd-icons-codicon "nf-cod-new_folder") " Folder")
-      treemacs-create-dir "New folder in the selected directory")
-     (,(nerd-icons-codicon "nf-cod-collapse_all")
-      treemacs-collapse-all-projects "Collapse all"))))
+   '(("New File" treemacs-create-file "New file in the selected directory")
+     ("New Folder" treemacs-create-dir "New folder in the selected directory")
+     ("Collapse" treemacs-collapse-all-projects "Collapse all"))))
 
 (defun lme-sidebar--files-visible-p ()
   "Return non-nil when the project tree is shown in the selected frame."
@@ -558,28 +571,29 @@ Outside any project treemacs falls back to the buffer's directory."
     (delete-window window)))
 
 (defconst lme-sidebar-views
-  '((files :title "Files" :icon "nf-cod-files" :command lme-sidebar-files
+  '((files :title "Files" :icon "disk" :command lme-sidebar-files
            :help "Project files"
            :visible lme-sidebar--files-visible-p
            :show lme-sidebar--files-show
            :hide lme-sidebar--files-hide)
-    (agents :title "Agents" :icon "nf-cod-robot" :command lme-sidebar-agents
+    (agents :title "Agents" :icon lambda :command lme-sidebar-agents
             :help "Agent sessions"
             :visible lme-agent-list-visible-p
             :show lme-agent-list-show
             :hide lme-agent-list-hide)
-    (shells :title "Shells" :icon "nf-cod-terminal" :command lme-sidebar-shells
+    (shells :title "Shells" :icon "computer" :command lme-sidebar-shells
             :help "Shells"
             :visible lme-shell-list-visible-p
             :show lme-shell-list-show
             :hide lme-shell-list-hide)
-    (buffers :title "Buffers" :icon "nf-cod-multiple_windows" :command lme-sidebar-buffers
+    (buffers :title "Buffers" :icon "document" :command lme-sidebar-buffers
              :help "Open buffers"
              :visible lme-buffer-list-visible-p
              :show lme-buffer-list-show
              :hide lme-buffer-list-hide))
   "Views the left sidebar can show, in menu bar order.
-Each view names its TITLE, its codicon, the COMMAND its menu bar title
+Each view names its TITLE, its Finder icon (see `lme-platinum-icon'),
+the COMMAND its menu bar title
 runs, and the functions that test, show and hide it in the selected frame.")
 
 (defun lme-sidebar-current-view ()

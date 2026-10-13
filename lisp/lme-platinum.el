@@ -37,14 +37,18 @@
 ;;   lists        the sidebar is a Finder window in list view: a header
 ;;                holding its buttons, column headings, disclosure
 ;;                triangles and one row per item
+;;   bottoms      every window's mode line is its bottom edge: placards
+;;                for the buffer, its position and its mode, and the grow
+;;                box in the corner of the active window
 ;;   bevels       controls stand one pixel proud: lit along the top and
 ;;                left edges, shaded along the bottom and right
 ;;   type         title bars and menus in Charcoal, or the nearest
 ;;                installed face; lists in Geneva
 ;;
-;; Platinum's greys are not used.  Bevels, stripes and frames are shades of
-;; the theme's own background and text, derived again whenever a theme is
-;; enabled (`lme-platinum-apply-faces').
+;; Colours come from the theme.  Bevels, stripes and frames are shades of
+;; its background and text, derived again whenever a theme is enabled
+;; (`lme-platinum-apply-faces'); a theme can name them outright in
+;; `lme-platinum-colors', as the platinum theme gives Platinum's own greys.
 ;;
 ;; Boxes, stripes and triangles are drawn as SVG.  The drawing functions are
 ;; pure: palette and geometry in, an SVG out; drawn images are memoized.
@@ -70,8 +74,6 @@
 (declare-function lme-sidebar-current-view "lme-sidebar" ())
 (declare-function lme-sidebar-select "lme-sidebar" (view))
 (declare-function lme-browser-workspace-p "lme-browser" ())
-(declare-function nerd-icons-icon-for-buffer "nerd-icons" ())
-(declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (defvar lme-sidebar-views)
 (defvar lme-agent-emacs-agents)
 
@@ -91,8 +93,16 @@ Mac OS 9 drew them in Charcoal."
 Mac OS 9's Finder listed files in Geneva."
   :type '(repeat string))
 
+(defcustom lme-platinum-colors nil
+  "Chrome colours a theme names outright, a plist.
+Keys are those of `lme-platinum--derive-palette' (:chrome, :header,
+:light, :shade, :frame, :muted, :accent, ...); a colour left out is
+derived from the theme's faces.  Themes set it, as the platinum theme
+does; users rarely need to."
+  :type '(plist :value-type color))
+
 (defconst lme-platinum-title-height 22
-  "Height in pixels of a title bar.")
+  "Height in pixels of a title bar, and of a window's bottom edge.")
 
 (defconst lme-platinum-box-size 13
   "Side in pixels of a title bar box.")
@@ -120,6 +130,13 @@ toward black, and frames are darker still."
           :shade (lme-tab-bar--blend chrome "#000000" 0.6)
           :frame (lme-tab-bar--blend content "#000000" 0.65)
           :muted (lme-tab-bar--blend dim text 0.35))))
+
+(defun lme-platinum--merge-palette (derived named)
+  "Return the palette DERIVED with the colours NAMED put in their place."
+  (let ((palette (copy-sequence derived)))
+    (cl-loop for (key value) on named by #'cddr
+             do (setq palette (plist-put palette key value)))
+    palette))
 
 (defun lme-platinum--color (name)
   "Return the palette colour NAME."
@@ -225,6 +242,47 @@ tall and the content below never shifts when the focus moves."
                             (list 'triangle open)
                             (lambda () (lme-platinum-draw-triangle lme-platinum--palette open)))))
 
+;;;; Icons
+;;
+;; Finder's small icons, drawn as sixteen-pixel SVGs in icons/os9: a
+;; folder, a hard disk, documents (text, picture, blank) and a compact
+;; Macintosh standing for a terminal.  Unlike the chrome, icons keep their
+;; own colours, as Mac OS 9's did whatever the appearance.
+
+(defvar lme-platinum--icons (make-hash-table :test #'equal)
+  "Icon images by name.")
+
+(defun lme-platinum-icon (name)
+  "Return the Finder icon NAME as a string one icon wide.
+NAME is a file of icons/os9 without its extension, or `lambda' for
+LispM's rainbow λ.  Where images cannot be shown, a blank stands in."
+  (let ((file (if (eq name 'lambda)
+                  (expand-file-name "icons/lispm-lambda.png" lme-directory)
+                (expand-file-name (format "icons/os9/%s.svg" name) lme-directory))))
+    (if (and (display-images-p) (file-readable-p file))
+        (propertize " " 'display
+                    (or (gethash file lme-platinum--icons)
+                        (puthash file (create-image file nil nil :height 16 :ascent 'center)
+                                 lme-platinum--icons)))
+      (propertize " " 'display '(space :width (16))))))
+
+(defun lme-platinum-buffer-icon (buffer)
+  "Return the Finder icon of BUFFER.
+An agent shows its own mark; a terminal, a compact Macintosh; a
+directory, a folder; a file, a document, a picture for an image; any
+other buffer, a blank document."
+  (with-current-buffer buffer
+    (cond ((and (fboundp 'lme-agent--buffer-p) (lme-agent--buffer-p buffer))
+           (lme-agent--icon (lme-agent--buffer-agent buffer)))
+          ((derived-mode-p 'eat-mode 'term-mode 'shell-mode 'eshell-mode)
+           (lme-platinum-icon "computer"))
+          ((derived-mode-p 'dired-mode) (lme-platinum-icon "folder"))
+          (buffer-file-name
+           (lme-platinum-icon (if (string-match-p (image-file-name-regexp) buffer-file-name)
+                                  "document-image"
+                                "document")))
+          (t (lme-platinum-icon "document-blank")))))
+
 ;;;; Title bars
 
 (defvar-local lme-platinum-title nil
@@ -244,14 +302,9 @@ tall and the content below never shifts when the focus moves."
       (buffer-name buffer)))
 
 (defun lme-platinum--buffer-icon (buffer)
-  "Return the proxy icon of BUFFER's window, or nil."
+  "Return the proxy icon of BUFFER's window, as Finder's windows showed one."
   (or (buffer-local-value 'lme-platinum-icon buffer)
-      (when (and (fboundp 'lme-agent--buffer-p) (lme-agent--buffer-p buffer))
-        (lme-agent--icon (lme-agent--buffer-agent buffer)))
-      (when (require 'nerd-icons nil t)
-        (with-current-buffer buffer
-          (let ((icon (nerd-icons-icon-for-buffer)))
-            (and (stringp icon) icon))))))
+      (lme-platinum-buffer-icon buffer)))
 
 (defun lme-platinum--window-command (command)
   "Return a mouse command calling COMMAND with the window clicked."
@@ -347,8 +400,9 @@ when another shares its column."
 ACTIVE draws the stripes and boxes; MODIFIED marks the close box;
 CONTROLS is a value of `lme-platinum--window-controls'."
   (let* ((face (if active 'lme-platinum-title 'lme-platinum-title-inactive))
+         ;; The bar is a mode line construct, where % starts a directive.
          (label (concat (when icon (concat icon " "))
-                        (propertize title 'face face)))
+                        (propertize (string-replace "%" "%%" title) 'face face)))
          (s lme-platinum-box-size)
          (layout (lme-platinum-title-layout width (string-pixel-width label)))
          (label (lme-platinum--fit label (nth 1 layout))))
@@ -469,6 +523,11 @@ LABEL's own, so an icon keeps its font."
                             t title)
     `(,key menu-item ,title ,command :help ,help)))
 
+(defun lme-platinum--lambda ()
+  "Return LispM's rainbow λ, the counterpart of Mac OS 9's rainbow Apple.
+Where images cannot be shown, a plain λ stands in."
+  (if (display-images-p) (lme-platinum-icon 'lambda) "λ"))
+
 (defun lme-platinum-lambda-menu ()
   "Pop up the λ menu, LispM's counterpart of the Apple menu."
   (interactive)
@@ -485,6 +544,9 @@ LABEL's own, so an icon keeps its font."
      ["Browser" lme-browser :visible (fboundp 'lme-browser)]
      ["Magit Status" magit-status]
      "---"
+     ("Appearance"
+      ["Dracula" (lme-set-theme 'dracula) :style radio :selected (eq lme-theme 'dracula)]
+      ["Platinum" (lme-set-theme 'platinum) :style radio :selected (eq lme-theme 'platinum)])
      ["Editing Style…" (customize-variable 'lme-editing-style)]
      ["Customize lispm-emacs…" (customize-group 'lispm-emacs)])))
 
@@ -494,7 +556,8 @@ A view's title is highlighted while the sidebar shows it, and the Web
 title while the browser workspace is selected."
   (let ((shown (lme-sidebar-current-view)))
     (append
-     (list (lme-platinum--menu-title 'lme-lambda "λ" #'lme-platinum-lambda-menu "LispM"))
+     (list (lme-platinum--menu-title 'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
+                                     "LispM"))
      (mapcar (lambda (view)
                (let ((spec (cdr view)))
                  (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
@@ -523,16 +586,121 @@ title while the browser workspace is selected."
        ["New Workspace" tab-bar-new-tab]
        ["Close Workspace" tab-bar-close-tab :active (cdr (funcall tab-bar-tabs-function))]))))
 
+(defvar tabspaces-default-tab)
+
 (defun lme-platinum-application-menu ()
   "Return the right end of the menu bar: the Application menu.
-It names the current workspace, as Mac OS 9's named the frontmost
-application, and lists every workspace when clicked."
-  (require 'nerd-icons)
+It names the current workspace with its icon, as Mac OS 9's named the
+frontmost application: the hard disk for the default workspace, a folder
+for a project's.  Clicked, it lists every workspace."
   (let ((name (alist-get 'name (tab-bar--current-tab))))
     (list (lme-platinum--menu-title
            'lme-application
-           (concat (nerd-icons-codicon "nf-cod-window") " " name " ▾")
+           (concat (lme-platinum-icon (if (equal name (bound-and-true-p tabspaces-default-tab))
+                                          "disk"
+                                        "folder"))
+                   " " name " ▾")
            #'lme-platinum-workspace-menu "Workspaces"))))
+
+;;;; Window bottoms
+
+(defvar-local lme-platinum-info nil
+  "What the bottom of this buffer's window says instead of the buffer's state.
+List windows set it, as Finder's windows counted their items: a string,
+or a function returning one when the window is drawn.")
+
+(defun lme-platinum-draw-grow-box (palette height)
+  "Return an SVG of the grow box, the ridged square in a window's corner.
+Three diagonal ridges, each a lit line beside a shaded one, in PALETTE,
+centred in HEIGHT pixels."
+  (let* ((s 15)
+         (svg (svg-create s height))
+         (y (/ (- height s) 2)))
+    (lme-platinum--fill svg 0 0 s height (plist-get palette :chrome))
+    (dolist (offset '(4 8 12))
+      (svg-line svg (- s offset) (+ y s) s (+ y s (- offset))
+                :stroke (plist-get palette :shade) :stroke-width 1)
+      (svg-line svg (- s offset -1) (+ y s) s (+ y s (- offset) 1)
+                :stroke (plist-get palette :light) :stroke-width 1))
+    svg))
+
+(defun lme-platinum--grow-box ()
+  "Return the grow box as a string."
+  (propertize " " 'display (lme-platinum--image
+                            (list 'grow)
+                            (lambda () (lme-platinum-draw-grow-box lme-platinum--palette
+                                                                    lme-platinum-title-height)))))
+
+(defun lme-platinum--placard (text active)
+  "Return TEXT as a placard, the raised plate Mac OS 9 showed status in.
+ACTIVE draws it raised; an inactive window's placards lie flat.  The
+placard's face is layered under TEXT's own, so coloured counts survive."
+  (let* ((pad (propertize " " 'display '(space :width (6))))
+         (placard (concat pad text pad)))
+    (add-face-text-property 0 (length placard)
+                            (if active 'lme-platinum-placard 'lme-platinum-placard-inactive)
+                            t placard)
+    placard))
+
+(defun lme-platinum--mode-line-text (construct)
+  "Return mode line CONSTRUCT formatted, trimmed, and safe to show again.
+It is formatted for the current buffer, the one whose window is drawn."
+  (string-replace "%" "%%" (string-trim (format-mode-line construct nil nil
+                                                          (current-buffer)))))
+
+(defvar evil-mode-line-tag)
+(defvar flymake-mode-line-counters)
+
+(defun lme-platinum-mode-line-left ()
+  "The left of a window's bottom edge: its state, buffer and position.
+A list window shows its `lme-platinum-info' instead."
+  (let ((active (mode-line-window-selected-p)))
+    (concat
+     (propertize " " 'display (lme-platinum--strut 8))
+     (if lme-platinum-info
+         (lme-platinum--placard (string-replace "%" "%%" (if (functionp lme-platinum-info)
+                                                              (funcall lme-platinum-info)
+                                                            lme-platinum-info))
+                                active)
+       (mapconcat
+        (lambda (text) (lme-platinum--placard text active))
+        (delq nil
+              (list (when (and (bound-and-true-p evil-local-mode)
+                               (stringp evil-mode-line-tag))
+                      (string-trim (substring-no-properties evil-mode-line-tag) "[ <]+" "[> ]+"))
+                    (concat (string-replace "%" "%%" (buffer-name))
+                            (when (and buffer-file-name (buffer-modified-p)) " •"))
+                    (lme-platinum--mode-line-text mode-line-position)))
+        " ")))))
+
+(defun lme-platinum-mode-line-right ()
+  "The right of a window's bottom edge: diagnostics, branch, mode, grow box.
+Only the active window shows the grow box, and only where the window can
+be resized; a side window cannot."
+  (let* ((active (mode-line-window-selected-p))
+         (parts (unless lme-platinum-info
+                  (delq nil
+                        (list (when (bound-and-true-p flymake-mode)
+                                (let ((counts (lme-platinum--mode-line-text
+                                               flymake-mode-line-counters)))
+                                  (unless (string-empty-p counts) counts)))
+                              (when (stringp vc-mode)
+                                (replace-regexp-in-string
+                                 "\\`[A-Za-z]+[-:@!?]" ""
+                                 (string-trim (substring-no-properties vc-mode))))
+                              (lme-platinum--mode-line-text mode-name))))))
+    (concat (mapconcat (lambda (text) (lme-platinum--placard text active)) parts " ")
+            (propertize " " 'display '(space :width (6)))
+            (if (and active (not (window-parameter (selected-window) 'window-side)))
+                (lme-platinum--grow-box)
+              (lme-platinum--space 15))
+            (lme-platinum--space 3))))
+
+(defconst lme-platinum-mode-line-format
+  '((:eval (lme-platinum-mode-line-left))
+    mode-line-format-right-align
+    (:eval (lme-platinum-mode-line-right)))
+  "The mode line of every window: its bottom edge, laid out as Mac OS 9's.")
 
 ;;;; Lists
 
@@ -548,6 +716,52 @@ META, the column the list is sorted by, is shaded as Mac OS 9 shaded it."
           (propertize " " 'display '(space :align-to right)
                       'face 'lme-platinum-column-sorted)
           "\n"))
+
+;;;; Treemacs
+
+(declare-function treemacs-load-theme "treemacs-themes" (name))
+
+(defun lme-platinum-treemacs-theme ()
+  "Draw treemacs's tree with Finder's icons: disks, folders and documents.
+A directory shows a disclosure triangle before its folder, as Finder's
+list view did; files are indented by a triangle's width, so their icons
+line up with the folders'.  It is made again when a theme is enabled,
+as the triangles take the theme's colour."
+  (when (featurep 'treemacs)
+    ;; Treemacs puts its background face in front of the default face; left
+    ;; inheriting the default, it would bring back the editor's font over
+    ;; the list's.  The project's name is not underlined, as Finder's
+    ;; disks were not.
+    (set-face-attribute 'treemacs-window-background-face nil :inherit 'unspecified)
+    (set-face-attribute 'treemacs-root-face nil :underline nil :weight 'bold :height 1.0)
+    (let* ((gap (propertize " " 'display '(space :width (5))))
+           (no-triangle (propertize " " 'display '(space :width (12))))
+           (row (lambda (lead icon) (concat lead gap (lme-platinum-icon icon) gap))))
+      (eval
+       `(treemacs-create-theme "lme-platinum"
+          :config
+          (progn
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle t) "disk")
+                                  :extensions (root-open))
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle nil) "disk")
+                                  :extensions (root-closed))
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle t) "folder")
+                                  :extensions (dir-open))
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle nil) "folder")
+                                  :extensions (dir-closed))
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle t) "document-blank")
+                                  :extensions (tag-open))
+            (treemacs-create-icon :icon ,(funcall row (lme-platinum-triangle nil) "document-blank")
+                                  :extensions (tag-closed))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-blank")
+                                  :extensions (tag-leaf))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-image")
+                                  :extensions ("png" "jpg" "jpeg" "gif" "svg" "webp" "bmp"
+                                               "tif" "tiff" "ico" "heic"))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document")
+                                  :extensions (fallback))))
+       t)
+      (treemacs-load-theme "lme-platinum"))))
 
 ;;;; Faces
 
@@ -573,6 +787,14 @@ META, the column the list is sorted by, is shaded as Mac OS 9 shaded it."
 
 (defface lme-platinum-header nil
   "Face of a list window's header, below its title bar."
+  :group 'lme-platinum)
+
+(defface lme-platinum-placard '((t :box (:line-width (1 . 1) :style released-button)))
+  "Face of a placard on the active window's bottom edge."
+  :group 'lme-platinum)
+
+(defface lme-platinum-placard-inactive '((t :inherit shadow))
+  "Face of a placard on an inactive window's bottom edge."
   :group 'lme-platinum)
 
 (defface lme-platinum-button '((t :box (:line-width (1 . 1) :style released-button)))
@@ -605,7 +827,9 @@ it, as on every theme change, is idempotent."
         (dim (face-foreground 'shadow nil t))
         (accent (face-foreground 'font-lock-constant-face nil t)))
     (when (and content text dim accent (color-name-to-rgb content))
-      (setq lme-platinum--palette (lme-platinum--derive-palette content text dim accent)
+      (setq lme-platinum--palette (lme-platinum--merge-palette
+                                   (lme-platinum--derive-palette content text dim accent)
+                                   lme-platinum-colors)
             lme-platinum--generation (1+ lme-platinum--generation))
       (let ((chrome (lme-platinum--color :chrome))
             (header (lme-platinum--color :header))
@@ -618,6 +842,23 @@ it, as on every theme change, is idempotent."
         (set-face-attribute 'tab-bar nil
                             :inherit 'unspecified :background chrome :foreground text
                             :box nil)
+        (set-face-attribute 'mode-line nil
+                            :inherit 'unspecified :background chrome :foreground text
+                            :box nil :overline 'unspecified :underline 'unspecified
+                            :height 'unspecified)
+        (set-face-attribute 'mode-line-inactive nil
+                            :inherit 'unspecified :background chrome
+                            :foreground (lme-platinum--color :muted)
+                            :box nil :overline 'unspecified :underline 'unspecified
+                            :height 'unspecified)
+        (set-face-attribute 'lme-platinum-placard nil
+                            :inherit 'lme-platinum-list :background header :foreground text
+                            :height 0.95
+                            :box '(:line-width (1 . 1) :style released-button))
+        (set-face-attribute 'lme-platinum-placard-inactive nil
+                            :inherit 'lme-platinum-list :background chrome
+                            :foreground (lme-platinum--color :muted) :height 0.95
+                            :box `(:line-width (1 . 1) :color ,chrome))
         (dolist (face '(lme-platinum-title lme-platinum-title-inactive
                         lme-platinum-menu-title lme-platinum-menu-title-active))
           (set-face-attribute face nil :family (or system 'unspecified) :height 120
@@ -663,7 +904,9 @@ it, as on every theme change, is idempotent."
 
 (defun lme-setup-platinum ()
   "Lay the frame out as Mac OS 9 did, in the active theme's colours."
-  (setq-default tab-line-format '(:eval (lme-platinum-title-bar)))
+  (setq-default tab-line-format '(:eval (lme-platinum-title-bar))
+                mode-line-format lme-platinum-mode-line-format)
+  (setq mode-line-right-align-edge 'window)
   (setq tab-bar-format '(lme-platinum-menu-bar
                          tab-bar-format-align-right
                          tab-bar-format-global
@@ -674,6 +917,9 @@ it, as on every theme change, is idempotent."
   (window-divider-mode 1)
   (lme-platinum-apply-faces)
   (add-hook 'enable-theme-functions #'lme-platinum-apply-faces)
+  (with-eval-after-load 'treemacs
+    (lme-platinum-treemacs-theme)
+    (add-hook 'enable-theme-functions (lambda (&rest _) (lme-platinum-treemacs-theme)) 90))
   (add-hook 'which-key-init-buffer-hook #'lme-platinum-no-title-bar)
   (add-hook 'transient-setup-buffer-hook #'lme-platinum-no-title-bar))
 

@@ -197,7 +197,7 @@ With a prefix argument, choose its ROLE."
   (require 'lispm)
   (setf (alist-get 'lispm lme-agent-emacs-agents)
         (list :name "LispM"
-              :icon '(nerd-icons-mdicon "nf-md-lambda" nil)
+              :icon '(lme-agent-image-icon "lispm-lambda.png" nil)
               :command #'lme-agent-lispm-new
               :sessions #'lme-lispm-sessions
               :new #'lme-lispm-new

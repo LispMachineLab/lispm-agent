@@ -134,27 +134,12 @@
   (use-package project
     :ensure nil)
 
+  ;; Both themes are at hand, so the Appearance menu switches between them.
   (use-package dracula-theme
-    :init (load-theme 'dracula t))
-
-  (use-package doom-modeline
-    :init
-    ;; Buffers are switched from the Buffers sidebar, so clicking a mode
-    ;; line's buffer name no longer cycles to the previous or next buffer.
-    ;; Every buffer-name segment reads this keymap when it renders.
-    (setq mode-line-buffer-identification-keymap (make-sparse-keymap))
-    ;; The encoding shows only when it is not UTF-8 with LF line ends, so
-    ;; split windows keep room for the buffer name and major mode.
-    (setq doom-modeline-buffer-encoding 'nondefault)
-    ;; Right-hand segments end at the right fringe, a position the display
-    ;; engine resolves itself; the pixel offset doom-modeline computes for
-    ;; the window edge overran terminal windows, which carry a left margin.
-    (setq mode-line-right-align-edge 'right-fringe)
-    (setq doom-modeline-icon (lme-gui-p)
-          doom-modeline-height 26
-          doom-modeline-buffer-file-name-style 'truncate-upto-project
-          inhibit-compacting-font-caches t)
-    (doom-modeline-mode 1))
+    :defer t)
+  (add-to-list 'custom-theme-load-path (expand-file-name "themes/" lme-directory))
+  (lme-load-theme lme-theme)
+  (setq inhibit-compacting-font-caches t)
 
   (when (eq lme-editing-style 'vim)
     (use-package evil
@@ -208,7 +193,11 @@
           tabspaces-use-filtered-buffers-as-default t
           tabspaces-project-switch-opens-workspace t
           tabspaces-initialize-project-with-todo nil
-          tabspaces-include-buffers '("*scratch*" "*Messages*"))
+          tabspaces-include-buffers '("*scratch*" "*Messages*")
+          ;; A project's saved session goes with Emacs's own state, not into
+          ;; the project, where it would show up as an untracked file.
+          tabspaces-session-project-session-store (locate-user-emacs-file "tabspaces/"))
+    (make-directory tabspaces-session-project-session-store t)
     :config
     (tabspaces-mode 1)
     ;; The first workspace is the default one; named explicitly, it no longer

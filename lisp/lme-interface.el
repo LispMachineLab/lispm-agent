@@ -34,6 +34,8 @@
 (require 'thingatpt)
 (require 'url-util)
 
+(defvar lme-platinum-mode-line-format)
+
 (defun lme-disable-display-line-numbers ()
   "Disable line numbers in the current buffer."
   (display-line-numbers-mode -1))
@@ -362,17 +364,14 @@ cells and split-pane dividers drawn with box characters stay straight."
            ("C-c p T" . treemacs))
     :hook (treemacs-mode . lme-sidebar--files-toolbar)
     :config
-    ;; No sidebar view has a mode line, so switching views keeps the bottom
-    ;; edge in place.
+    (setq treemacs-indentation-string (propertize " " 'display '(space :width (12)))
+          treemacs-indentation 1)
+    ;; Every sidebar view has the same bottom edge as any window, so
+    ;; switching views keeps it in place.
     (setq treemacs-width lme-sidebar-width
           treemacs-is-never-other-window t
-          treemacs-user-mode-line-format 'none)
+          treemacs-user-mode-line-format lme-platinum-mode-line-format)
     (define-key treemacs-mode-map [mouse-1] #'treemacs-single-click-expand-action))
-
-  (use-package treemacs-nerd-icons
-    :after treemacs
-    :config
-    (treemacs-load-theme "nerd-icons"))
 
   (use-package dirvish
     :demand t

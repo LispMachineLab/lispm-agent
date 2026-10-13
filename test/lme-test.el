@@ -67,15 +67,23 @@
                      '("b" "a"))))))
 
 (ert-deftest lme-test-first-start-in-batch ()
-  "A batch Emacs settles on Emacs keys without asking; a set style is kept."
-  (let ((lme-editing-style nil))
+  "A batch Emacs settles on Emacs keys and Dracula without asking.
+Choices already made are kept, and the start that finds them made is
+not a first start."
+  (let ((lme-editing-style nil)
+        (lme-theme nil))
     (cl-letf (((symbol-function 'lme--read-editing-style)
+               (lambda () (error "Asked in batch")))
+              ((symbol-function 'lme--read-theme)
                (lambda () (error "Asked in batch"))))
       (should (lme--first-start))
-      (should (eq lme-editing-style 'emacs))))
-  (let ((lme-editing-style 'vim))
+      (should (eq lme-editing-style 'emacs))
+      (should (eq lme-theme 'dracula))))
+  (let ((lme-editing-style 'vim)
+        (lme-theme 'platinum))
     (should-not (lme--first-start))
-    (should (eq lme-editing-style 'vim))))
+    (should (eq lme-editing-style 'vim))
+    (should (eq lme-theme 'platinum))))
 
 (ert-deftest lme-test-lispm-requirements ()
   "Of a package's requirements, those not installed are returned; Emacs never."
@@ -167,6 +175,48 @@
     (let ((side (display-buffer-in-side-window (get-buffer-create " lme-test-side")
                                                '((side . left)))))
       (should (equal (lme-platinum--window-controls side) '(on off off))))))
+
+(ert-deftest lme-test-palette-takes-named-colours ()
+  "Colours a theme names replace the derived ones; the rest stay derived."
+  (let* ((derived (lme-platinum--derive-palette "#282a36" "#f8f8f2" "#6272a4" "#bd93f9"))
+         (palette (lme-platinum--merge-palette derived '(:chrome "#DDDDDD" :accent "#6363CE"))))
+    (should (equal (plist-get palette :chrome) "#DDDDDD"))
+    (should (equal (plist-get palette :accent) "#6363CE"))
+    (should (equal (plist-get palette :shade) (plist-get derived :shade)))
+    ;; The derived palette itself is left untouched.
+    (should (equal (plist-get derived :accent) "#bd93f9"))))
+
+(ert-deftest lme-test-platinum-theme ()
+  "The platinum theme loads, and names Platinum's greys for the chrome."
+  (let ((custom-theme-load-path (cons (expand-file-name "themes/" lme-directory)
+                                      custom-theme-load-path)))
+    (unwind-protect
+        (progn
+          (load-theme 'platinum t)
+          (should (memq 'platinum custom-enabled-themes))
+          (should (equal (plist-get lme-platinum-colors :chrome) "#DDDDDD"))
+          (should (equal (plist-get lme-platinum-colors :accent) "#6363CE")))
+      (disable-theme 'platinum))
+    (should-not (plist-get lme-platinum-colors :chrome))))
+
+(ert-deftest lme-test-window-bottom ()
+  "A window's bottom edge counts a list's items, or shows the buffer."
+  (let ((lme-platinum--palette (lme-platinum--derive-palette "#282a36" "#f8f8f2"
+                                                             "#6272a4" "#bd93f9")))
+    (with-temp-buffer
+      (rename-buffer "lme-test 100% done" t)
+      (let ((left (lme-platinum-mode-line-left)))
+        ;; A % in the buffer name is escaped, as the bottom is a mode line.
+        (should (string-search "100%% done" left)))
+      (setq-local lme-platinum-info "3 sessions")
+      (should (string-search "3 sessions" (lme-platinum-mode-line-left)))
+      (should (string-empty-p (string-trim (substring-no-properties
+                                            (lme-platinum-mode-line-right))))))))
+
+(ert-deftest lme-test-sidebar-count ()
+  "List windows count their items in the singular or the plural."
+  (should (equal (lme-sidebar--count 1 "session") "1 session"))
+  (should (equal (lme-sidebar--count 3 "session" "1 running") "3 sessions, 1 running")))
 
 (provide 'lme-test)
 ;;; lme-test.el ends here
