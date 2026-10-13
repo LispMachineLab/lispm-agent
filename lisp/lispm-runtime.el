@@ -1393,11 +1393,13 @@ Interactively, the agent of the current session."
                   (if turn (format " in turn %d" turn) ""))))
 
 (defun lispm--snapshot-now (snapshot)
-  "Current text of the buffer or file in SNAPSHOT."
+  "Current text of the buffer or file in SNAPSHOT.
+A file's is its buffer's, unless that is out of date with it (see
+`lispm--file-text')."
   (let ((buffer (car snapshot))
         (file (plist-get (cdr snapshot) :file)))
-    (cond ((buffer-live-p buffer) (lispm-tools--buffer-text buffer))
-          (file (lispm--file-text file))
+    (cond (file (lispm--file-text file))
+          ((buffer-live-p buffer) (lispm-tools--buffer-text buffer))
           (t ""))))
 
 (defun lispm--read-turn ()
@@ -1425,6 +1427,14 @@ Interactively, the agent of the current session."
 Default: its latest turn with edits."
   (interactive (list (lispm--buffer-agent) (lispm--read-turn)))
   (pcase-let ((`(,turn . ,snapshots) (lispm--journal-entry agent turn)))
+    ;; All or nothing: a buffer with unsaved changes whose file changed
+    ;; on disk too is for the user to settle first.
+    (when-let* ((conflicts (seq-filter (lambda (s)
+                                         (and (buffer-live-p (car s))
+                                              (eq (lispm-tools--sync (car s)) 'conflict)))
+                                       snapshots)))
+      (user-error "Nothing reverted: %s changed on disk, and in Emacs too; save or revert first"
+                  (mapconcat (lambda (s) (buffer-name (car s))) conflicts ", ")))
     (unless (or (not (called-interactively-p 'any))
                 (yes-or-no-p (format "Revert %d buffer(s) %s changed in turn %d? "
                                      (length snapshots) (lispm-agent-name agent) turn)))

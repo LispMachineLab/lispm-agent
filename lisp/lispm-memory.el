@@ -65,11 +65,14 @@ SCOPE `project' (the default) is shared by the agents of its project;
   "File of the tasks of AGENT's project."
   (expand-file-name "tasks.org" (lispm-project-directory (lispm-agent-root agent))))
 
-(defun lispm-memory--visit (file header)
+(defun lispm-memory--visit (file header &optional to-change)
   "Buffer visiting FILE, created with HEADER if new.
-The user may change the file too, by hand or with git: a buffer out of
-date is brought up to date first (see `lispm-tools--sync')."
-  (let ((buffer (lispm-tools--visit file)))
+The user may change the file too, by hand or with git, so a buffer out
+of date is brought up to date first (see `lispm-tools--sync').  One
+with unsaved changes while the file changed on disk too is read as it
+is, being what the user sees, but cannot be changed: with TO-CHANGE,
+that is an error."
+  (let ((buffer (lispm-tools--visit file (not to-change))))
     (with-current-buffer buffer
       (when (zerop (buffer-size))
         (insert header)
@@ -77,14 +80,16 @@ date is brought up to date first (see `lispm-tools--sync')."
         (let ((inhibit-message t)) (save-buffer))))
     buffer))
 
-(defun lispm-memory--buffer (agent &optional scope role)
-  "Buffer of AGENT's memory in SCOPE, or of ROLE's (see `lispm-memory-file')."
+(defun lispm-memory--buffer (agent &optional scope role to-change)
+  "Buffer of AGENT's memory in SCOPE, or of ROLE's (see `lispm-memory-file').
+TO-CHANGE is as for `lispm-memory--visit'."
   (lispm-memory--visit (lispm-memory-file agent scope role)
                        (if (eq scope 'role)
                            (format "#+title: Memory of the %s role\n"
                                    (or role (lispm-agent-role agent)))
                          (format "#+title: Memory of %s\n"
-                                 (abbreviate-file-name (lispm-agent-root agent))))))
+                                 (abbreviate-file-name (lispm-agent-root agent))))
+                       to-change))
 
 (defun lispm-memory--scope-entries (agent scope &optional role)
   "Entries of AGENT's memory in SCOPE (or ROLE's), without creating its file."
@@ -92,11 +97,13 @@ date is brought up to date first (see `lispm-tools--sync')."
        (mapcar (lambda (e) (plist-put e :scope scope))
                (lispm-memory--entries (lispm-memory--buffer agent scope role)))))
 
-(defun lispm-tasks--buffer (agent)
-  "Buffer of the tasks of AGENT's project."
+(defun lispm-tasks--buffer (agent &optional to-change)
+  "Buffer of the tasks of AGENT's project.
+TO-CHANGE is as for `lispm-memory--visit'."
   (lispm-memory--visit (lispm-tasks-file agent)
                        (format "#+title: Tasks of %s\n#+todo: TODO NEXT BLOCKED | DONE CANCELLED\n"
-                               (abbreviate-file-name (lispm-agent-root agent)))))
+                               (abbreviate-file-name (lispm-agent-root agent)))
+                       to-change))
 
 (defun lispm-memory--entries (buffer)
   "Top-level entries of the org BUFFER, as plists.
@@ -143,7 +150,7 @@ Keys: :title :tags :todo :id :body :beg :end."
 (defun lispm-memory-remember (agent title content &optional tags scope)
   "Store CONTENT under TITLE in AGENT's memory in SCOPE.
 An entry of that title is replaced."
-  (let* ((buffer (lispm-memory--buffer agent scope))
+  (let* ((buffer (lispm-memory--buffer agent scope nil t))
          (title (lispm--oneline title 120))
          (existing (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
                              (lispm-memory--entries buffer)))
@@ -207,7 +214,7 @@ Project memory comes first, then the memory of AGENT's role, or of ROLE."
   (let* ((entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
                           (append (lispm-memory--scope-entries agent 'project)
                                   (lispm-memory--scope-entries agent 'role))))
-         (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope)))))
+         (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope) nil t))))
     (unless entry (error "No memory titled \"%s\"" title))
     (with-current-buffer buffer
       (delete-region (plist-get entry :beg) (plist-get entry :end)))
@@ -227,7 +234,7 @@ Project memory comes first, then the memory of AGENT's role, or of ROLE."
 
 (defun lispm-tasks-add (agent title &optional notes)
   "Add a TODO titled TITLE (with NOTES) to AGENT's tasks; return its ID."
-  (let* ((buffer (lispm-tasks--buffer agent))
+  (let* ((buffer (lispm-tasks--buffer agent t))
          (ids (mapcar (lambda (e) (plist-get e :id)) (lispm-memory--entries buffer)))
          (id (cl-loop for id = (format "T%04x" (random #x10000))
                       unless (member id ids) return id)))
@@ -249,7 +256,7 @@ Project memory comes first, then the memory of AGENT's role, or of ROLE."
   "Set task ID of AGENT to STATE and/or append NOTE."
   (when (and state (not (member state lispm-tasks--states)))
     (error "State must be one of %s" (string-join lispm-tasks--states ", ")))
-  (let* ((buffer (lispm-tasks--buffer agent))
+  (let* ((buffer (lispm-tasks--buffer agent t))
          (task (lispm-tasks--find agent id)))
     (with-current-buffer buffer
       (save-excursion

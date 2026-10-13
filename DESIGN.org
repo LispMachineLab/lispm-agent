@@ -174,10 +174,13 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   *one undo step of its own*, then saves. The user sees edits happen and undoes one with ~C-/~.
 - Other programs change files too: a shell command, git, the user's own shell. A buffer whose
   file changed on disk is brought up to date before a tool uses it, and never by asking, as
-  Emacs would: without unsaved changes it is reverted; with them it is a conflict, which the
-  tool reports to the model (~read_file~ shows the buffer and says so). When ~run_shell~
-  finishes, the unmodified buffers of the files it changed are reverted, so the user sees its
-  effect too; ~search_files~ reads such a file from disk rather than from its old buffer.
+  Emacs would: without unsaved changes it is reverted; with them it is in conflict with its
+  file, which a change reports to the model as an error (~read_file~ shows the buffer and says
+  so; ~lispm-revert-turn~ reverts nothing until the user settles it). After every call, the
+  unmodified buffers of files changed on disk are reverted, so the user sees what a command,
+  Lisp or an MCP server did there. Previews and the changes shown while a call is written
+  change nothing: like ~search_files~ and the system prompt's instruction files, they read an
+  out-of-date buffer's file from disk (~lispm--file-text~).
 - ~search_files~ is Emacs-native as well, with no grep or ripgrep behind it: project.el
   (~project-files~) lists the files, so a git project's ~.gitignore~ applies, and Emacs
   regexps search them, in the file's own buffer when Emacs visits it, so unsaved edits are
@@ -200,10 +203,13 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   needs approval by default.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
-- *C-g interrupts a call.* Calls run from the process sentinels and timers of the loop, where
-  Emacs inhibits quitting; ~lispm-tool-invoke~ allows it again while a tool runs, so a runaway
-  call, a loop in ~eval_elisp~ say, can always be stopped. The interrupted call fails, and the
-  turn goes on.
+- *C-g interrupts a call* while Emacs runs it. Calls run from the process sentinels and timers
+  of the loop, where Emacs inhibits quitting; ~lispm-tool-invoke~ allows it again while a tool
+  runs, so a runaway computation, a loop in ~eval_elisp~ say, can be stopped. The interrupted
+  call fails, and the turn goes on. What a call waits for afterwards (a process, a promise,
+  another agent) is stopped by aborting the turn. Only the tool is interruptible: recording its
+  result and going on with the turn is not, so C-g never leaves the runtime half way, and a C-g
+  pressed before the call began is left for whatever it was meant for.
 
 * 4. Memory: org and git
 
