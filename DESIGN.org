@@ -14,20 +14,20 @@ implementation:
 
 | Harness capability        | Emacs abstraction                                                | Implementation                                          |
 |---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
-| Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
-| Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
-| Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
-| Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lispm-tools.el][lispm-tools.el]]                                          |
-| Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
+| Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
+| Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
+| Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
+| Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
+| Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
-| Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lispm-memory.el][lispm-memory.el]]                                         |
+| Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lisp/lispm-memory.el][lispm-memory.el]]                                         |
 | Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
 | Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
-| Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
-| Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
-| Model APIs                | two API shapes behind one internal format                        | [[file:lispm-api.el][lispm-api.el]], [[file:lispm-openai.el][lispm-openai.el]], [[file:lispm-anthropic.el][lispm-anthropic.el]]   |
+| Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
+| Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lisp/lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
+| Model APIs                | two API shapes behind one internal format                        | [[file:lisp/lispm-api.el][lispm-api.el]], [[file:lisp/lispm-openai.el][lispm-openai.el]], [[file:lisp/lispm-anthropic.el][lispm-anthropic.el]]   |
 
 The name comes from the Lisp Machines (CONS, CADR, Symbolics Genera, ...): environments where
 the editor, the operating system and the programs were all live Lisp objects in one image.
@@ -137,7 +137,7 @@ prefix-matched as well. Therefore:
 *Storage is not the interface.* The org buffer is the right store (exact, editable,
 diffable, archived) but a poor place to hold a conversation: you would type into the record
 itself, and approving a call would mean editing a heading. So people talk to an agent in a
-chat ([[file:lispm-chat.el][lispm-chat.el]]) laid out like Claude Code's terminal interface, and the org buffer stays
+chat ([[file:lisp/lispm-chat.el][lispm-chat.el]]) laid out like Claude Code's terminal interface, and the org buffer stays
 out of sight under a hidden buffer name. The chat owns nothing: it is a view, redrawn from the
 org buffer (throttled, from the first item that changed) whenever that buffer or the agent's
 state changes. Your message goes through ~lispm-tell~ like any other input; the chat's input
@@ -340,7 +340,7 @@ parse into. Each API shape is an adapter that translates requests out and respon
 registered in ~lispm-api-shapes~ with its path, request builder, headers and stream decoder.
 Supporting another shape, such as OpenAI's Responses API, means adding one entry.
 
-Translation to and from Chat Completions ([[file:lispm-openai.el][lispm-openai.el]]):
+Translation to and from Chat Completions ([[file:lisp/lispm-openai.el][lispm-openai.el]]):
 
 | Messages shape                              | Chat Completions                                             |
 |---------------------------------------------+--------------------------------------------------------------|

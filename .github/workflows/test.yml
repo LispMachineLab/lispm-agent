@@ -28,7 +28,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: .deps
-          key: deps-${{ matrix.emacs }}-${{ hashFiles('lispm.el', 'test/install-deps.el') }}
+          key: deps-${{ matrix.emacs }}-${{ hashFiles('lisp/lispm.el', 'test/install-deps.el') }}
       - name: Byte-compile, warnings as errors
         run: make compile
       - name: Test

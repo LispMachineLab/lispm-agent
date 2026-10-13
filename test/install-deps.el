@@ -22,7 +22,7 @@
                                  (package-installed-p (car dep) (cadr dep))))
                            (package-desc-reqs
                             (with-temp-buffer
-                              (insert-file-contents "lispm.el")
+                              (insert-file-contents "lisp/lispm.el")
                               (package-buffer-info))))))
   (when missing
     (package-refresh-contents)

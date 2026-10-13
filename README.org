@@ -288,26 +288,28 @@ configuration but none of its state, a real model through the backend it chooses
 
 * Files
 
-| File                   | Contents                                                        |
-|------------------------+-----------------------------------------------------------------|
-| lispm-core.el          | agent object model, registry, configuration                     |
-| lispm-transcript.el    | byte-exact round trip between org sessions and the Messages API |
-| lispm-api.el           | curl transport, the table of API shapes, API keys               |
-| lispm-openai.el        | the OpenAI Chat Completions shape                               |
-| lispm-anthropic.el     | the Anthropic Messages shape                                    |
-| lispm-tools.el         | ~lispm-deftool~, permissions, built-in tools, edit journal       |
-| lispm-edits.el         | edits shown where they happen: streamed, proposed, typed in      |
-| lispm-memory.el        | memory.org and tasks.org, git audit trail                       |
-| lispm-runtime.el       | execution loop, approvals, inbox, triggers, rollback            |
-| lispm-collab.el        | multi-agent collaboration tools                                 |
-| lispm-mcp.el           | the tools of MCP servers, through mcp.el                        |
-| lispm-title.el         | sessions titled by the model                                    |
-| lispm-emacs.el         | apropos and the Info manuals: Emacs, as agents find and learn it |
-| lispm-skills.el        | skills: loading them, their code and tools                      |
-| skills/                | the skills LispM comes with: web                                |
-| lispm-chat.el          | the chat interface, drawn from the org transcript               |
-| lispm.el               | entry commands, dashboard, mode line                            |
-| demo/                  | the demo: its script, recorder and sample project               |
+| File                     | Contents                                                         |
+|--------------------------+------------------------------------------------------------------|
+| lisp/lispm.el            | entry commands, dashboard, mode line                             |
+| lisp/lispm-core.el       | agent object model, registry, configuration                      |
+| lisp/lispm-transcript.el | byte-exact round trip between org sessions and the Messages API  |
+| lisp/lispm-api.el        | curl transport, the table of API shapes, API keys                |
+| lisp/lispm-openai.el     | the OpenAI Chat Completions shape                                |
+| lisp/lispm-anthropic.el  | the Anthropic Messages shape                                     |
+| lisp/lispm-tools.el      | ~lispm-deftool~, permissions, built-in tools, edit journal       |
+| lisp/lispm-edits.el      | edits shown where they happen: streamed, proposed, typed in      |
+| lisp/lispm-memory.el     | memory.org and tasks.org, git audit trail                        |
+| lisp/lispm-runtime.el    | execution loop, approvals, inbox, triggers, rollback             |
+| lisp/lispm-collab.el     | multi-agent collaboration tools                                  |
+| lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
+| lisp/lispm-title.el      | sessions titled by the model                                     |
+| lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
+| lisp/lispm-skills.el     | skills: loading them, their code and tools                       |
+| lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |
+| skills/                  | the skills LispM comes with: web                                 |
+| test/                    | ERT suite, fake model, SSE and MCP servers                       |
+| demo/                    | the demo: its script, recorder and sample project                |
+| assets/                  | logo, social card, the demo's video                              |
 
 * License
 
