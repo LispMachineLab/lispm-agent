@@ -215,10 +215,11 @@ one with :enabled nil is not."
 
 (defun lme-popup--keyboard-p (keys)
   "Return non-nil when KEYS is typed on the keyboard alone.
-Mouse, wheel and menu bar events do not count."
+Mouse, wheel, touch and menu bar events do not count."
   (seq-every-p (lambda (event)
                  (not (and (symbolp event)
-                           (string-match-p "mouse\\|wheel\\|drag\\|menu-bar\\|tab-bar\\|tool-bar"
+                           (string-match-p (concat "mouse\\|wheel\\|drag\\|touch\\|pinch"
+                                                   "\\|swipe\\|menu-bar\\|tab-bar\\|tool-bar")
                                            (symbol-name event)))))
                keys))
 

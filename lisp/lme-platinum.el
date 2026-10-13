@@ -1255,30 +1255,230 @@ over and over while held; the thumb drags the window's text along."
   (add-hook 'window-buffer-change-functions #'lme-platinum--scroll-schedule)
   (lme-platinum--scroll-schedule))
 
-;;;; Clock
+;;;; Status: Emacs's own time, load, mail and battery
 
-(defcustom lme-platinum-clock-format "%-I:%M %p"
-  "How the menu bar clock shows the time, for `format-time-string'.
-Mac OS 9's clock read like 10:42 PM; nil hides the clock."
-  :type '(choice string (const :tag "No clock" nil)))
+;; Emacs keeps the time, the load average and the mail flag up to date
+;; (`display-time-mode') and the battery (`display-battery-mode'); the
+;; menu bar shows each as a title of its own at its right end, as Mac OS 9
+;; showed its clock there, each opening a menu:
+;;
+;;   load      a meter and the load average; the menu picks the 1, 5 or
+;;             15 minute average and opens the process list
+;;   mail      an envelope, flagged when mail has come; the Mail menu
+;;             reads, composes and checks mail
+;;   battery   a PowerBook's battery filled to its charge; the menu tells
+;;             the charge, the power source and the time left
+;;   time      the time as `display-time-format' has it; the menu gives
+;;             the date, the calendar and the world clock
+;;
+;; Emacs computes everything; `display-time-hook' and
+;; `battery-update-functions' only note what it found.  Whatever else is
+;; in `global-mode-string', such as LispM's agent count, stays before.
 
-(defvar lme-platinum--clock-timer nil
-  "Timer redrawing the menu bar clock as each minute turns.")
+(defvar battery-status-function)
+(defvar battery-echo-area-format)
+(defvar display-time-string)
+(defvar battery-mode-line-string)
+(defvar display-time-load-average)
+(defvar display-time-format)
+;; Bound by `display-time-update' while `display-time-hook' runs; the names
+;; are time.el's.
+(with-suppressed-warnings ((lexical load mail))
+  (defvar load)
+  (defvar mail))
+(declare-function battery-format "battery" (format alist))
+(declare-function display-time-update "time" ())
+(declare-function display-time-update--load "time" ())
 
-(defun lme-platinum-clock ()
-  "Return the menu bar clock, the time in `lme-platinum-clock-format'.
-It sits left of the Application menu, as Mac OS 9's did."
-  (when lme-platinum-clock-format
-    (list (lme-platinum--menu-title 'lme-clock
-                                    (format-time-string lme-platinum-clock-format)
-                                    #'ignore (format-time-string "%A, %e %B %Y")))))
+(defvar lme-platinum--load ""
+  "The load average `display-time-mode' last showed, \"\" below its threshold.")
 
-(defun lme-platinum--start-clock ()
-  "Redraw the menu bar at every turn of the minute."
-  (when (timerp lme-platinum--clock-timer)
-    (cancel-timer lme-platinum--clock-timer))
-  (setq lme-platinum--clock-timer
-        (run-at-time (- 60 (mod (float-time) 60)) 60 #'force-mode-line-update t)))
+(defvar lme-platinum--mail nil
+  "Non-nil when `display-time-mode' last found new mail.")
+
+(defvar lme-platinum--battery nil
+  "The battery status `display-battery-mode' last read, an alist.")
+
+(defun lme-platinum--note-time ()
+  "Note the load average and the mail flag Emacs has just computed.
+Run from `display-time-hook', inside `display-time-update'."
+  (setq lme-platinum--load (string-trim (substring-no-properties load))
+        lme-platinum--mail (and mail t)))
+
+(defun lme-platinum--note-battery (data)
+  "Note the battery status DATA Emacs has just read."
+  (setq lme-platinum--battery data))
+
+(defun lme-platinum-draw-battery (palette percent charging)
+  "Return an SVG of a battery filled to PERCENT in PALETTE.
+CHARGING draws a bolt across it; a nearly empty one is filled in red."
+  (let* ((svg (svg-create 24 lme-platinum-title-height))
+         (y (/ (- lme-platinum-title-height 11) 2))
+         (ink (plist-get palette :text))
+         (level (round (* 17 (/ (max 0 (min 100 percent)) 100.0)))))
+    (lme-platinum--fill svg 0 y 21 11 ink)
+    (lme-platinum--fill svg 1 (1+ y) 19 9 (plist-get palette :chrome))
+    (lme-platinum--fill svg 21 (+ y 3) 2 5 ink)
+    (lme-platinum--fill svg 2 (+ y 2) level 7 (if (< percent 10) "#CE3131" ink))
+    (when charging
+      (svg-polygon svg `((12 . ,(+ y 1)) (7 . ,(+ y 6)) (10.5 . ,(+ y 6))
+                         (9 . ,(+ y 10)) (14 . ,(+ y 5)) (10.5 . ,(+ y 5)))
+                   :fill (plist-get palette :accent) :stroke (plist-get palette :chrome)
+                   :stroke-width 0.75))
+    svg))
+
+(defun lme-platinum-draw-meter (palette fraction)
+  "Return an SVG of a load meter in PALETTE: three bars, filled to FRACTION."
+  (let* ((svg (svg-create 14 lme-platinum-title-height))
+         (bottom (+ (/ lme-platinum-title-height 2) 6))
+         (ink (plist-get palette :text))
+         (dim (plist-get palette :muted)))
+    (dotimes (i 3)
+      (let ((height (* 4 (1+ i))))
+        (lme-platinum--fill svg (* i 5) (- bottom height) 4 height
+                            (if (> fraction (/ i 3.0)) ink dim))))
+    svg))
+
+(defun lme-platinum--status-title (key image label command help)
+  "Return the menu bar status item KEY: IMAGE (an SVG or nil) and LABEL.
+It runs COMMAND, described by HELP, and is highlighted while its menu is open."
+  (lme-platinum--menu-title
+   key
+   (concat (when image
+             ;; An icon name gives a string already displayed as the icon.
+             (if (stringp image) (lme-platinum-icon image) (propertize " " 'display image)))
+           (when (and image label) " ")
+           label)
+   command help (eq lme-platinum--open-menu key)))
+
+(defun lme-platinum--status-menu (key items)
+  "Pop up ITEMS under the status title KEY that was just clicked."
+  (let ((x (car (posn-x-y (event-start last-input-event)))))
+    (lme-platinum--with-open-menu key
+      (lme-popup-menu items (max 0 (- x 12)) (lme-platinum--menu-y)))))
+
+(defun lme-platinum-load-menu ()
+  "Pop up the load menu: which average to show, and the processes."
+  (interactive)
+  (let ((averages (ignore-errors (load-average t))))
+    (lme-platinum--status-menu
+     'lme-load
+     `((:label "Load Average" :enabled nil)
+       ,@(seq-map-indexed
+          (lambda (span index)
+            (list :label (format "%s: %.2f" span (or (nth index averages) 0))
+                  :checked (eql display-time-load-average index)
+                  :action (lambda ()
+                            (setq display-time-load-average index)
+                            (display-time-update))))
+          '("1 minute" "5 minutes" "15 minutes"))
+       separator
+       (:label "Processes" :action proced)))))
+
+(defun lme-platinum-mail-menu ()
+  "Pop up the Mail menu: read, compose and check mail."
+  (interactive)
+  (lme-platinum--status-menu
+   'lme-mail
+   `((:label ,(if lme-platinum--mail "You have new mail" "No new mail")
+             :enabled nil)
+     separator
+     (:label "Read Mail" :action ,(lambda () (call-interactively read-mail-command)))
+     (:label "Compose Mail…" :action compose-mail)
+     separator
+     (:label "Check for Mail" :action display-time-update))))
+
+(defun lme-platinum-battery-menu ()
+  "Pop up the battery menu: its charge, its power source and the time left."
+  (interactive)
+  (let* ((data lme-platinum--battery)
+         (line (lambda (format) (battery-format format data))))
+    (lme-platinum--status-menu
+     'lme-battery
+     `((:label ,(funcall line "Charge: %p%%") :enabled nil)
+       (:label ,(concat "Power: "
+                        (pcase (alist-get ?L data)
+                          ((or "AC" "on-line") "Power Adapter")
+                          ((or "Battery" "Battery Power" "off-line") "Battery")
+                          (source (or source "unknown"))))
+               :enabled nil)
+       ,@(unless (member (alist-get ?t data) '(nil "N/A" "0:00"))
+           `((:label ,(funcall line "Time left: %t") :enabled nil)))
+       separator
+       (:label "Battery Status" :action battery)))))
+
+(defun lme-platinum-time-menu ()
+  "Pop up the clock's menu: the date, the calendar, the world clock."
+  (interactive)
+  (lme-platinum--status-menu
+   'lme-time
+   `((:label ,(format-time-string "%A, %B %-e, %Y") :enabled nil)
+     separator
+     (:label "Calendar" :action calendar)
+     (:label "World Clock" :action world-clock)
+     separator
+     (:label "Time Format…" :action ,(lambda () (customize-variable 'display-time-format))))))
+
+(defun lme-platinum-menu-status ()
+  "Return the status titles at the menu bar's right end.
+Whatever `global-mode-string' holds besides the time and the battery,
+then the load, the mail, the battery and the time."
+  (let* ((others (string-trim
+                  (format-mode-line
+                   (seq-remove (lambda (part)
+                                 (memq part '(display-time-string battery-mode-line-string)))
+                               (ensure-list global-mode-string)))))
+         (time-on (bound-and-true-p display-time-mode))
+         (percent (and (bound-and-true-p display-battery-mode) lme-platinum--battery
+                       (ignore-errors (string-to-number (alist-get ?p lme-platinum--battery))))))
+    (delq nil
+          (list
+           (unless (string-empty-p others)
+             (lme-platinum--menu-title 'lme-status others #'ignore nil))
+           (when (and time-on (not (string-empty-p lme-platinum--load)))
+             (lme-platinum--status-title
+              'lme-load
+              (lme-platinum--image
+               (list 'meter (min 3 (floor (* 3 (/ (string-to-number lme-platinum--load)
+                                                 (max 1 (num-processors)))))))
+               (lambda ()
+                 (lme-platinum-draw-meter lme-platinum--palette
+                                          (/ (string-to-number lme-platinum--load)
+                                             (float (max 1 (num-processors)))))))
+              lme-platinum--load #'lme-platinum-load-menu "Load average"))
+           (when time-on
+             (lme-platinum--status-title 'lme-mail (if lme-platinum--mail "mail-new" "mail")
+                                         nil #'lme-platinum-mail-menu
+                                         (if lme-platinum--mail "You have new mail" "Mail")))
+           (when percent
+             (let ((charging (member (alist-get ?L lme-platinum--battery) '("AC" "on-line"))))
+               (lme-platinum--status-title
+                'lme-battery
+                (lme-platinum--image (list 'battery (round percent) charging)
+                                     (lambda () (lme-platinum-draw-battery lme-platinum--palette
+                                                                           percent charging)))
+                (format "%d%%" (round percent)) #'lme-platinum-battery-menu
+                (battery-format battery-echo-area-format lme-platinum--battery))))
+           (when time-on
+             (lme-platinum--status-title
+              'lme-time nil (format-time-string (or display-time-format "%-I:%M %p"))
+              #'lme-platinum-time-menu (format-time-string "%A, %B %-e, %Y")))))))
+
+(defun lme-platinum--start-status ()
+  "Turn on Emacs's own time, load and mail, and the battery if there is one.
+The time reads as Mac OS 9's clock did, unless `display-time-format' was
+set already."
+  (require 'battery)
+  (require 'time)
+  (add-hook 'display-time-hook #'lme-platinum--note-time)
+  (add-hook 'battery-update-functions #'lme-platinum--note-battery)
+  (unless display-time-format
+    (setq display-time-format "%-I:%M %p"))
+  (display-time-mode 1)
+  (when (and battery-status-function
+             (not (equal (alist-get ?p (ignore-errors (funcall battery-status-function)))
+                         "N/A")))
+    (display-battery-mode 1)))
 
 ;;;; Lists
 
@@ -1517,10 +1717,9 @@ it, as on every theme change, is idempotent."
   (setq mode-line-right-align-edge 'window)
   (setq tab-bar-format '(lme-platinum-menu-bar
                          tab-bar-format-align-right
-                         tab-bar-format-global
-                         lme-platinum-clock
+                         lme-platinum-menu-status
                          lme-platinum-application-menu))
-  (lme-platinum--start-clock)
+  (lme-platinum--start-status)
   ;; Frames take sizes in pixels: a scroll bar is exactly as tall as its
   ;; window, and a maximized frame fills the screen.
   (setq frame-resize-pixelwise t)

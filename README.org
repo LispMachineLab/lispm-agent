@@ -13,8 +13,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then a
   title per sidebar view (Files, Agents, Shells, Buffers, Web), lit while its view is shown.  At
-  its right end, a clock and the Application menu, which names the current workspace and lists
-  the others.
+  its right end, Emacs's own load average, mail flag, battery and time, each a title with a
+  menu of its own (the Mail menu reads, composes and checks mail), then the Application menu,
+  which names the current workspace and lists the others.
 - *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
   collapse box.  Only the active window shows stripes and boxes, and a box is pressed, not
   clicked: it sinks while held and acts when let go over it.  The close box puts the window's

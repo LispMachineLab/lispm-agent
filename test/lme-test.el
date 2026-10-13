@@ -418,14 +418,52 @@ pops up its buffers on a Meta click."
         (lme-platinum-shade-or-zoom (split-window-below))
         (should (and shaded (not zoomed)))))))
 
-(ert-deftest lme-test-clock ()
-  "The menu bar clock shows the time as Mac OS 9 did, or nothing."
-  (let ((lme-platinum-clock-format "%-I:%M %p"))
-    (should (string-match-p "\\`[0-9]\\{1,2\\}:[0-9]\\{2\\} [AP]M\\'"
-                            (substring-no-properties
-                             (string-trim (nth 2 (car (lme-platinum-clock))))))))
-  (let ((lme-platinum-clock-format nil))
-    (should-not (lme-platinum-clock))))
+(ert-deftest lme-test-status-drawings ()
+  "The battery and the load meter draw at any level."
+  (let ((palette (lme-platinum--derive-palette "#FFFFFF" "#000000" "#777777" "#6363CE")))
+    (dolist (percent '(0 5 50 100))
+      (should (eq (dom-tag (lme-platinum-draw-battery palette percent t)) 'svg))
+      (should (eq (dom-tag (lme-platinum-draw-battery palette percent nil)) 'svg)))
+    (dolist (fraction '(0.0 0.5 1.5))
+      (should (eq (dom-tag (lme-platinum-draw-meter palette fraction)) 'svg)))))
+
+(require 'time)
+(defvar load)
+(defvar mail)
+
+(ert-deftest lme-test-status-notes ()
+  "What Emacs computes for the time and the battery is noted for the menu bar."
+  (let ((load " 1.25") (mail t) (lme-platinum--load nil) (lme-platinum--mail nil))
+    (lme-platinum--note-time)
+    (should (equal lme-platinum--load "1.25"))
+    (should (eq lme-platinum--mail t)))
+  (let ((lme-platinum--battery nil))
+    (lme-platinum--note-battery '((?p . "87")))
+    (should (equal (alist-get ?p lme-platinum--battery) "87"))))
+
+(ert-deftest lme-test-menu-status ()
+  "The menu bar keeps other status text, and adds the time and mail when on."
+  (let ((labels nil)
+        (lme-platinum--palette (lme-platinum--derive-palette "#FFFFFF" "#000000"
+                                                             "#777777" "#6363CE"))
+        (global-mode-string '("" "λ 2" display-time-string))
+        (display-time-string "9:41AM")
+        (display-time-mode t)
+        (display-time-format "%-I:%M %p")
+        (lme-platinum--load "")
+        (lme-platinum--mail nil))
+    ;; A batch Emacs formats every mode line construct as "".
+    (cl-letf (((symbol-function 'format-mode-line)
+               (lambda (construct &rest _)
+                 (mapconcat (lambda (part) (if (stringp part) part "")) (ensure-list construct) ""))))
+      (setq labels (mapcar (lambda (item) (substring-no-properties (nth 2 item)))
+                           (lme-platinum-menu-status))))
+    (progn
+      (should (string-search "λ 2" (nth 0 labels)))
+      (should-not (seq-some (lambda (label) (string-search "9:41AM" label)) labels))
+      (should (= (length labels) 3))))
+  (let ((global-mode-string nil) (display-time-mode nil))
+    (should-not (lme-platinum-menu-status))))
 
 (ert-deftest lme-test-age-short-date ()
   "Old sessions are dated as Finder dated files; recent ones by their age."
