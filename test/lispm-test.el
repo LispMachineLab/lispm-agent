@@ -242,7 +242,13 @@ BODY can use `project', a scratch directory for agents to work in."
                          '((type . "thinking") (thinking . "Looking") (signature . "abc"))))
           (should (equal (alist-get 'input (aref (alist-get 'content message) 1)) '((a . [1 2]))))
           (should (equal (alist-get 'lispm-invalid message) '("t2")))
-          (should (equal (reverse deltas) '((thinking . "Looking") (tool . "x") (tool . "x")))))))))
+          (should (equal (seq-remove (lambda (d) (eq (car d) 'tool-input)) (reverse deltas))
+                         '((thinking . "Looking") (tool . "x") (tool . "x"))))
+          ;; Each piece of a call's input is reported with what came before.
+          (should (equal (seq-filter (lambda (d) (eq (car d) 'tool-input)) (reverse deltas))
+                         '((tool-input :id "t1" :name "x" :json "{\"a\": [1, ")
+                           (tool-input :id "t1" :name "x" :json "{\"a\": [1, 2]}")
+                           (tool-input :id "t2" :name "x" :json "{\"a\": tru")))))))))
 
 (ert-deftest lispm-test-fallback-cleanup ()
   "Before a fallback boundary only text blocks are kept."
@@ -446,9 +452,13 @@ BODY can use `port' and `log', the file the server records requests in."
           (should (equal (alist-get 'lispm-invalid message) '("c2")))
           (should (equal (alist-get 'usage message)
                          '((input_tokens . 9) (output_tokens . 4) (cache_read_input_tokens . 2))))
-          (should (equal (reverse deltas)
+          (should (equal (seq-remove (lambda (d) (eq (car d) 'tool-input)) (reverse deltas))
                          '((thinking . "Think") (text . "Hel") (text . "lo")
-                           (tool . "read_file") (tool . "x")))))))))
+                           (tool . "read_file") (tool . "x"))))
+          (should (equal (seq-filter (lambda (d) (eq (car d) 'tool-input)) (reverse deltas))
+                         '((tool-input :id "c1" :name "read_file" :json "{\"pa")
+                           (tool-input :id "c2" :name "x" :json "{bad")
+                           (tool-input :id "c1" :name "read_file" :json "{\"path\": 1}")))))))))
 
 (ert-deftest lispm-test-openai-turn ()
   "Whole agent turns against a Chat Completions server, streamed and not."
@@ -1914,6 +1924,48 @@ Its policy is the stricter of its role's and its caller's."
         (should-not (string-match-p "Thinking…" text))
         (should (string-match-p "Aborted by the user" text))))))
 
+(ert-deftest lispm-test-chat-line-numbers ()
+  "The welcome box and rules fit beside line numbers, and follow the room left."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (window (selected-window)))
+      (cl-flet ((room ()
+                  ;; The columns text can use: the body less the line numbers.
+                  (with-selected-window window
+                    (- (window-body-width window)
+                       (ceiling (line-number-display-width 'columns)))))
+                (widest ()
+                  ;; The widest line drawn above the prompt.
+                  (with-current-buffer chat
+                    (apply #'max (mapcar #'string-width
+                                         (split-string (buffer-substring-no-properties
+                                                        (point-min) lispm-chat--prompt-start)
+                                                       "\n"))))))
+        (save-window-excursion
+          (set-window-buffer window chat)
+          ;; Margins narrow the body as a smaller window would.  Splitting
+          ;; the window would too, but batch Emacs aborts when asked for the
+          ;; line numbers of a window just split.
+          (set-window-margins window 20 0)
+          (with-current-buffer chat (display-line-numbers-mode 1))
+          (should (> (with-selected-window window (line-number-display-width)) 0))
+          (lispm-chat-redraw chat)
+          (should (<= (widest) (room)))
+          ;; A window that changes size is drawn at its new width.  Batch
+          ;; Emacs does not run `window-size-change-functions', so this
+          ;; calls the chat's own as they would.
+          (let ((wide (widest)))
+            (set-window-margins window 30 0)
+            (lispm-chat--resized window)
+            (should (lispm-test--wait (lambda () (< (widest) wide))))
+            (should (<= (widest) (room))))
+          ;; Line numbers turned off leave more room, drawn on.
+          (let ((narrow (widest)))
+            (with-current-buffer chat (display-line-numbers-mode -1))
+            (should (lispm-test--wait (lambda () (> (widest) narrow))))
+            (should (<= (widest) (room)))))))))
+
 (ert-deftest lispm-test-chat-commands ()
   "M-x lispm opens a chat; /clear starts over; the org interface remains."
   (lispm-test-env
@@ -1931,6 +1983,229 @@ Its policy is the stricter of its role's and its caller's."
       (let ((lispm-interface 'org))
         (with-current-buffer (lispm)
           (should (bound-and-true-p lispm-session-mode)))))))
+
+;;;; Edits shown where they happen
+
+(defun lispm-test--apply-hunks (old new hunks)
+  "OLD with HUNKS, line ranges of OLD and NEW, replaced by NEW's lines."
+  (let ((at 0) parts)
+    (pcase-dolist (`(,of ,ot ,nf ,nt) hunks)
+      (push (substring old at of) parts)
+      (push (substring new nf nt) parts)
+      (setq at ot))
+    (push (substring old at) parts)
+    (apply #'concat (nreverse parts))))
+
+(ert-deftest lispm-test-edits-hunks ()
+  "Changed lines are found as few, small hunks that turn the old text into the new."
+  (pcase-dolist (`(,old ,new ,count)
+                 '(("a\nb\nc\n" "a\nb\nc\n" 0)
+                   ("a\nb\nc\n" "a\nB\nc\n" 1)
+                   ("a\nb\nc\nd\ne\n" "A\nb\nc\nd\nE\n" 2)
+                   ("a\nb\n" "a\nb\nc\n" 1)
+                   ("a\nb\nc\n" "a\nc\n" 1)
+                   ("" "x\ny" 1)
+                   ("x\ny" "" 1)
+                   ("a\nb" "a\nc" 1)
+                   ("λ\n→\n∀\n" "λ\n∀\n→\n" 2)))
+    (let ((hunks (lispm-edits--hunks old new)))
+      (should (= (length hunks) count))
+      (should (equal (lispm-test--apply-hunks old new hunks) new))))
+  ;; One changed line in a long text is one small hunk.
+  (let* ((old (mapconcat (lambda (i) (format "line %d\n" i)) (number-sequence 1 500) ""))
+         (new (string-replace "line 250\n" "line two hundred fifty\n" old)))
+    (pcase (lispm-edits--hunks old new)
+      (`((,of ,ot ,nf ,nt))
+       (should (equal (substring old of ot) "line 250\n"))
+       (should (equal (substring new nf nt) "line two hundred fifty\n")))
+      (hunks (ert-fail (list "Expected one hunk" hunks))))))
+
+(ert-deftest lispm-test-edits-partial-json ()
+  "The input of a call being written is read as far as it goes."
+  (pcase-dolist (`(,json ,members)
+                 '(("" nil)
+                   ("{" nil)
+                   ("{\"pa" nil)
+                   ("{\"path\"" nil)
+                   ("{\"path\": " nil)
+                   ("{\"path\": \"a.txt\", \"content\": \"hel" ((path . "a.txt") (content . "hel")))
+                   ("{\"content\": \"a\\nb\\" ((content . "a\nb")))
+                   ("{\"content\": \"x\\u00" ((content . "x")))
+                   ("{\"content\": \"x\\u00e9" ((content . "xé")))
+                   ("{\"t\": \"say \\\"hi\\\" now" ((t . "say \"hi\" now")))
+                   ("{\"t\": \"a\\\\" ((t . "a\\")))
+                   ("{\"a\": tru" nil)
+                   ("{\"a\": 12" nil)
+                   ("{\"a\": 12, \"b\": true, \"c\": null" ((a . 12) (b . t) (c . :null)))
+                   ("{\"a\": [1, 2], \"b\": {\"c\": \"d\"}, \"e\": \"f\"}"
+                    ((a . [1 2]) (b . ((c . "d"))) (e . "f")))))
+    (should (equal (lispm-edits--partial-json json) members))))
+
+(defmacro lispm-test-with-edits (&rest body)
+  "Run BODY in `lispm-test-env', with edits shown as in an interactive Emacs."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((lispm-edits--in-batch t)
+           (lispm-edits--shows nil)
+           (lispm-edits--proposals nil)
+           (lispm-edits--writing (make-hash-table :test #'equal)))
+       (unwind-protect
+           (progn ,@body)
+         (lispm-edits--tick 1e10)
+         (mapc (lambda (p) (lispm-edits--retire p nil)) lispm-edits--proposals)))))
+
+(defun lispm-test--edit-overlays (buffer)
+  "The overlays showing edits in BUFFER, as (START END . PROPERTIES)."
+  (with-current-buffer buffer
+    (mapcar (lambda (o)
+              (append (list (overlay-start o) (overlay-end o))
+                      (cl-loop for key in '(face display before-string)
+                               for value = (overlay-get o key)
+                               when value append (list key (if (stringp value)
+                                                               (substring-no-properties value)
+                                                             value)))))
+            (seq-filter (lambda (o) (overlay-get o 'lispm-edits))
+                        (overlays-in (point-min) (point-max))))))
+
+(ert-deftest lispm-test-edits-window ()
+  "A change comes into view in place of another file, never over the chat."
+  (lispm-test-with-edits
+    (let ((a (find-file-noselect (expand-file-name "a.txt" project)))
+          (b (find-file-noselect (expand-file-name "b.txt" project)))
+          (chat (generate-new-buffer "*test chat*")))
+      (unwind-protect
+          (save-window-excursion
+            (with-current-buffer chat (setq major-mode 'lispm-chat-mode))
+            (delete-other-windows)
+            (switch-to-buffer chat)
+            ;; Only the chat in view: a window is split off for the file.
+            (let ((window (lispm-edits--window a)))
+              (should (eq (window-buffer window) a))
+              (should (eq (window-buffer (selected-window)) chat)))
+            ;; Another file in view: the change takes its place.
+            (let ((window (lispm-edits--window b)))
+              (should (eq (window-buffer window) b))
+              (should-not (get-buffer-window a))
+              (should (eq (window-buffer (selected-window)) chat))
+              (should (= (length (window-list)) 2))))
+        (kill-buffer chat)))))
+
+(ert-deftest lispm-test-edits-typed-in ()
+  "A change is typed in over what it replaced, then shows as it is."
+  (lispm-test-with-edits
+    (let ((file (expand-file-name "a.el" project))
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (lispm-test--write file "(defun a ()\n  1)\n\n(provide 'a)\n")
+      (let ((buffer (find-file-noselect file)))
+        (should (equal (lispm-test--call agent "edit_file" '((path . "a.el") (old_text . "  1)")
+                                                              (new_text . "  \"one\"\n  2)")))
+                       '("Replaced 1 occurrence in a.el." . nil)))
+        ;; The text is the new one at once; only the display lags.
+        (should (equal (lispm-test--file project "a.el")
+                       "(defun a ()\n  \"one\"\n  2)\n\n(provide 'a)\n"))
+        (should (get-buffer-window buffer))
+        (let* ((show (car lispm-edits--shows))
+               (start (lispm-edits--show-start show))
+               (overlays (lispm-test--edit-overlays buffer)))
+          (should (eq (lispm-edits--show-agent show) agent))
+          (should (> (lispm-edits--show-type show) 0))
+          ;; What was replaced lingers above the change.
+          (should (seq-some (lambda (o) (equal (plist-get (cddr o) 'before-string) "  1)\n"))
+                            overlays))
+          ;; What is not typed in yet is hidden behind the agent's cursor.
+          (should (seq-some (lambda (o) (string-match-p "λ tester" (or (plist-get (cddr o) 'display) "")))
+                            overlays))
+          (lispm-edits--tick (+ start (lispm-edits--show-type show) 0.01))
+          (setq overlays (lispm-test--edit-overlays buffer))
+          (should-not (seq-some (lambda (o) (plist-get (cddr o) 'display)) overlays))
+          ;; Then it is over.
+          (lispm-edits--tick (+ start 100))
+          (should-not lispm-edits--shows)
+          (should-not (lispm-test--edit-overlays buffer))
+          (should-not lispm-edits--timer))))))
+
+(ert-deftest lispm-test-edits-proposed ()
+  "A call awaiting approval shows its change in place, until it is made or refused."
+  (lispm-test-with-edits
+    (lispm-test--write (expand-file-name "a.txt" project) "hello world\nbye\n")
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "e1" "edit_file"
+                                                   '((path . "a.txt") (old_text . "world")
+                                                     (new_text . "lisp"))))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "e2" "write_file"
+                                                   '((path . "new.txt") (content . "fresh\n"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let* ((buffer (get-file-buffer (expand-file-name "a.txt" project)))
+             (overlays (lispm-test--edit-overlays buffer)))
+        ;; The line it would change, struck out; the new one below; who asks.
+        (should (member '(1 13 face lispm-edits-proposed-removed) overlays))
+        (should (seq-some (lambda (o) (equal (plist-get (cddr o) 'before-string) "hello lisp\n"))
+                          overlays))
+        (should (seq-some (lambda (o) (string-match-p "λ tester · awaiting approval"
+                                                      (or (plist-get (cddr o) 'before-string) "")))
+                          overlays))
+        (should (equal (lispm-test--file project "a.txt") "hello world\nbye\n"))
+        (lispm-resolve agent "e1" 'approve)
+        ;; Made: the proposal goes, and the change, seen already, is not typed in again.
+        (should (equal (lispm-test--file project "a.txt") "hello lisp\nbye\n"))
+        (should-not (lispm-edits--proposal "e1"))
+        (should (= (lispm-edits--show-type (car lispm-edits--shows)) 0)))
+      ;; A new file is shown in a buffer made for it, which goes when refused.
+      (should (lispm-test--wait (lambda () (lispm-edits--proposal "e2"))))
+      (let ((buffer (lispm-edits--proposal-buffer (lispm-edits--proposal "e2"))))
+        (should (seq-some (lambda (o) (string-match-p "awaiting approval \nfresh\n"
+                                                      (or (plist-get (cddr o) 'before-string) "")))
+                          (lispm-test--edit-overlays buffer)))
+        (lispm-resolve agent "e2" 'deny "No new files.")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should-not (lispm-edits--proposal "e2"))
+        (should-not (buffer-live-p buffer))
+        (should-not (file-exists-p (expand-file-name "new.txt" project)))))))
+
+(ert-deftest lispm-test-edits-streamed ()
+  "While the model writes a call, the change grows in place as its input arrives."
+  (lispm-test-with-edits
+    (lispm-test--write (expand-file-name "a.txt" project) "one\ntwo\nthree\n")
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (pieces '("{\"path\": \"a.txt\", \"old_text\": \"two\\n\", \"new_te"
+                     "xt\": \"deux\\nzw"
+                     "ei\\n\"}"))
+           (lispm-api-function
+            (lambda (_backend _body _betas &rest callbacks)
+              ;; Stream the call's input, and never finish.
+              (let ((json ""))
+                (dolist (piece pieces)
+                  (setq json (concat json piece))
+                  (funcall (plist-get callbacks :on-delta) 'tool-input
+                           (list :id "s1" :name "edit_file" :json json))))
+              nil))
+           (buffer (find-file-noselect (expand-file-name "a.txt" project))))
+      (lispm-tell agent "Translate two")
+      (should (lispm-test--wait (lambda () (lispm-edits--proposal "s1"))))
+      (let ((p (lispm-edits--proposal "s1")))
+        (should (lispm-edits--proposal-streaming p))
+        (should (equal (lispm-edits--proposal-text p) "one\ndeux\nzwei\nthree\n"))
+        (should (member '(5 9 face lispm-edits-proposed-removed) (lispm-test--edit-overlays buffer)))
+        (should (seq-some (lambda (o) (string-match-p "λ tester · writing…"
+                                                      (or (plist-get (cddr o) 'before-string) "")))
+                          (lispm-test--edit-overlays buffer))))
+      ;; The text cut short is shown as far as it goes.
+      (lispm-edits--input agent (list :id "s1" :name "edit_file"
+                                      :json "{\"path\": \"a.txt\", \"old_text\": \"two\\n\", \"new_text\": \"de"))
+      (lispm-edits--written "s1")
+      (should (equal (lispm-edits--proposal-text (lispm-edits--proposal "s1")) "one\ndethree\n"))
+      ;; Stopped before it was done: nothing remains.
+      (lispm-abort agent)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (lispm-edits--proposal "s1"))
+      (should-not (lispm-test--edit-overlays buffer))
+      (should (equal (lispm-test--file project "a.txt") "one\ntwo\nthree\n")))))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

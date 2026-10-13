@@ -140,9 +140,12 @@ It is fed on stdin, so keys stay off the command line."
   "POST BODY to BACKEND and stream the response.
 Responses that are not streamed (BODY asks for none) arrive whole.
 BETAS are beta feature names, for APIs that have them.  ON-DELTA
-receives (KIND STRING) as content streams in; ON-DONE the final
-message, in Messages shape; ON-ERROR a plist with :status, :type and
-:message.  Return the curl process."
+receives (KIND STRING) as content streams in: KIND text, thinking or
+tool (STRING being the tool's name); and (tool-input PLIST) as a tool
+call's input arrives, PLIST holding its :id, :name and the :json
+received so far.  ON-DONE receives the final message, in Messages
+shape; ON-ERROR a plist with :status, :type and :message.  Return the
+curl process."
   (let* ((shape (lispm-api--shape backend))
          (state (funcall (plist-get shape :stream)))
          (file (make-temp-file "lispm-request-" nil ".json"))
