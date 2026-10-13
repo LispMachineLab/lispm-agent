@@ -1983,6 +1983,273 @@ started, after the session opened."
       (sleep-for 0.1)
       (should (lispm-agent-condition boss)))))
 
+(ert-deftest lispm-test-condition-cut-short ()
+  "A response cut short by the output limit is asked for again with more room."
+  (lispm-test-with-conditions
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello\n"))
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Partial")
+                                        (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Whole.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (let ((id (lispm-test--condition-id agent)))
+        (should (eq (plist-get (lispm-agent-condition agent) :type) 'output-limit))
+        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(retry-larger keep abort)))
+        ;; Its call was not run.
+        (should (string-match-p "^\\*\\* FAILED read_file" (lispm-test--transcript agent)))
+        (lispm-restart agent id 'retry-larger))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Whole."))
+      (let ((request (car lispm-test--requests)))
+        (should (= (alist-get 'max_tokens request) (* 2 lispm-max-tokens)))
+        ;; The cut response is no longer sent, and stays on record.
+        (should-not (string-match-p "Partial" (format "%S" (alist-get 'messages request)))))
+      (should (string-match-p "^\\* Assistant :ignore:\n\\*\\* Reply\nPartial" (lispm-test--transcript agent)))
+      ;; The next turn has the usual limit again.
+      (push `(tester ,(lispm-test--msg "end_turn" (lispm-test--text "Again."))) lispm-test--scripts)
+      (lispm-tell agent "more")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (= (alist-get 'max_tokens (car lispm-test--requests)) lispm-max-tokens)))))
+
+(ert-deftest lispm-test-condition-cut-short-kept ()
+  "A response cut short can be kept, the model told to go on, or left as it is."
+  (lispm-test-with-conditions
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Partial"))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Rest.")))))
+      (lispm-tell agent "go")
+      (lispm-restart agent (lispm-test--condition-id agent) 'keep)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((sent (format "%S" (alist-get 'messages (car lispm-test--requests)))))
+        (should (string-match-p "Partial" sent))
+        (should (string-match-p "\\[From LispM, for the user\\]\nYour last response was cut short" sent)))
+      ;; The chat shows who said it.
+      (should (string-match-p "^LispM Your last response was cut short"
+                              (mapconcat (lambda (i) (concat (or (plist-get i :from) "") " "
+                                                             (or (plist-get i :text) "")))
+                                         (lispm-chat-items (lispm-agent-buffer agent)) "\n")))
+      ;; Left as it is: the transcript a turn cut short always had.
+      (setq lispm-test--scripts `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Again")))))
+      (lispm-tell agent "go on")
+      (lispm-restart agent (lispm-test--condition-id agent) 'abort)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "^\\* Assistant\n\\*\\* Reply\nAgain\n\\* Note\nThe response hit the output limit (`lispm-max-tokens').\n\\* User\n\\'"
+                              (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-condition-refused ()
+  "A refused response is asked for again; one with nothing in it drops nothing else."
+  (lispm-test-with-conditions
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "First."))
+                      ,(lispm-test--msg "refusal")
+                      ,(lispm-test--msg "refusal" (lispm-test--text "No."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Fine.")))))
+      (lispm-tell agent "one")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (lispm-tell agent "two" :callback (lambda (r) (setq reply r)))
+      (lispm-test--condition-id agent)
+      (should (eq (plist-get (lispm-agent-condition agent) :type) 'refused))
+      (should (equal (plist-get (lispm-agent-condition agent) :message) "The model declined to continue."))
+      (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'retry)
+      ;; The empty refusal left nothing to drop: the earlier response stays.
+      (should (string-match-p "^\\* Assistant\n\\*\\* Reply\nFirst\\." (lispm-test--transcript agent)))
+      (lispm-restart agent (lispm-test--condition-id agent) 'retry)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Fine."))
+      (should (string-match-p "^\\* Assistant :ignore:\n\\*\\* Reply\nNo\\." (lispm-test--transcript agent)))
+      (should-not (string-match-p "\"No\\.\"" (format "%S" (alist-get 'messages (car lispm-test--requests))))))))
+
+(ert-deftest lispm-test-condition-paused ()
+  "A paused response goes on by itself, by default."
+  (lispm-test-with-conditions
+    (let ((lispm-condition-handlers (eval (car (get 'lispm-condition-handlers 'standard-value)) t))
+          (agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "pause_turn" (lispm-test--text "Working"))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Done."))
+      ;; The paused response went back as it was: nothing after it.
+      (let ((messages (alist-get 'messages (car lispm-test--requests))))
+        (should (equal (alist-get 'role (aref messages (1- (length messages)))) "assistant"))
+        (should (string-match-p "Working" (format "%S" (aref messages (1- (length messages)))))))
+      (should (string-match-p "^\\* DONE Condition: Response paused\n\\(?:.*\n\\)*:RESTART: continue\n"
+                              (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-condition-context-full ()
+  "A full context window is handed over in the middle of the turn, which goes on."
+  (lispm-test-with-conditions
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           reply)
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "model_context_window_exceeded" (lispm-test--text "Long"))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (let ((old (lispm-agent-buffer agent)))
+        (should (eq (progn (lispm-test--condition-id agent) (plist-get (lispm-agent-condition agent) :type))
+                    'context-full))
+        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(compact abort)))
+        (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'compact)
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (equal reply "Done."))
+        (should-not (eq (lispm-agent-buffer agent) old))
+        ;; The summary was asked for without the response cut short.
+        (should-not (string-match-p "Long" (format "%S" (alist-get 'messages (cadr lispm-test--requests)))))
+        (let ((text (lispm-test--transcript agent)))
+          ;; Told, as a handover between turns does first, to save what
+          ;; should outlive the session.
+          (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* From LispM\nYour context filled up in the middle of this turn\\(?:.*\n\\)*\\* Assistant\n\\*\\* Reply\nDone\\.\n\\* User\n\\'" text)))))))
+
+(ert-deftest lispm-test-condition-compaction-failed ()
+  "A handover that fails waits; skipping it lets the input go on in the long session."
+  (lispm-test-with-conditions
+    (let ((lispm-compact-threshold 1)
+          (lispm-compact-save-memory nil)
+          (agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "One."))
+                      ,(lispm-test--failure 500 "api_error" "Boom")
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Two.")))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (lispm-tell agent "second" :callback (lambda (r) (setq reply r)))
+      (let ((id (lispm-test--condition-id agent)))
+        (should (eq (plist-get (lispm-agent-condition agent) :type) 'compaction-failed))
+        (should (equal (plist-get (lispm-agent-condition agent) :restarts) '(retry skip abort)))
+        (should (equal (plist-get (lispm-agent-condition agent) :message)
+                       "Compaction failed: api_error: Boom"))
+        (lispm-restart agent id 'skip))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Two."))
+      (should (string-match-p "^\\* DONE Condition: Compaction failed\n\\(?:.*\n\\)*:RESTART: skip\n:END:\nCompaction failed: api_error: Boom\n\\* User\nsecond\n"
+                              (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-condition-compaction-retried ()
+  "A failed handover is tried again; in the middle of a turn, the turn goes on after it."
+  (lispm-test-with-conditions
+    ;; Between turns: retried, it hands over, and the input goes on there.
+    (let ((lispm-compact-threshold 1)
+          (lispm-compact-save-memory nil)
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "One."))
+                      ,(lispm-test--failure 500 "api_error" "Boom")
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Two.")))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (lispm-tell agent "second")
+      (lispm-restart agent (lispm-test--condition-id agent) 'retry)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* User\nsecond\n\\* Assistant\n\\*\\* Reply\nTwo\\."
+                              (lispm-test--transcript agent))))
+    ;; In the middle of a turn: the condition says so, and skipping it
+    ;; goes on with the turn in the long session.
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           reply)
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "model_context_window_exceeded" (lispm-test--text "Long"))
+               ,(lispm-test--failure 500 "api_error" "Boom")
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (lispm-restart agent (lispm-test--condition-id agent) 'compact)
+      (should (lispm-test--wait (lambda () (eq (plist-get (lispm-agent-condition agent) :type)
+                                               'compaction-failed))))
+      (should (plist-get (lispm-agent-condition agent) :resume))
+      (should (string-match-p ":RESUME: t\n" (lispm-test--transcript agent)))
+      (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'skip)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Done.")))))
+
+(ert-deftest lispm-test-condition-raised-limit-refused ()
+  "A raised output limit the server refuses goes back, so that retrying can work."
+  (lispm-test-with-conditions
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          reply)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Partial"))
+                      ,(lispm-test--failure 400 "invalid_request_error" "max_tokens: too large")
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Whole.")))))
+      (lispm-tell agent "go" :callback (lambda (r) (setq reply r)))
+      (lispm-restart agent (lispm-test--condition-id agent) 'retry-larger)
+      (should (lispm-test--wait (lambda () (eq (plist-get (lispm-agent-condition agent) :type)
+                                               'request-failed))))
+      (should (string-match-p (format "The output limit raised to %d for this turn is back to %d\\."
+                                      (* 2 lispm-max-tokens) lispm-max-tokens)
+                              (plist-get (lispm-agent-condition agent) :message)))
+      (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'retry)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Whole."))
+      (should (= (alist-get 'max_tokens (car lispm-test--requests)) lispm-max-tokens))
+      ;; The chat says the cut response was there.
+      (should (string-match-p "Left out of the conversation: Partial"
+                              (mapconcat (lambda (i) (or (plist-get i :text) ""))
+                                         (lispm-chat-items (lispm-agent-buffer agent)) "\n"))))))
+
+(ert-deftest lispm-test-condition-compaction-stopped ()
+  "Stopping at a failed handover drops the input waiting for it; nothing ends a turn."
+  (lispm-test-with-conditions
+    (let ((lispm-compact-threshold 1)
+          (lispm-compact-save-memory nil)
+          (agent (lispm-defagent tester "Test agent." :root project))
+          told)
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "One."))
+                      ,(lispm-test--failure 500 "api_error" "Boom")
+                      ,(lispm-test--failure 500 "api_error" "Boom again"))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      ;; Denied in org: the input is dropped, its sender told.
+      (lispm-tell agent "second" :callback (lambda (r) (setq told r)))
+      (lispm-test--condition-id agent)
+      (should (eq (lispm--stop-restart (lispm-agent-condition agent)) 'abort))
+      (with-current-buffer (lispm-agent-buffer agent)
+        (goto-char (point-min))
+        (re-search-forward "^\\* WAITING Condition")
+        (org-todo "DENIED"))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "stopped before handling this: Compaction failed: api_error: Boom" told))
+      (let ((text (lispm-test--transcript agent)))
+        (should-not (string-match-p "second" text))
+        (should-not (string-match-p "^\\* Note" text))
+        (should (string-match-p "^\\* Event: compaction\nCompaction failed: api_error: Boom\n\\* User\n\\'" text)))
+      ;; Interrupted: no turn is ended either.
+      (lispm-tell agent "third")
+      (lispm-test--condition-id agent)
+      (lispm-abort agent)
+      (should (funcall (lispm-test--idle-p agent)))
+      (let ((text (lispm-test--transcript agent)))
+        (should-not (string-match-p "^\\* Note" text))
+        (should (string-match-p "^\\* Event: stopped\nCompaction failed: api_error: Boom again\nAborted by the user\\.\n\\* User\n\\'"
+                                text))))))
+
+(ert-deftest lispm-test-condition-unattended-cut-short ()
+  "Unattended, a response cut short is asked for again once, larger, then the turn stops."
+  (lispm-test-with-conditions
+    (let ((lispm-unattended-condition-handlers
+           (eval (car (get 'lispm-unattended-condition-handlers 'standard-value)) t))
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "max_tokens" (lispm-test--text "Cut"))
+                      ,(lispm-test--msg "max_tokens" (lispm-test--text "Cut again")))))
+      (lispm-tell agent "Look at your tasks." :event "every hour")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (= (length lispm-test--requests) 2))
+      (should (string-match-p "\\* Note\nThe response hit the output limit" (lispm-test--transcript agent))))))
+
 (ert-deftest lispm-test-condition-going-past ()
   "Writing in a helper's chat, in org, or a command goes past a condition."
   (lispm-test-with-conditions

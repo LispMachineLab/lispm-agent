@@ -46,6 +46,7 @@
 ;;   * Message from reviewer        input from another agent
 ;;   * Event: after-save-hook       input from a hook the user set up
 ;;   * Summary                      what an earlier session handed over
+;;   * From LispM                   LispM passing on a choice of the user's
 ;;   * WAITING Condition: ...       the turn stopped early, awaiting a
 ;;   :PROPERTIES:                   restart: retry, continue, abort...
 ;;   :CONDITION: request-failed     (`lispm-signal'); never sent
@@ -110,15 +111,17 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
   "A top-level section with heading TITLE and body TEXT."
   (concat "* " title "\n" (lispm-transcript--body text)))
 
-(defun lispm-transcript-condition (title id type restarts message)
+(defun lispm-transcript-condition (title id type restarts message &optional resume)
   "Section of a condition awaiting a restart.
 TITLE says what happened; ID and TYPE identify the condition, RESTARTS
-are the names of the restarts it offers, MESSAGE says why."
+are the names of the restarts it offers, MESSAGE says why.  RESUME
+non-nil records that it stopped a turn in the middle, not between two."
   (concat "* WAITING Condition: " title "\n"
           ":PROPERTIES:\n"
           ":CONDITION: " (symbol-name type) "\n"
           ":CONDITION_ID: " id "\n"
           ":RESTARTS: " (mapconcat #'symbol-name restarts " ") "\n"
+          (if resume ":RESUME: t\n" "")
           ":END:\n"
           (lispm-transcript--body message)))
 
@@ -419,6 +422,8 @@ own notes."
           ((string-match-p "\\`assistant\\'" title) 'assistant)
           ((string-match-p "\\`summary\\'" title)
            '(user . "[Summary of the earlier conversation, handed over to this session]\n"))
+          ((string-match-p "\\`from lispm\\'" title)
+           '(user . "[From LispM, for the user]\n"))
           ((string-match "\\`message from \\(.+\\)\\'" title)
            (cons 'user (format "[Message from agent %s]\n" (match-string 1 title))))
           ((string-match "\\`event: *\\(.+\\)\\'" title)
@@ -497,7 +502,7 @@ heading starts."
 Nil if that section is not a condition.  Otherwise a plist: :id,
 :type, :title, :state (its TODO keyword), :restarts, :restart (the
 one chosen, once it is) and :value (the value it was given, if any),
-:message and :pos (HBEG)."
+:resume (see `lispm-transcript-condition'), :message and :pos (HBEG)."
   (let* ((heading (lispm-transcript--heading hbeg))
          (title (or (plist-get heading :title) "")))
     (when (string-match "\\`Condition: \\(.*\\)\\'" title)
@@ -515,6 +520,7 @@ one chosen, once it is) and :value (the value it was given, if any),
               :restarts (mapcar #'intern (split-string (or (cdr (assoc "RESTARTS" props)) "")))
               :restart (and restart (intern restart))
               :value (and value (ignore-errors (car (read-from-string value))))
+              :resume (and (assoc "RESUME" props) t)
               :message (lispm-transcript--text text end)
               :pos hbeg)))))
 

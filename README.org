@@ -63,10 +63,11 @@ conversation per agent, and you can run several and come back to any of them.
    call that needs approval opens a box with the command or diff and the model's reason;
    answer ~1~ (yes), ~2~ (yes, and don't ask again for that tool) or ~3~ (no, and say what
    to do instead), or pick with the arrow keys and ~RET~.
-4. A turn that stops early, because a request failed or the agent reached ~lispm-max-steps~
-   requests, does not end: a box says what happened and how it can go on (retry, use another
-   model, continue, stop here); answer with its number, or just write your next message to
-   stop there. ~lispm-condition-handlers~ can choose for you, say to retry a failed request
+4. A turn that stops early, because a request failed, the agent reached ~lispm-max-steps~
+   requests, or a response was cut short or refused, does not end: a box says what happened
+   and how it can go on (retry, use another model, ask again with a larger limit, compact,
+   continue, stop here); answer with its number, or just write your next message to stop
+   there. ~lispm-condition-handlers~ can choose for you, say to retry a failed request
    after a minute. Agents nobody may be watching, helpers and agents woken by hooks and
    timers, retry a failed request twice and then stop by themselves
    (~lispm-unattended-condition-handlers~).
