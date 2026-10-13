@@ -103,6 +103,7 @@ topic, in the language the user writes in. No quotes, no final punctuation."
 (defun lispm-title--maybe (agent reply)
   "Title AGENT's session, untitled until its turn ended with REPLY."
   (when (and lispm-auto-title
+             (lispm-backend-name agent)
              (buffer-live-p (lispm-agent-buffer agent))
              (buffer-file-name (lispm-agent-buffer agent))
              (not (gethash (lispm-agent-id agent) lispm-title--asked))

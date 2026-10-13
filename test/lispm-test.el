@@ -259,6 +259,32 @@ BODY can use `project', a scratch directory for agents to work in."
                  (list (lispm-test--text "partial") '((type . "fallback"))
                        (lispm-test--text "rest")))))
 
+(ert-deftest lispm-test-default-backend ()
+  "No backend is assumed: the first with an API key in the environment, else none."
+  (lispm-test-env
+    (let ((lispm-backends (eval (car (get 'lispm-backends 'standard-value)) t))
+          (lispm-backend nil)
+          (process-environment
+           (seq-remove (lambda (v) (string-match-p "\\`\\(OPENAI\\|ANTHROPIC\\)_API_KEY=" v))
+                       process-environment)))
+      (should-not (lispm-backend-name))
+      (setenv "ANTHROPIC_API_KEY" "sk-test")
+      (should (eq (lispm-backend-name) 'anthropic))
+      (setenv "OPENAI_API_KEY" "sk-test")
+      (should (eq (lispm-backend-name) 'openai))
+      ;; An empty variable holds no key.
+      (setenv "OPENAI_API_KEY" "")
+      (should (eq (lispm-backend-name) 'anthropic))
+      (setenv "ANTHROPIC_API_KEY")
+      ;; With none, a turn ends at once, saying what to set, and asks no one.
+      (let ((agent (lispm-defagent tester "Test agent." :root project)))
+        (lispm-tell agent "hello")
+        (should (lispm-test--wait
+                 (lambda () (string-match-p "No model backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY"
+                                            (lispm-test--transcript agent)))))
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should-not lispm-test--requests)))))
+
 (ert-deftest lispm-test-request-features ()
   "First-party extensions are only sent to backends that support them."
   (let ((tools (list '((name . "t") (input_schema (type . "object")))))
@@ -1164,7 +1190,7 @@ text go back to the model byte for byte."
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (let* ((messages (alist-get 'messages (car lispm-test--requests)))
              (results (alist-get 'content (aref messages 2))))
-        ;; The default backend, rotom, gets failures marked in the text.
+        ;; The test backend lacks tool-errors: failures are marked in the text.
         (should (equal (aref results 0)
                        '((type . "tool_result") (tool_use_id . "t1")
                          (content . "Error: The user denied this call. Their reason: keep the build"))))

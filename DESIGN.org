@@ -50,7 +50,7 @@ Two objects, after the Lisp Machine's process and program:
   :instructions "Point out bugs with file:line; do not edit."
   :tools '(read_file search_files list_directory recall) ; capabilities, or t for all
   :policy '((write . deny))                            ; overrides the default policy
-  :backend 'rotom :model "gpt-5.5" :effort "medium")
+  :backend 'openai :model "gpt-5.5" :effort "medium")
 
 (lispm-start 'reviewer "~/src/lispm/")   ; M-x lispm does this for the current project
 #+end_src
@@ -334,7 +334,7 @@ Handovers happen only between turns, and only for sessions that hold a response.
 * 9. Model backends: two API shapes
 
 LispM speaks both shapes model servers offer: OpenAI Chat Completions, the most widely
-implemented (OpenAI, Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, rotom, ...), and Anthropic
+implemented (OpenAI, Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, ...), and Anthropic
 Messages. Internally there is a single conversation format, the Messages shape transcripts
 parse into. Each API shape is an adapter that translates requests out and responses back,
 registered in ~lispm-api-shapes~ with its path, request builder, headers and stream decoder.
@@ -368,33 +368,24 @@ A backend (~lispm-backends~) names an endpoint, its shape and the features to us
 | ~eager-input~           | anthropic | tool input streamed without buffering                       |
 | ~tool-errors~           | anthropic | the ~is_error~ flag of tool results                         |
 
-| Preset             | Shape     | Features                                                       |
-|--------------------+-----------+----------------------------------------------------------------|
-| ~rotom~ (default)  | openai    | streaming, reasoning-effort                                    |
-| ~rotom-messages~   | anthropic | streaming, tool-errors                                         |
-| ~openai~           | openai    | streaming, reasoning-effort, max-completion-tokens, stream-usage |
-| ~anthropic~        | anthropic | all of the above for its shape                                 |
+| Preset      | Shape     | Features                                                         |
+|-------------+-----------+------------------------------------------------------------------|
+| ~openai~    | openai    | streaming, reasoning-effort, max-completion-tokens, stream-usage |
+| ~anthropic~ | anthropic | all of the above for its shape                                   |
 
-The default backend is the local *Rotom* gateway (~http://127.0.0.1:14550/v1~, default model
-~gpt-5.5~), which serves GPT, Grok and other models behind both shapes: ~rotom~ uses its Chat
-Completions side, ~rotom-messages~ its Messages side. Both stream, parallel tool calls
-included; the Chat Completions side reports no token usage while streaming.
+*No provider is assumed.* The presets are the two first-party APIs; any other server, local or
+hosted, is an entry of the user's, and it is the shape that matters, not the provider. Nor is
+there a default backend: ~lispm-backend~ names one, or, left nil, the first entry whose API key
+is set in the environment serves (~OPENAI_API_KEY~, ~ANTHROPIC_API_KEY~, or an entry's
+~:key-env~). With none, a message gets an answer at once saying what to set, rather than a
+connection error from a guess. The ~anthropic~ preset's default model is ~claude-opus-5-5~, with
+every Messages feature enabled, including server-side refusal fallbacks (~fallbacks:
+"default"~).
 
-Use rotom 1.5.15 or later. Building LispM against earlier versions surfaced four bugs in the
-translation behind rotom's Messages side, all fixed in 1.5.15: parallel tool calls lost their
-arguments when streaming ([[https://github.com/RyanKung/rotom/issues/18][rotom#18]]), ~is_error~
-on tool results was rejected ([[https://github.com/RyanKung/rotom/issues/19][rotom#19]]), the
-object form of ~tool_choice~ was rejected and ~disable_parallel_tool_use~ ignored
-([[https://github.com/RyanKung/rotom/issues/20][rotom#20]]), and a response with a tool call
-could report ~end_turn~ ([[https://github.com/RyanKung/rotom/issues/21][rotom#21]]). One
-safeguard stays, as other gateways can mislabel stop reasons too: the runtime executes the tool
-calls of any response that was not cut short (~max_tokens~, ~refusal~), whatever its stop
-reason. Unknown ~claude-*~ model names are mapped to rotom's ~--model-fallback~.
-
-To use the first-party Anthropic API: ~(setq lispm-backend 'anthropic)~, with
-~ANTHROPIC_API_KEY~ set or an auth-source entry for ~api.anthropic.com~. The default model is
-~claude-opus-5-5~, with every Messages feature enabled, including server-side refusal fallbacks
-(~fallbacks: "default"~).
+Servers that translate between the two shapes can get the details wrong: stop reasons above
+all. So the runtime executes the tool calls of any response that was not cut short
+(~max_tokens~, ~refusal~), whatever its stop reason; a feature a server lacks, such as
+~tool-errors~, is left out of its entry, and LispM falls back (failures marked in the text).
 
 * 10. MCP servers and images
 
