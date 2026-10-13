@@ -64,7 +64,7 @@ An agent holds:
   offered to the model (section 2).
 - *Runtime state*: its session buffer, the request in flight, an inbox, the table of pending
   tool calls, the edit snapshots of the current turn (the journal), the tools the user allowed
-  for this Emacs session, the agent it is waiting on (~waiting-on~), its hook and timer
+  for this Emacs session, the agents it is waiting on (~waiting-on~), its hook and timer
   subscriptions, and its token usage.
 
 The state machine has four states: ~idle~ → ~requesting~ (waiting for the model) → ~acting~
@@ -309,8 +309,9 @@ Concurrency:
 - *No locks are needed*: the event loop is single-threaded and each tool call is atomic.
   Edits replace exact old text with new text; if someone else (or the user) changed that text
   first, the replacement fails and asks the model to re-read: *optimistic concurrency*.
-- *Deadlock detection*: ~ask_agent~ follows the ~waiting-on~ chain and refuses a request that
-  would close a cycle.
+- *Deadlock detection*: ~ask_agent~ follows the ~waiting-on~ edges and refuses a request that
+  would close a cycle. An agent that asks several in one response waits on all of them, so
+  the edges form a graph, not a chain.
 - Every agent's system prompt lists the running agents and the roles, so the model knows
   whom to delegate to.
 - *Isolation, when wanted*: optimistic concurrency keeps agents from clobbering each other,

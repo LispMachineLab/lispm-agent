@@ -43,7 +43,8 @@
 ;; edits are exact-text replacements, which fail instead of clobbering
 ;; when someone else changed the text first (optimistic concurrency).
 ;; What does need care is waiting: ask_agent refuses a request that
-;; would make agents wait on each other in a cycle.
+;; would make agents wait on each other in a cycle.  An agent that asks
+;; several in one response waits on all of them at once.
 
 ;;; Code:
 
@@ -62,11 +63,13 @@ NAME is as for `lispm-get-agent'."
 
 (defun lispm-collab--cycle-p (from to)
   "Non-nil if FROM waiting on TO would close a cycle of waiting agents."
-  (let ((agent to) (seen nil))
-    (while (and agent (not (eq agent from)) (not (memq agent seen)))
-      (push agent seen)
-      (setq agent (lispm-agent-waiting-on agent)))
-    (eq agent from)))
+  (let ((seen nil))
+    (cl-labels ((reaches (agent)
+                  (or (eq agent from)
+                      (unless (memq agent seen)
+                        (push agent seen)
+                        (seq-some #'reaches (lispm-agent-waiting-on agent))))))
+      (reaches to))))
 
 (cl-defun lispm-delegate (caller agent request callback &key root)
   "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
@@ -85,12 +88,12 @@ Return that agent."
     ;; Delegating must not widen what the caller may do.
     (when helper
       (setf (lispm-agent-ceiling helper) (lispm-policy caller)))
-    (setf (lispm-agent-waiting-on caller) target)
+    (push target (lispm-agent-waiting-on caller))
     (lispm-tell target request
                 :from (lispm-agent-name caller)
                 :callback (lambda (reply)
-                            (when (eq (lispm-agent-waiting-on caller) target)
-                              (setf (lispm-agent-waiting-on caller) nil))
+                            (setf (lispm-agent-waiting-on caller)
+                                  (cl-remove target (lispm-agent-waiting-on caller) :count 1))
                             (when helper
                               (run-at-time 0 nil #'lispm-retire helper))
                             (funcall callback target reply)))
