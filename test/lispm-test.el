@@ -1105,6 +1105,24 @@ starts is, so its schema is made outside the call that loaded it."
               (lispm-tool-invoke (lispm-get-tool "eval_elisp") '((code . "1"))
                                  (lambda (_text _errorp) (setq inhibited inhibit-quit)))
               (should (eq inhibited t)))
+            ;; What follows the tool is not interruptible either.
+            (let (inhibited)
+              (cl-letf* ((text (symbol-function 'lispm-tools--result-text))
+                         ((symbol-function 'lispm-tools--result-text)
+                          (lambda (value) (setq inhibited inhibit-quit) (funcall text value))))
+                (lispm-test--call agent "describe_symbol" '((name . "car"))))
+              (should (eq inhibited t)))
+            ;; C-g while run_shell sets up stops the command too.
+            (let (proc)
+              (cl-letf* ((make (symbol-function 'make-process))
+                         ((symbol-function 'make-process)
+                          (lambda (&rest args)
+                            (prog1 (setq proc (apply make args))
+                              (setq quit-flag t)))))
+                (should (equal (lispm-test--call agent "run_shell" '((command . "sleep 30")))
+                               (cons lispm-tools--interrupted t))))
+              (should-not quit-flag)
+              (should-not (process-live-p proc)))
             ;; A C-g pressed before the call is left for what it was meant for.
             (let (result kept)
               (let ((inhibit-quit t))
@@ -1258,16 +1276,50 @@ starts is, so its schema is made outside the call that loaded it."
         (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "new\n"))
         ;; Unsaved changes are left alone.
         (should (equal (with-current-buffer (find-buffer-visiting edited) (buffer-string)) "mine\nold\n"))
-        ;; Not only after shell commands: after Lisp too.
-        (let ((code (format "(call-process \"sh\" nil nil nil \"-c\" \"printf lisp > %s; touch -t 203101010000 %s\")"
-                            clean clean)))
-          (should-not (cdr (lispm-test--call agent "eval_elisp" `((code . ,code))))))
+        ;; Not only after shell commands: after Lisp too; and the hooks the
+        ;; reverts run know the agent did it.
+        (let ((code (format "(call-process \"sh\" nil nil nil \"-c\" %S)"
+                            (format "printf lisp > %s; touch -t 203101010000 %s"
+                                    (shell-quote-argument clean) (shell-quote-argument clean))))
+              reverted-by)
+          (with-current-buffer (find-buffer-visiting clean)
+            (add-hook 'after-revert-hook (lambda () (setq reverted-by lispm-current-agent)) nil t))
+          (should-not (cdr (lispm-test--call agent "eval_elisp" `((code . ,code)))))
+          (should (eq reverted-by agent)))
         (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "lisp"))
-        ;; Session transcripts, whose positions the runtime holds, are not reverted.
+        ;; Not after calls that change no file.
+        (lispm-test--change-on-disk clean "read\n")
+        (lispm-test--call agent "list_buffers" nil)
+        (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "lisp"))
+        ;; Nor when the user would rather not.
+        (let ((lispm-revert-after-calls nil))
+          (lispm-test--call agent "eval_elisp" '((code . "1"))))
+        (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "lisp"))
+        ;; Nor buffers of files outside the agent's root.
+        (let ((outside (make-temp-file "lispm-outside" nil ".txt" "out\n")))
+          (unwind-protect
+              (progn
+                (find-file-noselect outside)
+                (lispm-test--change-on-disk outside "changed\n")
+                (lispm-test--call agent "eval_elisp" '((code . "1")))
+                (should (equal (with-current-buffer (find-buffer-visiting outside) (buffer-string))
+                               "out\n"))
+                (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string))
+                               "read\n")))
+            (kill-buffer (find-buffer-visiting outside))
+            (delete-file outside)))
+        ;; Session transcripts, whose positions the runtime holds, are not
+        ;; reverted, not even for a tool: read as they are, not changed.
         (with-current-buffer (find-buffer-visiting clean) (setq-local lispm-session-mode t))
         (lispm-test--change-on-disk clean "changed\n")
-        (lispm-test--call agent "list_buffers" nil)
-        (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "lisp"))))))
+        (lispm-test--call agent "eval_elisp" '((code . "1")))
+        (should (string-match-p "\\`\\[the session of an agent, as LispM holds it; the file changed on disk\\]\n.*read"
+                                (car (lispm-test--call agent "read_file" '((path . "clean.txt"))))))
+        (should (string-match-p "the session of an agent"
+                                (car (lispm-test--call agent "write_file"
+                                                       '((path . "clean.txt") (content . "x"))))))
+        (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "read\n"))
+        (should (equal (lispm-test--disk clean) "changed\n"))))))
 
 (ert-deftest lispm-test-memory-changed-on-disk ()
   "Memory a person changed on disk, by hand or with git, is kept, without a question."
@@ -1292,7 +1344,60 @@ starts is, so its schema is made outside the call that loaded it."
           (should (string-match-p "unsaved changes"
                                   (car (lispm-test--call agent "remember"
                                                          '((title . "Third") (content . "f"))))))
-          (should-not (string-match-p "Third" (lispm-test--disk file))))))))
+          (should-not (string-match-p "Third" (lispm-test--disk file)))
+          ;; Emptied in Emacs: the header is not saved over the changed file.
+          (let ((disk (lispm-test--disk file)))
+            (with-current-buffer (find-buffer-visiting file) (erase-buffer))
+            (lispm-system-prompt agent)
+            (should (equal (lispm-test--disk file) disk))))))))
+
+(ert-deftest lispm-test-memory-deleted-on-disk ()
+  "Memory deleted on disk, by hand or with git, stays deleted."
+  (lispm-test-env
+    (let ((agent (lispm-defagent keeper :root project)))
+      (lispm-test--never-asking
+        (lispm-test--call agent "remember" '((title . "Old") (content . "a")))
+        (let ((file (lispm-memory-file agent)))
+          (should (find-buffer-visiting file))
+          (delete-file file)
+          (should (equal (car (lispm-test--call agent "recall" '((query . ""))))
+                         "Memory is empty."))
+          (lispm-test--call agent "remember" '((title . "New") (content . "b")))
+          (let ((text (lispm-test--disk file)))
+            (should (string-match-p "\\`#\\+title: Memory of " text))
+            (should (string-match-p "^\\* New$" text))
+            (should-not (string-match-p "^\\* Old$" text))))))))
+
+(ert-deftest lispm-test-out-of-date-buffers-elsewhere ()
+  "Instruction files, the turn diff and large files go by what is on disk."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (agents (expand-file-name "AGENTS.md" project))
+          (a (expand-file-name "a.txt" project)))
+      (lispm-test--never-asking
+        ;; The system prompt has the instructions on disk, not in a stale buffer.
+        (with-temp-file agents (insert "Old rules.\n"))
+        (find-file-noselect agents)
+        (lispm-test--change-on-disk agents "New rules.\n")
+        (let ((prompt (lispm-system-prompt agent)))
+          (should (string-match-p "New rules\\." prompt))
+          (should-not (string-match-p "Old rules" prompt)))
+        ;; The turn diff compares with what is on disk.
+        (with-temp-file a (insert "a\n"))
+        (setf (lispm-agent-turn agent) 1)
+        (lispm-test--call agent "edit_file" '((path . "a.txt") (old_text . "a") (new_text . "A")))
+        (lispm-test--change-on-disk a "on disk\n")
+        (lispm-turn-diff agent)
+        (should (string-match-p "^\\+on disk$" (with-current-buffer "*lispm-diff*" (buffer-string))))
+        ;; A file too large to visit without asking is refused.
+        (let ((large-file-warning-threshold 10)
+              (big (expand-file-name "big.txt" project)))
+          (with-temp-file big (insert (make-string 100 ?x) "\n"))
+          (should (string-match-p "too large"
+                                  (car (lispm-test--call agent "edit_file"
+                                                         '((path . "big.txt") (old_text . "x")
+                                                           (new_text . "y"))))))
+          (should-not (find-buffer-visiting big)))))))
 
 (ert-deftest lispm-test-revert-turn-conflict ()
   "A turn is reverted whole, or not at all while a file is in conflict."
@@ -2613,6 +2718,34 @@ Its policy is the stricter of its role's and its caller's."
         (should-not (lispm-edits--proposal "e2"))
         (should-not (buffer-live-p buffer))
         (should-not (file-exists-p (expand-file-name "new.txt" project)))))))
+
+(ert-deftest lispm-test-edits-proposed-reverted ()
+  "A proposal over a buffer that is reverted is made again from its new text."
+  (lispm-test-with-edits
+    (let ((file (expand-file-name "a.txt" project))
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (lispm-test--write file "hello world\nbye\n")
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "e1" "edit_file"
+                                                   '((path . "a.txt") (old_text . "world")
+                                                     (new_text . "lisp"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (equal (lispm-edits--proposal-text (lispm-edits--proposal "e1")) "hello lisp\nbye\n"))
+      (lispm-test--change-on-disk file "hello world\nbye\nmore\n")
+      (with-current-buffer (find-buffer-visiting file) (revert-buffer t t t))
+      (should (equal (lispm-edits--proposal-text (lispm-edits--proposal "e1"))
+                     "hello lisp\nbye\nmore\n"))
+      ;; A call that no longer makes sense shows nothing.
+      (lispm-test--change-on-disk file "hello there\n")
+      (with-current-buffer (find-buffer-visiting file) (revert-buffer t t t))
+      (should-not (lispm-edits--proposal "e1"))
+      (should-not (lispm-test--edit-overlays (find-buffer-visiting file)))
+      (lispm-resolve agent "e1" 'deny "Never mind.")
+      (should (lispm-test--wait (lispm-test--idle-p agent))))))
 
 (ert-deftest lispm-test-edits-streamed ()
   "While the model writes a call, the change grows in place as its input arrives."

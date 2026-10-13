@@ -1431,7 +1431,7 @@ Default: its latest turn with edits."
     ;; on disk too is for the user to settle first.
     (when-let* ((conflicts (seq-filter (lambda (s)
                                          (and (buffer-live-p (car s))
-                                              (eq (lispm-tools--sync (car s)) 'conflict)))
+                                              (memq (lispm-tools--sync (car s)) '(conflict held))))
                                        snapshots)))
       (user-error "Nothing reverted: %s changed on disk, and in Emacs too; save or revert first"
                   (mapconcat (lambda (s) (buffer-name (car s))) conflicts ", ")))

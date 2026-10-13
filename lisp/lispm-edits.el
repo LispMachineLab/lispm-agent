@@ -666,6 +666,19 @@ it is then: the input grows faster than it is worth drawing."
       (lispm-edits--propose agent id (lispm-get-tool (plist-get call :name))
                             (lispm-edits--partial-json (plist-get call :json)) t))))
 
+(defun lispm-edits--reverted ()
+  "Draw again the proposals laid over the current buffer, just reverted.
+They were made from its text before, which is gone: those of calls
+that still make sense are made again from the text it has now."
+  (let* ((buffer (current-buffer))
+         (proposals (seq-filter (lambda (p) (eq (lispm-edits--proposal-buffer p) buffer))
+                                lispm-edits--proposals)))
+    (dolist (p proposals)
+      (lispm-edits--retire p nil))
+    (dolist (agent (delete-dups (mapcar #'lispm-edits--proposal-agent proposals)))
+      (lispm-edits--update agent))))
+
+(add-hook 'after-revert-hook #'lispm-edits--reverted)
 (add-hook 'lispm-buffer-change-functions #'lispm-edits--changed)
 (add-hook 'lispm-state-change-functions #'lispm-edits--update)
 (add-hook 'lispm-tool-input-functions #'lispm-edits--input)

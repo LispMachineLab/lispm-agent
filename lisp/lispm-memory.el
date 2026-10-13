@@ -74,7 +74,8 @@ is, being what the user sees, but cannot be changed: with TO-CHANGE,
 that is an error."
   (let ((buffer (lispm-tools--visit file (not to-change))))
     (with-current-buffer buffer
-      (when (zerop (buffer-size))
+      ;; Not over a file changed on disk: saving would ask.
+      (when (and (zerop (buffer-size)) (eq (lispm-tools--state buffer) 'current))
         (insert header)
         (org-mode)
         (let ((inhibit-message t)) (save-buffer))))
