@@ -46,6 +46,10 @@
 ;;   * Message from reviewer        input from another agent
 ;;   * Event: after-save-hook       input from a hook the user set up
 ;;   * Summary                      what an earlier session handed over
+;;   * WAITING Condition: ...       the turn stopped early, awaiting a
+;;   :PROPERTIES:                   restart: retry, continue, abort...
+;;   :CONDITION: request-failed     (`lispm-signal'); never sent
+;;   :END:
 ;;
 ;; Any other top-level heading (say "* Notes") is the user's own and is
 ;; not sent; neither is any message tagged :ignore:, nor reasoning text
@@ -105,6 +109,18 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
 (defun lispm-transcript-section (title text)
   "A top-level section with heading TITLE and body TEXT."
   (concat "* " title "\n" (lispm-transcript--body text)))
+
+(defun lispm-transcript-condition (title id type restarts message)
+  "Section of a condition awaiting a restart.
+TITLE says what happened; ID and TYPE identify the condition, RESTARTS
+are the names of the restarts it offers, MESSAGE says why."
+  (concat "* WAITING Condition: " title "\n"
+          ":PROPERTIES:\n"
+          ":CONDITION: " (symbol-name type) "\n"
+          ":CONDITION_ID: " id "\n"
+          ":RESTARTS: " (mapconcat #'symbol-name restarts " ") "\n"
+          ":END:\n"
+          (lispm-transcript--body message)))
 
 (defun lispm-transcript--summary (input)
   "A short label for a tool call with INPUT: its main string argument."
@@ -476,6 +492,29 @@ heading starts."
                 blocks)))))
     (list (nreverse blocks) (nreverse results) (nreverse pending))))
 
+(defun lispm-transcript--condition (hbeg bbeg end)
+  "The condition whose section starts at HBEG, its body at BBEG, up to END.
+Nil if that section is not a condition.  Otherwise a plist: :id,
+:type, :title, :state (its TODO keyword), :restarts, :restart (the
+one chosen, once it is), :message and :pos (HBEG)."
+  (let* ((heading (lispm-transcript--heading hbeg))
+         (title (or (plist-get heading :title) "")))
+    (when (string-match "\\`Condition: \\(.*\\)\\'" title)
+      (let* ((name (match-string 1 title))
+             (props (lispm-transcript--properties bbeg end))
+             (text (save-excursion
+                     (goto-char bbeg)
+                     (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) bbeg)))
+             (restart (cdr (assoc "RESTART" props))))
+        (list :id (cdr (assoc "CONDITION_ID" props))
+              :type (intern (or (cdr (assoc "CONDITION" props)) "condition"))
+              :title name
+              :state (plist-get heading :todo)
+              :restarts (mapcar #'intern (split-string (or (cdr (assoc "RESTARTS" props)) "")))
+              :restart (and restart (intern restart))
+              :message (lispm-transcript--text text end)
+              :pos hbeg)))))
+
 (defun lispm-transcript--normalize (messages)
   "Merge consecutive MESSAGES of one role; drop leading non-user ones."
   (let (out)
@@ -494,16 +533,20 @@ heading starts."
 Return a plist: :system (the system prompt), :messages (Messages API
 messages, oldest first), :pending (ids of tool calls without a result
 yet), :pending-calls (those calls, as `lispm-transcript--parse-assistant'
-describes them) and :last-role."
+describes them), :condition (the condition awaiting a restart, if any,
+as `lispm-transcript--condition' describes it) and :last-role."
   (save-excursion
     (save-restriction
       (widen)
-      (let (system messages pending)
+      (let (system messages pending condition)
         (pcase-dolist (`(,hbeg ,bbeg ,end) (lispm-transcript--sections 1 (point-min) (point-max)))
           (let* ((heading (lispm-transcript--heading hbeg))
                  (role (and heading
                             (not (member "ignore" (plist-get heading :tags)))
                             (lispm-transcript--role (plist-get heading :title)))))
+            (when (and (null role) (equal (plist-get heading :todo) "WAITING"))
+              (when-let* ((found (lispm-transcript--condition hbeg bbeg end)))
+                (setq condition found)))
             (pcase role
               ('system (setq system (lispm-transcript--text bbeg end)))
               (`(user . ,prefix)
@@ -528,6 +571,7 @@ describes them) and :last-role."
               :messages messages
               :pending (mapcar (lambda (call) (plist-get call :id)) pending)
               :pending-calls pending
+              :condition condition
               :last-role (alist-get 'role (car (last messages))))))))
 
 (provide 'lispm-transcript)

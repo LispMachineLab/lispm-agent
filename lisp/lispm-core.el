@@ -226,6 +226,8 @@ Each is called with the buffer, its old text and its new text;
   allowed                    ; tool names approved for this Emacs session
   loaded-tools               ; deferred tools loaded by search_tools, by name
   waiting-on                 ; agents this one awaits (ask_agent)
+  condition                  ; condition its turn stopped at, awaiting a restart
+  auto-restarts              ; alist TYPE -> restarts chosen by handlers this turn
   compacting                 ; non-nil while the session is handed over
   triggers                   ; hook and timer subscriptions
   (usage (list 0 0 0)))      ; input, output, cache-read tokens

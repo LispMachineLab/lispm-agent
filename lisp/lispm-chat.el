@@ -266,6 +266,13 @@
                   items))
            ((string-match-p "\\`note\\'" title)
             (push (list :kind 'note :text (lispm-chat--body bbeg send)) items))
+           ;; A condition still waiting is the prompt below, not an item.
+           ((when-let* ((condition (lispm-transcript--condition hbeg bbeg send))
+                        (restart (plist-get condition :restart)))
+              (push (list :kind 'note
+                          :text (format "%s\n↻ %s" (plist-get condition :message)
+                                        (lispm-chat--restart-description condition restart)))
+                    items)))
            ((string-match-p "\\`assistant\\'" title)
             (setq items (append (reverse (lispm-chat--assistant-items bbeg send)) items)))))))
     (nreverse items)))
@@ -612,10 +619,46 @@ Code blocks lose their fences and keep their lines as they are."
   (or (car (lispm--waiting-calls lispm-chat-agent))
       (user-error "Nothing awaits your approval")))
 
+(defun lispm-chat--condition (&optional agent)
+  "The condition the prompt asks about: AGENT's, unless a call awaits approval."
+  (let ((agent (or agent lispm-chat-agent)))
+    (and agent (not (lispm--waiting-calls agent)) (lispm-agent-condition agent))))
+
+(defun lispm-chat--prompting-p ()
+  "Non-nil if the chat asks something: a call's approval, or a restart."
+  (and lispm-chat-agent
+       (or (lispm--waiting-calls lispm-chat-agent) (lispm-agent-condition lispm-chat-agent))))
+
+(defun lispm-chat--restart-description (condition restart)
+  "How the prompt for CONDITION describes its RESTART."
+  (if-let* ((spec (assq restart (plist-get (alist-get (plist-get condition :type)
+                                                       lispm-condition-types)
+                                            :restarts))))
+      (nth 1 spec)
+    (symbol-name restart)))
+
+(defun lispm-chat-restart (restart)
+  "Go on from the condition the prompt asks about by RESTART."
+  (lispm-choose-restart-named lispm-chat-agent restart)
+  (goto-char (point-max)))
+
+(defun lispm-chat--answer (n)
+  "Give the Nth answer, from 1, to the prompt; non-nil if it has one."
+  (if-let* ((condition (lispm-chat--condition)))
+      (when-let* ((restart (nth (1- n) (plist-get condition :restarts))))
+        (lispm-chat-restart restart)
+        t)
+    (when-let* (((lispm--waiting-calls lispm-chat-agent))
+                (command (nth (1- n) '(lispm-chat-yes lispm-chat-yes-always lispm-chat-no))))
+      (call-interactively command)
+      t)))
+
 (defun lispm-chat-yes ()
-  "Approve the call the prompt asks about."
+  "Approve the call the prompt asks about, or take the condition's default restart."
   (interactive)
-  (lispm-resolve lispm-chat-agent (lispm-chat--waiting) 'approve)
+  (if-let* ((condition (lispm-chat--condition)))
+      (lispm-chat-restart (car (plist-get condition :restarts)))
+    (lispm-resolve lispm-chat-agent (lispm-chat--waiting) 'approve))
   (goto-char (point-max)))
 
 (defun lispm-chat-yes-always ()
@@ -630,25 +673,30 @@ Code blocks lose their fences and keep their lines as they are."
   (goto-char (point-max)))
 
 (defun lispm-chat-no ()
-  "Deny the call, saying what to do instead."
+  "Deny the call, saying what to do instead; or stop at the condition."
   (interactive)
-  (let ((id (lispm-chat--waiting))
-        (reason (read-string "What should it do instead? (optional) ")))
-    (lispm-resolve lispm-chat-agent id 'deny reason))
+  (if (lispm-chat--condition)
+      (lispm-chat-restart 'abort)
+    (let ((id (lispm-chat--waiting))
+          (reason (read-string "What should it do instead? (optional) ")))
+      (lispm-resolve lispm-chat-agent id 'deny reason)))
   (goto-char (point-max)))
 
 (defun lispm-chat-choose ()
-  "Give the selected answer to the approval prompt."
+  "Give the selected answer to the prompt."
   (interactive)
-  (pcase lispm-chat--choice
-    (0 (lispm-chat-yes))
-    (1 (lispm-chat-yes-always))
-    (_ (lispm-chat-no))))
+  (lispm-chat--answer (1+ lispm-chat--choice)))
+
+(defun lispm-chat--answers ()
+  "How many answers the prompt offers."
+  (if-let* ((condition (lispm-chat--condition)))
+      (length (plist-get condition :restarts))
+    3))
 
 (defun lispm-chat-choice-next (&optional n)
-  "Select the next answer in the approval prompt, or the Nth after."
+  "Select the next answer in the prompt, or the Nth after."
   (interactive "p")
-  (setq lispm-chat--choice (mod (+ lispm-chat--choice (or n 1)) 3))
+  (setq lispm-chat--choice (mod (+ lispm-chat--choice (or n 1)) (lispm-chat--answers)))
   (lispm-chat--redraw))
 
 (defun lispm-chat-choice-previous ()
@@ -656,11 +704,19 @@ Code blocks lose their fences and keep their lines as they are."
   (interactive)
   (lispm-chat-choice-next -1))
 
+(defun lispm-chat--answer-command (n)
+  "A command giving the Nth answer to the prompt."
+  (lambda ()
+    (interactive)
+    (lispm-chat--answer n)))
+
 (defvar-keymap lispm-chat-approval-map
-  :doc "Keys of the approval prompt."
-  "1" #'lispm-chat-yes
-  "2" #'lispm-chat-yes-always
-  "3" #'lispm-chat-no
+  :doc "Keys of the approval prompt, and of the prompt for a restart."
+  "1" (lispm-chat--answer-command 1)
+  "2" (lispm-chat--answer-command 2)
+  "3" (lispm-chat--answer-command 3)
+  "4" (lispm-chat--answer-command 4)
+  "5" (lispm-chat--answer-command 5)
   "y" #'lispm-chat-yes
   "n" #'lispm-chat-no
   "RET" #'lispm-chat-choose
@@ -720,6 +776,31 @@ ITEMS are the session's items, where the call's preview is."
          (lispm-chat--width) 'lispm-chat-pending))
        'keymap lispm-chat-approval-map))))
 
+(defun lispm-chat--condition-prompt (agent)
+  "The prompt for a restart of the condition AGENT's turn waits at, or nil."
+  (when-let* ((condition (lispm-chat--condition agent)))
+    (let ((width (lispm-chat--width)))
+      (propertize
+       (concat
+        "\n"
+        (lispm-chat--box
+         (append (list (propertize (plist-get condition :title) 'face 'bold) "")
+                 (mapcar (lambda (l) (concat "  " l))
+                         (seq-take (split-string (string-fill (plist-get condition :message)
+                                                              (- width 8))
+                                                 "\n")
+                                   12))
+                 (list "" "How do you want to go on?")
+                 (cl-loop for restart in (plist-get condition :restarts)
+                          for i from 0
+                          for option = (lispm-chat--restart-description condition restart)
+                          collect (if (= i lispm-chat--choice)
+                                      (propertize (format "❯ %d. %s" (1+ i) option)
+                                                  'face 'lispm-chat-accent)
+                                    (format "  %d. %s" (1+ i) option))))
+         width 'lispm-chat-pending))
+       'keymap lispm-chat-approval-map))))
+
 ;;;; Status
 
 (defun lispm-chat--status (agent)
@@ -775,7 +856,8 @@ ITEMS are the session's items, where the call's preview is."
             (mapcar #'lispm-chat--item-string items)
             (mapcar #'lispm-chat--read-only
                     (delq nil (list (lispm-chat--queued agent)
-                                    (lispm-chat--approval agent items)
+                                    (or (lispm-chat--approval agent items)
+                                        (lispm-chat--condition-prompt agent))
                                     (lispm-chat--status agent)
                                     (concat "\n" (lispm-chat--rule) "\n")))))))
 
@@ -826,8 +908,10 @@ ITEMS are the session's items, where the call's preview is."
         (recenter -3)))))
 
 (defun lispm-chat--maybe-ask ()
-  "Select the first answer of a newly shown approval prompt."
-  (let ((id (car (lispm--waiting-calls lispm-chat-agent))))
+  "Select the first answer of a newly shown prompt."
+  (let ((id (or (car (lispm--waiting-calls lispm-chat-agent))
+                ;; The condition itself: an id can be given again.
+                (lispm-agent-condition lispm-chat-agent))))
     (unless (equal id lispm-chat--asked)
       (setq lispm-chat--asked id
             lispm-chat--choice 0))))
@@ -933,9 +1017,11 @@ ITEMS are the session's items, where the call's preview is."
   (when (overlayp lispm-chat--footer)
     (let ((footer
            (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
-                       (propertize (if (and lispm-chat-agent (lispm--waiting-calls lispm-chat-agent))
-                                       "Answer above with 1, 2 or 3"
-                                     "Try \"explain this project\", or / for commands")
+                       (propertize (cond ((not (lispm-chat--prompting-p))
+                                          "Try \"explain this project\", or / for commands")
+                                         ((lispm-chat--condition)
+                                          "Choose above with its number, or write to stop and send")
+                                         (t "Answer above with 1, 2 or 3"))
                                    'face 'lispm-chat-dim)
                      " ")
                    "\n" (lispm-chat--rule) "\n"
@@ -958,7 +1044,7 @@ Outside the input, show the item at point in full."
          (if (get-text-property (point) 'lispm-chat-key)
              (lispm-chat-toggle)
            (goto-char (point-max))))
-        ((and (string-blank-p (lispm-chat--input)) (lispm--waiting-calls lispm-chat-agent))
+        ((and (string-blank-p (lispm-chat--input)) (lispm-chat--prompting-p))
          (lispm-chat-choose))
         (t (lispm-chat-send))))
 
@@ -973,6 +1059,10 @@ Outside the input, show the item at point in full."
       (lispm-chat-set-input "")
       (if (string-match-p "\\`/[a-z]" text)
           (lispm-chat--command agent text)
+        ;; Writing while the turn waits at a condition stops it there,
+        ;; as writing after a failed turn always did.
+        (when-let* ((condition (lispm-agent-condition agent)))
+          (lispm-restart agent (plist-get condition :id) 'abort))
         (lispm-tell agent text)
         (lispm-chat--schedule agent)))))
 
@@ -988,20 +1078,18 @@ Outside the input, show the item at point in full."
   (unless (lispm-chat--in-input-p) (goto-char (point-max)))
   (call-interactively #'self-insert-command))
 
-(defun lispm-chat--answer-key (answer)
-  "A command giving ANSWER (a command) to a pending approval prompt, else typing."
+(defun lispm-chat--answer-key (n)
+  "A command giving the Nth answer to the prompt shown, else typing."
   (lambda ()
     (interactive)
-    (if (and (lispm--waiting-calls lispm-chat-agent)
-             (string-empty-p (lispm-chat--input)))
-        (call-interactively answer)
+    (unless (and (string-empty-p (lispm-chat--input)) (lispm-chat--answer n))
       (lispm-chat-self-insert))))
 
 (defun lispm-chat-previous ()
   "Select the previous answer of an approval prompt, or move up a line."
   (interactive)
   (if (and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
-           (lispm--waiting-calls lispm-chat-agent))
+           (lispm-chat--prompting-p))
       (lispm-chat-choice-previous)
     (call-interactively #'previous-line)))
 
@@ -1009,7 +1097,7 @@ Outside the input, show the item at point in full."
   "Select the next answer of an approval prompt, or move down a line."
   (interactive)
   (if (and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
-           (lispm--waiting-calls lispm-chat-agent))
+           (lispm-chat--prompting-p))
       (lispm-chat-choice-next)
     (call-interactively #'next-line)))
 
@@ -1203,9 +1291,11 @@ Return the chat of the new conversation."
   "C-c C-c" #'lispm-chat-interrupt
   "C-c C-k" #'lispm-chat-interrupt
   "C-c C-t" #'lispm-chat-transcript
-  "1" (lispm-chat--answer-key #'lispm-chat-yes)
-  "2" (lispm-chat--answer-key #'lispm-chat-yes-always)
-  "3" (lispm-chat--answer-key #'lispm-chat-no))
+  "1" (lispm-chat--answer-key 1)
+  "2" (lispm-chat--answer-key 2)
+  "3" (lispm-chat--answer-key 3)
+  "4" (lispm-chat--answer-key 4)
+  "5" (lispm-chat--answer-key 5))
 
 (define-derived-mode lispm-chat-mode nil "LispM"
   "Talk to a LispM agent.
