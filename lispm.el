@@ -67,6 +67,7 @@
 (require 'lispm-transcript)
 (require 'lispm-api)
 (require 'lispm-tools)
+(require 'lispm-edits)
 (require 'lispm-memory)
 (require 'lispm-runtime)
 (require 'lispm-collab)

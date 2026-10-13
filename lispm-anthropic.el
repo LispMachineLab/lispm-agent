@@ -186,9 +186,12 @@ arrives: `text', `thinking' or `tool' (a tool name)."
              (concat (let ((s (alist-get 'signature block))) (if (stringp s) s ""))
                      (alist-get 'signature delta))))
       ("input_json_delta"
-       (puthash index (concat (gethash index (lispm-anthropic-stream-json stream) "")
-                              (alist-get 'partial_json delta))
-                (lispm-anthropic-stream-json stream)))
+       (let ((json (concat (gethash index (lispm-anthropic-stream-json stream) "")
+                           (alist-get 'partial_json delta))))
+         (puthash index json (lispm-anthropic-stream-json stream))
+         (when on-delta
+           (funcall on-delta 'tool-input
+                    (list :id (alist-get 'id block) :name (alist-get 'name block) :json json)))))
       ("citations_delta"
        (setf (alist-get 'citations block)
              (vconcat (alist-get 'citations block)
