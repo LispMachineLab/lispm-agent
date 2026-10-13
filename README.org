@@ -6,19 +6,25 @@ place to work, and puts Claude Code, Codex and Hermes beside them when you have 
 
 * What you get
 
-The frame is laid out as Mac OS 9 laid out its desktop, in the forms of its Platinum appearance,
-while every colour comes from the theme (Dracula by default).
+The frame is laid out as Mac OS 9 laid out its desktop, in the forms of its Platinum appearance.
+Two appearances come with it, asked for at the first start and switched from the λ menu: Dracula,
+and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
-- *A menu bar* along the top: the λ menu at its left end (new agents, sessions, shells, the
-  browser, settings), then a title per sidebar view (Files, Agents, Shells, Buffers, Web), lit
+- *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
+  Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then a title per sidebar view (Files, Agents, Shells, Buffers, Web), lit
   while its view is shown.  At its right end the Application menu names the current workspace
   and lists the others.
 - *A title bar on every window*: a close box, the title between pinstripes, a zoom box and a
   collapse box.  Only the active window shows stripes and boxes.  The close box puts the window's
   buffer away, the zoom box gives the window the whole main area and back, the collapse box rolls
   it up to its title bar, and the title pops up the workspace's buffers.
+- *A bottom edge on every window*: placards for the buffer, its position, its diagnostics, its
+  branch and its mode, and the grow box in the active window's corner.
+- *Finder's icons*: folders, a hard disk, text, picture and blank documents, and a compact
+  Macintosh for terminals, in the sidebar, the title bars and the project tree.
 - *A sidebar laid out as a Finder list*: a header holding the view's buttons, column headings,
-  disclosure triangles, and one row per item with its date or place in the right-hand column.
+  disclosure triangles, one row per item with its date or place in the right-hand column, and a
+  count of the items at the bottom.
   The agents view lists every agent session, running or recorded, grouped by project: LispM's,
   and those of Claude Code, Codex and Hermes when their CLI is on ~PATH~.  Click one to resume it
   where it ran.
@@ -26,8 +32,8 @@ while every colour comes from the theme (Dracula by default).
   right, and *a workspace per project*, owning that project's buffers.
 - *Agents that see Emacs*: Claude Code connects over its IDE protocol, Codex and Hermes over MCP,
   and all of them can read the selection, the open and unsaved files, and Flymake's diagnostics.
-- *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot,
-  tree-sitter modes and doom-modeline.
+- *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot and
+  tree-sitter modes.
 - *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
   configuration files, SPC is the leader key, and terminals, chats and the sidebar keep Emacs keys
   so the programs in them get every key.
@@ -53,8 +59,9 @@ git clone https://github.com/RyanKung/lispm-emacs ~/.emacs.d
 emacs
 #+end_src
 
-The first start asks whether you edit with vim or Emacs keys, installs the packages (a few
-minutes, once), and offers to install the icon font the sidebar and tabs draw with.
+The first start asks whether you edit with vim or Emacs keys and which appearance you want,
+installs the packages (a few minutes, once), and offers to install the icon font agents' marks
+are drawn with.
 
 Then give LispM a model: with ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment
 nothing more is needed; for any other server, local or hosted, see LispM's
@@ -91,7 +98,8 @@ included.  With vim keys, =SPC= opens the leader: =SPC e= find a file, =SPC b= s
 
 Put them in =personal.el= next to =init.el= (git ignores it); it is loaded after lispm-emacs is
 set up, so it can change anything.  To pick the other editing style later, customize
-~lme-editing-style~.
+~lme-editing-style~; to switch appearance, use the λ menu's Appearance submenu or
+=M-x lme-set-theme=.
 
 An existing configuration can use lispm-emacs as a library instead:
 
