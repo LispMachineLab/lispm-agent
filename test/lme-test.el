@@ -251,6 +251,77 @@ while held."
           (lme-platinum-press press (lambda (_) nil) (lambda () (cl-incf ran))))
         (should (= ran 1))))))
 
+(ert-deftest lme-test-drag-swaps-windows ()
+  "A title bar dropped on another window swaps the two, columns permitting."
+  (lme-test--with-layout
+   (let* ((session (lme-test--session "lme-test session 8"))
+          (a (lme-test--file "lme-test-g.txt"))
+          (b (lme-test--file "lme-test-h.txt")))
+     (switch-to-buffer session)
+     (switch-to-buffer a)
+     (let* ((file-window (selected-window))
+            (lower (split-window-below)))
+       (set-window-buffer lower b)
+       (cl-flet ((drag (from to)
+                   (lme-platinum-drag-window
+                    (list 'drag-mouse-1 (list from 'tab-line '(0 . 0) 0)
+                          (list to 'tab-line '(0 . 0) 0)))))
+         ;; Two files trade places.
+         (drag file-window lower)
+         (should (eq (window-buffer file-window) b))
+         (should (eq (window-buffer lower) a))
+         ;; A file dropped on the session does not move.
+         (drag lower (get-buffer-window session))
+         (should (eq (window-buffer (get-buffer-window session)) session)))))))
+
+(ert-deftest lme-test-file-icons ()
+  "Files are shown with the document of their kind."
+  (should (equal (lme-platinum-file-icon-name "a.el") "document-lisp"))
+  (should (equal (lme-platinum-file-icon-name "a.rs") "document-code"))
+  (should (equal (lme-platinum-file-icon-name "README.md") "document-markdown"))
+  (should (equal (lme-platinum-file-icon-name "notes.org") "document-org"))
+  (should (equal (lme-platinum-file-icon-name "a.png") "document-image"))
+  (should (equal (lme-platinum-file-icon-name "LICENSE") "document"))
+  (dolist (name '("document-lisp" "document-code" "document-markdown" "document-org"
+                  "folder-git" "lispm" "robot"))
+    (should (file-exists-p (expand-file-name (format "icons/os9/%s.svg" name) lme-directory)))))
+
+(ert-deftest lme-test-scroll-thumb ()
+  "The thumb is as long as the share shown, and as far down as the start."
+  (let ((w lme-platinum-scroll-width))
+    ;; Everything shows: no thumb.
+    (should-not (lme-platinum-scroll-thumb 400 1 1000 1 1000))
+    ;; The top of a buffer ten times the window: a tenth of the track, at its top.
+    (pcase-let ((`(,top . ,length) (lme-platinum-scroll-thumb (+ 300 (* 2 w)) 1 101 1 1001)))
+      (should (= top w))
+      (should (= length 30)))
+    ;; The end: the thumb's bottom meets the down arrow.
+    (pcase-let ((`(,top . ,length) (lme-platinum-scroll-thumb (+ 300 (* 2 w)) 901 1001 1 1001)))
+      (should (= (+ top length) (+ 300 w))))
+    ;; A short thumb is never shorter than a box.
+    (should (= (cdr (lme-platinum-scroll-thumb 400 1 2 1 100000)) 16))))
+
+(ert-deftest lme-test-scroll-bar-draws ()
+  "Scroll bars draw active, inactive, and with nothing to scroll."
+  (let ((palette (lme-platinum--derive-palette "#FFFFFF" "#000000" "#777777" "#6363CE")))
+    (should (eq (dom-tag (lme-platinum-draw-scroll-bar palette 300 '(40 . 30) t)) 'svg))
+    (should (eq (dom-tag (lme-platinum-draw-scroll-bar palette 300 nil t)) 'svg))
+    (should (eq (dom-tag (lme-platinum-draw-scroll-bar palette 300 '(40 . 30) nil)) 'svg))))
+
+(ert-deftest lme-test-scroll-bar-windows ()
+  "Files get scroll bars; sessions and side windows other than lists do not."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((file (lme-test--file "lme-test-i.txt"))
+          (session (lme-test--session "lme-test session 9")))
+      (set-window-buffer (selected-window) file)
+      (should (lme-platinum--scroll-window-p (selected-window)))
+      (set-window-buffer (selected-window) session)
+      (should-not (lme-platinum--scroll-window-p (selected-window)))
+      (let ((side (display-buffer-in-side-window (get-buffer-create " lme-test popup")
+                                                 '((side . bottom)))))
+        (should-not (lme-platinum--scroll-window-p side))))))
+
 (ert-deftest lme-test-title-bar-clicks ()
   "A title bar brings its window forward, rolls up on a double click, and
 pops up its buffers on a Meta click."

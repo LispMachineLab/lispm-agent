@@ -334,16 +334,16 @@ row's text."
       (add-text-properties beg (point) properties))
     (insert "\n")))
 
-(defun lme-sidebar--insert-group (open name meta action help)
+(defun lme-sidebar--insert-group (open name meta action help &optional directory)
   "Insert a group's row: a disclosure triangle, OPEN or not, a folder and NAME.
-META sits in the right-hand column; clicking the row calls ACTION,
-described by HELP."
+The folder is badged when DIRECTORY is a git repository.  META sits in
+the right-hand column; clicking the row calls ACTION, described by HELP."
   (let ((beg (point)))
     (insert (lme-sidebar--row
              (concat (lme-sidebar--blank '(space :width (8)))
                      (propertize (lme-platinum-triangle open) 'face 'lme-platinum-list)
                      (lme-sidebar--blank '(space :width (6)))
-                     (lme-platinum-icon "folder")
+                     (lme-platinum-folder-icon directory)
                      (lme-sidebar--blank '(space :width (6))))
              (propertize (lme-sidebar--one-line name 200)
                          'face '(:inherit lme-platinum-list :weight bold))

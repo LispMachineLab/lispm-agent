@@ -252,8 +252,10 @@ tall and the content below never shifts when the focus moves."
 ;;;; Icons
 ;;
 ;; Finder's small icons, drawn as sixteen-pixel SVGs in icons/os9: a
-;; folder, a hard disk, documents (text, picture, blank), a compact
-;; Macintosh standing for a terminal, and a small robot for the agents.
+;; folder (badged when it holds a git repository), a hard disk, documents
+;; (text, code, Lisp, Markdown, Org, picture, blank), a compact Macintosh
+;; standing for a terminal, a small robot for the agents and LispM's own
+;; application diamond.
 ;; Unlike the chrome, icons keep their own colours, as Mac OS 9's did
 ;; whatever the appearance.
 
@@ -277,21 +279,56 @@ LispM's rainbow λ.  Where images cannot be shown, a blank stands in."
                                           lme-platinum--icons)))
       (propertize " " 'face 'lme-platinum-list 'display '(space :width (16))))))
 
+(defconst lme-platinum-lisp-extensions '("el" "lisp" "lsp" "cl" "scm" "ss" "rkt" "clj" "cljs"
+                                         "cljc" "edn" "fnl")
+  "Extensions of files shown with the Lisp document icon.")
+
+(defconst lme-platinum-code-extensions
+  '("c" "h" "cc" "cpp" "hpp" "m" "mm" "swift" "rs" "go" "zig" "py" "rb" "js" "jsx" "ts" "tsx"
+    "java" "kt" "scala" "hs" "ml" "ex" "exs" "erl" "lua" "php" "sh" "bash" "zsh" "fish" "nix"
+    "sol" "sql" "css" "scss" "html" "xml" "json" "yaml" "yml" "toml" "proto" "mk" "cmake")
+  "Extensions of files shown with the code document icon.")
+
+(defun lme-platinum-file-icon-name (file)
+  "Return the name of the document icon of FILE, by its kind."
+  (let ((extension (downcase (or (file-name-extension file) ""))))
+    (cond ((string-match-p (image-file-name-regexp) file) "document-image")
+          ((member extension lme-platinum-lisp-extensions) "document-lisp")
+          ((member extension '("md" "markdown" "mkd")) "document-markdown")
+          ((equal extension "org") "document-org")
+          ((member extension lme-platinum-code-extensions) "document-code")
+          (t "document"))))
+
+(defun lme-platinum-folder-icon (directory)
+  "Return the folder icon of DIRECTORY: badged when it is a git repository."
+  (lme-platinum-icon (if (and directory
+                              (file-exists-p (expand-file-name ".git" directory)))
+                         "folder-git"
+                       "folder")))
+
+(defvar lispm-directory)
+
 (defun lme-platinum-buffer-icon (buffer)
   "Return the Finder icon of BUFFER.
 An agent shows its own mark; a terminal, a compact Macintosh; a
-directory, a folder; a file, a document, a picture for an image; any
-other buffer, a blank document."
+directory, a folder; LispM's own records, LispM's diamond; a file, the
+document of its kind; any other buffer, a blank document."
   (with-current-buffer buffer
     (cond ((and (fboundp 'lme-agent--buffer-p) (lme-agent--buffer-p buffer))
            (lme-agent--icon (lme-agent--buffer-agent buffer)))
           ((derived-mode-p 'eat-mode 'term-mode 'shell-mode 'eshell-mode)
            (lme-platinum-icon "computer"))
-          ((derived-mode-p 'dired-mode) (lme-platinum-icon "folder"))
+          ((derived-mode-p 'dired-mode) (lme-platinum-folder-icon default-directory))
+          ((and buffer-file-name (boundp 'lispm-directory)
+                (file-in-directory-p buffer-file-name lispm-directory))
+           (lme-platinum-icon "lispm"))
           (buffer-file-name
-           (lme-platinum-icon (if (string-match-p (image-file-name-regexp) buffer-file-name)
-                                  "document-image"
-                                "document")))
+           (lme-platinum-icon
+            (let ((name (lme-platinum-file-icon-name buffer-file-name)))
+              (cond ((not (equal name "document")) name)
+                    ((derived-mode-p 'lisp-data-mode) "document-lisp")
+                    ((derived-mode-p 'prog-mode) "document-code")
+                    (t name)))))
           (t (lme-platinum-icon "document-blank")))))
 
 ;;;; Title bars
@@ -387,18 +424,40 @@ HELP describes it.  It is pressed rather than clicked, see
     (keymap-set map "<tab-line> <double-down-mouse-1>" #'ignore)
     (keymap-set map "<tab-line> <double-mouse-1>"
                 (lme-platinum--window-command #'lme-platinum-shade-or-zoom))
+    (keymap-set map "<tab-line> <drag-mouse-1>" #'lme-platinum-drag-window)
     (keymap-set map "<tab-line> M-<down-mouse-1>" #'ignore)
     (keymap-set map "<tab-line> M-<mouse-1>"
                 (lme-platinum--window-command #'lme-platinum-title-menu))
     map)
   "Keymap of a title bar outside its boxes, as Mac OS 9's title bars
 behaved: a click brings the window forward, a double click rolls it up,
-and a Command click (Meta) pops up its buffers.")
+a drag moves the window, and a Command click (Meta) pops up its buffers.")
 
 (defconst lme-platinum--title-help
-  (format "Double-click to roll up; %s-click for the window's buffers"
+  (format "Drag onto another window to swap them; double-click to roll up; %s-click for \
+the window's buffers"
           (if (eq system-type 'darwin) "⌘" "M"))
   "Help shown over a title bar.")
+
+(declare-function lme-main-area--window-p "lme-interface" (window))
+(declare-function lme-main-area--terminal-p "lme-interface" (window))
+
+(defun lme-platinum-drag-window (event)
+  "Move the window whose title bar EVENT dragged to where it was dropped.
+Tiled windows cannot float as Mac OS 9's did, so a window dropped on
+another trades places with it.  The main area's columns hold: a session
+trades places only with a session, anything else only with another
+window that is not a session."
+  (interactive "e")
+  (let ((from (posn-window (event-start event)))
+        (to (posn-window (event-end event))))
+    (when (and (windowp to) (window-live-p to) (not (eq from to))
+               (lme-main-area--window-p from) (lme-main-area--window-p to))
+      (if (eq (and (lme-main-area--terminal-p from) t)
+              (and (lme-main-area--terminal-p to) t))
+          (progn (window-swap-states from to)
+                 (select-window to))
+        (message "Sessions keep to the left, everything else to the right")))))
 
 (defun lme-platinum--space (width)
   "Return a blank WIDTH pixels wide."
@@ -704,14 +763,15 @@ title while the browser workspace is selected."
 (defun lme-platinum-application-menu ()
   "Return the right end of the menu bar: the Application menu.
 It names the current workspace with its icon, as Mac OS 9's named the
-frontmost application: the hard disk for the default workspace, a folder
-for a project's.  Clicked, it lists every workspace."
+frontmost application: the hard disk for the default workspace, a
+project's folder for a project's.  Clicked, it lists every workspace."
   (let ((name (alist-get 'name (tab-bar--current-tab))))
     (list (lme-platinum--menu-title
            'lme-application
-           (concat (lme-platinum-icon (if (equal name (bound-and-true-p tabspaces-default-tab))
-                                          "disk"
-                                        "folder"))
+           (concat (if (equal name (bound-and-true-p tabspaces-default-tab))
+                       (lme-platinum-icon "disk")
+                     (lme-platinum-folder-icon (car (rassoc name (bound-and-true-p
+                                                                  tabspaces-project-tab-map)))))
                    " " name " ▾")
            #'lme-platinum-workspace-menu "Workspaces"
            (eq lme-platinum--open-menu 'lme-application)))))
@@ -816,6 +876,337 @@ be resized; a side window cannot."
     (:eval (lme-platinum-mode-line-right)))
   "The mode line of every window: its bottom edge, laid out as Mac OS 9's.")
 
+;;;; Scroll bars
+;;
+;; Mac OS 9's scroll bar runs down a window's right edge: an arrow box at
+;; each end, a recessed track, and a thumb in the variation colour with
+;; grip ridges.  Each window that scrolls gets one, drawn as an SVG in a
+;; child frame laid over the window's right fringe, which is widened to
+;; make room:
+;;
+;;   window --geometry--> child frame position and height
+;;   window --start, end, size--> thumb --SVG--> child frame's one line
+;;
+;; Bars follow the windows on every command and scroll, and an inactive
+;; window's bar shows its empty track, as Mac OS 9's did.  Sessions
+;; (terminals and chats) scroll their own way and get none.
+
+(defcustom lme-platinum-scroll-bars t
+  "Non-nil gives windows Mac OS 9's scroll bars, see `lme-platinum-scroll-sync'."
+  :type 'boolean)
+
+(defconst lme-platinum-scroll-width 15
+  "Width in pixels of a scroll bar, and the height of its arrow boxes.")
+
+(defun lme-platinum-scroll-thumb (height start end min max)
+  "Return the thumb of a scroll bar HEIGHT pixels tall, as (TOP . LENGTH).
+The window shows from START to END of a buffer spanning MIN to MAX.  The
+value is nil when everything shows, or when the track is too short."
+  (let* ((arrow lme-platinum-scroll-width)
+         (track (- height (* 2 arrow)))
+         (size (- max min))
+         (shown (- end start)))
+    (when (and (> size 0) (> track 24) (or (> start min) (< end max)))
+      (let* ((length (min track (max 16 (round (* track (/ (float shown) size))))))
+             (fraction (/ (float (- start min)) (max 1 (- size shown)))))
+        (cons (+ arrow (round (* (- track length) (min 1.0 fraction)))) length)))))
+
+(defun lme-platinum--bevel (svg x y width height palette lit shaded fill)
+  "Draw a box of WIDTH by HEIGHT at X, Y of SVG: framed, FILL lit and shaded.
+LIT and SHADED colour its top-left and bottom-right inner edges; the
+frame is PALETTE's."
+  (lme-platinum--fill svg x y width height (plist-get palette :frame))
+  (lme-platinum--fill svg (1+ x) (1+ y) (- width 2) (- height 2) fill)
+  (lme-platinum--fill svg (1+ x) (1+ y) (- width 2) 1 lit)
+  (lme-platinum--fill svg (1+ x) (1+ y) 1 (- height 2) lit)
+  (lme-platinum--fill svg (1+ x) (+ y height -2) (- width 2) 1 shaded)
+  (lme-platinum--fill svg (+ x width -2) (1+ y) 1 (- height 2) shaded))
+
+(defun lme-platinum-draw-scroll-bar (palette height thumb active)
+  "Return an SVG of a scroll bar HEIGHT pixels tall in PALETTE.
+THUMB, as returned by `lme-platinum-scroll-thumb', places the thumb; nil
+draws none, and the arrows dimmed.  An inactive bar, ACTIVE nil, shows
+only its empty track."
+  (let* ((w lme-platinum-scroll-width)
+         (svg (svg-create w height))
+         (chrome (plist-get palette :chrome))
+         (track (lme-tab-bar--blend chrome (plist-get palette :shade) 0.3))
+         (accent (plist-get palette :accent)))
+    ;; The track: recessed, a frame line on its left and a shadow inside it.
+    (lme-platinum--fill svg 0 0 w height (plist-get palette :frame))
+    (lme-platinum--fill svg 1 0 (1- w) height track)
+    (lme-platinum--fill svg 1 0 1 height (plist-get palette :shade))
+    (when active
+      (dolist (end '(up down))
+        (let ((y (if (eq end 'up) 0 (- height w)))
+              (ink (plist-get palette (if thumb :text :muted))))
+          (lme-platinum--bevel svg 0 y w w palette
+                               (plist-get palette :light) (plist-get palette :shade) chrome)
+          (svg-polygon svg (if (eq end 'up)
+                               `((7.5 . ,(+ y 4)) (3.5 . ,(+ y 9)) (11.5 . ,(+ y 9)))
+                             `((7.5 . ,(+ y 10)) (3.5 . ,(+ y 5)) (11.5 . ,(+ y 5))))
+                       :fill ink :stroke "none")))
+      (when thumb
+        (let ((top (car thumb)) (length (cdr thumb)))
+          (lme-platinum--bevel svg 0 top w length palette
+                               (lme-tab-bar--blend accent "#FFFFFF" 0.45)
+                               (lme-tab-bar--blend accent "#000000" 0.4)
+                               accent)
+          ;; Grip ridges across the thumb's middle.
+          (when (>= length 14)
+            (let ((middle (+ top (/ length 2))))
+              (dolist (offset '(-4 -1 2))
+                (lme-platinum--fill svg 4 (+ middle offset) 7 1
+                                    (lme-tab-bar--blend accent "#FFFFFF" 0.45))
+                (lme-platinum--fill svg 4 (+ middle offset 1) 7 1
+                                    (lme-tab-bar--blend accent "#000000" 0.4))))))))
+    svg))
+
+(defvar lme-platinum--scroll-bars nil
+  "Alist of windows to the child frames holding their scroll bars.")
+
+(defvar lme-platinum--scroll-timer nil
+  "Pending timer bringing the scroll bars up to date, if any.")
+
+(declare-function lme-sidebar-buffer-view "lme-sidebar" (buffer))
+(declare-function lme-terminal-buffer-p "lme-interface" (buffer))
+
+(defun lme-platinum--scroll-window-p (window)
+  "Return non-nil when WINDOW gets a scroll bar.
+Every window of the main area does but sessions and the browser's page;
+of side windows, only the sidebar's lists."
+  (let ((buffer (window-buffer window)))
+    (and (not (window-minibuffer-p window))
+         (not (window-parameter window 'lme-chrome))
+         (not (lme-terminal-buffer-p buffer))
+         (not (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                       'xwidget-webkit-mode))
+         (or (not (window-parameter window 'window-side))
+             (lme-sidebar-buffer-view buffer)
+             (eq (buffer-local-value 'major-mode buffer) 'treemacs-mode)))))
+
+(defvar lme-platinum--scroll-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (press '("<down-mouse-1>" "<double-down-mouse-1>" "<triple-down-mouse-1>"))
+      (keymap-set map press #'lme-platinum-scroll-press))
+    (dolist (release '("<mouse-1>" "<double-mouse-1>" "<triple-mouse-1>" "<drag-mouse-1>"))
+      (keymap-set map release #'ignore))
+    (keymap-set map "<wheel-up>" #'lme-platinum-scroll-wheel)
+    (keymap-set map "<wheel-down>" #'lme-platinum-scroll-wheel)
+    map)
+  "Keymap of a scroll bar's buffer.")
+
+(defun lme-platinum--scroll-frame (window)
+  "Return the child frame holding WINDOW's scroll bar, made when missing.
+It takes no focus and hooks run for new frames do not see it."
+  (let ((frame (window-parameter window 'lme-platinum-scroll-frame)))
+    (if (frame-live-p frame)
+        frame
+      (let* ((buffer (generate-new-buffer " *lme-scroll-bar*"))
+             (frame (let ((after-make-frame-functions nil)
+                          (before-make-frame-hook nil))
+                      (make-frame
+                       `((parent-frame . ,(window-frame window))
+                         (minibuffer . nil) (no-accept-focus . t) (no-focus-on-map . t)
+                         (undecorated . t) (unsplittable . t) (no-other-frame . t)
+                         (internal-border-width . 0) (child-frame-border-width . 0)
+                         (left-fringe . 0) (right-fringe . 0)
+                         (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
+                         (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
+                         (line-spacing . 0) (cursor-type . nil) (no-special-glyphs . t)
+                         (desktop-dont-save . t) (visibility . nil)
+                         (background-color . ,(lme-platinum--color :chrome))
+                         (width . 2) (height . 1))))))
+        (with-current-buffer buffer
+          (setq-local mode-line-format nil
+                      header-line-format nil
+                      tab-line-format nil
+                      cursor-type nil
+                      cursor-in-non-selected-windows nil
+                      display-line-numbers nil
+                      truncate-lines t
+                      line-spacing 0
+                      ;; The bar's one line is as wide as the frame; scrolled
+                      ;; sideways to show point after it, it would lose a column.
+                      auto-hscroll-mode nil
+                      lme-platinum--scroll-target window)
+          (use-local-map lme-platinum--scroll-map))
+        (let ((root (frame-root-window frame)))
+          (set-window-buffer root buffer)
+          (set-window-dedicated-p root t)
+          (set-window-fringes root 0 0)
+          (set-window-margins root 0 0))
+        (set-frame-parameter frame 'lme-platinum-scroll-target window)
+        (set-window-parameter window 'lme-platinum-scroll-frame frame)
+        (push (cons window frame) lme-platinum--scroll-bars)
+        frame))))
+
+(defvar-local lme-platinum--scroll-target nil
+  "The window whose scroll bar this buffer draws.")
+
+(defun lme-platinum--scroll-update (window)
+  "Bring WINDOW's scroll bar up to date: place it, size it, draw it."
+  (let ((width lme-platinum-scroll-width))
+    (unless (= (or (cadr (window-fringes window)) 0) width)
+      (set-window-fringes window nil width nil t))
+    (let* ((frame (lme-platinum--scroll-frame window))
+           (inside (window-inside-pixel-edges window))
+           (x (- (nth 2 (window-pixel-edges window))
+                 (window-right-divider-width window)
+                 (window-scroll-bar-width window)
+                 width))
+           (y (nth 1 inside))
+           (height (max 1 (- (nth 3 inside) y)))
+           (buffer (window-buffer window))
+           (thumb (with-current-buffer buffer
+                    (lme-platinum-scroll-thumb height (window-start window)
+                                               (window-end window t)
+                                               (point-min) (point-max))))
+           (active (eq window (frame-selected-window (window-frame window))))
+           (place (list x y height))
+           (key (list lme-platinum--generation height thumb active)))
+      (unless (equal place (frame-parameter frame 'lme-platinum-scroll-place))
+        (set-frame-parameter frame 'lme-platinum-scroll-place place)
+        ;; Sized in pixels, below the width of the ten columns a window
+        ;; may otherwise not shrink under.
+        (let ((window-min-width 1)
+              (window-safe-min-width 1))
+          (set-frame-size frame width height t))
+        (set-frame-position frame x y))
+      (unless (equal key (frame-parameter frame 'lme-platinum-scroll-key))
+        (set-frame-parameter frame 'lme-platinum-scroll-key key)
+        (set-frame-parameter frame 'lme-platinum-scroll-thumb thumb)
+        (set-frame-parameter frame 'background-color (lme-platinum--color :chrome))
+        (let ((root (frame-root-window frame)))
+          (with-current-buffer (window-buffer root)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert (propertize " " 'display
+                                  (svg-image (lme-platinum-draw-scroll-bar
+                                              lme-platinum--palette height thumb active)
+                                             :ascent 100 :scale 1)))))
+          (set-window-point root 1)
+          (set-window-hscroll root 0)))
+      (unless (frame-visible-p frame)
+        (make-frame-visible frame)))))
+
+(defun lme-platinum--scroll-drop (window frame)
+  "Take WINDOW's scroll bar, held in child FRAME, away."
+  (when (frame-live-p frame)
+    (let ((buffer (window-buffer (frame-root-window frame))))
+      (delete-frame frame t)
+      (kill-buffer buffer)))
+  (when (window-live-p window)
+    (set-window-parameter window 'lme-platinum-scroll-frame nil)
+    (set-window-fringes window nil nil nil t)))
+
+(defun lme-platinum-scroll-sync ()
+  "Give every window that wants a scroll bar its own, up to date, and
+take the bars of windows gone or no longer wanting one away."
+  (setq lme-platinum--scroll-timer nil)
+  (let ((wanted nil))
+    (when (and lme-platinum-scroll-bars lme-platinum--palette)
+      (dolist (frame (frame-list))
+        (when (and (frame-visible-p frame) (not (frame-parent frame))
+                   (display-graphic-p frame))
+          (dolist (window (window-list frame 'no-mini))
+            (when (lme-platinum--scroll-window-p window)
+              (push window wanted)
+              (lme-platinum--scroll-update window))))))
+    (setq lme-platinum--scroll-bars
+          (seq-filter (pcase-lambda (`(,window . ,frame))
+                        (or (and (memq window wanted) (frame-live-p frame))
+                            (progn (lme-platinum--scroll-drop window frame) nil)))
+                      lme-platinum--scroll-bars))))
+
+(defun lme-platinum--scroll-schedule (&rest _)
+  "Bring the scroll bars up to date once Emacs has redisplayed."
+  (unless (timerp lme-platinum--scroll-timer)
+    (setq lme-platinum--scroll-timer
+          (run-with-idle-timer 0 nil #'lme-platinum-scroll-sync))))
+
+(defun lme-platinum--scroll-in (window step)
+  "Call STEP, a function of no arguments, with WINDOW selected; redraw its bar."
+  (with-selected-window window
+    (ignore-errors (funcall step)))
+  (lme-platinum--scroll-update window)
+  (redisplay t))
+
+(defun lme-platinum--scroll-repeat (window step)
+  "Call STEP in WINDOW, and again and again while the mouse button is held.
+As Mac OS 9's arrows and track did, holding repeats after a pause."
+  (lme-platinum--scroll-in window step)
+  (when (sit-for 0.35)
+    (while (sit-for 0.05)
+      (lme-platinum--scroll-in window step))))
+
+(defun lme-platinum--scroll-mouse-y (frame)
+  "Return the mouse's height in pixels from the top of scroll bar FRAME."
+  (pcase-let ((`(,over ,_ . ,y) (mouse-pixel-position)))
+    (cond ((null y) 0)
+          ((eq over frame) y)
+          (t (- y (cdr (frame-position frame)))))))
+
+(defun lme-platinum--scroll-drag (window frame grab thumb)
+  "Drag WINDOW's thumb, held GRAB pixels from its top, until the button rises.
+THUMB is its (TOP . LENGTH) when the drag began; FRAME holds the bar."
+  (let* ((width lme-platinum-scroll-width)
+         (height (frame-pixel-height frame))
+         (track (- height (* 2 width)))
+         (length (cdr thumb)))
+    (track-mouse
+      (while (mouse-movement-p (read-event))
+        (let* ((top (max width (min (- height width length)
+                                    (- (lme-platinum--scroll-mouse-y frame) grab))))
+               (fraction (/ (float (- top width)) (max 1 (- track length)))))
+          (lme-platinum--scroll-in
+           window
+           (lambda ()
+             (let* ((shown (- (window-end nil t) (window-start)))
+                    (span (max 0 (- (point-max) (point-min) shown)))
+                    (position (+ (point-min) (round (* fraction span)))))
+               (set-window-start nil (save-excursion (goto-char position)
+                                                     (line-beginning-position)))))))))))
+
+(defun lme-platinum-scroll-press (event)
+  "Act on a press in a scroll bar, as Mac OS 9's scroll bars did.
+The arrows scroll a line and the track above or below the thumb a page,
+over and over while held; the thumb drags the window's text along."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (frame (window-frame (posn-window position)))
+         (window (frame-parameter frame 'lme-platinum-scroll-target))
+         (thumb (frame-parameter frame 'lme-platinum-scroll-thumb))
+         (y (cdr (posn-x-y position)))
+         (height (frame-pixel-height frame))
+         (width lme-platinum-scroll-width))
+    (when (window-live-p window)
+      (cond ((< y width) (lme-platinum--scroll-repeat window (lambda () (scroll-down 1))))
+            ((>= y (- height width)) (lme-platinum--scroll-repeat window (lambda () (scroll-up 1))))
+            ((null thumb))
+            ((< y (car thumb)) (lme-platinum--scroll-repeat window #'scroll-down))
+            ((>= y (+ (car thumb) (cdr thumb))) (lme-platinum--scroll-repeat window #'scroll-up))
+            (t (lme-platinum--scroll-drag window frame (- y (car thumb)) thumb))))))
+
+(defun lme-platinum-scroll-wheel (event)
+  "Scroll the window of the scroll bar the mouse wheel turned over, by EVENT."
+  (interactive "e")
+  (let ((window (frame-parameter (window-frame (posn-window (event-start event)))
+                                 'lme-platinum-scroll-target)))
+    (when (window-live-p window)
+      (lme-platinum--scroll-in window (if (eq (event-basic-type event) 'wheel-up)
+                                          (lambda () (scroll-down 3))
+                                        (lambda () (scroll-up 3)))))))
+
+(defun lme-platinum-scroll-enable ()
+  "Keep the scroll bars in step with windows, scrolling and selection."
+  (add-hook 'post-command-hook #'lme-platinum--scroll-schedule)
+  (add-hook 'window-scroll-functions #'lme-platinum--scroll-schedule)
+  (add-hook 'window-size-change-functions #'lme-platinum--scroll-schedule)
+  (add-hook 'window-selection-change-functions #'lme-platinum--scroll-schedule)
+  (add-hook 'window-buffer-change-functions #'lme-platinum--scroll-schedule)
+  (lme-platinum--scroll-schedule))
+
 ;;;; Clock
 
 (defcustom lme-platinum-clock-format "%-I:%M %p"
@@ -900,6 +1291,14 @@ as the triangles take the theme's colour."
             (treemacs-create-icon :icon ,(funcall row no-triangle "document-image")
                                   :extensions ("png" "jpg" "jpeg" "gif" "svg" "webp" "bmp"
                                                "tif" "tiff" "ico" "heic"))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-lisp")
+                                  :extensions ,lme-platinum-lisp-extensions)
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-markdown")
+                                  :extensions ("md" "markdown" "mkd"))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-org")
+                                  :extensions ("org"))
+            (treemacs-create-icon :icon ,(funcall row no-triangle "document-code")
+                                  :extensions ,lme-platinum-code-extensions)
             (treemacs-create-icon :icon ,(funcall row no-triangle "document")
                                   :extensions (fallback))))
        t)
@@ -1072,6 +1471,10 @@ it, as on every theme change, is idempotent."
                          lme-platinum-clock
                          lme-platinum-application-menu))
   (lme-platinum--start-clock)
+  ;; Frames take sizes in pixels: a scroll bar is exactly as tall as its
+  ;; window, and a maximized frame fills the screen.
+  (setq frame-resize-pixelwise t)
+  (lme-platinum-scroll-enable)
   ;; Window frames: a dark outline on each window's edge, platinum between.
   (setq window-divider-default-places t
         window-divider-default-right-width 5

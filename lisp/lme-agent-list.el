@@ -41,7 +41,8 @@
 (declare-function lme-agent--emacs-buffer-agent "lme-ai" (buffer))
 (declare-function lme-sidebar--insert-entry "lme-sidebar"
                   (icon title meta action help &optional properties depth))
-(declare-function lme-sidebar--insert-group "lme-sidebar" (open name meta action help))
+(declare-function lme-sidebar--insert-group "lme-sidebar"
+                  (open name meta action help &optional directory))
 (declare-function lme-sidebar--insert-columns "lme-sidebar" (name meta))
 (declare-function lme-sidebar--count "lme-sidebar" (n singular &optional detail))
 (defvar lme-platinum-info)
@@ -321,7 +322,8 @@ Finder list; its sessions are rows one level in, newest first."
      (lme-agent--age (plist-get group :time) now)
      (apply-partially #'lme-agent-list--toggle-fold group)
      (format "%s %s" (if folded "Open" "Close")
-             (if chats "project-less conversations" directory)))
+             (if chats "project-less conversations" directory))
+     (unless chats directory))
     (unless folded
       ;; A terminal whose session is already listed shows as that session's
       ;; running row; only terminals without a recorded session list here.

@@ -20,13 +20,19 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   clicked: it sinks while held and acts when let go over it.  The close box puts the window's
   buffer away, the zoom box gives the window the whole main area and back, and the collapse box
   rolls it up to its title bar.  Double-click a title bar to roll the window up (or zoom one alone
-  in its column); Command-click it for the workspace's buffers.
+  in its column); drag it onto another window to swap the two (sessions only with sessions);
+  Command-click it for the workspace's buffers.
+- *Scroll bars*: Mac OS 9's, down each window's right edge: arrow boxes at both ends, a recessed
+  track and a thumb in the accent colour with grip ridges.  Arrows and track repeat while held,
+  the thumb drags.  An inactive window shows its empty track; sessions scroll their own way.
 - *Window frames*: neighbouring windows meet as Mac OS 9's windows were framed, a dark outline
   on each edge and platinum between.
 - *A bottom edge on every window*: placards for the buffer, its position, its diagnostics, its
   branch and its mode, and the grow box in the active window's corner.
-- *Finder's icons*: folders, a hard disk, text, picture and blank documents, a compact Macintosh
-  for terminals and a robot for the agents, in the sidebar, the title bars and the project tree.
+- *Finder's icons*: folders (badged when they hold a git repository), a hard disk, documents by
+  kind (text, code, Lisp, Markdown, Org, picture), a compact Macintosh for terminals, a robot for
+  the agents and LispM's diamond for its records, in the sidebar, the title bars, the Application
+  menu and the project tree.
 - *A sidebar laid out as a Finder list*: a header holding the view's bevel buttons, column
   headings, disclosure triangles, one row per item with its date or place in the right-hand
   column, shaded down its length as the sorted column was, the selected row in the highlight
