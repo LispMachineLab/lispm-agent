@@ -76,7 +76,7 @@ SCOPE `project' (the default) is shared by the agents of its project;
     buffer))
 
 (defun lispm-memory--buffer (agent &optional scope role)
-  "Buffer of AGENT's memory in SCOPE (see `lispm-memory-file')."
+  "Buffer of AGENT's memory in SCOPE, or of ROLE's (see `lispm-memory-file')."
   (lispm-memory--visit (lispm-memory-file agent scope role)
                        (if (eq scope 'role)
                            (format "#+title: Memory of the %s role\n"

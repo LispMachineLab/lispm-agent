@@ -207,7 +207,7 @@ AGENT is the running agent of the current project, or a new one."
 
 ;;;###autoload
 (defun lispm-ask-region (beg end text)
-  "Ask the current project's agent about the region from BEG to END."
+  "Ask the current project's agent TEXT about the region from BEG to END."
   (interactive (list (region-beginning) (region-end)
                      (read-string "Ask about the region: ")))
   (lispm-ask (or (lispm--project-agent) (lispm-start))
