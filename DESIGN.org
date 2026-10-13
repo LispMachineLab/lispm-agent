@@ -297,18 +297,29 @@ it. Its restarts:
 | ~request-failed~ | ~retry~ the same request; ~use-model~: another backend or model; ~abort~ |
 | ~step-limit~     | ~continue~ for as many requests again; ~abort~                           |
 
-They are chosen wherever approvals are given: the chat shows a box with the restarts numbered
-(writing a message instead stops there and sends it); in the org transcript ~C-c C-y~ offers
-them, and changing the heading's TODO state to ~DONE~ takes the default, to ~DENIED~ aborts; the
-agenda lists waiting conditions with waiting calls. In Lisp, ~lispm-restart~ chooses one, and
-~lispm-condition-handlers~ chooses without asking, as ~handler-bind~ would, at once or after a
-delay and at most so many times in a turn: ~((request-failed retry :after 60 :times 2))~. A
-chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~); ~abort~ removes it and
+They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
+in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
+takes the default, to ~DENIED~ aborts; the agenda lists waiting conditions with waiting calls.
+Whatever the user asks of the agent next goes past the condition, stopping there: a message
+written in the chat, one written in org under a new ~* User~ heading after the condition,
+~/clear~, ~/compact~. In Lisp, ~lispm-restart~ chooses one, and handlers choose without asking,
+as ~handler-bind~ would, at once or after a delay, at most so many times in a turn, then perhaps
+another restart: ~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
+started go by ~lispm-condition-handlers~, none by default: they wait for the user. Turns started
+by another agent's message (a helper's) or by an event (a hook, a timer) go by
+~lispm-unattended-condition-handlers~, since nobody may be watching and someone, or the next
+event, waits for them: by default a failed request is tried again twice, a minute apart, then
+the turn stops, as one reaching the step limit does at once.
+
+A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
+given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and
 ends the turn with the note a turn stopped early always ended with, so the transcript is as it
 was before restarts existed. A condition survives a restart of Emacs like a call awaiting
 approval: reopening the session waits at it again, and since requests are built from the
 transcript, ~retry~ needs nothing else saved. Meanwhile the agent is busy: messages and events
-queue in its inbox, a helper's caller keeps waiting, and ~lispm-abort~ stops the turn there.
+queue in its inbox, a helper's caller keeps waiting, and ~lispm-abort~ stops the turn there. A
+helper the user writes to does not retire once it has replied to its caller: it stays to answer
+them.
 
 *Explainability* comes in four layers: the ~why~ of every write or exec call; the transcript
 itself (every call's input, state and result); ~lispm-show-request~ (the raw request the model

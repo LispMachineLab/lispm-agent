@@ -1781,11 +1781,12 @@ started, after the session opened."
   `(error :status ,status :type ,type :message ,message))
 
 (defmacro lispm-test-with-conditions (&rest body)
-  "Run BODY in `lispm-test-env', failed requests not retried by the transport."
+  "Run BODY in `lispm-test-env', failed requests not retried, no handlers."
   (declare (indent 0))
   `(lispm-test-env
      (let ((lispm-api-max-retries 0)
-           (lispm-condition-handlers nil))
+           (lispm-condition-handlers nil)
+           (lispm-unattended-condition-handlers nil))
        ,@body)))
 
 (defun lispm-test--condition-id (agent)
@@ -1928,10 +1929,11 @@ started, after the session opened."
 (ert-deftest lispm-test-condition-handlers ()
   "A handler chooses a restart without asking, as often as it may, then the user does."
   (lispm-test-with-conditions
-    (let ((lispm-condition-handlers '((request-failed retry :after 0.05)))
-          (agent (lispm-defagent tester "Test agent." :root project))
-          seen)
-      (add-hook 'lispm-condition-functions (lambda (_agent c) (push (plist-get c :id) seen)))
+    (let* ((lispm-condition-handlers '((request-failed retry :after 0.05)))
+           (agent (lispm-defagent tester "Test agent." :root project))
+           (seen nil)
+           (note (lambda (_agent c) (push (plist-get c :id) seen))))
+      (add-hook 'lispm-condition-functions note)
       (unwind-protect
           (progn
             (setq lispm-test--scripts
@@ -1948,7 +1950,133 @@ started, after the session opened."
             (should (equal (plist-get (lispm-agent-condition agent) :id) "c2"))
             (lispm-restart agent "c2" 'retry)
             (should (lispm-test--wait (lispm-test--idle-p agent))))
-        (setq lispm-condition-functions nil)))))
+        (remove-hook 'lispm-condition-functions note)))))
+
+(ert-deftest lispm-test-condition-unattended ()
+  "Turns nobody started from the keyboard go by their own handlers, and end."
+  (lispm-test-with-conditions
+    (lispm-defrole reviewer "Reviews changes.")
+    (let ((lispm-unattended-condition-handlers
+           '((request-failed retry :after 0.05 :times 1 :then abort)))
+          (boss (lispm-defagent boss :root project)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "No review.")))
+              (reviewer@project ,(lispm-test--failure 529 "overloaded_error" "Overloaded")
+                                ,(lispm-test--failure 529 "overloaded_error" "Overloaded"))))
+      (lispm-tell boss "get a review")
+      ;; The helper's failures are retried once, then its turn stops, and
+      ;; the caller goes on with the failure.
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (null (cdr (lispm-agents)))))))
+      (should (= (cl-count-if (lambda (b) (string-match-p "You are \"reviewer" (alist-get 'system b)))
+                              lispm-test--requests)
+                 2))
+      (should (string-match-p "reviewer@project replied:\nThe request failed (HTTP 529)"
+                              (format "%S" (alist-get 'messages (car lispm-test--requests)))))
+      ;; The user's own turn waits for them, as before.
+      (setq lispm-test--scripts `((boss ,(lispm-test--failure 529 "overloaded_error" "Overloaded"))))
+      (lispm-tell boss "again")
+      (lispm-test--condition-id boss)
+      (sleep-for 0.1)
+      (should (lispm-agent-condition boss)))))
+
+(ert-deftest lispm-test-condition-going-past ()
+  "Writing in a helper's chat, in org, or a command goes past a condition."
+  (lispm-test-with-conditions
+    (lispm-defrole reviewer "Reviews changes.")
+    (let ((boss (lispm-defagent boss :root project)))
+      ;; A helper the user writes to stays, to answer them, in its session.
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "No review.")))
+              (reviewer@project ,(lispm-test--failure 500 "api_error" "Boom")
+                                ,(lispm-test--msg "end_turn" (lispm-test--text "Fine by me.")))))
+      (lispm-tell boss "get a review")
+      (should (lispm-test--wait (lambda () (lispm-get-agent 'reviewer@project t))))
+      (let* ((helper (lispm-get-agent 'reviewer@project))
+             (chat (lispm-chat helper))
+             (sessions (length (lispm--session-files-in "projects/*/sessions/*.org"))))
+        (lispm-test--condition-id helper)
+        (lispm-test--chat-type chat "never mind")
+        (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                  (funcall (lispm-test--idle-p helper))
+                                                  (string-match-p "Fine by me" (lispm-test--transcript helper))))))
+        (should (memq helper (lispm-agents)))
+        (should (buffer-live-p chat))
+        (should (= (length (lispm--session-files-in "projects/*/sessions/*.org")) sessions))
+        (should (string-match-p "^\\* Note\nThe request failed (HTTP 500): api_error: Boom\n\\* User\nnever mind\n"
+                                (lispm-test--transcript helper)))))
+    ;; In the org interface: under a new * User heading after the condition.
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts `((tester ,(lispm-test--failure 500 "api_error" "Boom")
+                                          ,(lispm-test--msg "end_turn" (lispm-test--text "Sure.")))))
+      (lispm-tell agent "one")
+      (lispm-test--condition-id agent)
+      (with-current-buffer (lispm-agent-buffer agent)
+        (should-error (lispm-send) :type 'user-error)
+        (goto-char (point-max))
+        (insert "* User\ntwo instead\n")
+        (lispm-send))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "^\\* User\none\n\\* Note\nThe request failed (HTTP 500): api_error: Boom\n\\* User\ntwo instead\n\\* Assistant"
+                              (lispm-test--transcript agent)))
+      ;; /clear goes past it too.
+      (setq lispm-test--scripts `((tester ,(lispm-test--failure 500 "api_error" "Boom"))))
+      (lispm-tell agent "three")
+      (lispm-test--condition-id agent)
+      (let ((old (lispm-agent-buffer agent)))
+        (lispm-chat-clear agent "")
+        (should-not (lispm-agent-condition agent))
+        (should-not (eq (lispm-agent-buffer agent) old))))))
+
+(ert-deftest lispm-test-condition-use-model-recorded ()
+  "Another model needs naming, is recorded on the heading, and is kept on reopening."
+  (lispm-test-with-conditions
+    (let* ((lispm-backends (cons '(other :api anthropic :url "http://fake.invalid" :model "other-model")
+                                 lispm-backends))
+           (default-directory project)
+           (agent (lispm-start)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--failure 404 "not_found_error" "model")
+                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Hello.")))))
+      (lispm-tell agent "hi")
+      (let ((id (lispm-test--condition-id agent)))
+        ;; Without a value, nothing happens.
+        (should-error (lispm-restart agent id 'use-model) :type 'user-error)
+        (should (equal (plist-get (lispm-agent-condition agent) :id) id))
+        ;; Nor without a backend.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+          (should-error (lispm-choose-restart-named agent 'use-model) :type 'user-error))
+        (should (lispm-agent-condition agent))
+        (lispm-restart agent id 'use-model '(other . "bigger")))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p ":RESTART: use-model\n:VALUE: (other \\. \"bigger\")\n"
+                              (lispm-test--transcript agent)))
+      (should (string-match-p "↻ Retry with another backend or model: other, bigger"
+                              (mapconcat (lambda (i) (or (plist-get i :text) ""))
+                                         (lispm-chat-items (lispm-agent-buffer agent)) "\n")))
+      (let ((revived (lispm-resume-file (lispm-test--crash agent))))
+        (should (eq (lispm-agent-backend revived) 'other))
+        (should (equal (lispm-agent-model revived) "bigger"))))))
+
+(ert-deftest lispm-test-condition-commands ()
+  "Commands about a condition ask only what they need, and say when there is none."
+  (lispm-test-with-conditions
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts `((tester ,(lispm-test--failure 500 "api_error" "Boom"))))
+      (lispm-tell agent "hi")
+      (lispm-test--condition-id agent)
+      ;; Stopping at a condition asks for no reason.
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (error "Asked for a reason"))))
+        (with-current-buffer (lispm-agent-buffer agent)
+          (call-interactively #'lispm-deny)))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-error (lispm-choose-restart-named agent 'retry) :type 'user-error))))
 
 (ert-deftest lispm-test-condition-resumed ()
   "A condition saved when Emacs stopped is waited at again when the session is opened."

@@ -496,7 +496,8 @@ heading starts."
   "The condition whose section starts at HBEG, its body at BBEG, up to END.
 Nil if that section is not a condition.  Otherwise a plist: :id,
 :type, :title, :state (its TODO keyword), :restarts, :restart (the
-one chosen, once it is), :message and :pos (HBEG)."
+one chosen, once it is) and :value (the value it was given, if any),
+:message and :pos (HBEG)."
   (let* ((heading (lispm-transcript--heading hbeg))
          (title (or (plist-get heading :title) "")))
     (when (string-match "\\`Condition: \\(.*\\)\\'" title)
@@ -505,13 +506,15 @@ one chosen, once it is), :message and :pos (HBEG)."
              (text (save-excursion
                      (goto-char bbeg)
                      (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) bbeg)))
-             (restart (cdr (assoc "RESTART" props))))
+             (restart (cdr (assoc "RESTART" props)))
+             (value (cdr (assoc "VALUE" props))))
         (list :id (cdr (assoc "CONDITION_ID" props))
               :type (intern (or (cdr (assoc "CONDITION" props)) "condition"))
               :title name
               :state (plist-get heading :todo)
               :restarts (mapcar #'intern (split-string (or (cdr (assoc "RESTARTS" props)) "")))
               :restart (and restart (intern restart))
+              :value (and value (ignore-errors (car (read-from-string value))))
               :message (lispm-transcript--text text end)
               :pos hbeg)))))
 

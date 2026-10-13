@@ -267,12 +267,19 @@
            ((string-match-p "\\`note\\'" title)
             (push (list :kind 'note :text (lispm-chat--body bbeg send)) items))
            ;; A condition still waiting is the prompt below, not an item.
-           ((when-let* ((condition (lispm-transcript--condition hbeg bbeg send))
-                        (restart (plist-get condition :restart)))
-              (push (list :kind 'note
-                          :text (format "%s\n↻ %s" (plist-get condition :message)
-                                        (lispm-chat--restart-description condition restart)))
-                    items)))
+           ((and (string-match-p "\\`condition: " title)
+                 (when-let* ((condition (lispm-transcript--condition hbeg bbeg send))
+                             (restart (plist-get condition :restart)))
+                   (push (list :kind 'note
+                               :text (format "%s\n↻ %s%s" (plist-get condition :message)
+                                             (lispm-restart-description condition restart)
+                                             (pcase (plist-get condition :value)
+                                               ('nil "")
+                                               (`(,backend . ,model)
+                                                (format ": %s%s" backend
+                                                        (if model (format ", %s" model) "")))
+                                               (value (format ": %s" value)))))
+                         items))))
            ((string-match-p "\\`assistant\\'" title)
             (setq items (append (reverse (lispm-chat--assistant-items bbeg send)) items)))))))
     (nreverse items)))
@@ -626,16 +633,7 @@ Code blocks lose their fences and keep their lines as they are."
 
 (defun lispm-chat--prompting-p ()
   "Non-nil if the chat asks something: a call's approval, or a restart."
-  (and lispm-chat-agent
-       (or (lispm--waiting-calls lispm-chat-agent) (lispm-agent-condition lispm-chat-agent))))
-
-(defun lispm-chat--restart-description (condition restart)
-  "How the prompt for CONDITION describes its RESTART."
-  (if-let* ((spec (assq restart (plist-get (alist-get (plist-get condition :type)
-                                                       lispm-condition-types)
-                                            :restarts))))
-      (nth 1 spec)
-    (symbol-name restart)))
+  (and lispm-chat-agent (lispm--awaiting lispm-chat-agent)))
 
 (defun lispm-chat-restart (restart)
   "Go on from the condition the prompt asks about by RESTART."
@@ -793,7 +791,7 @@ ITEMS are the session's items, where the call's preview is."
                  (list "" "How do you want to go on?")
                  (cl-loop for restart in (plist-get condition :restarts)
                           for i from 0
-                          for option = (lispm-chat--restart-description condition restart)
+                          for option = (lispm-restart-description condition restart)
                           collect (if (= i lispm-chat--choice)
                                       (propertize (format "❯ %d. %s" (1+ i) option)
                                                   'face 'lispm-chat-accent)
@@ -909,9 +907,8 @@ ITEMS are the session's items, where the call's preview is."
 
 (defun lispm-chat--maybe-ask ()
   "Select the first answer of a newly shown prompt."
-  (let ((id (or (car (lispm--waiting-calls lispm-chat-agent))
-                ;; The condition itself: an id can be given again.
-                (lispm-agent-condition lispm-chat-agent))))
+  ;; A call's id, or the condition itself: a condition's id can be given again.
+  (let ((id (car (lispm--awaiting lispm-chat-agent))))
     (unless (equal id lispm-chat--asked)
       (setq lispm-chat--asked id
             lispm-chat--choice 0))))
@@ -1061,8 +1058,7 @@ Outside the input, show the item at point in full."
           (lispm-chat--command agent text)
         ;; Writing while the turn waits at a condition stops it there,
         ;; as writing after a failed turn always did.
-        (when-let* ((condition (lispm-agent-condition agent)))
-          (lispm-restart agent (plist-get condition :id) 'abort))
+        (lispm-stop-at-condition agent)
         (lispm-tell agent text)
         (lispm-chat--schedule agent)))))
 
@@ -1188,6 +1184,7 @@ Outside the input, show the item at point in full."
 (defun lispm-chat-clear (agent _argument)
   "Start a new conversation in place of AGENT's, which stays on record.
 Return the chat of the new conversation."
+  (lispm-stop-at-condition agent)
   (when (lispm-agent-busy-p agent)
     (user-error "%s is busy; C-c C-c interrupts it" (lispm-agent-name agent)))
   (if (lispm-agent-standing agent)
@@ -1209,6 +1206,7 @@ Return the chat of the new conversation."
 
 (defun lispm-chat-compact (agent _argument)
   "Hand AGENT's conversation over to a summary of it."
+  (lispm-stop-at-condition agent)
   (lispm-compact agent))
 
 (defun lispm-chat-resume (agent _argument)
@@ -1223,7 +1221,7 @@ Return the chat of the new conversation."
   (if (string-empty-p argument)
       (message "%s uses %s via %s" (lispm-agent-name agent)
                (lispm-agent-model* agent) (lispm-backend-name agent))
-    (setf (lispm-agent-model agent) argument)
+    (lispm-use-model agent (lispm-agent-backend agent) argument)
     (with-current-buffer (lispm-agent-view agent)
       (lispm-chat--redraw))
     (message "%s now uses %s" (lispm-agent-name agent) argument)))
