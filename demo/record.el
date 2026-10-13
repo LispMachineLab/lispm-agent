@@ -34,9 +34,23 @@
 (defvar lispm-demo--started nil "When recording started.")
 (defvar lispm-demo--fast nil "Stretches to speed up, (START . END) in `float-time'.")
 (defvar lispm-demo--turns 0 "Turns finished so far.")
+(defvar lispm-demo--streams nil
+  "Stretches (FROM . TO) in which the model wrote a change, newest first.")
 
 (add-hook 'lispm-turn-end-functions
           (lambda (&rest _) (setq lispm-demo--turns (1+ lispm-demo--turns))))
+
+(defun lispm-demo--streamed (_agent call)
+  "Note that the model is writing CALL; a change it makes is worth watching."
+  (when-let* ((tool (lispm-get-tool (plist-get call :name)))
+              ((lispm-tool-changes tool)))
+    (let ((now (float-time))
+          (last (car lispm-demo--streams)))
+      (if (and last (< (- now (cdr last)) 1.0))
+          (setcdr last now)
+        (push (cons now now) lispm-demo--streams)))))
+
+(add-hook 'lispm-tool-input-functions #'lispm-demo--streamed)
 
 ;; `emacsclient -s lispm-demo' looks in while the demo plays.
 (require 'server)
@@ -87,6 +101,7 @@
     (`(call ,function) (funcall function) (run-at-time 0.05 nil next))
     (`(until ,predicate) (lispm-demo--until predicate next))
     (`(model ,predicate) (lispm-demo--model predicate next))
+    (`(answer ,turns) (lispm-demo--answer turns next))
     (_ (error "Unknown step %S" step))))
 
 (defun lispm-demo--type (chars next)
@@ -103,15 +118,52 @@
     (run-at-time 0.1 nil #'lispm-demo--until predicate next)))
 
 (defun lispm-demo--model (predicate next)
-  "Call NEXT once PREDICATE holds, noting the wait as a stretch to speed up.
-The first moments and the last stay at their own speed."
+  "Call NEXT once PREDICATE holds, noting the wait as stretches to speed up.
+The first moments and the last stay at their own speed, and so do
+those in which the model writes a change: it shows as it is written."
   (let ((start (float-time)))
     (lispm-demo--until predicate
                        (lambda ()
-                         (let ((from (+ start 1.2)) (to (- (float-time) 0.4)))
-                           (when (> (- to from) 1.0)
-                             (push (cons from to) lispm-demo--fast)))
+                         (dolist (piece (lispm-demo--without
+                                         (cons (+ start 1.2) (- (float-time) 0.4))
+                                         lispm-demo--streams))
+                           (when (> (- (cdr piece) (car piece)) 1.0)
+                             (push piece lispm-demo--fast)))
                          (funcall next)))))
+
+(defun lispm-demo--without (stretch holes)
+  "The pieces of STRETCH, (FROM . TO), outside HOLES and a moment around them."
+  (let ((pieces (list stretch)))
+    (dolist (hole holes pieces)
+      (let ((a (- (car hole) 0.5)) (b (+ (cdr hole) 0.3)))
+        (setq pieces
+              (mapcan (lambda (piece)
+                        (let ((left (cons (car piece) (min a (cdr piece))))
+                              (right (cons (max b (car piece)) (cdr piece))))
+                          (seq-filter (lambda (p) (< (car p) (cdr p))) (list left right))))
+                      pieces))))))
+
+(defun lispm-demo--answer (turns next)
+  "Answer whatever the agent asks until TURNS turns are over, then call NEXT.
+A command is allowed for the session (2), a change approved once (1),
+after a look at it."
+  (lispm-demo--model
+   (lambda () (or (lispm-demo-approval-p) (>= lispm-demo--turns turns)))
+   (lambda ()
+     (if (not (lispm-demo-approval-p))
+         (funcall next)
+       (let* ((agent (lispm-demo--agent))
+              (call (gethash (car (lispm--waiting-calls agent)) (lispm-agent-pending agent)))
+              (command (equal (plist-get call :name) "run_shell")))
+         (run-at-time (if command 2.5 3.5) nil
+                      (lambda ()
+                        ;; The answer goes to the chat, wherever the focus went.
+                        (when-let* ((window (get-buffer-window (lispm-demo--chat))))
+                          (select-window window))
+                        (lispm-demo--type (list (if command ?2 ?1))
+                                          (lambda ()
+                                            (run-at-time 0.5 nil #'lispm-demo--answer
+                                                         turns next))))))))))
 
 (defun lispm-demo-approval-p ()
   "Non-nil when the agent waits for an answer."
@@ -215,18 +267,12 @@ last change: the filter holds that frame until STOPPED."
     (call rk/sidebar-agents)
     (call ,(lambda () (select-window (get-buffer-window (lispm-demo--chat)))))
     (pause 1.5)
-    (type "Run make test, find out why it fails, and fix slug.el.")
+    (type "Run make test, find out why it fails and fix slug.el, then write a short README.md.")
     (pause 0.6)
     (keys "RET")
-    ;; Running a command needs approval: 2 allows it for the session.
-    (model lispm-demo-approval-p)
-    (pause 2.5)
-    (type "2")
-    ;; So does an edit, shown as a diff.
-    (model lispm-demo-approval-p)
-    (pause 3.5)
-    (type "1")
-    (model ,(lispm-demo-turns 1))
+    ;; Commands and changes need approval.  A change streams into its file
+    ;; as the model writes it, and awaits approval there.
+    (answer 1)
     (pause 3.0)
     ;; The chat is drawn from an org document: the tool calls are TODO entries.
     (keys "C-c C-t")
@@ -241,13 +287,10 @@ last change: the filter holds that frame until STOPPED."
     (call ,(lambda () (select-window (get-buffer-window (lispm-demo--chat)))))
     (pause 1.5)
     ;; The agent can drive Emacs itself.
-    (type "Replace slug.el on the right with the git diff of your fix.")
+    (type "Now show me the git diff of your changes in the window on the right.")
     (pause 0.6)
     (keys "RET")
-    (model lispm-demo-approval-p)
-    (pause 3.5)
-    (type "1")
-    (model ,(lispm-demo-turns 2))
+    (answer 2)
     (pause 5.0)
     (call lispm-demo--stop))
   "What the demo does.")

@@ -17,9 +17,10 @@ they are agents. In code, the package name and prefix are all lowercase: ~lispm~
 #+HTML: <p align="center"><img src="assets/demo/lispm-demo.gif" alt="An agent fixes a failing test in Emacs, its conversation is shown as an org document, and it opens a diff window by evaluating Emacs Lisp" /></p>
 
 Above, in the author's Emacs (its sidebar and workspaces are configuration, not LispM), an
-agent runs a project's failing tests and fixes the bug, asking before it runs a command or
-edits a file; the chat then turns out to be an org document whose tool calls are TODO entries;
-last, the agent opens a diff beside the chat by evaluating Emacs Lisp.
+agent runs a project's failing tests, fixes the bug and writes a README, asking before it runs
+a command or changes a file. Each change streams into its file as the model writes it and
+awaits approval there; the chat then turns out to be an org document whose tool calls are TODO
+entries; last, the agent shows the diff beside the chat by evaluating Emacs Lisp.
 
 * Installation
 
