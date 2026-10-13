@@ -63,6 +63,19 @@ reads it when approving, and it stays in the transcript."
   :type 'integer
   :group 'lispm)
 
+(defcustom lispm-revert-after-calls t
+  "Whether buffers are reverted after a call that may have changed files.
+After each such call, the buffers without unsaved changes of the files
+under the agent's root that changed on disk are reverted, so the user
+sees what a shell command, Lisp or an MCP server did there.  Whatever
+this says, a tool brings a buffer it uses up to date first."
+  :type 'boolean
+  :group 'lispm)
+
+(defconst lispm-tools--still-permissions '(read memory comm web)
+  "Permission classes whose tools change no file of the agent's.
+No buffers are reverted after their calls.")
+
 (cl-defstruct (lispm-tool (:constructor lispm-tool--create) (:copier nil))
   "A tool callable by agents.
 Tools defined with `lispm-deftool' have PARAMS, from which their schema
@@ -246,29 +259,82 @@ A tool with a schema of its own gets INPUT whole."
     (lispm--truncate (if (string-empty-p text) "(no output)" text)
                      lispm-tool-output-limit)))
 
+(defconst lispm-tools--interrupted
+  "Interrupted: the user pressed C-g while the call ran.  What it did until then stands."
+  "Result of a call the user interrupted.")
+
+(defun lispm-tools--interruptibly (function args)
+  "Apply FUNCTION to ARGS so that C-g interrupts it, signaling `quit'.
+Calls run from process sentinels and timers, where Emacs inhibits
+quitting: without this, a runaway call could not be stopped.  A C-g
+pressed before FUNCTION started was meant for something else, and is
+left for the code around it.  Input does not end a `while-no-input'
+around it either: that would leave the call without a result."
+  (let ((pending quit-flag))
+    (setq quit-flag nil)
+    (unwind-protect
+        (let ((inhibit-quit nil)
+              (throw-on-input nil))
+          (apply function args))
+      (when pending
+        (setq quit-flag pending)))))
+
+(defun lispm-tools--deliver (done agent tool text errorp images)
+  "Give DONE the result of AGENT's call of TOOL: TEXT, ERRORP and IMAGES.
+First, if TOOL may have changed files, the buffers of those under
+AGENT's root that changed on disk are reverted, so that the user sees
+what the call did there (see `lispm-revert-after-calls'); C-g stops
+that.  DONE goes on with the turn: it records the result and may ask
+the model again, which C-g must not leave half done, so quitting is
+inhibited meanwhile."
+  (let ((inhibit-quit t))
+    (when (and lispm-revert-after-calls agent
+               (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions)))
+      ;; Hooks the reverts run are the agent's doing.
+      (let ((lispm-current-agent agent))
+        (condition-case nil
+            (lispm-tools--interruptibly #'lispm-tools--revert-changed
+                                        (list (lispm-agent-root agent)))
+          (quit nil))))
+    (apply done text errorp (and images (list images)))))
+
 (defun lispm-tool-invoke (tool input done)
   "Run TOOL on INPUT, a decoded JSON object.
 Call DONE exactly once with the result text and non-nil if the call
 failed, and, if the result has images, a third argument: their files.
 Synchronous tools call DONE before returning.  An asynchronous tool's
-`done' takes the same arguments."
-  (if (lispm-tool-async tool)
-      (let* ((called nil)
-             (once (lambda (result &optional errorp images)
-                     (unless called
+`done' takes the same arguments.
+
+C-g interrupts what the tool does while Emacs runs it, a loop in
+eval_elisp say, and the call fails (see `lispm-tools--interruptibly').
+What an asynchronous tool waits for afterwards, a process or another
+agent, is stopped by aborting the turn.  Only the tool is
+interruptible: what comes after it, the result and the rest of the
+turn, is not, so C-g never leaves it half done or reports a call that
+ran to its end as interrupted.  DONE is never called while the tool
+runs."
+  (let* ((inhibit-quit t)
+         (agent lispm-current-agent)
+         (running t)
+         (called nil)
+         (result nil)
+         (finish (lambda (value &optional errorp images)
+                   (unless called
+                     (let ((args (list (lispm-tools--result-text value) errorp images)))
                        (setq called t)
-                       (apply done (lispm-tools--result-text result) errorp
-                              (and images (list images)))))))
-        (condition-case err
-            (apply (lispm-tool-function tool) once (lispm-tools--arguments tool input))
-          (error (funcall once (error-message-string err) t))))
-    (pcase-let ((`(,result . ,errorp)
-                 (condition-case err
-                     (cons (apply (lispm-tool-function tool)
-                                  (lispm-tools--arguments tool input))
-                           nil)
-                   (error (cons (error-message-string err) t)))))
-      (funcall done (lispm-tools--result-text result) errorp))))
+                       (if running
+                           (setq result args)
+                         (apply #'lispm-tools--deliver done agent tool args)))))))
+    (condition-case err
+        (let ((args (lispm-tools--arguments tool input)))
+          (if (lispm-tool-async tool)
+              (lispm-tools--interruptibly (lispm-tool-function tool) (cons finish args))
+            (funcall finish (lispm-tools--interruptibly (lispm-tool-function tool) args))))
+      (error (funcall finish (error-message-string err) t))
+      (quit (funcall finish lispm-tools--interrupted t)))
+    (setq running nil)
+    (when result
+      (apply #'lispm-tools--deliver done agent tool result))))
 
 (defun lispm-tool-preview-text (tool input)
   "What calling TOOL with INPUT would do, as a string, or nil."
@@ -586,9 +652,140 @@ outside the agent's root always ask, whatever the policy says."
               (concat (substring text 0 at) new (substring text (+ at (length old))))))
           (if all count 1))))
 
+;;;; Buffers and the files on disk
+;;
+;; Tools read and change the buffer visiting a file, not the file, so
+;; that agents see what the user sees.  Other programs change files
+;; too: a shell command, git, the user's own shell.  So before a tool
+;; changes or reads a buffer, the buffer is brought up to date with
+;; its file, and never by asking the user, as Emacs would: one without
+;; unsaved changes is reverted; one with them is in conflict with its
+;; file, which a change reports to the model as an error.  Previews,
+;; and the changes shown while a call is written, change nothing: they
+;; go by `lispm--file-text'.  After a call that may have changed files,
+;; the buffers of those under the agent's root that changed on disk are
+;; reverted, so the user sees what it did (`lispm-revert-after-calls').
+
+(defun lispm-tools--state (buffer)
+  "What BUFFER is with respect to the file it visits; nothing is changed.
+`current': up to date with it, or visiting no file.
+`stale': out of date, without unsaved changes: reverting brings it
+up to date.
+`conflict': with unsaved changes, while the file changed on disk too.
+`held': an agent's session transcript out of date with its file; the
+runtime holds positions in it, so it is kept as it is.
+`gone': without unsaved changes, while its file was deleted on disk."
+  (with-current-buffer buffer
+    (cond ((or (not buffer-file-name) (verify-visited-file-modtime buffer)) 'current)
+          ((buffer-modified-p) 'conflict)
+          ((bound-and-true-p lispm-session-mode) 'held)
+          ((file-exists-p buffer-file-name) 'stale)
+          (t 'gone))))
+
+(defun lispm-tools--sync (buffer)
+  "Bring BUFFER up to date with the file it visits, if that changed on disk.
+A `stale' buffer is reverted; return its state then, as
+`lispm-tools--state' tells it: `current', `conflict', `held' or `gone'."
+  (let ((state (lispm-tools--state buffer)))
+    (if (not (eq state 'stale))
+        state
+      (with-current-buffer buffer
+        (let ((inhibit-message t))
+          (revert-buffer t t t)))
+      'current)))
+
+(defun lispm-tools--conflict (buffer)
+  "Signal that BUFFER cannot be changed: it is in conflict with its file.
+Which to keep is the user's choice, not the model's."
+  (error (if (buffer-modified-p buffer)
+             "%s changed on disk, and its buffer in Emacs has unsaved changes; \
+ask the user which to keep"
+           "%s changed on disk, and its buffer is the session of an agent, which \
+LispM keeps as it is; ask the user which to keep")
+         (abbreviate-file-name (buffer-file-name buffer))))
+
+(defun lispm-tools--find-file (file)
+  "Visit FILE, asking nothing; an error if it is too large to.
+Emacs asks before it visits a file larger than
+`large-file-warning-threshold'; tools refuse instead."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (when (and size large-file-warning-threshold (> size large-file-warning-threshold))
+      (error "%s is too large to open in Emacs (%s; see `large-file-warning-threshold')"
+             (abbreviate-file-name file) (file-size-human-readable size)))
+    (find-file-noselect file t)))
+
+(defun lispm-tools--visiting (file &optional conflicts)
+  "The buffer visiting FILE, up to date with it, or nil.
+Nil too if FILE was deleted on disk.  A buffer in conflict with FILE,
+or held as it is (see `lispm-tools--state'), is an error, unless
+CONFLICTS is non-nil: then it is returned as it is."
+  (when-let* ((buffer (find-buffer-visiting file)))
+    (pcase (lispm-tools--sync buffer)
+      ('current buffer)
+      ((or 'conflict 'held) (if conflicts buffer (lispm-tools--conflict buffer))))))
+
+(defun lispm-tools--visit (file &optional conflicts)
+  "A buffer visiting FILE, up to date with it; FILE is visited if need be.
+A buffer whose file was deleted on disk is emptied, as the buffer of a
+new file.  CONFLICTS is as for `lispm-tools--visiting'."
+  (or (lispm-tools--visiting file conflicts)
+      (when-let* ((buffer (find-buffer-visiting file)))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer))
+          (set-buffer-modified-p nil)
+          (clear-visited-file-modtime))
+        buffer)
+      (lispm-tools--find-file file)))
+
+(defun lispm-tools--existing (file)
+  "A buffer holding FILE's text, for a change to it; an error if there is none.
+That is the buffer visiting FILE, up to date with it, which may hold a
+new file's text not saved yet; else FILE, visited now."
+  (or (lispm-tools--visiting file)
+      (and (file-exists-p file) (lispm-tools--find-file file))
+      (error "No such file: %s" (abbreviate-file-name file))))
+
+(defun lispm-tools--to-show (file &optional new)
+  "A buffer to show a change to FILE in while it is proposed, or nil.
+Nothing is changed for it: the buffer visiting FILE if it is up to
+date with it; else, if no buffer visits FILE, FILE visited now, if it
+exists or NEW is non-nil."
+  (if-let* ((buffer (find-buffer-visiting file)))
+      (and (eq (lispm-tools--state buffer) 'current) buffer)
+    (and (or new (file-exists-p file))
+         (lispm-tools--find-file file))))
+
+(defun lispm-tools--buffer-file-text (buffer)
+  "BUFFER's text, or its file's if BUFFER is out of date with it.
+See `lispm--file-text'."
+  (if-let* ((file (buffer-file-name buffer)))
+      (lispm--file-text file)
+    (lispm-tools--buffer-text buffer)))
+
+(defun lispm-tools--revert-changed (root)
+  "Revert the stale buffers of files under ROOT (see `lispm-tools--state').
+Run after a call that may have changed files (a shell command, Lisp,
+an MCP server), so that the buffers the user and the agents see hold
+what is on disk; see `lispm-revert-after-calls'.  Remote files are
+left out: checking them would mean a connection each."
+  (let ((root (file-name-as-directory (expand-file-name root))))
+    (dolist (buffer (buffer-list))
+      (let ((file (buffer-file-name buffer)))
+        (when (and file
+                   (not (buffer-modified-p buffer))
+                   (string-prefix-p root file)
+                   (not (file-remote-p file))
+                   (eq (lispm-tools--state buffer) 'stale))
+          (with-demoted-errors "LispM: reverting a buffer: %S"
+            (lispm-tools--sync buffer)))))))
+
 (defun lispm-tools--set-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved.
-Then tell `lispm-buffer-change-functions'."
+Then tell `lispm-buffer-change-functions'.  A BUFFER in conflict with
+its file, or held as it is, is an error (see `lispm-tools--state')."
+  (when (memq (lispm-tools--sync buffer) '(conflict held))
+    (lispm-tools--conflict buffer))
   (let ((old (lispm-tools--buffer-text buffer)))
     (lispm-tools--replace-text buffer text)
     ;; The change is made: whatever shows it must not undo the call.
@@ -620,6 +817,16 @@ Then tell `lispm-buffer-change-functions'."
   "The live buffer called NAME."
   (or (get-buffer name) (error "No buffer named %s" name)))
 
+(defun lispm-tools--buffer-to-change (name)
+  "The live buffer called NAME, up to date with its file if it visits one.
+An error if it is in conflict with its file, or its file was deleted."
+  (let ((buffer (lispm-tools--buffer name)))
+    (pcase (lispm-tools--sync buffer)
+      ((or 'conflict 'held) (lispm-tools--conflict buffer))
+      ('gone (error "%s was deleted on disk; buffer %s holds its old text"
+                    (abbreviate-file-name (buffer-file-name buffer)) name))
+      (_ buffer))))
+
 (defun lispm-tools--buffer-text (buffer)
   "All of BUFFER's text."
   (with-current-buffer buffer
@@ -638,11 +845,16 @@ If the file is open in Emacs, you get the buffer's current contents,
 unsaved edits included: what the user sees."
   :permission read
   (let* ((file (lispm-tools--file path))
-         (buffer (find-buffer-visiting file)))
-    (cond (buffer
-           (concat (if (buffer-modified-p buffer) "[open in Emacs, unsaved changes]\n" "")
-                   (lispm-tools--number-lines (lispm-tools--buffer-text buffer)
-                                              offset limit)))
+         (open (find-buffer-visiting file))
+         (state (and open (lispm-tools--sync open))))
+    (cond ((memq state '(current conflict held))
+           ;; Out of step with its file, the buffer is what the user
+           ;; sees, or what the runtime holds: say so.
+           (concat (pcase state
+                     ('conflict "[open in Emacs, unsaved changes; the file changed on disk too]\n")
+                     ('held "[the session of an agent, as LispM holds it; the file changed on disk]\n")
+                     (_ (if (buffer-modified-p open) "[open in Emacs, unsaved changes]\n" "")))
+                   (lispm-tools--number-lines (lispm-tools--buffer-text open) offset limit)))
           ((file-directory-p file) (error "%s is a directory; use list_directory" path))
           ((file-readable-p file)
            (lispm-tools--number-lines (lispm--file-text file) offset limit))
@@ -871,7 +1083,9 @@ of AGENT in which it started ends meanwhile."
          (search-file (file)
            (let ((open (gethash file visiting))
                  (limit (- lispm-search-max-matches count)))
-             (if (buffer-live-p open)
+             ;; A buffer is searched for its unsaved changes, unless it
+             ;; is out of date: then the file is.
+             (if (and (buffer-live-p open) (lispm--buffer-current-p open))
                  (with-current-buffer open
                    (let ((case-fold-search case-fold))
                      (lispm-tools--matches regexp (label file) limit)))
@@ -1022,11 +1236,11 @@ current contents exactly, so read the file first."
   :permission write
   :preview #'lispm-tools--edit-preview
   :changes (lambda (path old-text new-text &optional replace-all)
-             (let ((buffer (find-file-noselect (lispm-tools--file path))))
+             (when-let* ((buffer (lispm-tools--to-show (lispm-tools--file path))))
                (cons buffer (car (lispm-tools--replace (lispm-tools--buffer-text buffer)
                                                        old-text new-text replace-all)))))
   (let* ((file (lispm-tools--file path))
-         (buffer (find-file-noselect file))
+         (buffer (lispm-tools--existing file))
          (edit (lispm-tools--replace (lispm-tools--buffer-text buffer)
                                      old-text new-text replace-all)))
     (lispm-tools--set-text buffer (car edit))
@@ -1043,10 +1257,11 @@ for changes to existing files."
              (let ((file (lispm-tools--file path)))
                (lispm--diff (lispm--file-text file) content (lispm-tools--label file))))
   :changes (lambda (path content)
-             (cons (find-file-noselect (lispm-tools--file path)) content))
+             (when-let* ((buffer (lispm-tools--to-show (lispm-tools--file path) t)))
+               (cons buffer content)))
   (let* ((file (lispm-tools--file path))
          (existed (file-exists-p file)))
-    (lispm-tools--set-text (find-file-noselect file) content)
+    (lispm-tools--set-text (lispm-tools--visit file) content)
     (format "%s %s." (if existed "Overwrote" "Created") (lispm-tools--label file))))
 
 (lispm-deftool edit_buffer
@@ -1058,14 +1273,15 @@ for changes to existing files."
 For files use edit_file."
   :permission write
   :preview (lambda (buffer old-text new-text &optional replace-all)
-             (let ((old (lispm-tools--buffer-text (lispm-tools--buffer buffer))))
+             (let ((old (lispm-tools--buffer-file-text (lispm-tools--buffer buffer))))
                (lispm--diff old (car (lispm-tools--replace old old-text new-text replace-all))
                             buffer)))
   :changes (lambda (buffer old-text new-text &optional replace-all)
              (let ((b (lispm-tools--buffer buffer)))
-               (cons b (car (lispm-tools--replace (lispm-tools--buffer-text b)
-                                                  old-text new-text replace-all)))))
-  (let* ((b (lispm-tools--buffer buffer))
+               (when (eq (lispm-tools--state b) 'current)
+                 (cons b (car (lispm-tools--replace (lispm-tools--buffer-text b)
+                                                    old-text new-text replace-all))))))
+  (let* ((b (lispm-tools--buffer-to-change buffer))
          (edit (lispm-tools--replace (lispm-tools--buffer-text b)
                                      old-text new-text replace-all)))
     (lispm-tools--set-text b (car edit))
@@ -1080,46 +1296,56 @@ For files use edit_file."
 output also streams into a buffer the user can watch."
   :permission exec
   :async t
-  (let* ((agent lispm-current-agent)
-         (buffer (get-buffer-create
-                  (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
-         (default-directory (lispm-tools--root))
-         (output "")
-         (proc (make-process
-                :name "lispm-shell" :buffer buffer :noquery t
-                :connection-type 'pipe
-                :command (list shell-file-name shell-command-switch command)
-                :filter
-                (lambda (p chunk)
-                  (setq output (concat output chunk))
-                  (when (buffer-live-p (process-buffer p))
-                    (with-current-buffer (process-buffer p)
-                      (save-excursion
-                        (goto-char (process-mark p))
-                        (insert chunk)
-                        (set-marker (process-mark p) (point))))))
-                :sentinel
-                (lambda (p _event)
-                  (unless (process-live-p p)
-                    (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
-                    (let ((status (process-exit-status p)))
-                      (funcall done
-                               (concat output
-                                       (if (process-get p 'timed-out)
-                                           "\n[killed: timeout]"
-                                         (format "\n[exit status %d]" status)))
-                               (process-get p 'timed-out))))))))
-    (with-current-buffer buffer
-      (goto-char (point-max))
-      (insert (format "\n$ %s\n" command))
-      (set-marker (process-mark proc) (point)))
-    (process-put proc 'lispm-agent agent)
-    (process-put proc 'timer
-                 (run-at-time (or timeout lispm-shell-timeout) nil
-                              (lambda ()
-                                (when (process-live-p proc)
-                                  (process-put proc 'timed-out t)
-                                  (kill-process proc)))))))
+  ;; Setting up must not be cut short by C-g: a process left without
+  ;; its timer and its agent could be neither timed out nor aborted.
+  ;; A C-g meanwhile stops the command once it is set up.
+  (let ((inhibit-quit t))
+    (let* ((agent lispm-current-agent)
+           (buffer (get-buffer-create
+                    (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
+           (default-directory (lispm-tools--root))
+           (output "")
+           (proc (make-process
+                  :name "lispm-shell" :buffer buffer :noquery t
+                  :connection-type 'pipe
+                  :command (list shell-file-name shell-command-switch command)
+                  :filter
+                  (lambda (p chunk)
+                    (setq output (concat output chunk))
+                    (when (buffer-live-p (process-buffer p))
+                      (with-current-buffer (process-buffer p)
+                        (save-excursion
+                          (goto-char (process-mark p))
+                          (insert chunk)
+                          (set-marker (process-mark p) (point))))))
+                  :sentinel
+                  (lambda (p _event)
+                    (unless (or (process-live-p p) (process-get p 'interrupted))
+                      (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
+                      (let ((status (process-exit-status p)))
+                        (funcall done
+                                 (concat output
+                                         (if (process-get p 'timed-out)
+                                             "\n[killed: timeout]"
+                                           (format "\n[exit status %d]" status)))
+                                 (process-get p 'timed-out))))))))
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (insert (format "\n$ %s\n" command))
+        (set-marker (process-mark proc) (point)))
+      (process-put proc 'lispm-agent agent)
+      (process-put proc 'timer
+                   (run-at-time (or timeout lispm-shell-timeout) nil
+                                (lambda ()
+                                  (when (process-live-p proc)
+                                    (process-put proc 'timed-out t)
+                                    (kill-process proc)))))
+      (when quit-flag
+        (setq quit-flag nil)
+        (cancel-timer (process-get proc 'timer))
+        (process-put proc 'interrupted t)
+        (delete-process proc)
+        (signal 'quit nil)))))
 
 (defun lispm-tools--read-forms (code)
   "All Lisp forms in the string CODE."

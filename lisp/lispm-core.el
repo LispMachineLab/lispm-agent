@@ -573,9 +573,20 @@ and the incomplete remainder."
    (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or string "")))
    (or width 72) nil nil "…"))
 
+(defun lispm--buffer-current-p (buffer)
+  "Non-nil if BUFFER holds the text to go by for the file it visits.
+It does unless the file changed on disk since and BUFFER has no
+unsaved changes: then it is out of date, and the file holds the text.
+A buffer with unsaved changes holds what the user sees, and so does
+one visiting no file."
+  (or (buffer-modified-p buffer)
+      (verify-visited-file-modtime buffer)))
+
 (defun lispm--file-text (file)
-  "Contents of FILE, from its buffer if one visits it."
-  (if-let* ((buf (find-buffer-visiting file)))
+  "Contents of FILE, from its buffer if one visits it and is not out of date.
+See `lispm--buffer-current-p'.  The empty string if FILE cannot be read."
+  (if-let* ((buf (find-buffer-visiting file))
+            ((lispm--buffer-current-p buf)))
       (with-current-buffer buf
         (save-restriction
           (widen)
