@@ -1728,11 +1728,40 @@ Its policy is the stricter of its role's and its caller's."
       ;; Each agent's system prompt introduces the other.
       (should (string-match-p "- helper: Does arithmetic." (alist-get 'system (car (last lispm-test--requests)))))
       ;; A request that would make two agents wait on each other is refused.
-      (setf (lispm-agent-waiting-on helper) boss)
+      (setf (lispm-agent-waiting-on helper) (list boss))
       (let ((result (lispm-test--call boss "ask_agent" '((agent . "helper") (request . "?")))))
         (should (cdr result))
         (should (string-match-p "deadlock" (car result))))
       (should (cdr (lispm-test--call boss "send_message" '((to . "boss") (text . "hi"))))))))
+
+(ert-deftest lispm-test-ask-agents-in-parallel ()
+  "An agent that asks several at once waits on each until it replies."
+  (lispm-test-env
+    (let ((boss (lispm-defagent boss :root project))
+          (adder (lispm-defagent adder :root project))
+          (doubler (lispm-defagent doubler :root project)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "adder") (request . "2+2?")))
+                                      (lispm-test--tool "t2" "ask_agent"
+                                                        '((agent . "doubler") (request . "2*3?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "4 and 6.")))
+              ;; Asking back the agent that waits on it would deadlock,
+              ;; though that agent asked someone else after it.
+              (adder ,(lispm-test--msg "tool_use"
+                                       (lispm-test--tool "a1" "ask_agent"
+                                                         '((agent . "boss") (request . "Why?"))))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "4")))
+              (doubler ,(lispm-test--msg "end_turn" (lispm-test--text "6")))))
+      (lispm-tell boss "ask both")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (funcall (lispm-test--idle-p adder))
+                                                (funcall (lispm-test--idle-p doubler))))))
+      (should (string-match-p "deadlock" (lispm-test--transcript adder)))
+      (should (string-match-p "adder replied:\n4" (lispm-test--transcript boss)))
+      (should (string-match-p "doubler replied:\n6" (lispm-test--transcript boss)))
+      (should-not (lispm-agent-waiting-on boss)))))
 
 ;;;; Triggers
 

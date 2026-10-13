@@ -225,7 +225,7 @@ Each is called with the buffer, its old text and its new text;
   journal                    ; alist TURN -> edit snapshots
   allowed                    ; tool names approved for this Emacs session
   loaded-tools               ; deferred tools loaded by search_tools, by name
-  waiting-on                 ; agent this one awaits (ask_agent)
+  waiting-on                 ; agents this one awaits (ask_agent)
   compacting                 ; non-nil while the session is handed over
   triggers                   ; hook and timer subscriptions
   (usage (list 0 0 0)))      ; input, output, cache-read tokens
