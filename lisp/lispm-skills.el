@@ -51,7 +51,12 @@
 (require 'lispm-transcript)
 
 (defconst lispm-skills--builtin
-  (expand-file-name "skills/" (file-name-directory (or load-file-name buffer-file-name)))
+  (let ((here (file-name-directory (or load-file-name buffer-file-name))))
+    ;; skills/ is beside lisp/ in a checkout, and beside the Lisp files
+    ;; in a package built from it (as MELPA builds them).
+    (seq-find #'file-directory-p
+              (list (expand-file-name "../skills/" here) (expand-file-name "skills/" here))
+              (expand-file-name "../skills/" here)))
   "The skills of LispM itself.")
 
 (defcustom lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/")
