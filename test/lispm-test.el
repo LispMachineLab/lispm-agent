@@ -2250,6 +2250,154 @@ started, after the session opened."
       (should (= (length lispm-test--requests) 2))
       (should (string-match-p "\\* Note\nThe response hit the output limit" (lispm-test--transcript agent))))))
 
+(ert-deftest lispm-test-eval-backtrace ()
+  "An error in evaluated Lisp comes back with the backtrace of that code alone."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project)))
+      (pcase-let ((`(,text . ,errorp)
+                   (lispm-test--call agent "eval_elisp"
+                                     '((code . "(defun lispm-test-f (x) (car x)) (defun lispm-test-g () (lispm-test-f 3)) (lispm-test-g)")))))
+        (should errorp)
+        (should (equal text (concat "Wrong type argument: listp, 3\n\nBacktrace, innermost call first:\n"
+                                    "  (car 3)\n  (lispm-test-f 3)\n  (lispm-test-g)"))))
+      ;; An error the code handles itself is not one.
+      (should (equal (lispm-test--call agent "eval_elisp" '((code . "(condition-case nil (car 3) (error 'caught))")))
+                     '("=> caught" . nil))))))
+
+(defmacro lispm-test-with-stopped-call (&rest body)
+  "Run BODY with an agent `tester' whose read_file call of a missing file stopped.
+BODY can use `agent', `id' (the call's) and `reply' (the turn's, once it ends)."
+  (declare (indent 0))
+  `(lispm-test-with-conditions
+     (let ((lispm-debug-tool-errors '("read_file"))
+           (agent (lispm-defagent tester "Test agent." :root project))
+           (reply nil))
+       (setq lispm-test--scripts
+             `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+                       ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+       (lispm-tell agent "read" :callback (lambda (r) (setq reply r)))
+       (let ((id (progn (should (lispm-test--wait (lambda () (lispm--asked-condition agent))))
+                        (plist-get (lispm--asked-condition agent) :id))))
+         (ignore id)
+         ,@body))))
+
+(ert-deftest lispm-test-tool-error-stops ()
+  "A failure `lispm-debug-tool-errors' covers stops the call, recorded on its heading."
+  (lispm-test-with-stopped-call
+    (let ((condition (lispm--asked-condition agent)))
+      (should (equal id "t1"))
+      (should (eq (plist-get condition :type) 'tool-error))
+      (should (equal (plist-get condition :restarts) '(report retry use-value abort)))
+      (should (string-match-p "\\`read_file failed: No such file: " (plist-get condition :message)))
+      (should (eq (lispm-agent-state agent) 'waiting))
+      (should (equal (lispm-agent-status agent) "1 call stopped at an error"))
+      (should (string-match-p "^\\*\\* WAITING read_file  a\\.txt\n:PROPERTIES:\n:TOOL_ID:  t1\n:TOOL:     read_file\n:CONDITION: tool-error\n:END:\n\\(?:.*\n\\)*\\*\\*\\* Stopped\nNo such file: "
+                              (lispm-test--transcript agent)))
+      ;; Nothing was sent: the model is waiting for the call's result.
+      (should (= (length lispm-test--requests) 1))
+      ;; Reported, the error is the result, as it would have been.
+      (lispm-restart agent id 'report)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Done."))
+      (let ((text (lispm-test--transcript agent)))
+        (should (string-match-p "^\\*\\* FAILED read_file  a\\.txt\n" text))
+        (should-not (string-match-p ":CONDITION:" text))
+        (should (string-match-p "^\\*\\*\\* Stopped: report\n" text)))
+      (should (string-match-p "No such file" (format "%S" (alist-get 'messages (car lispm-test--requests))))))))
+
+(ert-deftest lispm-test-tool-error-retry-and-value ()
+  "A stopped call can be run again once its cause is fixed, or given a result."
+  (lispm-test-with-stopped-call
+    (with-temp-file (expand-file-name "a.txt" project) (insert "found\n"))
+    (lispm-restart agent id 'retry)
+    (should (lispm-test--wait (lispm-test--idle-p agent)))
+    (should (string-match-p "^\\*\\* DONE read_file  a\\.txt\n" (lispm-test--transcript agent)))
+    (should (string-match-p "found" (format "%S" (alist-get 'messages (car lispm-test--requests))))))
+  (lispm-test-with-stopped-call
+    (should-error (lispm-restart agent id 'use-value) :type 'user-error)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "It says hello.")))
+      (lispm-choose-restart-named agent 'use-value))
+    (should (lispm-test--wait (lispm-test--idle-p agent)))
+    (should (string-match-p "^\\*\\* DONE read_file  a\\.txt\n" (lispm-test--transcript agent)))
+    (should (string-match-p "It says hello\\." (format "%S" (alist-get 'messages (car lispm-test--requests)))))))
+
+(ert-deftest lispm-test-tool-error-abort-and-org ()
+  "Stopping at a stopped call ends the turn, inputs kept; in org, its TODO state settles it."
+  (lispm-test-with-stopped-call
+    (lispm-tell agent "next")
+    (should (lispm-agent-inbox agent))
+    (with-current-buffer (lispm-agent-buffer agent)
+      (goto-char (point-min))
+      (re-search-forward "^\\*\\* WAITING read_file")
+      (org-todo "DENIED"))
+    (should (lispm-test--wait (lambda () (string-match-p "^\\* User\nnext\n" (lispm-test--transcript agent)))))
+    (should (string-match-p "^\\*\\* FAILED read_file  a\\.txt\n\\(?:.*\n\\)*\\* Note\nread_file failed: No such file"
+                            (lispm-test--transcript agent)))
+    (should (string-match-p "read_file failed" reply)))
+  (lispm-test-with-stopped-call
+    (with-current-buffer (lispm-agent-buffer agent)
+      (goto-char (point-min))
+      (re-search-forward "^\\*\\* WAITING read_file")
+      (org-todo "DONE"))
+    (should (lispm-test--wait (lispm-test--idle-p agent)))
+    (should (equal reply "Done."))
+    (should (string-match-p "^\\*\\*\\* Stopped: report\n" (lispm-test--transcript agent)))))
+
+(ert-deftest lispm-test-tool-error-resumed ()
+  "A call stopped when Emacs stopped is stopped again when the session is opened."
+  (lispm-test-with-conditions
+    (let* ((lispm-debug-tool-errors t)
+           (default-directory project)
+           (agent (lispm-start)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt")))))))
+      (lispm-tell agent "read")
+      (should (lispm-test--wait (lambda () (lispm--asked-condition agent))))
+      (let ((revived (lispm-resume-file (lispm-test--crash agent))))
+        (should (eq (lispm-agent-state revived) 'waiting))
+        (should (eq (plist-get (lispm--asked-condition revived) :type) 'tool-error))
+        (should (string-match-p "No such file" (plist-get (lispm--asked-condition revived) :error)))
+        (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done."))) lispm-test--scripts)
+        (lispm-restart revived "t1" 'report)
+        (should (lispm-test--wait (lispm-test--idle-p revived)))))))
+
+(ert-deftest lispm-test-tool-error-unattended-and-uncovered ()
+  "Unattended, a stopped call reports its error; uncovered tools and C-g never stop."
+  (lispm-test-with-conditions
+    (let ((lispm-debug-tool-errors t)
+          (lispm-unattended-condition-handlers '((tool-error report)))
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "read" :event "every hour")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "^\\*\\*\\* Stopped: report\n" (lispm-test--transcript agent)))))
+  (lispm-test-with-conditions
+    (let ((lispm-debug-tool-errors '("eval_elisp"))
+          (agent (lispm-defagent tester "Test agent." :root project :policy '((exec . auto)))))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use"
+                                        (lispm-test--tool "t1" "read_file" '((path . "a.txt")))
+                                        (lispm-test--tool "t2" "eval_elisp" '((why . "w") (code . "(signal 'quit nil)"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "go")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (string-match-p "Stopped" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-chat-tool-error ()
+  "The chat shows a stopped call's error and asks how to go on."
+  (lispm-test-with-stopped-call
+    (let ((chat (lispm-chat agent)))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "⏺ Read(a\\.txt)\n  ⎿  No such file: " text))
+        (should (string-match-p "│ Call failed +│" text))
+        (should (string-match-p "│ ❯ 1\\. Tell the model it failed +│\n│   2\\. Run it again +│\n│   3\\. Give the model a result of your own +│\n│   4\\. Stop here +│"
+                                text)))
+      (lispm-test--chat-key chat "1")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal reply "Done.")))))
+
 (ert-deftest lispm-test-condition-going-past ()
   "Writing in a helper's chat, in org, or a command goes past a condition."
   (lispm-test-with-conditions

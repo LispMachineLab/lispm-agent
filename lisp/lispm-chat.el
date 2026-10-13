@@ -192,21 +192,23 @@
              (type (cdr (assoc "BLOCK" props))))
         (cond
          ((assoc "TOOL_ID" props)
-          (let ((json (lispm-transcript--block bbeg own-end)) result failed preview images)
+          (let ((json (lispm-transcript--block bbeg own-end)) result failed preview images stopped)
             (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
               (pcase (plist-get (lispm-transcript--heading kbeg) :title)
                 ((and (or "Result" "Error") title)
                  (setq result (or (lispm-transcript--block kbody kend) "")
                        failed (equal title "Error")
                        images (lispm-transcript--images kbody kend)))
-                ("Preview" (setq preview (lispm-transcript--block kbody kend)))))
+                ("Preview" (setq preview (lispm-transcript--block kbody kend)))
+                ("Stopped" (setq stopped (lispm-transcript--text kbody kend)))))
             (let ((input (and json (ignore-errors (lispm--json-decode json)))))
               (push (list :kind 'tool
                           :key (cdr (assoc "TOOL_ID" props))
                           :name (cdr (assoc "TOOL" props))
                           :state (plist-get heading :todo)
                           :input (and (consp input) input)
-                          :result result :failed failed :preview preview :images images)
+                          :result result :failed failed :preview preview :images images
+                          :stopped (and (assoc "CONDITION" props) stopped))
                     items))))
          ((member type '("thinking" "reasoning"))
           (let* ((json (lispm-transcript--block bbeg own-end))
@@ -465,7 +467,12 @@ Code blocks lose their fences and keep their lines as they are."
     (pcase (plist-get item :state)
       ("WRITING" nil)
       ((or "RUNNING" "APPROVED") (list "Running…"))
-      ("WAITING" (list "Waiting for your approval…"))
+      ("WAITING"
+       (if-let* ((stopped (plist-get item :stopped))
+                 (lines (split-string (string-trim-right stopped) "\n")))
+           (mapcar (lambda (l) (propertize l 'face 'lispm-chat-error))
+                   (lispm-chat--more (if expanded lines (seq-take lines 2)) (length lines)))
+         (list "Waiting for your approval…")))
       ((or "DENIED" "FAILED")
        (mapcar (lambda (l) (propertize l 'face 'lispm-chat-error))
                (lispm-chat--more (if expanded lines (seq-take lines 2)) (length lines))))
@@ -643,9 +650,10 @@ Code blocks lose their fences and keep their lines as they are."
       (user-error "Nothing awaits your approval")))
 
 (defun lispm-chat--condition (&optional agent)
-  "The condition the prompt asks about: AGENT's, unless a call awaits approval."
+  "The condition the prompt asks about, AGENT's or a call's, if any.
+See `lispm--asked-condition'."
   (let ((agent (or agent lispm-chat-agent)))
-    (and agent (not (lispm--waiting-calls agent)) (lispm-agent-condition agent))))
+    (and agent (lispm--asked-condition agent))))
 
 (defun lispm-chat--prompting-p ()
   "Non-nil if the chat asks something: a call's approval, or a restart."
@@ -653,7 +661,7 @@ Code blocks lose their fences and keep their lines as they are."
 
 (defun lispm-chat-restart (restart)
   "Go on from the condition the prompt asks about by RESTART."
-  (lispm-choose-restart-named lispm-chat-agent restart)
+  (lispm-choose-restart-named lispm-chat-agent restart (lispm-chat--condition))
   (goto-char (point-max)))
 
 (defun lispm-chat--answer (n)
@@ -741,7 +749,9 @@ Code blocks lose their fences and keep their lines as they are."
   "The prompt for AGENT's first call awaiting approval, or nil.
 ITEMS are the session's items, where the call's preview is."
   (when-let* ((id (car (lispm--waiting-calls agent)))
-              (call (gethash id (lispm-agent-pending agent))))
+              (call (gethash id (lispm-agent-pending agent)))
+              ;; One stopped at an error asks for a restart instead.
+              ((not (plist-get call :condition))))
     (let* ((name (plist-get call :name))
            (input (and (consp (plist-get call :input)) (plist-get call :input)))
            (shown (lispm-chat--tool-name name))
@@ -923,8 +933,9 @@ ITEMS are the session's items, where the call's preview is."
 
 (defun lispm-chat--maybe-ask ()
   "Select the first answer of a newly shown prompt."
-  ;; A call's id, or the condition itself: a condition's id can be given again.
-  (let ((id (car (lispm--awaiting lispm-chat-agent))))
+  ;; A condition itself, or a call's id: a condition's id can be given again.
+  (let ((id (or (lispm--asked-condition lispm-chat-agent)
+                (car (lispm--awaiting lispm-chat-agent)))))
     (unless (equal id lispm-chat--asked)
       (setq lispm-chat--asked id
             lispm-chat--choice 0))))

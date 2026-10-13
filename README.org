@@ -243,7 +243,13 @@ of MCP servers are deferred by default; a tool of your own is when its ~lispm-de
 
 Whatever Emacs can do, an agent can do with ~eval_elisp~; ~apropos~, ~describe_symbol~ and
 ~read_info~ (the Info manuals) let it find out what there is and how it works. Code that
-waits for something ends with ~(lispm-async (lambda (resolve) ...))~.
+waits for something ends with ~(lispm-async (lambda (resolve) ...))~. An error in it comes
+back with its backtrace, innermost call first.
+
+A tool's failure goes to the model, which usually knows what to do about it. Set
+~lispm-debug-tool-errors~ (t, or a list of tool names) and it stops the call instead, as
+~debug-on-error~ would: you choose to tell the model, run the call again, give it a result of
+your own, or stop the turn.
 
 * Skills
 

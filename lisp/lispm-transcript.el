@@ -43,6 +43,8 @@
 ;;   #+begin_src json ... #+end_src the call's input
 ;;   *** Preview                    diff shown while awaiting approval
 ;;   *** Result                     the tool's output (or *** Error)
+;;   *** Stopped                    an error the call stopped at, awaiting a
+;;                                  restart (:CONDITION: tool-error)
 ;;   * Message from reviewer        input from another agent
 ;;   * Event: after-save-hook       input from a hook the user set up
 ;;   * Summary                      what an earlier session handed over
@@ -285,6 +287,12 @@ The others become a line of text; see `lispm-context-images'."
                                          (buffer-string)))))))))
          messages)))))
 
+(defun lispm-transcript-stopped (text &optional restart)
+  "Subsection of a call stopped at the error TEXT.
+RESTART, once one is chosen, is named in its heading."
+  (concat "*** Stopped" (if restart (format ": %s" restart) "") "\n"
+          (lispm-transcript--body text)))
+
 (defun lispm-transcript-preview (diff)
   "Section text showing DIFF while a call awaits approval."
   (concat "*** Preview\n#+begin_src diff\n"
@@ -335,6 +343,24 @@ Return an alist (TOOL-ID . MARKER) locating each tool-call heading."
       (let ((case-fold-search nil))
         (when (looking-at (concat "\\*+ " lispm-transcript--state-re "\\_>"))
           (replace-match state t t nil 1))))))
+
+(defun lispm-transcript-set-property (pos name value)
+  "Set the property NAME of the heading at POS to VALUE; nil removes it.
+The property goes in the drawer right under the heading, if it has one."
+  (save-excursion
+    (goto-char pos)
+    (forward-line 1)
+    (when (looking-at "[ \t]*:PROPERTIES:[ \t]*$")
+      (let ((end (save-excursion
+                   (and (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+                        (copy-marker (match-beginning 0))))))
+        (when end
+          (if (re-search-forward (format "^[ \t]*:%s:.*\n" (regexp-quote name)) end t)
+              (replace-match (if value (format ":%s: %s\n" name value) "") t t)
+            (when value
+              (goto-char end)
+              (insert (format ":%s: %s\n" name value))))
+          (set-marker end nil))))))
 
 (defun lispm-transcript-subtree-end (pos level)
   "End of the LEVEL subtree whose heading starts at POS."
@@ -447,7 +473,8 @@ IMAGES are files the result holds besides TEXT."
   "Parse an assistant section body between BEG and END.
 Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
 call a plist (:id :name :input :state :pos), :pos being where its
-heading starts."
+heading starts, and :stopped, the error it stopped at, for a call
+waiting at one (see `lispm-transcript-stopped')."
   (let* ((children (lispm-transcript--sections 2 beg end))
          (lead (string-trim (buffer-substring-no-properties
                              beg (if children (caar children) end))))
@@ -482,7 +509,13 @@ heading starts."
                   ((member (plist-get heading :todo) '("WAITING" "APPROVED" "RUNNING"))
                    (push (list :id id :name (cdr (assoc "TOOL" props))
                                :input (if (consp input) input nil)
-                               :state (plist-get heading :todo) :pos hbeg)
+                               :state (plist-get heading :todo) :pos hbeg
+                               :stopped (and (assoc "CONDITION" props)
+                                             (cl-loop for (kbeg kbody kend) in kids
+                                                      when (equal (plist-get (lispm-transcript--heading kbeg)
+                                                                             :title)
+                                                                  "Stopped")
+                                                      return (lispm-transcript--text kbody kend))))
                          pending))
                   (t
                    (push (lispm-transcript--tool-result id "(no result recorded)" t)
