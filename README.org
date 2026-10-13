@@ -109,8 +109,7 @@ The file takes the place of another file in view, or a window is split off for i
 stays where it is. ~lispm-show-edits~ turns all of this off, ~lispm-edits-follow~ keeps changes
 to buffers out of view from being brought into it, and ~lispm-edits-speed~,
 ~lispm-edits-max-duration~ and ~lispm-edits-fade~ set the pace. A change streams in only when
-the backend streams tool calls' input piece by piece; Rotom's Messages side does
-(~rotom-messages~), its Chat Completions side sends the input whole.
+the backend streams tool calls' input piece by piece, as Rotom does on both sides since 1.5.16.
 
 * Agents, roles and sessions
 
