@@ -748,10 +748,11 @@ See `lispm--asked-condition'."
 (defun lispm-chat--approval (agent items)
   "The prompt for AGENT's first call awaiting approval, or nil.
 ITEMS are the session's items, where the call's preview is."
-  (when-let* ((id (car (lispm--waiting-calls agent)))
-              (call (gethash id (lispm-agent-pending agent)))
-              ;; One stopped at an error asks for a restart instead.
-              ((not (plist-get call :condition))))
+  (when-let* (;; Not while a call before it, stopped at an error, asks
+              ;; for a restart.
+              ((not (lispm--asked-condition agent)))
+              (id (car (lispm--waiting-calls agent)))
+              (call (gethash id (lispm-agent-pending agent))))
     (let* ((name (plist-get call :name))
            (input (and (consp (plist-get call :input)) (plist-get call :input)))
            (shown (lispm-chat--tool-name name))

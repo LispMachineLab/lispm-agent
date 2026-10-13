@@ -638,9 +638,7 @@ BAR, if non-nil, is a cursor at its end."
                (lispm-edits--retire p nil))))))
     (when (lispm-edits--live-p)
       (maphash (lambda (id call)
-                 ;; Not a call stopped at an error: it changed nothing.
-                 (when (and (eq (plist-get call :status) 'ask)
-                            (not (plist-get call :condition)))
+                 (when (eq (plist-get call :status) 'ask)
                    (lispm-edits--propose agent id
                                          (or (plist-get call :tool)
                                              (lispm-get-tool (plist-get call :name)))

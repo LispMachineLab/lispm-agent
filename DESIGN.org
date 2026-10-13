@@ -213,7 +213,10 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   innermost call first: the frames of that code alone, from where the error was signaled
   (caught with ~handler-bind~, before the stack unwinds) up to the ~eval~ of the form, at
   most 20 of them; so the model sees which function called which with what, as a person
-  would in the debugger.
+  would in the debugger. The handler runs for errors the code catches as well, so it only
+  collects the frames; they are printed once an error reaches eval_elisp. They show the
+  arguments of those calls, values the model may not have seen otherwise (a password read with
+  ~auth-source~): ~lispm-eval-backtrace~ turns them off.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
 - *C-g interrupts a call* while Emacs runs it. Calls run from the process sentinels and timers
@@ -316,8 +319,9 @@ takes the default, to ~DENIED~ aborts; the agenda lists waiting conditions with 
 Whatever the user asks of the agent next goes past the condition, stopping there: a message
 written in the chat, one written in org under a new ~* User~ heading after the condition,
 ~/clear~, ~/compact~. In Lisp, ~lispm-restart~ chooses one, and handlers choose without asking,
-as ~handler-bind~ would, at once or after a delay, at most so many times in a turn, then perhaps
-another restart: ~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
+as ~handler-bind~ would, at once or after a delay, at most so many times in a turn (for a call's
+condition, in that call), then perhaps another restart:
+~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
 started go by ~lispm-condition-handlers~: they wait for the user, except that a paused response
 goes on. Turns started
 by another agent's message (a helper's) or by an event (a hook, a timer) go by
@@ -343,12 +347,14 @@ tool names) makes them stop instead, as ~debug-on-error~ enters the debugger: th
 waits at a ~tool-error~ condition of its own, carried by the call rather than the turn. Its
 heading goes back to ~WAITING~, with ~:CONDITION: tool-error~ and a ~*** Stopped~ subsection
 holding the error, so the agenda lists it and a reopened session takes it up, as calls awaiting
-approval; the chat asks about it where it would ask for approval. ~report~ gives the model the
-error as the result, as without the option; ~retry~ runs the call again, once the user has fixed
-what it needed; ~use-value~ gives the model a result the user types; ~abort~ ends the turn, the
-call failed, the others stopped, inputs waiting kept. A chosen restart is named on the Stopped
-subsection (~*** Stopped: retry~). Unattended turns report at once; a call interrupted with C-g
-never stops.
+approval; the chat asks about it where it would ask for approval, but it is not one: approving a
+tool for the session leaves it alone, and aborting the turn names ~abort~ on it. ~report~ gives
+the model the error as the result, as without the option; ~retry~ runs the call again, once the
+user has fixed what it needed (a handler's ~retry~ runs it only if the policy would run it
+unasked, else it awaits approval again); ~use-value~ gives the model a result the user types;
+~abort~ ends the turn, the call failed, the others stopped, inputs waiting kept. A chosen
+restart is named on the Stopped subsection (~*** Stopped: retry~). Unattended turns report each
+failed call at once; a call interrupted with C-g never stops.
 
 A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
 given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and
