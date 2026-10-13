@@ -482,25 +482,32 @@ Only a window sharing its column with another can roll up."
 
 (declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
 
+(declare-function lme-sidebar-buffer-view "lme-sidebar" (buffer))
+
 (defun lme-platinum--window-buffers (window)
-  "Return the buffers WINDOW could show: its workspace's, minus hidden ones."
-  (seq-remove (lambda (buffer) (string-prefix-p " " (buffer-name buffer)))
+  "Return the buffers WINDOW could show: its workspace's.
+Hidden buffers and the sidebar's lists are left out."
+  (seq-remove (lambda (buffer)
+                (or (string-prefix-p " " (buffer-name buffer))
+                    (lme-sidebar-buffer-view buffer)))
               (if (bound-and-true-p tabspaces-mode)
                   (tabspaces--buffer-list (window-frame window))
                 (buffer-list (window-frame window)))))
 
 (defun lme-platinum-title-menu (window)
-  "Pop up the buffers WINDOW could show, and show the one chosen in it.
+  "Pop up the buffers WINDOW could show, and show the one chosen.
 As Mac OS 9 popped up a window's path from its title, the title pops up
-the workspace's buffers, the one WINDOW shows checked."
+the workspace's buffers, the one WINDOW shows checked.  The choice goes
+to WINDOW unless the main area's columns send it elsewhere: a session
+to the left, a file to the right."
   (popup-menu
    (cons "Buffers"
          (mapcar (lambda (buffer)
                    (vector (lme-platinum--buffer-title buffer)
                            (lambda ()
                              (interactive)
-                             (set-window-buffer window buffer)
-                             (select-window window))
+                             (select-window window)
+                             (switch-to-buffer buffer))
                            :style 'radio
                            :selected (eq buffer (window-buffer window))))
                  (seq-take (lme-platinum--window-buffers window) 30)))))

@@ -51,8 +51,6 @@
 (declare-function flymake-diagnostic-text "flymake" (diag))
 (declare-function flymake-diagnostic-backend "flymake" (diag))
 (declare-function evil-visual-state-p "evil-states" (&optional state))
-(declare-function lme-main-area--windows "lme-interface" ())
-(declare-function lme-main-area--terminal-p "lme-interface" (window))
 (defvar evil-visual-beginning)
 (defvar evil-visual-end)
 (defvar flymake-mode)
@@ -280,20 +278,8 @@ Only files under DIRECTORY are reported."
              `((success . :false) (message . ,(format "Document not open: %s" file))))))))
 
 (defun lme-agent-context-display (buffer)
-  "Show BUFFER in the main area beside the terminals, keeping the selection.
-A main window showing no terminal is reused; otherwise the rightmost one is
-split, files going right as in the rest of the main area."
-  (display-buffer
-   buffer
-   (list (lambda (buffer alist)
-           (let* ((windows (lme-main-area--windows))
-                  (reusable (seq-find (lambda (window) (not (lme-main-area--terminal-p window)))
-                                      windows)))
-             (window--display-buffer
-              buffer
-              (or reusable (split-window (or (car (last windows)) (selected-window)) nil 'right))
-              (if reusable 'reuse 'window)
-              alist))))))
+  "Show BUFFER in the main area's file column, keeping the selection."
+  (display-buffer buffer '(lme-main-area-display-file)))
 
 (defun lme-agent-context--tool-open-file (_directory arguments)
   "Show the file ARGUMENTS name, at its start text when given, without focus."

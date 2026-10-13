@@ -47,6 +47,7 @@
 (require 'package)
 
 (defvar lme-agent-map)
+(defvar lme-conversation-modes)
 (defvar lme-agent-list-mode-map)
 (defvar lispm-interface)
 (defvar lispm-chat-agent)
@@ -207,6 +208,8 @@ With a prefix argument, choose its ROLE."
               :rename #'lme-lispm-rename
               :files #'lme-lispm-files))
 
+  ;; A chat keeps to the session column from the moment it is created.
+  (add-to-list 'lme-conversation-modes 'lispm-chat-mode)
   (add-hook 'lispm-chat-mode-hook #'lme-lispm--tag-buffer)
   (add-hook 'lispm-session-mode-hook #'lme-lispm--tag-buffer)
   (add-hook 'lispm-state-change-functions #'lme-lispm--changed)

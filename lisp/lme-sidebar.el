@@ -171,14 +171,40 @@ DETAIL, when non-nil, follows after a comma."
           (when detail (concat ", " detail))))
 
 (defun lme-sidebar--display (buffer)
-  "Show BUFFER as the left sidebar of this frame and return its window."
+  "Show BUFFER as the left sidebar of this frame and return its window.
+The window is dedicated to BUFFER, so nothing else is ever shown in it:
+switching buffers there goes to the main area instead."
   (display-buffer-in-side-window
    buffer `((side . left)
             (slot . -1)
             (window-width . ,lme-sidebar-width)
             (preserve-size . (t . nil))
+            (dedicated . t)
             (window-parameters . ((no-delete-other-windows . t)
                                   (no-other-window . t))))))
+
+(defun lme-sidebar-buffer-view (buffer)
+  "Return the sidebar view BUFFER is the list of, or nil.
+See the :mode of `lme-sidebar-views'."
+  (car (seq-find (lambda (view)
+                   (when-let* ((mode (plist-get (cdr view) :mode)))
+                     (eq (buffer-local-value 'major-mode buffer) mode)))
+                 lme-sidebar-views)))
+
+(defun lme-sidebar--view-buffer-p (buffer-or-name _action)
+  "Return non-nil when BUFFER-OR-NAME is a sidebar list about to be shown.
+This is the `display-buffer-alist' condition keeping lists in the sidebar."
+  (when-let* ((buffer (get-buffer buffer-or-name)))
+    (lme-sidebar-buffer-view buffer)))
+
+(defun lme-sidebar-display-view (buffer _alist)
+  "Show the sidebar view whose list BUFFER is, and return its window.
+This is a `display-buffer' action function: however a list is asked for,
+it is shown in the sidebar, never in the main area."
+  (let ((view (lme-sidebar-buffer-view buffer)))
+    (unless (eq view (lme-sidebar-current-view))
+      (lme-sidebar-select view))
+    (get-buffer-window buffer)))
 
 (defun lme-sidebar--hide-buffer (name)
   "Hide the sidebar window showing the buffer called NAME."
@@ -187,13 +213,12 @@ DETAIL, when non-nil, follows after a comma."
 
 (defun lme-sidebar-show-in-main (buffer)
   "Show BUFFER in the main area and select it.
-Terminals go to the left of the main area, see `lme-main-area-show-terminal'.
-Other buffers are shown from the most recently used main window through
-`display-buffer', so files obey the main area's right-hand rule."
+Sessions go to the session column, see `lme-main-area-show-terminal';
+anything else to the file column, through `display-buffer', so a file of
+another project still opens in that project's workspace."
   (if (lme-terminal-buffer-p buffer)
       (lme-main-area-show-terminal buffer)
-    (select-window (lme-agent--main-window))
-    (pop-to-buffer-same-window buffer)
+    (select-window (display-buffer buffer '(lme-main-area-display-file)))
     buffer))
 
 (defun lme-sidebar--insert-styled-button (label action help)
@@ -576,24 +601,27 @@ Outside any project treemacs falls back to the buffer's directory."
            :visible lme-sidebar--files-visible-p
            :show lme-sidebar--files-show
            :hide lme-sidebar--files-hide)
-    (agents :title "Agents" :icon "robot" :command lme-sidebar-agents
+    (agents :title "Agents" :icon "robot" :mode lme-agent-list-mode
+            :command lme-sidebar-agents
             :help "Agent sessions"
             :visible lme-agent-list-visible-p
             :show lme-agent-list-show
             :hide lme-agent-list-hide)
-    (shells :title "Shells" :icon "computer" :command lme-sidebar-shells
+    (shells :title "Shells" :icon "computer" :mode lme-shell-list-mode
+            :command lme-sidebar-shells
             :help "Shells"
             :visible lme-shell-list-visible-p
             :show lme-shell-list-show
             :hide lme-shell-list-hide)
-    (buffers :title "Buffers" :icon "document" :command lme-sidebar-buffers
+    (buffers :title "Buffers" :icon "document" :mode lme-buffer-list-mode
+             :command lme-sidebar-buffers
              :help "Open buffers"
              :visible lme-buffer-list-visible-p
              :show lme-buffer-list-show
              :hide lme-buffer-list-hide))
   "Views the left sidebar can show, in menu bar order.
 Each view names its TITLE, its Finder icon (see `lme-platinum-icon'),
-the COMMAND its menu bar title
+the MODE of its list buffer when it has one, the COMMAND its menu bar title
 runs, and the functions that test, show and hide it in the selected frame.")
 
 (defun lme-sidebar-current-view ()

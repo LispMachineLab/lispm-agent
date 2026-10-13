@@ -48,15 +48,21 @@
 
 ;;;; Main area layout
 ;;
-;; The main area is every window that is not a side window.  Terminals
-;; (agent sessions and shells) live on its left, files on its right:
+;; The main area is every window that is not a side window.  It keeps two
+;; columns, whatever command shows a buffer:
 ;;
-;;   showing a terminal   reuse a terminal window, else split a window that
-;;                        shows a file and take its left half
-;;   visiting a file      from a terminal window, reuse a file window, else
-;;                        split the terminal window and take its right half
+;;   sessions   terminals and agent conversations, on the left: a window
+;;              already showing a session is reused, else the leftmost
+;;              window, split first when it shows a file
+;;   the rest   files, and any buffer switched to in place, on the right,
+;;              never over a session nor in the sidebar: they go to the
+;;              rightmost window that is not a session, else a session
+;;              window is split for them
 ;;
-;; Anything else is shown in place.
+;; Popups (help, completions, transient menus) open as they ask.  The
+;; rules sit in `display-buffer-alist', and `switch-to-buffer' obeys them
+;; too, so C-x b, C-x C-f, the sidebar, the title bar's buffer menu and
+;; the agents' own display requests all keep the columns.
 
 (defun lme-main-area--window-p (window)
   "Return non-nil when WINDOW holds content of the main area.
@@ -75,11 +81,20 @@ Side windows and chrome windows, such as the browser's address window
 It is laid out as a terminal, though it may visit a file.")
 (put 'lme-conversation-buffer 'permanent-local t)
 
+(defvar lme-conversation-modes nil
+  "Major modes of agent conversations, laid out as terminals.
+Agents running inside Emacs add their chat modes, so a chat keeps to the
+session column from the moment it is created.")
+
 (defun lme-terminal-buffer-p (buffer)
-  "Return non-nil when BUFFER is laid out as a terminal.
-That is an Eat terminal, or an agent conversation, see `lme-conversation-buffer'."
-  (or (eq (buffer-local-value 'major-mode buffer) 'eat-mode)
-      (buffer-local-value 'lme-conversation-buffer buffer)))
+  "Return non-nil when BUFFER is laid out as a terminal: a session.
+That is an Eat terminal, or an agent conversation, see
+`lme-conversation-buffer' and `lme-conversation-modes'."
+  (let ((mode (buffer-local-value 'major-mode buffer)))
+    (or (eq mode 'eat-mode)
+        (buffer-local-value 'lme-conversation-buffer buffer)
+        (and lme-conversation-modes
+             (apply #'provided-mode-derived-p mode lme-conversation-modes)))))
 
 (defun lme-main-area--terminal-p (window)
   "Return non-nil when WINDOW shows a terminal."
@@ -90,38 +105,77 @@ That is an Eat terminal, or an agent conversation, see `lme-conversation-buffer'
   (let ((buffer (window-buffer window)))
     (and (buffer-file-name buffer) (not (lme-terminal-buffer-p buffer)))))
 
-(defun lme-main-area-show-terminal (buffer)
-  "Show terminal BUFFER on the left of the main area and select its window.
-A window already showing a terminal is reused; otherwise the leftmost main
-window is split when it shows a file, keeping the file on the right."
-  (let* ((windows (lme-main-area--windows))
-         (window (or (seq-find #'lme-main-area--terminal-p windows)
-                     (let ((leftmost (or (car windows) (selected-window))))
-                       (if (lme-main-area--file-p leftmost)
-                           (split-window leftmost nil 'left)
-                         leftmost)))))
-    (set-window-buffer window buffer)
-    (select-window window)
-    buffer))
+(defun lme-main-area--by-use (windows)
+  "Return WINDOWS, the most recently used first."
+  (sort (copy-sequence windows)
+        (lambda (a b) (> (window-use-time a) (window-use-time b)))))
 
-(defun lme-main-area--file-over-terminal-p (buffer-or-name _action)
-  "Return non-nil when BUFFER-OR-NAME is a file about to replace a terminal.
-This is the `display-buffer-alist' condition routing files to the right."
-  (let ((buffer (get-buffer buffer-or-name)))
-    (and (buffer-file-name buffer)
-         (not (lme-terminal-buffer-p buffer))
-         (not (window-parameter (selected-window) 'window-side))
-         (lme-main-area--terminal-p (selected-window)))))
+(defun lme-main-area--session-window (buffer)
+  "Return the window session BUFFER belongs in, and whether it is new.
+The value is (WINDOW . NEW).  A window showing BUFFER wins, then the
+session window used last; else the leftmost window, split off to the
+left of a file it shows."
+  (let* ((windows (lme-main-area--windows))
+         (leftmost (or (car windows) (selected-window))))
+    (or (when-let* ((window (or (get-buffer-window buffer)
+                                (car (lme-main-area--by-use
+                                      (seq-filter #'lme-main-area--terminal-p windows))))))
+          (cons window nil))
+        (if (lme-main-area--file-p leftmost)
+            (cons (split-window leftmost nil 'left) t)
+          (cons leftmost nil)))))
+
+(defun lme-main-area--file-window ()
+  "Return the window a file belongs in, and whether it is new.
+The value is (WINDOW . NEW).  The rightmost window showing a file wins,
+then the rightmost window showing no session; else the rightmost session
+window is split, and the file takes its right half."
+  (let ((windows (lme-main-area--windows)))
+    (if-let* ((window (or (car (last (seq-filter #'lme-main-area--file-p windows)))
+                          (car (last (seq-remove #'lme-main-area--terminal-p windows))))))
+        (cons window nil)
+      (cons (split-window (or (car (last windows)) (selected-window)) nil 'right) t))))
+
+(defun lme-main-area-display-session (buffer alist)
+  "Display session BUFFER in the session column, per ALIST.
+This is a `display-buffer' action function."
+  (pcase-let ((`(,window . ,new) (lme-main-area--session-window buffer)))
+    (window--display-buffer buffer window (if new 'window 'reuse) alist)))
 
 (defun lme-main-area-display-file (buffer alist)
-  "Display file BUFFER on the right of the main area, per ALIST.
-A main window already showing a file is reused, the rightmost first;
-otherwise the selected terminal window is split and BUFFER takes its right
-half.  This is a `display-buffer' action function."
-  (let* ((files (seq-filter #'lme-main-area--file-p (lme-main-area--windows)))
-         (window (or (car (last files))
-                     (split-window (selected-window) nil 'right))))
-    (window--display-buffer buffer window (if files 'reuse 'window) alist)))
+  "Display file BUFFER in the file column, per ALIST.
+This is a `display-buffer' action function."
+  (pcase-let ((`(,window . ,new) (lme-main-area--file-window)))
+    (window--display-buffer buffer window (if new 'window 'reuse) alist)))
+
+(defun lme-main-area-show-terminal (buffer)
+  "Show terminal BUFFER in the session column and select its window."
+  (select-window (lme-main-area-display-session buffer nil))
+  buffer)
+
+(defun lme-main-area--session-p (buffer-or-name _action)
+  "Return non-nil when BUFFER-OR-NAME is a session about to be shown.
+This is the `display-buffer-alist' condition keeping sessions on the left."
+  (when-let* ((buffer (get-buffer buffer-or-name)))
+    (and (lme-terminal-buffer-p buffer)
+         ;; A session shown in place in a session window stays there, so
+         ;; two sessions side by side remain possible.
+         (not (and (lme-main-area--terminal-p (selected-window))
+                   (lme-main-area--window-p (selected-window))
+                   (not (get-buffer-window buffer)))))))
+
+(defun lme-main-area--astray-p (buffer-or-name action)
+  "Return non-nil when BUFFER-OR-NAME is about to cover a session or the sidebar.
+That is a buffer other than a session, shown from a session window or a
+side window, such as the sidebar: a file, whatever ACTION asks, or any
+buffer switched to in place.  This is the `display-buffer-alist'
+condition keeping the session column for sessions."
+  (when-let* ((buffer (get-buffer buffer-or-name)))
+    (and (not (lme-terminal-buffer-p buffer))
+         (or (buffer-file-name buffer)
+             (memq 'display-buffer-same-window (ensure-list (car-safe action))))
+         (or (window-parameter (selected-window) 'window-side)
+             (lme-main-area--terminal-p (selected-window))))))
 
 ;;;; Project workspaces
 ;;
@@ -172,15 +226,15 @@ This is the `display-buffer-alist' condition sending files to their project."
 
 (defun lme-workspace-display-file (buffer alist)
   "Display file BUFFER in its project's workspace, per ALIST.
-The workspace is entered, or created with BUFFER alone in it; there BUFFER
-replaces the main window, or goes to the right when a terminal is selected.
+The workspace is entered, or created with BUFFER alone in it; in a
+workspace already open, BUFFER goes to its file column.
 This is a `display-buffer' action function."
   (pcase-let* ((`(,name . ,root) (lme-workspace--file-project buffer))
                (fresh (lme-workspace-enter name root)))
-    (if (and (not fresh) (lme-main-area--terminal-p (selected-window)))
+    (if (not fresh)
         (lme-main-area-display-file buffer alist)
       (prog1 (window--display-buffer buffer (lme-agent--main-window) 'reuse alist)
-        (when fresh (tabspaces-reset-buffer-list))))))
+        (tabspaces-reset-buffer-list)))))
 
 (defun lme-workspace-show-alone (buffer)
   "Show BUFFER as the only buffer of the workspace just created.
@@ -324,10 +378,18 @@ cells and split-pane dividers drawn with box characters stay straight."
   (lme-ansi-apply-faces)
   (add-hook 'enable-theme-functions #'lme-ansi-apply-faces)
   ;; Each entry is added in front, so the workspace rule is consulted first.
+  ;; `switch-to-buffer' obeys them too, so no command bypasses the columns;
+  ;; a dedicated window, such as the sidebar's, sends the buffer elsewhere.
   (add-to-list 'display-buffer-alist
-               '(lme-main-area--file-over-terminal-p lme-main-area-display-file))
+               '(lme-main-area--astray-p lme-main-area-display-file))
+  (add-to-list 'display-buffer-alist
+               '(lme-main-area--session-p lme-main-area-display-session))
+  (add-to-list 'display-buffer-alist
+               '(lme-sidebar--view-buffer-p lme-sidebar-display-view))
   (add-to-list 'display-buffer-alist
                '(lme-workspace--foreign-file-p lme-workspace-display-file))
+  (setq switch-to-buffer-obey-display-actions t
+        switch-to-buffer-in-dedicated-window 'pop)
   (add-hook 'buffer-list-update-hook #'lme-buffer-list--schedule-refresh)
   (add-hook 'xwidget-webkit-mode-hook #'lme-browser--setup)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-browser--on-workspace-select)

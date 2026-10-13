@@ -218,5 +218,112 @@ not a first start."
   (should (equal (lme-sidebar--count 1 "session") "1 session"))
   (should (equal (lme-sidebar--count 3 "session" "1 running") "3 sessions, 1 running")))
 
+;;;; Main area columns
+
+(defmacro lme-test--with-layout (&rest body)
+  "Run BODY in a frame of one main window, with the columns' rules on."
+  `(save-window-excursion
+     (let ((display-buffer-alist
+            '((lme-main-area--astray-p lme-main-area-display-file)
+              (lme-main-area--session-p lme-main-area-display-session)))
+           (switch-to-buffer-obey-display-actions t)
+           (window-min-width 4))
+       (delete-other-windows)
+       ,@body)))
+
+(defun lme-test--session (name)
+  "Return a fresh buffer NAME laid out as a session."
+  (with-current-buffer (get-buffer-create name)
+    (setq lme-conversation-buffer t)
+    (current-buffer)))
+
+(defun lme-test--file (name)
+  "Return a buffer visiting a temporary file NAME."
+  (find-file-noselect (expand-file-name name temporary-file-directory)))
+
+(defun lme-test--left-p (a b)
+  "Return non-nil when the window of buffer A is left of B's."
+  (< (car (window-edges (get-buffer-window a))) (car (window-edges (get-buffer-window b)))))
+
+(ert-deftest lme-test-file-from-session-goes-right ()
+  "A file opened from a session window opens to its right; the session stays."
+  (lme-test--with-layout
+   (let ((session (lme-test--session "lme-test session"))
+         (file (lme-test--file "lme-test-a.txt")))
+     (switch-to-buffer session)
+     (switch-to-buffer file)
+     (should (get-buffer-window session))
+     (should (lme-test--left-p session file))
+     (should (eq (window-buffer (selected-window)) file)))))
+
+(ert-deftest lme-test-session-from-file-goes-left ()
+  "A session shown from a file window goes to the left of the file."
+  (lme-test--with-layout
+   (let ((session (lme-test--session "lme-test session 2"))
+         (file (lme-test--file "lme-test-b.txt")))
+     (switch-to-buffer file)
+     (switch-to-buffer session)
+     (should (get-buffer-window file))
+     (should (lme-test--left-p session file)))))
+
+(ert-deftest lme-test-session-reuses-session-column ()
+  "With both columns open, a session from the file side replaces the session."
+  (lme-test--with-layout
+   (let ((one (lme-test--session "lme-test session 3"))
+         (two (lme-test--session "lme-test session 4"))
+         (file (lme-test--file "lme-test-c.txt")))
+     (switch-to-buffer one)
+     (switch-to-buffer file)
+     (switch-to-buffer two)
+     (should (= (length (window-list)) 2))
+     (should-not (get-buffer-window one))
+     (should (lme-test--left-p two file)))))
+
+(ert-deftest lme-test-other-buffer-from-session-goes-right ()
+  "Any buffer switched to from a session window goes right, not over it."
+  (lme-test--with-layout
+   (let ((session (lme-test--session "lme-test session 6"))
+         (other (get-buffer-create "lme-test other")))
+     (switch-to-buffer session)
+     (switch-to-buffer other)
+     (should (get-buffer-window session))
+     (should (lme-test--left-p session other)))))
+
+(ert-deftest lme-test-popups-are-left-alone ()
+  "A buffer displayed as a popup is not taken over by the columns."
+  (lme-test--with-layout
+   (let ((session (lme-test--session "lme-test session 7")))
+     (switch-to-buffer session)
+     (should-not (lme-main-area--astray-p (get-buffer-create "lme-test popup")
+                                          '(display-buffer-pop-up-window))))))
+
+(define-derived-mode lme-test-chat-mode special-mode "Chat"
+  "A stand-in for an agent's chat mode.")
+
+(ert-deftest lme-test-chat-mode-is-a-session ()
+  "A buffer in a registered chat mode keeps to the session column at once."
+  (lme-test--with-layout
+   (let ((lme-conversation-modes '(lme-test-chat-mode))
+         (file (lme-test--file "lme-test-f.txt"))
+         (chat (with-current-buffer (get-buffer-create "lme-test chat")
+                 (lme-test-chat-mode)
+                 (current-buffer))))
+     (switch-to-buffer file)
+     (pop-to-buffer chat)
+     (should (lme-test--left-p chat file)))))
+
+(ert-deftest lme-test-second-file-stays-right ()
+  "A second file opened from the session replaces the file, not the session."
+  (lme-test--with-layout
+   (let ((session (lme-test--session "lme-test session 5"))
+         (a (lme-test--file "lme-test-d.txt"))
+         (b (lme-test--file "lme-test-e.txt")))
+     (switch-to-buffer session)
+     (switch-to-buffer a)
+     (select-window (get-buffer-window session))
+     (switch-to-buffer b)
+     (should (= (length (window-list)) 2))
+     (should (lme-test--left-p session b)))))
+
 (provide 'lme-test)
 ;;; lme-test.el ends here
