@@ -559,7 +559,8 @@ Windows that showed the end of the buffer keep following it."
 
 (defun lispm--record-event (agent title text)
   "Note TEXT as an event in AGENT's session without starting a turn.
-The model reads it with the next input."
+The event's heading is \"Event: TITLE\".  The model reads it with
+the next input."
   (lispm--in-session agent
     (let ((input (lispm--input-heading-p)))
       (if input

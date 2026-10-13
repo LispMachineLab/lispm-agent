@@ -320,7 +320,8 @@ PROPS are as for `lispm-register-role'.
 
 (cl-defun lispm-make-agent (role root &key name id standing)
   "Make a live agent of ROLE working in ROOT, and return it.
-NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id."
+NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id.
+STANDING non-nil makes it a standing agent, as `lispm-defagent' does."
   (let* ((role (lispm-get-role role))
          (agent (lispm-agent--create
                  :name (or name (lispm--free-name

@@ -1004,7 +1004,8 @@ how this Emacs works before writing code for it."
 ;;;; Built-in tools: writing
 
 (defun lispm-tools--edit-preview (path old-text new-text &optional replace-all)
-  "Diff that edit_file with these arguments would produce."
+  "Diff that edit_file would produce in the file at PATH.
+OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
   (let* ((file (lispm-tools--file path))
          (old (lispm--file-text file)))
     (lispm--diff old (car (lispm-tools--replace old old-text new-text replace-all))
