@@ -156,10 +156,10 @@ ROLE.  DIRECTORY defaults to the current project's root."
 
 (defun lispm--read-session (prompt)
   "Read a recorded session with PROMPT; return its description."
-  (let* ((root (file-name-as-directory (expand-file-name (lispm--project-root))))
+  (let* ((here (lispm-project-directory (lispm--project-root)))
+         (here-p (lambda (s) (string-prefix-p here (plist-get s :file))))
          (sessions (lispm-sessions))
-         (sessions (append (seq-filter (lambda (s) (equal (file-name-as-directory (plist-get s :root)) root)) sessions)
-                           (seq-remove (lambda (s) (equal (file-name-as-directory (plist-get s :root)) root)) sessions)))
+         (sessions (append (seq-filter here-p sessions) (seq-remove here-p sessions)))
          (table (make-hash-table :test #'equal))
          (labels (mapcar (lambda (s)
                            (let ((label (format "%-16s %-5s %s  %s"

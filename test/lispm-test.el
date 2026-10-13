@@ -1503,6 +1503,156 @@ Its policy is the stricter of its role's and its caller's."
              (results (alist-get 'content (aref (alist-get 'messages helper-request) 2))))
         (should (string-match-p "Denied by policy" (alist-get 'content (aref results 0))))))))
 
+;;;; Worktrees
+
+(defvar lispm-worktree-directory)       ; of the worktree skill
+
+(defun lispm-test--git (directory &rest args)
+  "Run git ARGS in DIRECTORY; return its output, trimmed."
+  (let ((default-directory directory))
+    (with-temp-buffer
+      (apply #'call-process "git" nil t nil
+             "-c" "user.name=test" "-c" "user.email=test@lispm.invalid" "-c" "commit.gpgsign=false"
+             args)
+      (string-trim (buffer-string)))))
+
+(defun lispm-test--git-repo (directory)
+  "Make DIRECTORY a git repository with one commit; return it."
+  (lispm-test--write (expand-file-name "README" directory) "hello\n")
+  (lispm-test--git directory "init" "-q")
+  (lispm-test--git directory "add" ".")
+  (lispm-test--git directory "commit" "-q" "-m" "init")
+  directory)
+
+(ert-deftest lispm-test-worktree-same-project ()
+  "A linked git worktree is the project of its main worktree: same sessions, memory and tasks."
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (let* ((main (lispm-test--git-repo (file-truename project)))
+           (linked (expand-file-name "../linked/" main))
+           (module (expand-file-name "../module/" main)))
+      (lispm-test--git main "worktree" "add" "-b" "side" linked)
+      (should (file-regular-p (expand-file-name ".git" linked)))
+      (should (equal (lispm--main-worktree linked) main))
+      (should (equal (lispm--main-worktree (expand-file-name "lisp/" linked))
+                     (expand-file-name "lisp/" main)))
+      (should (equal (lispm--main-worktree main) main))
+      (should (equal (lispm-project-directory linked) (lispm-project-directory main)))
+      ;; A submodule's .git is a file too, but it is a project of its own.
+      (lispm-test--write (expand-file-name ".git" module) "gitdir: ../project/.git/modules/module\n")
+      (should (equal (lispm--main-worktree module) module))
+      (let ((here (lispm-defagent here :root main))
+            (there (lispm-defagent there :root linked)))
+        (lispm-test--call here "remember" '((title . "Shared") (content . "One project.")))
+        (should (equal (car (lispm-test--call there "recall" '((query . "shared"))))
+                       "## Shared\nOne project."))))))
+
+(ert-deftest lispm-test-worktree-skill ()
+  "worktree_ask starts a helper in a worktree of its own; its work stays there until merged."
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (lispm-defrole coder "Writes code." :policy '((write . auto)))
+    (let* ((project (lispm-test--git-repo (file-truename project)))
+           (boss (lispm-defagent boss :root project :policy '((write . auto))))
+           (call (lambda (tool input &optional agent)
+                   (let ((lispm-current-agent (or agent boss)) result)
+                     (lispm-tool-invoke (lispm-get-tool tool) input
+                                        (lambda (text errorp &rest _) (setq result (cons text errorp))))
+                     (should (lispm-test--wait (lambda () result) 10))
+                     result)))
+           (trees (expand-file-name "../worktrees/" project))
+           (tree (lambda (name) (expand-file-name (concat "project/" name "/") trees)))
+           (branch-p (lambda (name)
+                       (not (string-empty-p (lispm-test--git project "branch" "--list"
+                                                             (concat "lispm/" name)))))))
+      (should (string-match-p "tools now available: worktree_ask, worktree_list, worktree_remove"
+                              (car (lispm-test--call boss "skill" '((name . "worktree"))))))
+      (unwind-protect
+          (let ((lispm-worktree-directory trees))
+            (setq lispm-test--scripts
+                  `((coder@x ,(lispm-test--msg "tool_use"
+                                               (lispm-test--tool "c1" "write_file"
+                                                                 '((why . "asked to") (path . "x.txt")
+                                                                   (content . "from x\n"))))
+                             ,(lispm-test--msg "end_turn" (lispm-test--text "Wrote x.txt.")))
+                    (coder@y ,(lispm-test--msg "end_turn" (lispm-test--text "Nothing to do.")))
+                    (coder@z ,(lispm-test--msg "tool_use"
+                                               (lispm-test--tool "c2" "write_file"
+                                                                 '((why . "asked to") (path . "z.txt")
+                                                                   (content . "from z\n"))))
+                             ;; The helper commits its work.
+                             ,(lambda (_body)
+                                (lispm-test--git (funcall tree "z") "add" ".")
+                                (lispm-test--git (funcall tree "z") "commit" "-q" "-m" "Add z")
+                                (lispm-test--msg "end_turn" (lispm-test--text "Committed."))))))
+            ;; Work left uncommitted stays in the worktree, apart from the project.
+            (let ((result (funcall call "worktree_ask" '((why . "apart") (role . "coder")
+                                                         (request . "Write x.txt") (name . "x")))))
+              (should-not (cdr result))
+              (should (string-match-p
+                       (concat "\\`coder@x replied:\nWrote x\\.txt\\.\n\nIts work is in the worktree "
+                               ".*/worktrees/project/x/, on the branch lispm/x, made from [0-9a-f]\\{7\\}\\.\n"
+                               "Uncommitted:\n\\?\\? x\\.txt\n")
+                       (car result))))
+            (should (equal (lispm-test--file (funcall tree "x") "x.txt") "from x\n"))
+            (should-not (file-exists-p (expand-file-name "x.txt" project)))
+            (should (lispm-test--wait (lambda () (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss)))))
+            (let ((helper (seq-find (lambda (body) (eq (lispm-test--agent-name body) 'coder@x))
+                                    lispm-test--requests)))
+              (should (string-match-p "You work in a git worktree of your own, .*/x/, on the branch lispm/x, made from HEAD"
+                                      (format "%S" (alist-get 'messages helper)))))
+            ;; The helper's session is one of the project's.
+            (should (string-prefix-p (lispm-project-directory project)
+                                     (plist-get (seq-find (lambda (s) (equal (plist-get s :agent) "coder@x"))
+                                                          (lispm-sessions))
+                                                :file)))
+            (should (string-match-p "\\`- x: branch lispm/x, .*/x/ (uncommitted changes)\\'"
+                                    (car (lispm-test--call boss "worktree_list" nil))))
+            (should (cdr (funcall call "worktree_remove" '((why . "done") (name . "x")))))
+            (should (file-exists-p (funcall tree "x")))
+            (should (string-match-p "\\`Removed the worktree .*/x/ and its branch lispm/x\\.\\'"
+                                    (car (funcall call "worktree_remove"
+                                                  '((why . "drop") (name . "x") (force . t))))))
+            (should-not (file-exists-p (funcall tree "x")))
+            (should-not (funcall branch-p "x"))
+            ;; A helper that changed nothing leaves nothing behind.
+            (should (equal (funcall call "worktree_ask" '((why . "apart") (role . "coder")
+                                                          (request . "Check y") (name . "y")))
+                           (cons (concat "coder@y replied:\nNothing to do.\n\n"
+                                         "It changed nothing, so its worktree and branch are removed.")
+                                 nil)))
+            (should-not (file-exists-p (funcall tree "y")))
+            (should-not (funcall branch-p "y"))
+            ;; Committed work is merged from its branch, which then goes with its worktree.
+            (let ((result (funcall call "worktree_ask" '((why . "apart") (role . "coder")
+                                                         (request . "Write z.txt") (name . "z")))))
+              (should (string-match-p
+                       "\nCommits:\n[0-9a-f]+ Add z\nChanges from [0-9a-f]\\{7\\}:\n z\\.txt | 1 \\+\n"
+                       (car result)))
+              (should-not (string-match-p "Uncommitted" (car result))))
+            (lispm-test--git project "merge" "-q" "--ff-only" "lispm/z")
+            (should (equal (lispm-test--file project "z.txt") "from z\n"))
+            (should (string-match-p "\\`Removed the worktree .*/z/ and its branch lispm/z\\.\\'"
+                                    (car (funcall call "worktree_remove" '((why . "merged") (name . "z"))))))
+            (should (equal (car (lispm-test--call boss "worktree_list" nil)) "No worktrees."))
+            ;; Mistakes are reported before anything is made.
+            (should (equal (funcall call "worktree_ask" '((why . "w") (role . "coder") (request . "r")
+                                                          (base . "nope")))
+                           '("No commit nope here" . t)))
+            (should (equal (funcall call "worktree_ask" '((why . "w") (role . "poet") (request . "r")))
+                           '("No role named poet; list_agents shows the roles" . t)))
+            (should (equal (funcall call "worktree_ask" '((why . "w") (role . "coder") (request . "r")
+                                                          (name . "../up")))
+                           '("A worktree name is letters, digits, dots, dashes and underscores" . t)))
+            (let ((plain (expand-file-name "../plain/" project)))
+              (make-directory plain)
+              (should (string-match-p "is not in a git repository\\'"
+                                      (car (funcall call "worktree_ask" '((why . "w") (role . "coder")
+                                                                          (request . "r"))
+                                                    (lispm-defagent plain :root plain)))))))
+        (dolist (name '("worktree_ask" "worktree_list" "worktree_remove"))
+          (remhash name lispm-tools--registry))))))
+
 (ert-deftest lispm-test-compaction ()
   "A long session is handed over: memory saved, a summary written, the turn continued."
   (lispm-test-env

@@ -418,10 +418,43 @@ of your own can be added"))
   (replace-regexp-in-string "[^[:alnum:]._]" "-"
                             (directory-file-name (expand-file-name directory))))
 
+(defun lispm--first-line (file)
+  "The first line of FILE, trimmed; nil unless FILE is a regular file."
+  (when (file-regular-p file)
+    (with-temp-buffer
+      (insert-file-contents file nil 0 4096)
+      (string-trim (buffer-substring (point-min) (line-end-position))))))
+
+(defun lispm--main-worktree (directory)
+  "DIRECTORY, or its counterpart in the main worktree if it is in a linked one.
+The worktrees `git worktree add' links to a repository are one project
+with its main worktree.  A linked worktree's .git is a file naming its
+own git directory, whose commondir file names the repository's, so
+telling needs no git process."
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (top (when-let* ((top (locate-dominating-file directory ".git")))
+                (file-name-as-directory (expand-file-name top))))
+         (common (when-let* ((top)
+                             (gitdir (lispm--first-line (expand-file-name ".git" top)))
+                             ((string-match "\\`gitdir:[ \t]*\\(.+\\)" gitdir))
+                             (private (expand-file-name (match-string 1 gitdir) top))
+                             (common (lispm--first-line (expand-file-name "commondir" private))))
+                   (file-name-as-directory (expand-file-name common private)))))
+    (if (not common)
+        directory
+      (file-name-as-directory
+       (expand-file-name (file-relative-name directory top)
+                         ;; A bare repository has no main worktree; it stands for itself.
+                         (if (equal (file-name-nondirectory (directory-file-name common)) ".git")
+                             (file-name-parent-directory common)
+                           common))))))
+
 (defun lispm-project-directory (root)
   "Directory of the sessions, tasks and memory of the project at ROOT.
-Created on demand, under `lispm-directory', not in the project."
-  (let ((dir (expand-file-name (concat "projects/" (lispm--slug root) "/") lispm-directory)))
+Created on demand, under `lispm-directory', not in the project.  A
+linked git worktree has its main worktree's."
+  (let ((dir (expand-file-name (concat "projects/" (lispm--slug (lispm--main-worktree root)) "/")
+                               lispm-directory)))
     (make-directory dir t)
     dir))
 
