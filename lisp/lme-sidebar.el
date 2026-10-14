@@ -49,7 +49,7 @@
 (declare-function lme-agent-list-visible-p "lme-agent-list" ())
 (declare-function lme-agent-list-show "lme-agent-list" ())
 (declare-function lme-agent-list-hide "lme-agent-list" ())
-(declare-function eat-make "eat" (name program &optional startfile &rest switches))
+(declare-function lme-terminal-make "lme-term" (name program &rest args))
 (defvar explicit-shell-file-name)
 (defvar lme-sidebar-views)
 
@@ -369,17 +369,17 @@ the right-hand column; clicking the row calls ACTION, described by HELP."
   "Name of the shell sidebar buffer.")
 
 (defun lme-shell--buffer-p (buffer)
-  "Return non-nil when BUFFER is a live Eat shell, not an agent terminal."
+  "Return non-nil when BUFFER is a live shell terminal, not an agent's."
   (and (buffer-live-p buffer)
-       (eq (buffer-local-value 'major-mode buffer) 'eat-mode)
+       (memq (buffer-local-value 'major-mode buffer) '(eat-mode lme-term-mode))
        (not (lme-agent--buffer-p buffer))
        (lme-agent--running-p buffer)))
 
 (defun lme-shell-new (&optional directory)
   "Start a new shell in DIRECTORY, by default the main window's project root.
-The shell is the one Eat would start, run as an independent process."
+The shell is the user's, run as an independent process in a terminal, see
+`lme-terminal-make'."
   (interactive)
-  (require 'eat)
   (let* ((directory (or directory
                         (with-selected-window (lme-agent--main-window)
                           (lme-agent--project-directory))))
@@ -387,7 +387,7 @@ The shell is the one Eat would start, run as an independent process."
          (process-environment (lme-agent--independent-environment process-environment))
          (program (or explicit-shell-file-name (getenv "ESHELL") shell-file-name)))
     (lme-sidebar-show-in-main
-     (eat-make (lme-agent--fresh-name 'shell directory) program)))
+     (lme-terminal-make (lme-agent--fresh-name 'shell directory) program "-l")))
   (lme-shell-list-refresh))
 
 (defun lme-shell-list--render ()

@@ -59,8 +59,9 @@
 (require 'lme-agent-ide)
 (require 'lme-agent-mcp)
 
-(declare-function eat-make "eat" (name program &optional startfile &rest switches))
-(declare-function eat-term-send-string-as-yank "eat" (terminal args))
+(declare-function lme-terminal-make "lme-term" (name program &rest args))
+(declare-function lme-terminal-live-p "lme-term" (buffer))
+(declare-function lme-terminal-paste "lme-term" (buffer text))
 (declare-function project-root "project" (project))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function lme-sidebar-agents "lme-sidebar" ())
@@ -555,7 +556,7 @@ The short id suffix keeps labels unique across sessions with equal titles."
 That is an Eat terminal created for an agent, or the buffer of a session
 of an agent running inside Emacs."
   (and (buffer-live-p buffer)
-       (or (and (eq (buffer-local-value 'major-mode buffer) 'eat-mode)
+       (or (and (memq (buffer-local-value 'major-mode buffer) '(eat-mode lme-term-mode))
                 (string-match-p "\\`\\*\\(claude\\|codex\\|hermes\\):" (buffer-name buffer)))
            (and (lme-agent--emacs-buffer-agent buffer) t))))
 
@@ -564,8 +565,7 @@ of an agent running inside Emacs."
 The session of an agent running inside Emacs runs while its buffer lives."
   (if (and buffer (lme-agent--emacs-buffer-agent buffer))
       (buffer-live-p buffer)
-    (when-let* ((process (and buffer (get-buffer-process buffer))))
-      (process-live-p process))))
+    (and buffer (lme-terminal-live-p buffer))))
 
 (defvar-local lme-agent-buffer-session-id nil
   "Id of the session this agent terminal runs, when known.")
@@ -604,13 +604,14 @@ Agents started from Emacs are independent top-level sessions."
               environment))
 
 (defun lme-agent--launch (agent directory name args &optional id title)
-  "Run AGENT with ARGS in DIRECTORY inside the Eat terminal NAME; return it.
+  "Run AGENT with ARGS in DIRECTORY inside the terminal NAME; return it.
+The terminal is an lme-term once its module is built, see
+`lme-terminal-make', else an Eat terminal.
 The terminal records the session ID and TITLE for labels and the sidebar.
 The agent runs as an independent session whatever environment Emacs itself
 inherited.  A running terminal with the same NAME is returned instead of
 restarted."
   (lme-agent--check-installed agent)
-  (require 'eat)
   (unless (file-directory-p directory)
     (user-error "Working directory no longer exists: %s" directory))
   (let* ((default-directory (file-name-as-directory directory))
@@ -622,7 +623,7 @@ restarted."
                      ((or 'codex 'hermes) (lme-agent-mcp-start agent default-directory)))))
          (process-environment (append (and server (lme-agent-context-environment server))
                                       (lme-agent--independent-environment process-environment)))
-         (buffer (apply #'eat-make name (alist-get agent lme-agent-programs) nil
+         (buffer (apply #'lme-terminal-make name (alist-get agent lme-agent-programs)
                         (append (and server (lme-agent-context-arguments server)) args))))
     (when server
       (lme-agent-context-bind server buffer)
@@ -849,10 +850,9 @@ save the server anyway.  Answer yes.  Every Hermes terminal started from
 Emacs then sees Emacs's state."
   (interactive)
   (lme-agent--check-installed 'hermes)
-  (require 'eat)
   (pop-to-buffer
    (let ((process-environment (lme-agent--independent-environment process-environment)))
-     (apply #'eat-make "hermes setup" (alist-get 'hermes lme-agent-programs) nil
+     (apply #'lme-terminal-make "hermes setup" (alist-get 'hermes lme-agent-programs)
             (lme-agent-mcp-hermes-setup-arguments)))))
 
 (defun lme-agent--pick-terminal ()
@@ -909,8 +909,7 @@ The text is pasted into the agent's composer without submitting it."
     (deactivate-mark)
     (if-let* ((emacs (lme-agent--emacs-agent (lme-agent--emacs-buffer-agent target))))
         (funcall (plist-get emacs :send) target text)
-      (with-current-buffer target
-        (eat-term-send-string-as-yank eat-terminal (list text))))
+      (lme-terminal-paste target text))
     (pop-to-buffer target)))
 
 ;;;; Session management
@@ -1186,7 +1185,8 @@ It is drawn as Mac OS 9's contextual menus were, see `lme-popup-menu'."
   (with-eval-after-load 'embark
     (add-to-list 'embark-keymap-alist
                  '(lme-agent-session . lme-agent-session-embark-map)))
-  (add-hook 'eat-exit-hook #'lme-agent-list-refresh-on-exit))
+  (add-hook 'eat-exit-hook #'lme-agent-list-refresh-on-exit)
+  (add-hook 'lme-term-exit-functions #'lme-agent-list-refresh-on-exit))
 
 
 (provide 'lme-ai)

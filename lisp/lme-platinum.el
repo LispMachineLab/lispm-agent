@@ -337,7 +337,7 @@ document of its kind; any other buffer, a blank document."
   (with-current-buffer buffer
     (cond ((and (fboundp 'lme-agent--buffer-p) (lme-agent--buffer-p buffer))
            (lme-agent--icon (lme-agent--buffer-agent buffer)))
-          ((derived-mode-p 'eat-mode 'term-mode 'shell-mode 'eshell-mode)
+          ((derived-mode-p 'eat-mode 'lme-term-mode 'term-mode 'shell-mode 'eshell-mode)
            (lme-platinum-icon "computer"))
           ((derived-mode-p 'dired-mode) (lme-platinum-folder-icon default-directory))
           ((and buffer-file-name (boundp 'lispm-directory)

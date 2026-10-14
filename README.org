@@ -120,6 +120,16 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   project's buffers.
 - *Agents that see Emacs*: Claude Code connects over its IDE protocol, Codex and Hermes over MCP,
   and all of them can read the selection, the open and unsaved files, and Flymake's diagnostics.
+- *Terminals that never stall Emacs*.  Emacs runs Lisp, process output and redisplay on one
+  thread, so a terminal emulated in Lisp decodes everything its program writes on that thread,
+  shown or not, and a few agents resuming long sessions at once froze Emacs.  lispm-emacs
+  emulates each terminal on a thread of its own instead, in a dynamic module written in Rust
+  (=native/lme-term=, on [[https://github.com/alacritty/alacritty][Alacritty]]'s terminal), and
+  wakes Emacs only for the terminals a window shows, to draw the lines that changed: Emacs's work
+  follows the windows on screen, not the number of agents running or how much they write.
+  Shells and agents run in it once it is built, which happens in the background at the first
+  start where Rust's Cargo is installed, and again when an update changes its sources; until
+  then, and without Rust, they run in Eat.
 - *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot and
   tree-sitter modes.
 - *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
@@ -162,6 +172,8 @@ Optional, and picked up when present:
 
 - [[https://github.com/anthropics/claude-code][Claude Code]] (~claude~), Codex (~codex~) and Hermes
   (~hermes~) on ~PATH~;
+- [[https://rustup.rs][Rust]] (~cargo~), to build the terminals' module (=make native= builds it by
+  hand);
 - the Maple Mono NF CN font, whose glyphs keep terminal columns aligned, CJK included
   (=brew install --cask font-maple-mono-nf-cn= on macOS);
 - a spell checker (aspell, hunspell or ispell) for Flyspell;
@@ -314,7 +326,9 @@ GitHub.
 git -C ~/.emacs.d pull
 #+end_src
 
-then =M-x package-upgrade-all= for the packages and =M-x package-vc-upgrade= for LispM.
+then =M-x package-upgrade-all= for the packages and =M-x package-vc-upgrade= for LispM.  When the
+update changed the terminals' module, the next start rebuilds it in the background, terminals
+running in Eat until it is ready.
 
 * Tests
 

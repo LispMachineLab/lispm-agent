@@ -20,3 +20,5 @@
 *.elc
 *~
 .DS_Store
+# lme-term's Rust build
+/native/lme-term/target/

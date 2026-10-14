@@ -91,7 +91,7 @@ session column from the moment it is created.")
 That is an Eat terminal, or an agent conversation, see
 `lme-conversation-buffer' and `lme-conversation-modes'."
   (let ((mode (buffer-local-value 'major-mode buffer)))
-    (or (eq mode 'eat-mode)
+    (or (memq mode '(eat-mode lme-term-mode))
         (buffer-local-value 'lme-conversation-buffer buffer)
         (and lme-conversation-modes
              (apply #'provided-mode-derived-p mode lme-conversation-modes)))))
@@ -205,6 +205,7 @@ Without `tabspaces-mode' nothing happens."
 
 (declare-function lme-agent--project-root "lme-agent-list" (directory))
 (declare-function lme-agent--git-main-root "lme-agent-list" (directory))
+(declare-function lme-shell-new "lme-sidebar" (&optional directory))
 
 (defun lme-workspace--file-project (buffer)
   "Return (NAME . ROOT) of the git project holding file BUFFER, or nil.
@@ -500,8 +501,11 @@ cells and split-pane dividers drawn with box characters stay straight."
     (dirvish-side-follow-mode 1))
 
   (defun lme-eat-new ()
+    "Start a new shell: in lme-term once built, else in Eat."
     (interactive)
-    (eat nil '(4)))
+    (if (and (fboundp 'lme-term-ready-p) (lme-term-ready-p))
+        (lme-shell-new)
+      (eat nil '(4))))
 
   (use-package eat
     :commands (eat eat-project)
@@ -524,6 +528,7 @@ cells and split-pane dividers drawn with box characters stay straight."
     :hook ((eat-mode . lme-eat-terminal-display)
            (eat-mode . lme-eat-terminal-keys)
            (eat-exit . lme-shell-list-refresh)
+           (lme-term-exit-functions . lme-shell-list-refresh)
            (eshell-load . eat-eshell-mode)
            (eshell-load . eat-eshell-visual-command-mode)))
 

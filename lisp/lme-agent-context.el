@@ -83,6 +83,7 @@ process exits, when the terminal is killed, or when Emacs exits."
     (setq lme-agent-context-server server)
     (add-hook 'kill-buffer-hook #'lme-agent-context--terminal-killed nil t))
   (add-hook 'eat-exit-hook #'lme-agent-context--terminal-exited)
+  (add-hook 'lme-term-exit-functions #'lme-agent-context--term-exited)
   (add-hook 'kill-emacs-hook #'lme-agent-context-release-all)
   (add-hook 'post-command-hook #'lme-agent-context--note-selection))
 
@@ -105,8 +106,12 @@ process exits, when the terminal is killed, or when Emacs exits."
   (lme-agent-context-release (current-buffer)))
 
 (defun lme-agent-context--terminal-exited (process)
-  "Stop the server of the terminal whose PROCESS exited."
+  "Stop the server of the Eat terminal whose PROCESS exited."
   (lme-agent-context-release (process-buffer process)))
+
+(defun lme-agent-context--term-exited (buffer &rest _)
+  "Stop the server of the lme-term BUFFER, whose program exited."
+  (lme-agent-context-release buffer))
 
 ;;;; Scope
 

@@ -1474,5 +1474,159 @@ its window is open."
       (should (member "Control Panels" (mapcar (lambda (item) (plist-get item :label))
                                          (lme-apps-application-items)))))))
 
+;;;; lme-term
+
+(defmacro lme-test--with-term (bindings &rest body)
+  "Run BODY with BINDINGS of terminal buffers made by `lme-term-make', each
+(VAR NAME PROGRAM ARGS), killed afterwards; skipped where the module is
+not built."
+  (declare (indent 1))
+  `(progn
+     (skip-unless (lme-term-ready-p))
+     (let ,(mapcar (pcase-lambda (`(,var ,name ,program ,args))
+                     `(,var (lme-term-make ,name ,program ,args temporary-file-directory)))
+                   bindings)
+       (unwind-protect (progn ,@body)
+         ,@(mapcar (lambda (b) `(let ((kill-buffer-query-functions nil)) (kill-buffer ,(car b))))
+                   bindings)))))
+
+(defun lme-test--term-wait (buffer &optional seconds)
+  "Wait until BUFFER's terminal program exited, at most SECONDS."
+  (let ((deadline (+ (float-time) (or seconds 5))))
+    (while (and (null (buffer-local-value 'lme-term--exit-code buffer))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.02)
+      (lme-term--tick))))
+
+(ert-deftest lme-test-term-draws-colours-and-input ()
+  "A terminal draws its program's text with the cells' colours, takes what
+is typed, keeps its last screen when the program exits, and reports the
+exit code."
+  (lme-test--with-term ((term "lme-test-term" "/bin/sh"
+                              '("-c" "printf 'a\\033[1;32mgreen\\033[0mb\\n'; read line; echo \"got:$line\"; exit 3")))
+    (with-current-buffer term
+      (accept-process-output nil 0.2)
+      (lme-term-send-string "hello\r")
+      (lme-test--term-wait term)
+      (goto-char (point-min))
+      (should (search-forward "agreenb" nil t))
+      (should (equal (get-text-property (+ (point-min) 1) 'face)
+                     '(:foreground "#00ff00" :weight bold)))
+      (should (search-forward "got:hello" nil t))
+      (should (search-forward "[Process exited with code 3]" nil t))
+      (should (eql lme-term--exit-code 3))
+      (should-not (lme-term-live-p)))))
+
+(ert-deftest lme-test-term-environment-is-emacs-own ()
+  "The program sees `process-environment', not the environment Emacs was
+started with."
+  (let ((process-environment (cons "LME_TEST_VALUE=from-lisp"
+                                   (seq-remove (lambda (e) (string-prefix-p "HOME=" e))
+                                               process-environment))))
+    (lme-test--with-term ((term "lme-test-env" "/bin/sh"
+                                '("-c" "echo \"[$LME_TEST_VALUE][${HOME:-none}][$TERM]\"")))
+      (lme-test--term-wait term)
+      (with-current-buffer term
+        (goto-char (point-min))
+        (should (search-forward "[from-lisp][none][xterm-256color]" nil t))))))
+
+(ert-deftest lme-test-term-hidden-terminal-does-not-wake-emacs ()
+  "A terminal no window shows never wakes Emacs for its output, only for
+its exit: its program's writing costs Emacs's thread nothing."
+  (skip-unless (lme-term-ready-p))
+  (let ((woken nil))
+    (cl-letf (((symbol-function 'lme-term--schedule) #'ignore))
+      (setq lme-term--pending nil)
+      (let ((term (lme-term-make "lme-test-hidden" "/bin/sh"
+                                 '("-c" "for i in 1 2 3 4 5; do echo line $i; sleep 0.05; done; sleep 0.3")
+                                 temporary-file-directory)))
+        (unwind-protect
+            (with-current-buffer term
+              (let ((deadline (+ (float-time) 0.25)))
+                (while (< (float-time) deadline)
+                  (accept-process-output nil 0.02)))
+              (setq woken (memq lme-term--id lme-term--pending))
+              (should-not woken)
+              (let ((deadline (+ (float-time) 3)))
+                (while (and (not (memq lme-term--id lme-term--pending)) (< (float-time) deadline))
+                  (accept-process-output nil 0.02)))
+              (should (memq lme-term--id lme-term--pending))
+              (should (string-match-p "line 5" (lme-term-module-text lme-term--terminal nil))))
+          (let ((kill-buffer-query-functions nil)) (kill-buffer term)))))))
+
+(ert-deftest lme-test-term-resizes ()
+  "Resizing a terminal tells its program the new size."
+  (lme-test--with-term ((term "lme-test-size" "/bin/sh" '("-c" "sleep 0.3; stty size")))
+    (with-current-buffer term
+      (lme-term-module-resize lme-term--terminal 57 13)
+      (lme-test--term-wait term)
+      (should (string-match-p "13 57" (lme-term-module-text lme-term--terminal nil))))))
+
+(ert-deftest lme-test-term-starts-at-selected-window-size ()
+  "A terminal no window shows yet starts the size of the selected window,
+so the program sees no resize when the terminal is shown there."
+  (let ((size (lme-term--window-size (selected-window))))
+    (lme-test--with-term ((term "lme-test-start-size" "/bin/sh" '("-c" "stty size")))
+      (lme-test--term-wait term)
+      (with-current-buffer term
+        (should (equal lme-term--size size))
+        (should (string-match-p (format "%d %d" (cdr size) (car size))
+                                (lme-term-module-text lme-term--terminal nil)))))))
+
+(ert-deftest lme-test-agent-list-refreshes-after-agents-only ()
+  "Only an agent terminal's exit refreshes the agent sidebar, and only once
+Emacs is idle: reading transcripts must not stall the terminal scheduler."
+  (let ((lme-agent-list--refresh-timer nil)
+        (scheduled 0))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (&rest _) (setq scheduled (1+ scheduled)) 'timer))
+              ((symbol-function 'lme-agent-list-refresh)
+               (lambda () (error "Refreshed synchronously"))))
+      (with-temp-buffer
+        (lme-agent-list-refresh-on-exit (current-buffer) 0)
+        (should (= scheduled 0)))
+      (with-current-buffer (get-buffer-create "*claude:lme-test*")
+        (unwind-protect
+            (progn
+              (setq major-mode 'lme-term-mode)
+              (lme-agent-list-refresh-on-exit (current-buffer) 0)
+              (lme-agent-list-refresh-on-exit (current-buffer) 0)
+              (should (= scheduled 1)))
+          (kill-buffer))))))
+
+(ert-deftest lme-test-term-module-stale-after-source-change ()
+  "The module counts as stale once a source is newer than its library."
+  (let* ((root (make-temp-file "lme-term-src" t))
+         (lme-term-source-directory root)
+         (library (expand-file-name "target/release/liblme_term.dylib" root))
+         (source (expand-file-name "src/lib.rs" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory library) t)
+          (make-directory (file-name-directory source) t)
+          (dolist (file (list source (expand-file-name "Cargo.toml" root)
+                              (expand-file-name "Cargo.lock" root)))
+            (write-region "" nil file)
+            (set-file-times file (time-subtract nil 60)))
+          (write-region "" nil library)
+          (should (equal (lme-term--module-file) library))
+          (should-not (lme-term--stale-p))
+          (set-file-times source (time-add nil 60))
+          (should (lme-term--stale-p)))
+      (delete-directory root t))))
+
+(ert-deftest lme-test-term-keys ()
+  "Keys send the bytes terminals expect: cursor keys follow the program's
+mode, C-c C-c sends C-c, and Escape reaches the program."
+  (should (equal (cdr (assoc "C-c C-c" lme-term-keys)) "\C-c"))
+  (should (equal (cdr (assoc "<escape>" lme-term-keys)) "\e"))
+  (should (equal (cdr (assoc "S-<return>" lme-term-keys)) "\e[13;2u"))
+  (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 1)))
+    (should (equal (lme-term--cursor-key "A") "\eOA")))
+  (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 0)))
+    (should (equal (lme-term--cursor-key "A") "\e[A")))
+  (should (eq (lookup-key lme-term-keys-mode-map (kbd "C-c C-c")) #'lme-term-send-key))
+  (should (eq (lookup-key lme-term-keys-mode-map (kbd "M-x")) #'execute-extended-command)))
+
 (provide 'lme-test)
 ;;; lme-test.el ends here

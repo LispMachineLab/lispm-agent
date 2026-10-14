@@ -444,9 +444,21 @@ Archived sessions are left out unless `lme-agent-list--show-archived'."
         (forward-line (1- line))
         (when window (set-window-point window (point)))))))
 
-(defun lme-agent-list-refresh-on-exit (_process)
-  "Refresh the agent sidebar after an Eat terminal's process exits."
-  (lme-agent-list-refresh))
+(defvar lme-agent-list--refresh-timer nil
+  "The idle timer of a pending sidebar refresh, or nil.")
+
+(defun lme-agent-list-refresh-on-exit (&optional terminal &rest _)
+  "Refresh the agent sidebar once Emacs is idle after an agent exits.
+TERMINAL is the exited terminal's buffer or process; other terminals
+leave the sidebar alone.  Reading transcripts can take seconds the first
+time, so the refresh never runs inside the code that saw the exit."
+  (let ((buffer (if (processp terminal) (process-buffer terminal) terminal)))
+    (when (and (lme-agent--buffer-p buffer) (not lme-agent-list--refresh-timer))
+      (setq lme-agent-list--refresh-timer
+            (run-with-idle-timer
+             0.2 nil (lambda ()
+                       (setq lme-agent-list--refresh-timer nil)
+                       (lme-agent-list-refresh)))))))
 
 (defvar-keymap lme-agent-list-mode-map
   :doc "Keymap for the agent sidebar."

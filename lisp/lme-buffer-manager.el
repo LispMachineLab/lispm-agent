@@ -141,7 +141,9 @@ and `lme-buffer-manager--children'."
           (mapcar
            (lambda (buffer)
              (let* ((process (get-buffer-process buffer))
-                    (pid (and process (process-id process)))
+                    ;; An lme-term's program is the module's, not Emacs's.
+                    (pid (or (and process (process-id process))
+                             (and (fboundp 'lme-term-pid) (lme-term-pid buffer))))
                     (cost (and pid (lme-buffer-manager--tree-cost pid processes children)))
                     (bytes (with-current-buffer buffer
                              (max 0 (1- (position-bytes (point-max)))))))
@@ -160,7 +162,8 @@ and `lme-buffer-manager--children'."
                                                   29 nil nil "…"))
                 (lme-buffer-manager--kind buffer)
                 (lme-buffer-manager--number (lme-buffer-manager--size bytes) bytes)
-                (cond (pid (format "%s (%d)" (process-name process) pid))
+                (cond ((and pid process) (format "%s (%d)" (process-name process) pid))
+                      (pid (format "terminal (%d)" pid))
                       (process (format "%s (network)" (process-name process)))
                       (t ""))
                 (lme-buffer-manager--number (if cost (format "%.1f%%" (car cost)) "")
