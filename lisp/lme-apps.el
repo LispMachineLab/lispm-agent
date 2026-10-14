@@ -49,7 +49,9 @@
     (editor :name "Emacs" :icon emacs :menus lme-editor-menus
             :activate lme-editor-activate)
     (browser :name "Browser" :icon "netscape" :menus lme-browser-menus
-             :activate lme-browser-show :visible lme-xwidget-available-p))
+             :activate lme-browser-show :visible lme-xwidget-available-p)
+    (settings :name "Settings" :icon "control-panels" :menus lme-settings-menus
+              :activate lme-settings-show :visible lme-settings-open-p))
   "The applications, in the Application menu's order: (KEY . PROPERTIES).
 :name and :icon (see `lme-platinum-icon-file') name an application, :menus is a
 function returning its menus as `lme-platinum-menus-function' does,

@@ -1372,5 +1372,55 @@ once, and the browser lists only web pages' bookmarks, oldest first."
         (lme-browser--turn-throbber)
         (should-not lme-browser--throbber-frame)))))
 
+;;;; Settings
+
+(ert-deftest lme-test-settings-panels-draw ()
+  "Each panel draws its settings: the themes, the desktop's picture and its
+positions, the keys, the browser's pages."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always)
+            ((symbol-function 'lme-browser--load-history) (lambda () '(("u" "t" 0 1))))
+            ((symbol-function 'lme-browser-bookmarks) (lambda () nil)))
+    (with-current-buffer (lme-settings--buffer)
+      (pcase-dolist (`(,panel . ,labels)
+                     '((themes "Dracula" "Platinum")
+                       (desktop "From the theme" "Fill" "Tile" "Arrange Icons")
+                       (keyboard "Vim keys" "Emacs keys" "next start")
+                       (browser "Home Page" "Clear History" "Edit Bookmarks")))
+        (lme-settings-select panel)
+        (dolist (label labels)
+          (should (string-search label (buffer-string))))
+        (should (string-search (capitalize (symbol-name panel)) lme-platinum-title))))))
+
+(ert-deftest lme-test-settings-radio-saves ()
+  "Pressing a radio button saves its choice and draws the panel again."
+  (let ((saved nil)
+        (lme-editing-style 'vim))
+    (cl-letf (((symbol-function 'customize-save-variable)
+               (lambda (variable value) (push (cons variable value) saved))))
+      (with-current-buffer (lme-settings--buffer)
+        (lme-settings-select 'keyboard)
+        (let ((button (next-button (point-min))))
+          (while (and button (not (string-search "Emacs keys" (button-label button))))
+            (setq button (next-button (button-end button))))
+          (should button)
+          (button-activate button))
+        (should (equal (car saved) '(lme-editing-style . emacs)))))))
+
+(ert-deftest lme-test-settings-in-menus ()
+  "The λ menu opens each panel; the Application menu lists Settings while
+its window is open."
+  (let ((settings (seq-find (lambda (item) (and (consp item) (equal (plist-get item :label) "Settings")))
+                            (lme-platinum-lambda-items))))
+    (should settings)
+    (should (member "Themes…" (mapcar (lambda (item) (plist-get item :label))
+                                      (funcall (plist-get settings :submenu))))))
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (cl-letf (((symbol-function 'lme-settings-open-p) #'ignore))
+      (should-not (member "Settings" (mapcar (lambda (item) (plist-get item :label))
+                                             (lme-apps-application-items)))))
+    (cl-letf (((symbol-function 'lme-settings-open-p) #'always))
+      (should (member "Settings" (mapcar (lambda (item) (plist-get item :label))
+                                         (lme-apps-application-items)))))))
+
 (provide 'lme-test)
 ;;; lme-test.el ends here

@@ -49,7 +49,11 @@
       url
     (concat "https://" url)))
 
-(defvar lme-xwidget-search-url "https://duckduckgo.com/?q=%s")
+(defcustom lme-xwidget-search-url "https://duckduckgo.com/?q=%s"
+  "Address searched for what is typed in the location field that is no
+address, %s standing for the words searched."
+  :type 'string
+  :group 'lispm-emacs)
 
 (defun lme-xwidget-browse-url (url)
   "Open URL using xwidget webkit when available."
@@ -126,8 +130,10 @@
 (defconst lme-browser-workspace-name "Browser"
   "Name of the workspace holding the embedded browser.")
 
-(defconst lme-browser-home-url "https://duckduckgo.com"
-  "Page a new browser tab opens.")
+(defcustom lme-browser-home-url "https://duckduckgo.com"
+  "Page a new browser tab opens, and Home goes to."
+  :type 'string
+  :group 'lispm-emacs)
 
 (defconst lme-browser-address-buffer-name " *Browser Address*"
   "Name of the address window's buffer; the leading space keeps it unlisted.")
