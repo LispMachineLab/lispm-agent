@@ -828,6 +828,14 @@ routing while the old workspace is still in front."
                                                (plist-get palette :shade) 0.5)
                            down))))
 
+(ert-deftest lme-test-alert-button-focus-ring ()
+  "The alert button the keyboard is on is outlined in the accent colour."
+  (let* ((palette (lme-platinum--derive-palette "#282a36" "#f8f8f2" "#6272a4" "#bd93f9"))
+         (plain (format "%S" (lme-popup-draw-button palette "Cancel" 80)))
+         (focused (format "%S" (lme-popup-draw-button palette "Cancel" 80 nil nil t))))
+    (should-not (string-search (plist-get palette :accent) plain))
+    (should (string-search (plist-get palette :accent) focused))))
+
 (ert-deftest lme-test-toolbar-buttons-with-image-icons-are-apart ()
   "Two toolbar buttons whose icons are images read alike, \" +\", but are
 different buttons: pressing one draws only it pushed in."

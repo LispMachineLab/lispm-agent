@@ -774,10 +774,11 @@ command of the place clicked."
 (defconst lme-popup-alert-width 420
   "Width in pixels of an alert.")
 
-(defun lme-popup-draw-button (palette label width &optional default pressed)
+(defun lme-popup-draw-button (palette label width &optional default pressed focused)
   "Return an SVG of a push button WIDTH pixels wide reading LABEL in PALETTE.
 A DEFAULT button is ringed, as the one Return presses; a PRESSED one is
-drawn pushed in."
+drawn pushed in; a FOCUSED one, the one Space presses, is outlined in the
+accent colour, as Mac OS outlined the control the keyboard was on."
   (let* ((ring (if default 4 0))
          (height (+ 22 (* 2 ring)))
          (svg (svg-create (+ width (* 2 ring)) height))
@@ -792,6 +793,9 @@ drawn pushed in."
               :stroke (plist-get palette (if pressed :shade :light)) :stroke-width 1)
     (svg-line svg (+ ring 4) (+ ring 20.5) (+ ring width -4) (+ ring 20.5)
               :stroke (plist-get palette (if pressed :light :shade)) :stroke-width 1)
+    (when focused
+      (svg-rectangle svg (+ ring 2.5) (+ ring 2.5) (- width 5) 17 :rx 3
+                     :fill "none" :stroke (plist-get palette :accent) :stroke-width 2))
     (svg-text svg label
               :x (+ ring (/ width 2.0)) :y (+ ring 15.5) :text-anchor "middle"
               :font-family (or (face-attribute 'lme-platinum-title :family nil t) "Geneva")
@@ -803,18 +807,19 @@ drawn pushed in."
   "Return the width of the push button reading LABEL: room for it, at least 70."
   (max 70 (+ 28 (string-pixel-width (propertize label 'face 'lme-platinum-title)))))
 
-(defun lme-popup-alert-text (icon message detail buttons pressed)
+(defun lme-popup-alert-text (icon message detail buttons pressed &optional focused)
   "Return the text of an alert: ICON, MESSAGE, DETAIL and its BUTTONS.
 BUTTONS is a list of (LABEL VALUE ROLE), ROLE `default' or `cancel' or
 nil, laid left to right ending at the alert's right; PRESSED is the
-VALUE of the one held down."
+VALUE of the one held down, FOCUSED that of the one the keyboard is on."
   (let* ((images (mapcar (pcase-lambda (`(,label ,value ,role))
                            (let ((width (lme-popup--button-width label)))
                              (cons (propertize
                                     " " 'display
                                     (svg-image (lme-popup-draw-button
                                                 lme-platinum--palette label width
-                                                (eq role 'default) (equal pressed value))
+                                                (eq role 'default) (equal pressed value)
+                                                (and focused (equal focused value)))
                                                :ascent 'center :scale 1)
                                     'lme-popup-button value)
                                    (+ width (if (eq role 'default) 8 0)))))
@@ -876,12 +881,20 @@ are events pressing a button too, as Command-D pressed Don't Save."
     (if (not (lme-popup-available-p))
         (lme-popup--alert-fallback message buttons detail cancel)
       (let* ((popup (lme-popup-open-alert icon message buttons detail))
-             (pressed nil) (held nil) (choice cancel))
+             (values (mapcar #'cadr buttons))
+             (pressed nil) (held nil) (focused nil) (choice cancel))
         (unwind-protect
             (cl-flet ((redraw ()
                         (lme-popup--fill popup (lme-popup-alert-text icon message detail
-                                                                     buttons pressed))
-                        (redisplay t)))
+                                                                     buttons pressed focused))
+                        (redisplay t))
+                      (focus (step)
+                        ;; Tab goes from no button to the first, as from the
+                        ;; message to the controls.
+                        (let ((index (seq-position values focused)))
+                          (setq focused (nth (mod (if index (+ index step) (if (> step 0) 0 -1))
+                                                  (length values))
+                                             values)))))
               (track-mouse
                 (catch 'done
                   (while t
@@ -900,6 +913,14 @@ are events pressing a button too, as Command-D pressed Don't Save."
                         ;; The default button blinks as it is pressed.
                         (setq pressed default) (redraw) (sit-for 0.12)
                         (setq choice default) (throw 'done nil))
+                       ((memq event '(tab ?\t ?\C-f right))
+                        (focus 1) (redraw))
+                       ((memq event '(backtab S-tab ?\C-b left))
+                        (focus -1) (redraw))
+                       ((and focused (eq event ?\s))
+                        ;; Space presses the button the keyboard is on.
+                        (setq pressed focused) (redraw) (sit-for 0.12)
+                        (setq choice focused) (throw 'done nil))
                        ((lme-popup--press-p event)
                         (when (setq held (lme-popup--button-at event popup))
                           (setq pressed held) (redraw)))
