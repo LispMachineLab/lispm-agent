@@ -675,7 +675,7 @@ release.  The press selects the terminal's window, as a click does."
                       (setq cell (lme-term--mouse-cell posn))))
                   (setq done t))
                  ;; Keyboard input ends the press; it is read again.
-                 ((or (integerp next) (and (symbolp next) (not (memq next '(focus-in focus-out)))))
+                 ((lme-typed-event-p next)
                   (push next unread-command-events)
                   (setq done t)))))
             (lme-term--send (lme-term--mouse-report button cell nil t))))))))

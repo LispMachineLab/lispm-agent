@@ -1752,6 +1752,18 @@ are alerts too, the latter asked only when nothing else was."
   (should (equal (lme-platinum--names '("a" "b" "c" "d" "e")) "“a”, “b”, “c” and 2 others"))
   (should (equal (lme-platinum--names '("*shell:a*")) "“shell:a”")))
 
+(ert-deftest lme-test-typed-events ()
+  "Characters and function keys are typed; mouse events and the area
+symbols `read-event' returns before them are not, so a panel dropped
+from the menu bar outlives the release of the click that dropped it."
+  (should (lme-typed-event-p ?a))
+  (should (lme-typed-event-p 'f1))
+  (should (lme-typed-event-p 'escape))
+  (should-not (lme-typed-event-p 'tab-bar))
+  (should-not (lme-typed-event-p 'mode-line))
+  (should-not (lme-typed-event-p '(mouse-1 nil)))
+  (should-not (lme-typed-event-p nil)))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."

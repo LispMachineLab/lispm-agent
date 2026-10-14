@@ -314,14 +314,33 @@ in front, SELECTED the index chosen, WIDTH the panel's in pixels."
          (propertize " " 'display `(space :height (,lme-workspaces-gap))) "\n"))
       rows "")
      (propertize " " 'display `(space :align-to (,lme-workspaces-gap)))
-     (mapconcat (pcase-lambda (`(,label ,command))
-                  (propertize (concat " " label " ")
-                              'face 'lme-platinum-button 'lme-workspace-action command
-                              'pointer 'hand))
-                lme-workspaces--actions " ")
-     (propertize "   ⇥ next   ⏎ open   esc keep" 'face 'lme-platinum-toolbar-label)
+     (lme-workspaces--buttons)
+     "\n"
+     (propertize " " 'display '(space :height (6))) "\n"
+     (propertize " " 'display `(space :align-to (,lme-workspaces-gap)))
+     (lme-workspaces--hint)
      "\n"
      (propertize " " 'display '(space :height (12))))))
+
+(defun lme-workspaces--buttons ()
+  "Return the panel's row of buttons."
+  (mapconcat (pcase-lambda (`(,label ,command))
+               (propertize (concat " " label " ")
+                           'face 'lme-platinum-button 'lme-workspace-action command
+                           'pointer 'hand))
+             lme-workspaces--actions " "))
+
+(defun lme-workspaces--hint ()
+  "Return the line telling the panel's keys."
+  (propertize "⇥ next   ⏎ open   1–9 choose   esc keep" 'face 'lme-platinum-toolbar-label))
+
+(defun lme-workspaces--width (columns)
+  "Return the panel's width in pixels for COLUMNS of thumbnails: wide
+enough for its buttons and its keys too."
+  (max (lme-workspaces--column-left columns)
+       (+ (* 2 lme-workspaces-gap)
+          (max (string-pixel-width (lme-workspaces--buttons))
+               (string-pixel-width (lme-workspaces--hint))))))
 
 (defun lme-workspaces--target (event frame)
   "Return what EVENT is over in panel FRAME: (workspace . INDEX), (action .
@@ -354,7 +373,7 @@ X, Y of the screen frame, or stands over its upper middle."
          (selected (lme-workspaces--move (or (seq-position names current) 0) (or step 0)
                                          (max 1 count)))
          (columns (min lme-workspaces-columns (max 1 count)))
-         (width (+ (lme-workspaces--column-left columns) 0))
+         (width (lme-workspaces--width columns))
          (lme-workspaces--images nil)
          (popup (lme-popup--frame screen))
          (choice nil))
@@ -409,10 +428,12 @@ X, Y of the screen frame, or stands over its upper middle."
                          (throw 'done nil))))
                      ((and (consp event) (memq (event-basic-type event)
                                                '(wheel-up wheel-down mouse-4 mouse-5))))
-                     ((and (consp event) (memq 'click (event-modifiers event))))
-                     (t
+                     ((lme-typed-event-p event)
                       ;; Any other key closes the panel and goes where it
-                      ;; was typed.
+                      ;; was typed.  Other events, such as the area a
+                      ;; mouse event comes from, are passed over: the
+                      ;; release of the click that dropped the panel from
+                      ;; the menu bar comes as `tab-bar', then the release.
                       (push event unread-command-events)
                       (throw 'done nil))))))))
         (lme-popup--dispose popup)))

@@ -292,5 +292,19 @@ A buffer's `lme-paste-function', when set, receives the text instead."
            (eat-term-send-string-as-yank eat-terminal (list text)))
           (t (insert-for-yank text)))))
 
+(defconst lme-area-prefixes
+  '(tab-bar tab-line header-line mode-line menu-bar tool-bar vertical-line
+    vertical-scroll-bar horizontal-scroll-bar left-fringe right-fringe
+    left-margin right-margin right-divider bottom-divider internal-border
+    child-frame-border)
+  "Symbols `read-event' returns before a mouse event over part of a frame
+or window other than text: the event follows.")
+
+(defun lme-typed-event-p (event)
+  "Return non-nil when EVENT was typed: a character or a function key, not
+a mouse event, nor the area symbol before one, see `lme-area-prefixes'."
+  (or (integerp event)
+      (and (symbolp event) event (not (memq event lme-area-prefixes)))))
+
 (provide 'lme-core)
 ;;; lme-core.el ends here
