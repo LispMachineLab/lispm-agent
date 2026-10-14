@@ -83,10 +83,6 @@ selected frame's outermost parent."
       (setq frame (frame-parent frame)))
     frame))
 
-(defconst lme-apps-window-reach 80
-  "Pixels of a floating window that stay on the desktop however it is moved,
-so its title bar can always be caught again.")
-
 (defun lme-apps-windows (&optional screen)
   "Return the floating windows over SCREEN: child frames marked `lme-window'."
   (let ((screen (or screen (lme-apps-screen))))
@@ -95,39 +91,72 @@ so its title bar can always be caught again.")
                        (frame-parameter frame 'lme-window)))
                 (frame-list))))
 
-(defun lme-apps-keep-on-desktop (frame)
-  "Keep floating FRAME on its screen's desktop, as Mac OS 9 kept a window's
-title bar on the screen: under the menu bar, never wider or taller than
-the desktop, and at least `lme-apps-window-reach' pixels of it in sight.
-Placing it again also mends a position the window system left stale."
+(defun lme-apps--geometry (frame)
+  "Return where FRAME is: (LEFT TOP TEXT-WIDTH TEXT-HEIGHT) in pixels."
+  (pcase-let ((`(,left . ,top) (frame-position frame)))
+    (list left top (frame-text-width frame) (frame-text-height frame))))
+
+(defun lme-apps--put (frame place)
+  "Put floating FRAME at PLACE, a value of `lme-apps--geometry', kept whole on
+its screen's desktop: under the menu bar, and no larger than the desktop.
+On macOS a child frame is not clipped to its parent, so a window let past
+the desktop's edge would hang out of Emacs's frame over the screen."
   (when-let* (((frame-live-p frame))
               (screen (frame-parent frame)))
-    (let* ((top-min (tab-bar-height screen t))
-           (screen-width (frame-native-width screen))
-           (screen-height (frame-native-height screen))
-           (width (frame-pixel-width frame))
-           (height (frame-pixel-height frame))
-           (fit-width (min width screen-width))
-           (fit-height (min height (- screen-height top-min))))
-      (unless (and (= fit-width width) (= fit-height height))
-        (set-frame-size frame
-                        (max 200 (- (frame-text-width frame) (- width fit-width)))
-                        (max 100 (- (frame-text-height frame) (- height fit-height)))
-                        t)
-        (setq width (frame-pixel-width frame)))
-      (pcase-let ((`(,left . ,top) (frame-position frame)))
-        (set-frame-position
-         frame
-         (max (- lme-apps-window-reach width)
-              (min left (- screen-width lme-apps-window-reach)))
-         (max top-min (min top (- screen-height lme-platinum-title-height))))))))
+    (pcase-let* ((`(,left ,top ,width ,height) place)
+                 (top-min (tab-bar-height screen t))
+                 (screen-width (frame-native-width screen))
+                 (screen-height (frame-native-height screen))
+                 ;; What the frame adds around its text: borders, mostly.
+                 (extra-width (- (frame-pixel-width frame) (frame-text-width frame)))
+                 (extra-height (- (frame-pixel-height frame) (frame-text-height frame)))
+                 (fit-width (max 200 (min width (- screen-width extra-width))))
+                 (fit-height (max 100 (min height (- screen-height top-min extra-height)))))
+      (unless (and (= fit-width (frame-text-width frame))
+                   (= fit-height (frame-text-height frame)))
+        (set-frame-size frame fit-width fit-height t))
+      (set-frame-position
+       frame
+       (max 0 (min left (- screen-width fit-width extra-width)))
+       (max top-min (min top (- screen-height fit-height extra-height)))))))
+
+(defun lme-apps-keep-on-desktop (frame)
+  "Keep floating FRAME on the desktop where it was just put or moved, and
+remember that place: the window system moves child frames on its own when
+their screen changes size, so they are put back there afterwards."
+  (when (frame-live-p frame)
+    (lme-apps--put frame (lme-apps--geometry frame))
+    (set-frame-parameter frame 'lme-window-place (lme-apps--geometry frame))))
+
+(defun lme-apps--place-windows (screen &optional again)
+  "Put the floating windows of SCREEN back in their places, each kept on the
+desktop and given back its own size where there is room.  AGAIN forces
+the window system to place them anew and shows them again: going full
+screen or back, macOS moves child windows its own way and may leave them
+out of sight while Emacs takes them for shown."
+  (when (frame-live-p screen)
+    (dolist (window (lme-apps-windows screen))
+      (let ((place (or (frame-parameter window 'lme-window-place)
+                       (lme-apps--geometry window))))
+        (when again
+          ;; A move to where Emacs takes the window to be would be skipped.
+          (set-frame-position window (1+ (car place)) (cadr place)))
+        (lme-apps--put window place)
+        (when (and again (frame-visible-p window))
+          (make-frame-invisible window t)
+          (make-frame-visible window))))))
 
 (defun lme-apps--screen-resized (frame)
-  "Place the floating windows of FRAME again when it changed size, as going
-full screen and back does.  This is a `window-size-change-functions'
+  "Put the floating windows of FRAME back in their places when it changed
+size, and once more after it went full screen or back, when the window
+system is done with them.  This is a `window-size-change-functions'
 function."
   (unless (frame-parent frame)
-    (mapc #'lme-apps-keep-on-desktop (lme-apps-windows frame))))
+    (lme-apps--place-windows frame)
+    (let ((fullscreen (frame-parameter frame 'fullscreen)))
+      (unless (equal fullscreen (frame-parameter frame 'lme-apps-fullscreen))
+        (set-frame-parameter frame 'lme-apps-fullscreen fullscreen)
+        (run-at-time 1 nil #'lme-apps--place-windows frame t)))))
 
 (defun lme-apps--available ()
   "Return the applications that can run here."

@@ -16,8 +16,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   home disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
   double-click it (or press Return) to open it.  Floating windows (the Finder's, the floating
-  editor) stay on the desktop: their title bars cannot be dragged off it, and when Emacs's
-  frame changes size, as going full screen and back does, they are placed on it again.
+  editor) stay whole on the desktop, which on macOS does not clip them: dragged past its edge
+  they come back onto it, and when Emacs's frame changes size, as going full screen and back
+  does, each returns to the place it was given, shrunk only while it does not fit.
 - *A Finder window*, opened by the home disk: a folder's items as large icons, floating over
   the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
   items and the room left counted at its bottom.  A folder opens in the window, a file in the
