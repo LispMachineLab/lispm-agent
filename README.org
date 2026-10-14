@@ -101,6 +101,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
   configuration files, SPC is the leader key, and terminals, chats and the sidebar keep Emacs keys
   so the programs in them get every key.
+- *X windows as buffers*, when Emacs runs on an X display that has no window manager: Emacs
+  becomes it (see [[*Mac OS and X][Mac OS and X]]).
 
 Title bars and menus are set in Charcoal when it is installed, else Chicago (ChicagoFLF, a free
 revival whose author considers it public domain, works too) or Geneva; lists in Geneva.  macOS
@@ -141,6 +143,89 @@ Optional, and picked up when present:
 - a spell checker (aspell, hunspell or ispell) for Flyspell;
 - an Emacs built with xwidgets, for the embedded browser.
 
+* Mac OS and X
+
+The same configuration runs in the Mac OS build of Emacs (NS, as Emacs.app and emacs-plus are)
+and in an X build.  Nothing is set per machine: each start looks at the display Emacs has and at
+what it was built with.
+
+- *The menu bar*: Mac OS draws Emacs's menu bar at the top of the screen.  On X it would be a
+  second bar inside the frame, under the Platinum menu bar, so X frames go without; the λ menu
+  and the application's menus have everything.
+- *The default font*: Monaco, else Menlo, else DejaVu Sans Mono, at 12 points.  The Mac build
+  falls back to Monaco and an X build to fontconfig's =monospace= (Andale Mono on a Mac);
+  naming the family makes them alike.  A default face set with Customize is kept.
+- *The browser* needs an Emacs built with xwidgets (on X, with GTK and WebKitGTK); without, its
+  icon and menu items are not shown.
+- *Tree-sitter modes* are used when Emacs is built with tree-sitter.
+- *Modifier keys*: Command is Meta in the Mac build; an X build takes its modifiers from the X
+  server's keyboard map.
+
+** Emacs as the window manager
+
+On an X display that no window manager runs on, Emacs becomes its window manager: [[https://github.com/emacs-exwm/exwm][EXWM]]
+shows every X window, a terminal, a browser, any X program, as a buffer, which then goes into
+windows and workspaces as any buffer does.  EXWM is installed the first time it is needed.
+
+A display that has a window manager keeps it, a Linux desktop's or XQuartz's: Emacs looks for
+the check window an EWMH window manager names on the root window, and one named by a window
+manager that has quit does not count.  To never manage windows, put this in =personal.el=:
+
+#+begin_src emacs-lisp
+(setq lme-window-manager nil)
+#+end_src
+
+On GNU/Linux, run Emacs as the X session itself, for instance with =exec emacs= at the end of
+=~/.xinitrc=.
+
+** X on macOS
+
+A build of Emacs has one window system, Mac OS or X, never both.  To have X on a Mac, build a
+second Emacs beside the Mac one and use [[https://www.xquartz.org][XQuartz]] (=brew install --cask xquartz=) as its X server:
+
+#+begin_src sh
+./configure --prefix=$HOME/.local/emacs-x11 --without-ns --with-x \
+  --x-includes=/opt/homebrew/include --x-libraries=/opt/homebrew/lib \
+  --with-x-toolkit=no --with-cairo --with-harfbuzz --with-rsvg \
+  --with-xpm=ifavailable --without-gsettings --without-native-compilation
+make && make install
+#+end_src
+
+Take every X library from Homebrew (=libx11=, =cairo=, =harfbuzz=, =librsvg=), not from
+XQuartz's =/opt/X11=: Homebrew's cairo and librsvg bring Homebrew's libX11, and two libX11s in
+one process do not mix.  Homebrew has no libXaw, hence no toolkit; lispm-emacs draws its own
+menus.  librsvg is what the Platinum chrome's pictures need.
+
+XQuartz normally runs rootless: each X window is a Mac window, and quartz-wm is the window
+manager, so there the X Emacs is an ordinary window and EXWM stays off.  To let Emacs manage the
+windows, give it a display of its own.  Xephyr, which comes with XQuartz, is an X server that
+draws its whole screen inside one window of another; run it in one terminal:
+
+#+begin_src sh
+export DISPLAY=$(launchctl getenv DISPLAY)   # where a shell lacks XQuartz's display
+/opt/X11/bin/Xephyr :2 -screen 1440x900 -resizeable
+#+end_src
+
+and the X Emacs on it from another:
+
+#+begin_src sh
+DISPLAY=:2 ~/.local/emacs-x11/bin/emacs
+#+end_src
+
+Clicking into Xephyr's window grabs the keyboard and the mouse; Control-Shift lets them go.
+Closing that window ends the display and the Emacs on it, so quit Emacs first (=C-x C-c=).
+Alternatively, XQuartz's full-screen mode (rootless off in its preferences) with a =~/.xinitrc=
+that starts the X Emacs instead of quartz-wm gives Emacs the whole screen.
+
+Two things to know when both builds run:
+
+- They read the same configuration and write the same state (the minibuffer history, recent
+  files, places in files); the one that quits last keeps its own.
+- Points become pixels at the display's resolution.  Xephyr's screen above reports about 75
+  dots per inch, so text there is about the Mac build's size; XQuartz's own display reports
+  96, a third larger.  =Xft.dpi: 72= in =~/.Xresources=, which XQuartz loads when it starts,
+  matches them on that display, for every X program.
+
 * Keys
 
 | Key                    | Does                                                       |
@@ -157,9 +242,10 @@ Optional, and picked up when present:
 | =C-x b=, =C-s=         | switch buffer, search the buffer (Consult)                 |
 | =C-.=                  | act on the thing at point (Embark)                         |
 
-On macOS the Command key is Meta, so Command-C and Command-V copy and paste everywhere, terminals
-included.  With vim keys, =SPC= opens the leader: =SPC e= find a file, =SPC b= switch buffer,
-=SPC g= Magit, =SPC t= a terminal, =SPC f r= ripgrep, and =which-key= shows the rest.
+In the Mac OS build the Command key is Meta, so Command-C and Command-V copy and paste
+everywhere, terminals included.  With vim keys, =SPC= opens the leader: =SPC e= find a file,
+=SPC b= switch buffer, =SPC g= Magit, =SPC t= a terminal, =SPC f r= ripgrep, and =which-key=
+shows the rest.
 
 * Your own settings
 
