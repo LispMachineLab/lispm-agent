@@ -902,14 +902,11 @@ dragged about, this puts them back."
   `((:label "Arrange Icons" :action lme-desktop-arrange-icons
             :enabled ,(and lme-desktop-icon-places t))))
 
-(defun lme-desktop-context-menu (event)
-  "Pop up the desktop's menu where EVENT right-clicked: Open for the icon
-under it, then Arrange Icons and the desktop picture, as Mac OS 9's
-desktop offered them."
-  (interactive "e")
-  (lme-desktop-mouse-select event)
-  (let ((selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer)))
-        (xy (lme-popup--frame-xy event)))
+(defun lme-desktop--menu (x y &optional align)
+  "Pop up the desktop's menu at X, Y of the frame, ALIGN as `lme-popup-menu'
+takes it: Open for the icon selected, then Arrange Icons and the desktop
+picture, as Mac OS 9's desktop offered them."
+  (let ((selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer))))
     (lme-popup-menu
      `(,@(when selected
            '((:label "Open" :action lme-desktop-open :key "M-o")
@@ -919,7 +916,28 @@ desktop offered them."
        (:label "Desktop Picture…" :action lme-desktop-choose-picture)
        (:label "No Desktop Picture" :action lme-desktop-remove-picture
                :enabled ,(and lme-desktop-picture t)))
-     (car xy) (cdr xy))))
+     x y align)))
+
+(defun lme-desktop-context-menu (event)
+  "Pop up the desktop's menu where EVENT right-clicked, of the icon there."
+  (interactive "e")
+  (lme-desktop-mouse-select event)
+  (let ((xy (lme-popup--frame-xy event)))
+    (lme-desktop--menu (car xy) (cdr xy))))
+
+(defun lme-desktop--keyboard-menu ()
+  "Pop up the desktop's menu from the keyboard, under the icon selected,
+see `lme-context-menu-function'.  An icon in the right half of the
+desktop has the menu end at its right, so it stays on the desktop."
+  (let* ((buffer (lme-desktop-buffer))
+         (window (get-buffer-window buffer))
+         (body (window-body-pixel-edges window))
+         (hit (assq (buffer-local-value 'lme-desktop--selected buffer)
+                    (buffer-local-value 'lme-desktop--hits buffer))))
+    (pcase-let ((`(,_ ,left ,_ ,right ,bottom) (or hit (list nil 40 40 40 40))))
+      (if (> left (/ (window-body-width window t) 2))
+          (lme-desktop--menu (+ (car body) right) (+ (cadr body) bottom) 'right)
+        (lme-desktop--menu (+ (car body) left) (+ (cadr body) bottom))))))
 
 (defun lme-desktop-mouse-open (event)
   "Open the desktop icon double-clicked by EVENT."
@@ -1020,7 +1038,8 @@ mode is turned off first: turned off, it restores the lines it found."
   "Major mode of the desktop, the place behind every window.
 \\{lme-desktop-mode-map}"
   (lme-desktop--bare)
-  (setq-local revert-buffer-function (lambda (&rest _) (lme-desktop--render)))
+  (setq-local revert-buffer-function (lambda (&rest _) (lme-desktop--render))
+              lme-context-menu-function #'lme-desktop--keyboard-menu)
   (add-hook 'window-size-change-functions #'lme-desktop--render nil t)
   (add-hook 'window-buffer-change-functions #'lme-desktop--render nil t))
 

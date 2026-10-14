@@ -657,6 +657,26 @@ release instead; where the context menu is empty, nothing opens."
         (select-window window))
       (lme-popup-keymap-menu (context-menu-map event) event))))
 
+(defvar-local lme-context-menu-function nil
+  "Function popping up this buffer's right-click menu from the keyboard, or nil.
+Windows whose items are drawn as images, the desktop's and the Finder's,
+set it: their menu is of the item selected, which point does not mark.")
+
+(defun lme-popup-context-menu-at-point ()
+  "Pop up the right-click menu of what point is on, as a right click there
+would: the place's own menu where it has one, such as an agent's in the
+sidebar, else Emacs's context menu.  Right clicks need the mouse, and no
+key of the keyboard lispm-emacs is used from opens one."
+  (interactive)
+  (if lme-context-menu-function
+      (funcall lme-context-menu-function)
+    (let* ((position (or (posn-at-point) (user-error "Point is not in sight")))
+           (local (and (lme-popup--local-right-click-p position)
+                       (key-binding [mouse-3] t nil position))))
+      (if (commandp local)
+          (call-interactively local nil (vector (list 'mouse-3 position)))
+        (lme-popup-keymap-menu (context-menu-map (list 'down-mouse-3 position)) position)))))
+
 (defun lme-popup--pane-items (menu)
   "Return the items of MENU, an `x-popup-menu' menu of panes.
 MENU is (TITLE (PANE-TITLE ITEM...)...); an ITEM (STRING . VALUE)
@@ -746,6 +766,7 @@ command of the place clicked."
   (lme-popup-apply-faces)
   (keymap-global-set "<down-mouse-3>" #'lme-popup-context-menu)
   (keymap-global-set "<mouse-3>" #'ignore)
+  (keymap-global-set "C-c c" #'lme-popup-context-menu-at-point)
   (advice-add 'x-popup-menu :around #'lme-popup--x-popup-menu))
 
 ;;;; Alerts

@@ -493,6 +493,19 @@ after it is selected."
   "Pop up the menu of the item right-clicked by EVENT, or of the folder."
   (interactive "e")
   (lme-finder-mouse-select event)
+  (lme-finder--menu (lme-popup--frame-xy event)))
+
+(defun lme-finder--keyboard-menu ()
+  "Pop up the menu of the item selected, under its name, or of the folder,
+from the keyboard, see `lme-context-menu-function'."
+  (lme-finder--in
+    (let ((item (and lme-finder--selected
+                     (text-property-any (point-min) (point-max)
+                                        'lme-finder-item lme-finder--selected))))
+      (lme-finder--menu (lme-popup--frame-xy (or item (window-start)))))))
+
+(defun lme-finder--menu (xy)
+  "Pop up the menu of the item selected, or of the folder, at XY of the frame."
   (let* ((selected (lme-finder--in lme-finder--selected))
          (real (lme-finder-real-p))
          (file (and selected real t)))
@@ -508,7 +521,7 @@ after it is selected."
                           (lme-finder--in
                             (kill-new (expand-file-name lme-finder--selected
                                                         lme-finder--directory))))))
-     (car (lme-popup--frame-xy event)) (cdr (lme-popup--frame-xy event)))))
+     (car xy) (cdr xy))))
 
 (defvar-keymap lme-finder-mode-map
   :doc "Keymap of the Finder window."
@@ -562,6 +575,7 @@ after it is selected."
               evil-emacs-state-cursor '(nil)
               evil-normal-state-cursor '(nil)
               header-line-format '(:eval (lme-finder--toolbar))
+              lme-context-menu-function #'lme-finder--keyboard-menu
               lme-platinum-box-functions (list :close #'lme-finder--close-box
                                                :zoom #'lme-finder--zoom-box
                                                :collapse #'lme-finder--collapse-box))

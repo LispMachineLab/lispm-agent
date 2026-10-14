@@ -274,6 +274,8 @@ Two things to know when both builds run:
 | Key                    | Does                                                       |
 |------------------------+------------------------------------------------------------|
 | =C-c s=                | into the sidebar's list and back out (=n=, =p=, =RET= in it) |
+| =C-c c=                | the right-click menu of what point is on, or of the icon selected |
+| =C-c o=                | the next application: the desktop, Emacs, the browser, Control Panels |
 | =C-c m=                | the menu bar from the keyboard: =C-f=, =C-b= to the menu beside, =C-n=, =C-p= or a letter to an item, =RET= chooses |
 | =C-c a l=              | start a LispM agent in this project (=C-u= to pick a role) |
 | =C-c a c=, =x=, =h=    | start Claude Code, Codex or Hermes in this project         |

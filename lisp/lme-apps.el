@@ -49,14 +49,16 @@
     (editor :name "Emacs" :icon emacs :menus lme-editor-menus
             :activate lme-editor-activate)
     (browser :name "Browser" :icon "netscape" :menus lme-browser-menus
-             :activate lme-browser-show :visible lme-xwidget-available-p)
+             :activate lme-browser-show :visible lme-xwidget-available-p
+             :running lme-browser--buffers)
     (settings :name "Control Panels" :icon "control-panels" :menus lme-settings-menus
               :activate lme-settings-show :visible lme-settings-open-p))
   "The applications, in the Application menu's order: (KEY . PROPERTIES).
 :name and :icon (see `lme-platinum-icon-file') name an application, :menus is a
 function returning its menus as `lme-platinum-menus-function' does,
-:activate brings it in front, and :visible, when given, is a function
-deciding whether it can run here.")
+:activate brings it in front, :visible, when given, is a function
+deciding whether it can run here, and :running one deciding whether it
+runs now; without it, an application runs whenever it can.")
 
 (defvar lme-apps--frontmost nil
   "The application in front, a key of `lme-apps', or nil before the first.")
@@ -171,6 +173,23 @@ function."
   "Bring APP, a key of `lme-apps', in front."
   (funcall (plist-get (alist-get app lme-apps) :activate)))
 
+(defun lme-apps--running ()
+  "Return the applications running now, in the Application menu's order."
+  (seq-filter (lambda (app)
+                (let ((running (plist-get (cdr app) :running)))
+                  (or (not running) (and (fboundp running) (funcall running)))))
+              (lme-apps--available)))
+
+(defun lme-apps-next ()
+  "Bring the next running application in front, as the Application menu
+would, wrapping around: the desktop, the editor, the browser while it
+has a page open, Control Panels while they are open."
+  (interactive)
+  (let* ((apps (mapcar #'car (lme-apps--running)))
+         (index (or (seq-position apps (lme-apps-frontmost)) -1)))
+    (when apps
+      (lme-apps-activate (nth (mod (1+ index) (length apps)) apps)))))
+
 (defun lme-apps-menus ()
   "Return the frontmost application's menus, for the menu bar."
   (let ((menus (plist-get (alist-get (lme-apps-frontmost) lme-apps) :menus)))
@@ -232,7 +251,10 @@ This is a `window-selection-change-functions' function."
   (add-hook 'tab-bar-tab-post-select-functions #'lme-apps--follow-workspace)
   (add-hook 'window-selection-change-functions #'lme-apps--follow-window)
   (add-hook 'window-size-change-functions #'lme-apps--screen-resized)
-  (add-hook 'lme-platinum-frame-moved-functions #'lme-apps-keep-on-desktop))
+  (add-hook 'lme-platinum-frame-moved-functions #'lme-apps-keep-on-desktop)
+  ;; The next application from the keyboard, as Command-Tab is the
+  ;; system's.
+  (keymap-global-set "C-c o" #'lme-apps-next))
 
 (provide 'lme-apps)
 ;;; lme-apps.el ends here
