@@ -12,8 +12,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 - *A desktop*, where Emacs starts, in the theme's colours tinted with its accent (Mac OS 8's
   blue-violet under Platinum).  Its icons stand down the right edge as Mac OS 9's did: the home
-  disk (the file manager) and the applications, Emacs and the browser, at the top, the Trash in
-  the bottom corner.  Click one to select it, double-click it (or press Return) to open it.
+  disk (the file manager) and the applications, Emacs (with Emacs's own icon) and the browser,
+  at the top, the Trash in the bottom corner.  Click one to select it, double-click it (or press Return) to open it.
 - *Applications*, one in front at a time, as on Mac OS 9: the desktop, Emacs the editor, and the
   browser.  The one in front fills the menu bar with its menus; the Application menu at the
   right end names it and lists the others.  Files, folders, terminals and agents opened while the

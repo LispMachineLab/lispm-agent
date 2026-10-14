@@ -71,14 +71,15 @@ A workspace's main area shows it where it holds nothing else.")
 (defvar lme-desktop-items
   '((home :label "Home" :icon "hard-disk-32" :command lme-desktop-open-home
           :help "Your home folder, in the file manager")
-    (editor :label "Emacs" :icon "editor-32" :command lme-editor-activate
+    (editor :label "Emacs" :icon emacs :command lme-editor-activate
             :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "globe-32" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
     (trash :label "Trash" :icon "trash-32" :command lme-desktop-open-trash
            :bottom t :help "What was thrown away"))
   "The desktop's icons, from the top: (KEY . PROPERTIES).
-:label names an icon, :icon is its file in icons/os9, :command opens it
+:label names an icon, :icon is as `lme-platinum-icon-file' takes it
+\(the 32-pixel drawing, or Emacs's own scalable icon), :command opens it
 and :help describes it.  :visible, when given, is a function deciding
 whether the icon shows; :bottom puts it in the bottom corner, as Mac OS 9
 kept the Trash there.")
@@ -179,9 +180,7 @@ Where images cannot be shown, a blank of the icon's width stands in."
      (or (gethash (cons name selected) lme-desktop--icons)
          (puthash (cons name selected)
                   (let ((svg (with-temp-buffer
-                               (insert-file-contents
-                                (expand-file-name (format "icons/os9/%s.svg" name)
-                                                  lme-directory))
+                               (insert-file-contents (lme-platinum-icon-file name))
                                (buffer-string))))
                     (create-image (if selected (lme-desktop--darken svg) svg) 'svg t
                                   :height lme-desktop-icon-size :ascent 'center))

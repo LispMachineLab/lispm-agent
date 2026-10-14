@@ -214,7 +214,7 @@ This is a `tab-bar-tab-post-select-functions' function."
               right-fringe-width 0
               evil-emacs-state-cursor '(nil)
               evil-normal-state-cursor '(nil)
-              lme-platinum-icon (lme-platinum-icon "editor")
+              lme-platinum-icon (lme-platinum-icon 'emacs)
               lme-platinum-box-functions (list :close #'lme-editor--close-box
                                                :zoom #'lme-editor--zoom-box)
               lme-platinum-active-function #'lme-editor--active-p)

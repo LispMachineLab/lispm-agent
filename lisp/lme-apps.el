@@ -46,12 +46,12 @@
 (defvar lme-apps
   '((desktop :name "Desktop" :icon "disk" :menus lme-desktop-menus
              :activate lme-desktop-activate)
-    (editor :name "Emacs" :icon "editor" :menus lme-editor-menus
+    (editor :name "Emacs" :icon emacs :menus lme-editor-menus
             :activate lme-editor-activate)
     (browser :name "Browser" :icon "globe" :menus lme-browser-menus
              :activate lme-browser-show :visible lme-xwidget-available-p))
   "The applications, in the Application menu's order: (KEY . PROPERTIES).
-:name and :icon (a file of icons/os9) name an application, :menus is a
+:name and :icon (see `lme-platinum-icon-file') name an application, :menus is a
 function returning its menus as `lme-platinum-menus-function' does,
 :activate brings it in front, and :visible, when given, is a function
 deciding whether it can run here.")

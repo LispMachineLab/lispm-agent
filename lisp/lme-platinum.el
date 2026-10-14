@@ -264,13 +264,24 @@ tall and the content below never shifts when the focus moves."
 (defvar lme-platinum--icons (make-hash-table :test #'equal)
   "Icon images by name.")
 
+(defun lme-platinum-icon-file (name)
+  "Return the file of icon NAME: a file of icons/os9 without its extension,
+`lambda' for LispM's rainbow λ, or `emacs' for the icon Emacs ships with,
+read from this Emacs's own data directory."
+  (pcase name
+    ('lambda (expand-file-name "icons/lispm-lambda.png" lme-directory))
+    ('emacs (let ((file (expand-file-name "images/icons/hicolor/scalable/apps/emacs.svg"
+                                          data-directory)))
+              (if (file-readable-p file)
+                  file
+                (lme-platinum-icon-file "document"))))
+    (_ (expand-file-name (format "icons/os9/%s.svg" name) lme-directory))))
+
 (defun lme-platinum-icon (name)
   "Return the Finder icon NAME as a string one icon wide.
-NAME is a file of icons/os9 without its extension, or `lambda' for
-LispM's rainbow λ.  Where images cannot be shown, a blank stands in."
-  (let ((file (if (eq name 'lambda)
-                  (expand-file-name "icons/lispm-lambda.png" lme-directory)
-                (expand-file-name (format "icons/os9/%s.svg" name) lme-directory))))
+NAME is as `lme-platinum-icon-file' takes it.  Where images cannot be
+shown, a blank stands in."
+  (let ((file (lme-platinum-icon-file name)))
     ;; The icon carries a face of its own, so a button it sits in, such as
     ;; a list row, does not underline it.
     (if (and (display-images-p) (file-readable-p file))
