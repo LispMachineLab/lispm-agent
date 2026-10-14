@@ -66,6 +66,7 @@
 (declare-function lispm-desktop-remove-picture "lispm-desktop-surface" ())
 (declare-function lispm-desktop-arrange-icons "lispm-desktop-surface" ())
 (declare-function lispm-desktop--color "lispm-desktop-surface" ())
+(declare-function lispm-desktop--hex-color "lispm-desktop-surface" (color))
 (declare-function lispm-desktop-editor-floating-p "lispm-desktop-editor" ())
 (declare-function lispm-desktop-browser-floating-p "lispm-desktop-browser" ())
 (declare-function lispm-desktop-browser--load-history "lispm-desktop-browser-places" ())
@@ -203,9 +204,11 @@ describes it."
                                 svg)))))
 
 (defun lispm-desktop-settings--choose-color ()
-  "Ask for the desktop's colour and keep it."
-  (let ((color (read-color "Desktop colour: " t)))
-    (unless (string-empty-p color)
+  "Ask for the desktop's colour and keep it, written #RRGGBB.
+`read-color' returns a colour typed by name as #RRRRGGGGBBBB, which the
+desktop's SVG cannot read."
+  (let ((color (lispm-desktop--hex-color (read-color "Desktop colour: " t))))
+    (when color
       (lispm-desktop-settings--save 'lispm-desktop-color color))))
 
 (defun lispm-desktop-settings--picture-preview ()

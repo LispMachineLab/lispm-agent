@@ -47,6 +47,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'face-remap)
 (require 'seq)
 (require 'subr-x)
@@ -266,9 +267,26 @@ Dragging an icon sets this."
   "C-M-p" #'lispm-desktop-move-icon-up
   "q" #'ignore)
 
+(defun lispm-desktop--hex-color (color)
+  "Return COLOR, any colour Emacs takes, written #RRGGBB, or nil if it is none.
+SVG takes #RRGGBB, but not all Emacs takes: the #RRRRGGGGBBBB `read-color'
+returns, rgb:R/G/B, or names such as \"dark slate blue\" and \"gray50\", which
+SVG paints black.  A colour written in hex is read as written; a name is
+resolved by a graphic display, else by the table of X's colour names, as a
+text terminal shows names only roughly."
+  (when-let* (((stringp color))
+              (values (or (color-values-from-color-spec color)
+                          (and (display-graphic-p) (color-values color))
+                          (cdr (assoc (tty-color-canonicalize color) color-name-rgb-alist)))))
+    (apply #'color-rgb-to-hex
+           (append (mapcar (lambda (value) (/ value 65535.0)) values) '(2)))))
+
 (defun lispm-desktop--color ()
-  "Return the desktop's colour: `lispm-desktop-color', or the theme's."
-  (or lispm-desktop-color (lispm-desktop-platinum--color :desktop) "#666699"))
+  "Return the desktop's colour, written #RRGGBB as SVG takes it:
+`lispm-desktop-color', or the theme's when that is unset or no colour."
+  (or (lispm-desktop--hex-color lispm-desktop-color)
+      (lispm-desktop--hex-color (lispm-desktop-platinum--color :desktop))
+      "#666699"))
 
 (defun lispm-desktop--darken (svg)
   "Return SVG with every colour halved, as Mac OS 9 darkened a selected icon."

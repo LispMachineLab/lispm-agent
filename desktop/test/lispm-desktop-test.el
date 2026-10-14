@@ -500,6 +500,47 @@ bottom corner."
       (should (string-match-p "fill=\"#123456\"" svg))
       (should-not (string-match-p "<image" svg)))))
 
+(ert-deftest lispm-desktop-test-desktop-color-is-hex ()
+  "Any colour Emacs takes reaches the desktop's SVG written #RRGGBB: the
+12-digit hex `read-color' returns, short hex, rgb:, and names, which a
+graphic display resolves."
+  (dolist (case '(("#483D8B" . "#483d8b")
+                  ("#48483D3D8B8B" . "#483d8b")
+                  ("#F00" . "#ff0000")
+                  ("rgb:ff/80/00" . "#ff8000")
+                  ("dark slate blue" . "#483d8b")
+                  ("DarkSlateBlue" . "#483d8b")
+                  ("gray50" . "#7f7f7f")))
+    (should (equal (lispm-desktop--hex-color (car case)) (cdr case))))
+  (should-not (lispm-desktop--hex-color "no such colour"))
+  (should-not (lispm-desktop--hex-color ""))
+  (should-not (lispm-desktop--hex-color nil))
+  (cl-letf (((symbol-function 'display-graphic-p) #'always)
+            ((symbol-function 'color-values)
+             (lambda (color &optional _) (and (equal color "SystemWindow") '(65535 0 0)))))
+    (should (equal (lispm-desktop--hex-color "SystemWindow") "#ff0000")))
+  (let ((lispm-desktop-picture nil))
+    (let ((lispm-desktop-color "dark slate blue"))
+      (should (equal (lispm-desktop--color) "#483d8b"))
+      (should (string-match-p "fill=\"#483d8b\"" (lispm-desktop--svg 800 600))))
+    (let ((lispm-desktop-color "#48483D3D8B8B"))
+      (should (equal (lispm-desktop--color) "#483d8b")))
+    ;; A colour Emacs does not know leaves the desktop the theme's, not black.
+    (let ((lispm-desktop-color "no such colour"))
+      (should (equal (lispm-desktop--color)
+                     (let ((lispm-desktop-color nil)) (lispm-desktop--color)))))))
+
+(ert-deftest lispm-desktop-test-settings-choose-color-keeps-hex ()
+  "The colour chosen is kept written #RRGGBB, as a name typed comes back
+from `read-color' 12-digit; nothing, or no colour, is not kept."
+  (let (saved)
+    (cl-letf (((symbol-function 'lispm-desktop-settings--save)
+               (lambda (variable value) (push (cons variable value) saved))))
+      (dolist (answer '("#48483D3D8B8B" "" "no such colour"))
+        (cl-letf (((symbol-function 'read-color) (lambda (&rest _) answer)))
+          (lispm-desktop-settings--choose-color))))
+    (should (equal saved '((lispm-desktop-color . "#483d8b"))))))
+
 (ert-deftest lispm-desktop-test-trash-full ()
   "The Trash is full when it holds anything but Finder's .DS_Store: counted
 where it can be read, measured by its link count where it cannot."
