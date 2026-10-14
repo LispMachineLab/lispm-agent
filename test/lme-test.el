@@ -331,6 +331,21 @@ them, up selecting the folder it came from."
         (should (string-match-p "\\`5 items" (lme-finder--info)))))
     (kill-buffer lme-finder-buffer-name)))
 
+(ert-deftest lme-test-finder-moves-to-trash ()
+  "Command-Delete sends the selected item to the Trash and selects the next."
+  (lme-test--with-folder
+    (let ((trashed nil))
+      (cl-letf (((symbol-function 'move-file-to-trash)
+                 (lambda (file) (push file trashed) (delete-file file))))
+        (lme-finder--go folder)
+        (lme-finder--select "beta.txt")
+        (lme-finder-move-to-trash)
+        (should (equal trashed (list (expand-file-name "beta.txt" folder))))
+        (lme-finder--in
+          (should-not (assoc "beta.txt" lme-finder--items))
+          (should (equal lme-finder--selected "init.el")))))
+    (kill-buffer lme-finder-buffer-name)))
+
 (ert-deftest lme-test-views-ask-the-editor-first ()
   "A view is asked for through the editor, which comes forward first."
   (let ((asked nil))

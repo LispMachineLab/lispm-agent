@@ -38,8 +38,9 @@
 ;;
 ;; Keys, as Finder's: the arrows select, Return or Command-O opens,
 ;; Command-Up goes to the enclosing folder, Command-[ and Command-] back
-;; and forward, Command-Shift-N makes a folder, Command-W closes the
-;; window, and typing a name's first letters selects it.
+;; and forward, Command-Shift-N makes a folder, Command-Delete moves the
+;; selected item to the Trash, Command-W closes the window, and typing a
+;; name's first letters selects it.
 
 ;;; Code:
 
@@ -56,6 +57,7 @@
 (declare-function lme-sidebar--toolbar-button "lme-sidebar" (label command help row &optional face))
 (declare-function lme-popup-menu "lme-popup" (items &optional x y align))
 (declare-function lme-popup--frame-xy "lme-popup" (position))
+(declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
 (defvar lme-editor--frame)
 
 (defconst lme-finder-buffer-name " *Finder*"
@@ -337,6 +339,26 @@ the history, as going there by hand does."
       (make-directory path)
       (lme-finder--go lme-finder--directory nil name))))
 
+(defun lme-finder-move-to-trash ()
+  "Move the selected item to the Trash, as Command-Delete did in Finder.
+It goes to the system's own Trash, from where it can be put back; the item
+after it is selected."
+  (interactive)
+  (lme-finder--in
+    (when-let* ((name lme-finder--selected))
+      (let* ((names (mapcar #'car lme-finder--items))
+             (index (or (seq-position names name) 0))
+             (next (or (nth (1+ index) names) (and (> index 0) (nth (1- index) names)))))
+        (condition-case err
+            (progn
+              (move-file-to-trash (expand-file-name name lme-finder--directory))
+              (lme-finder--go lme-finder--directory nil next)
+              (message "“%s” was moved to the Trash" name))
+          (error
+           (lme-popup-alert 'stop (format "“%s” could not be moved to the Trash." name)
+                            '(("OK" ok default))
+                            (error-message-string err))))))))
+
 (defun lme-finder-rename (name)
   "Rename the selected item to NAME."
   (interactive (list (read-string "Rename to: " (lme-finder--in lme-finder--selected))))
@@ -418,6 +440,8 @@ the history, as going there by hand does."
        separator
        (:label "New Folder…" :action lme-finder-new-folder)
        (:label "Rename…" :action lme-finder-rename :enabled ,(and selected t))
+       (:label "Move to Trash" :action lme-finder-move-to-trash :key "M-DEL"
+               :enabled ,(and selected t))
        (:label "Copy Path" :enabled ,(and selected t)
                :action ,(lambda ()
                           (lme-finder--in
@@ -449,6 +473,8 @@ the history, as going there by hand does."
   "M-[" #'lme-finder-back
   "M-]" #'lme-finder-forward
   "M-N" #'lme-finder-new-folder
+  "M-DEL" #'lme-finder-move-to-trash
+  "M-<backspace>" #'lme-finder-move-to-trash
   "M-r" #'lme-finder-refresh
   "M-w" #'lme-finder-close
   "<escape>" #'lme-finder-deselect

@@ -57,6 +57,8 @@
 (declare-function lme-finder-shown-p "lme-finder" ())
 (declare-function lme-finder-open "lme-finder" ())
 (declare-function lme-finder-close "lme-finder" ())
+(declare-function lme-finder--buffer "lme-finder" ())
+(defvar lme-finder--selected)
 (defvar lme-finder--had-focus)
 (declare-function lme-main-area--windows "lme-interface" ())
 
@@ -477,6 +479,11 @@ on the Finder window when it had the keyboard last, else on the desktop."
       (:label "Open" :action ,(if in-finder 'lme-finder-open 'lme-desktop-open)
               :enabled ,(and (or in-finder selected) t))
       (:label "Close Window" :action lme-finder-close :enabled ,(and finder t))
+      separator
+      (:label "Move to Trash" :action lme-finder-move-to-trash :key "M-DEL"
+              :enabled ,(and in-finder
+                             (with-current-buffer (lme-finder--buffer) lme-finder--selected)
+                             t))
       separator
       ,@(mapcar (lambda (item)
                   (list :label (plist-get (cdr item) :label)

@@ -19,8 +19,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
   items and the room left counted at its bottom.  A folder opens in the window, a file in the
   editor, which comes forward.  The arrows select, Return opens, Command-Up, Command-[ and
-  Command-] go up, back and forward, typing a name's first letters selects it, and a right
-  click offers Open, New Folder, Rename and Copy Path.  It belongs to the desktop: it shows
+  Command-] go up, back and forward, Command-Delete moves the selected item to the Trash (the
+  system's own, from where it can be put back), typing a name's first letters selects it, and
+  a right click offers Open, New Folder, Rename, Move to Trash and Copy Path.  It belongs to the desktop: it shows
   with it, and over the floating editor, and steps aside for the full-screen editor and the
   browser.
 - *Applications*, one in front at a time, as on Mac OS 9: the desktop, Emacs the editor, and the
