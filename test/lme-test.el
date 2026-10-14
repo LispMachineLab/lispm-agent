@@ -186,7 +186,7 @@ box runs the buffer's own close function."
       (set-window-parameter chrome 'lme-chrome t)
       (should (equal (lme-platinum--window-controls chrome) '(on off off)))
       (with-temp-buffer
-        (setq-local lme-platinum-close-function (lambda (window) (setq closed window)))
+        (setq-local lme-platinum-box-functions (list :close (lambda (window) (setq closed window))))
         (set-window-buffer chrome (current-buffer))
         (lme-platinum-close-window chrome)
         (should (eq closed chrome))
@@ -202,7 +202,7 @@ front; without xwidgets it is left out."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always)
             ((symbol-function 'lme-browser-workspace-p) #'ignore))
     (let ((bar (lme-platinum-menu-bar)))
-      (should (equal (last (mapcar #'car bar) 2) '(lme-view-buffers lme-view-web)))
+      (should (equal (last (mapcar #'car bar) 2) '(lme-view-shells lme-view-web)))
       (should-not (text-property-any 0 (length (nth 2 (car (last bar))))
                                      'face 'lme-platinum-menu-title-active
                                      (nth 2 (car (last bar)))))))
@@ -222,16 +222,18 @@ front; without xwidgets it is left out."
 (ert-deftest lme-test-desktop-items ()
   "The browser's icon shows where the browser can run; the Trash is last."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
-    (should (equal (mapcar #'car (lme-desktop--items)) '(home trash))))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor trash))))
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
-    (should (equal (mapcar #'car (lme-desktop--items)) '(home browser trash)))))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor browser trash)))))
 
 (ert-deftest lme-test-desktop-selects-and-names ()
   "The arrow keys step through the icons, wrapping; the selected name is
 inverted."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
     (save-window-excursion
-      (lme-desktop-show)
+      ;; The desktop with its icons, as its own workspace shows it.
+      (set-window-buffer (selected-window) (lme-desktop-buffer))
+      (lme-desktop--render (selected-window))
       (with-current-buffer (lme-desktop-buffer)
         (setq lme-desktop--selected nil)
         (lme-desktop-select-next)
@@ -239,6 +241,9 @@ inverted."
         (lme-desktop-select-previous)
         (should (eq lme-desktop--selected 'trash))
         (lme-desktop-select-previous)
+        (should (eq lme-desktop--selected 'editor))
+        (lme-desktop-select-next)
+        (lme-desktop-select-next)
         (should (eq lme-desktop--selected 'home))
         (goto-char (point-min))
         (search-forward "Home")
@@ -274,15 +279,88 @@ the last one uncovers the desktop."
     (lme-desktop--on-new-workspace)
     (should (lme-desktop-p))))
 
-(ert-deftest lme-test-views-leave-the-browser ()
-  "A view asked for in the browser's workspace opens in the one used before."
-  (let ((left nil))
-    (cl-letf (((symbol-function 'lme-browser-workspace-p) (lambda () (not left)))
-              ((symbol-function 'tab-bar--tab-index-recent) (lambda (&rest _) 0))
-              ((symbol-function 'tab-bar-switch-to-recent-tab) (lambda (&rest _) (setq left t)))
-              (lme-sidebar-views '((test :visible ignore :show ignore :hide ignore))))
+(ert-deftest lme-test-views-ask-the-editor-first ()
+  "A view is asked for through the editor, which comes forward first."
+  (let ((asked nil))
+    (cl-letf (((symbol-function 'lme-editor--prepare-view) (lambda () (setq asked t)))
+              (lme-sidebar-views '((test :visible ignore :show ignore :hide ignore)))
+              (lme-sidebar-prepare-function #'lme-editor--prepare-view))
       (lme-sidebar-select 'test)
-      (should left))))
+      (should asked))))
+
+(ert-deftest lme-test-menu-bar-follows-the-application ()
+  "The menu bar holds the menus of the application in front."
+  (let ((lme-platinum-menus-function #'lme-apps-menus))
+    (let ((lme-apps--frontmost 'editor))
+      (should (equal (lme-test--menu-bar-titles)
+                     '(lme-lambda lme-editor-file lme-editor-edit lme-editor-view
+                                  lme-editor-project lme-editor-window))))
+    (let ((lme-apps--frontmost 'desktop))
+      (should (equal (lme-test--menu-bar-titles)
+                     '(lme-lambda lme-desktop-file lme-desktop-special))))
+    (let ((lme-apps--frontmost 'browser))
+      (should (equal (lme-test--menu-bar-titles)
+                     '(lme-lambda lme-browser-file lme-browser-go lme-browser-window))))))
+
+(ert-deftest lme-test-application-menu-lists-applications ()
+  "The Application menu lists the applications, the one in front checked;
+the browser only where it can run."
+  (let ((lme-apps--frontmost 'editor))
+    (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+      (let ((items (lme-apps-application-items)))
+        (should (equal (mapcar (lambda (item) (plist-get item :label)) items)
+                       '("Desktop" "Emacs")))
+        (should (plist-get (nth 1 items) :checked))
+        (should (equal (cdr (lme-apps-application)) "Emacs"))))
+    (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
+      (should (= 3 (length (lme-apps-application-items)))))))
+
+(ert-deftest lme-test-documents-go-to-the-editor ()
+  "Outside the editor, documents are sent to it; the browser's pages, the
+desktop and internal buffers are not."
+  (with-current-buffer (get-buffer-create "lme-test-document.txt")
+    (setq buffer-file-name "/tmp/lme-test-document.txt")
+    (let ((document (current-buffer)))
+      (cl-letf (((symbol-function 'lme-editor--in-workspace-p) #'ignore))
+        (should (lme-editor--astray-p document nil))
+        (should-not (lme-editor--astray-p (lme-desktop-buffer) nil))
+        (let ((lme-editor--displaying t))
+          (should-not (lme-editor--astray-p document nil))))
+      (cl-letf (((symbol-function 'lme-editor--in-workspace-p) #'always))
+        (should-not (lme-editor--astray-p document nil))))
+    (setq buffer-file-name nil)
+    (kill-buffer)))
+
+(ert-deftest lme-test-editor-workspaces-leave-out-desktop-and-browser ()
+  "The desktop's and the browser's workspaces are not the editor's."
+  (should-not (lme-editor--workspace-tab-p '(tab (name . "Desktop"))))
+  (should-not (lme-editor--workspace-tab-p '(tab (name . "Browser"))))
+  (should (lme-editor--workspace-tab-p '(tab (name . "lispm-emacs")))))
+
+(ert-deftest lme-test-buffer-manager-counts-process-trees ()
+  "A buffer's process is counted with every process under it."
+  (let ((processes (make-hash-table)))
+    (puthash 10 '(1 1.5 1000) processes)
+    (puthash 11 '(10 2.0 500) processes)
+    (puthash 12 '(11 0.5 250) processes)
+    (puthash 20 '(1 9.0 9000) processes)
+    (let ((children (lme-buffer-manager--children processes)))
+      (should (equal (lme-buffer-manager--tree-cost 10 processes children) '(4.0 . 1750)))
+      (should (equal (lme-buffer-manager--tree-cost 12 processes children) '(0.5 . 250))))))
+
+(ert-deftest lme-test-buffer-manager-rows ()
+  "Every buffer but internal ones has a row, its text measured."
+  (with-current-buffer (get-buffer-create "lme-test-row")
+    (erase-buffer)
+    (insert "hello")
+    (cl-letf (((symbol-function 'lme-buffer-manager--processes) (lambda () (make-hash-table))))
+      (let* ((entries (lme-buffer-manager--entries))
+             (row (assq (current-buffer) entries)))
+        (should row)
+        (should (equal (get-text-property 0 'lme-value (aref (cadr row) 2)) 5))
+        (should-not (seq-find (lambda (entry) (string-prefix-p " " (buffer-name (car entry))))
+                              entries))))
+    (kill-buffer)))
 
 (ert-deftest lme-test-palette-takes-named-colours ()
   "Colours a theme names replace the derived ones; the rest stay derived."

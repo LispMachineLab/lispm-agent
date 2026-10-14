@@ -341,10 +341,22 @@ document of its kind; any other buffer, a blank document."
 (defvar-local lme-platinum-icon nil
   "Icon the window of this buffer shows before its title, a string.")
 
-(defvar-local lme-platinum-close-function nil
-  "Function the close box of this buffer's window calls with the window,
-instead of putting the buffer away: for chrome, such as the browser's
-address window, whose close box closes what it frames.")
+(defvar-local lme-platinum-box-functions nil
+  "What the title bar boxes of this buffer's window do instead of their own.
+A plist of :close, :zoom and :collapse functions, each called with the
+window, for chrome whose boxes act on what it frames, such as the
+browser's address window or the editor's title strip.  Where the plist is
+set, a box without a function is drawn disabled.")
+
+(defvar-local lme-platinum-active-function nil
+  "Function deciding whether this buffer's title bar is drawn active, or nil.
+Called with the window, it lets chrome look active along with what it
+frames, as the editor's title strip does while the editor is in front.")
+
+(defun lme-platinum--box-function (window box)
+  "Return the function WINDOW's buffer gives title bar BOX, or nil.
+BOX is :close, :zoom or :collapse; see `lme-platinum-box-functions'."
+  (plist-get (buffer-local-value 'lme-platinum-box-functions (window-buffer window)) box))
 
 (defun lme-platinum-no-title-bar ()
   "Give the current buffer's windows no title bar, as for transient popups."
@@ -423,9 +435,20 @@ HELP describes it.  It is pressed rather than clicked, see
                         (keymap-set map "<tab-line> <mouse-1>" #'ignore)
                         map)))
 
+(defun lme-platinum--title-press (event)
+  "Drag the child frame whose top title bar EVENT pressed, as a window.
+A window at the top of a child frame, such as the floating editor's
+title strip, moves the frame, as Mac OS 9 moved a window by its title;
+elsewhere the press does nothing and the release selects the window."
+  (interactive "e")
+  (let* ((window (posn-window (event-start event)))
+         (frame (and (windowp window) (window-frame window))))
+    (when (and frame (frame-parent frame) (window-at-side-p window 'top))
+      (mouse-drag-frame-move event))))
+
 (defvar lme-platinum--title-map
   (let ((map (make-sparse-keymap)))
-    (keymap-set map "<tab-line> <down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> <down-mouse-1>" #'lme-platinum--title-press)
     (keymap-set map "<tab-line> <mouse-1>"
                 (lme-platinum--window-command #'select-window))
     (keymap-set map "<tab-line> <double-down-mouse-1>" #'ignore)
@@ -518,10 +541,14 @@ as the sidebar, or chrome, such as the browser's address window."
 Each is `on', `off' (drawn disabled) or nil.  A side window or chrome
 closes but neither zooms nor collapses; a window collapses only when
 another shares its column."
-  (let ((fixed (lme-platinum--fixed-p window)))
-    (list 'on
-          (if fixed 'off 'on)
-          (if (and (not fixed) (window-combined-p window)) 'on 'off))))
+  (let ((fixed (lme-platinum--fixed-p window))
+        (functions (buffer-local-value 'lme-platinum-box-functions (window-buffer window))))
+    (if functions
+        (mapcar (lambda (box) (if (plist-get functions box) 'on 'off))
+                '(:close :zoom :collapse))
+      (list 'on
+            (if fixed 'off 'on)
+            (if (and (not fixed) (window-combined-p window)) 'on 'off)))))
 
 (defun lme-platinum--title-bar (window)
   "Return the title bar of WINDOW, drawn for its current state."
@@ -530,7 +557,10 @@ another shares its column."
          ;; address window wears the page's, is active with that window.
          (active (or (mode-line-window-selected-p)
                      (eq (window-parameter window 'lme-platinum-title-for)
-                         (old-selected-window))))
+                         (old-selected-window))
+                     (when-let* ((active (buffer-local-value 'lme-platinum-active-function
+                                                             buffer)))
+                       (funcall active window))))
          (pressed (window-parameter window 'lme-platinum-pressed))
          (width (- (window-pixel-width window)
                    (window-right-divider-width window)
@@ -611,8 +641,8 @@ alert has asked about unsaved changes or a running process, and WINDOW
 goes too when other windows remain in the main area; the last one shows
 the desktop."
   (cond
-   ((buffer-local-value 'lme-platinum-close-function (window-buffer window))
-    (funcall (buffer-local-value 'lme-platinum-close-function (window-buffer window)) window))
+   ((lme-platinum--box-function window :close)
+    (funcall (lme-platinum--box-function window :close) window))
    ((window-parameter window 'window-side)
     (when-let* ((view (lme-sidebar-current-view)))
       (lme-sidebar-select view)))
@@ -654,24 +684,32 @@ buffer whose process still runs asks before the process is stopped."
   "Zoom WINDOW to the whole main area, or back to where it was.
 The sidebar stays, as `delete-other-windows' leaves side windows be."
   (let ((saved (frame-parameter nil 'lme-platinum-unzoom)))
-    (if (and saved (eq (car saved) window) (not (cdr (lme-main-area--windows))))
-        (progn (set-frame-parameter nil 'lme-platinum-unzoom nil)
-               (set-window-configuration (cdr saved)))
+    (cond
+     ((lme-platinum--box-function window :zoom)
+      (funcall (lme-platinum--box-function window :zoom) window))
+     ((and saved (eq (car saved) window) (not (cdr (lme-main-area--windows))))
+      (set-frame-parameter nil 'lme-platinum-unzoom nil)
+      (set-window-configuration (cdr saved)))
+     (t
       (set-frame-parameter nil 'lme-platinum-unzoom
                            (cons window (current-window-configuration)))
-      (delete-other-windows window))))
+      (delete-other-windows window)))))
 
 (defun lme-platinum-collapse-window (window)
   "Roll WINDOW up to its title bar, or down again, as a window shade.
 Only a window sharing its column with another can roll up."
-  (if-let* ((height (window-parameter window 'lme-platinum-shade)))
-      (progn (set-window-parameter window 'lme-platinum-shade nil)
-             (window-resize window (- height (window-total-height window)) nil t))
-    (when (window-combined-p window)
-      (set-window-parameter window 'lme-platinum-shade (window-total-height window))
-      (window-resize window (- (window-min-size window nil t)
-                               (window-total-height window))
-                     nil t))))
+  (cond
+   ((lme-platinum--box-function window :collapse)
+    (funcall (lme-platinum--box-function window :collapse) window))
+   ((window-parameter window 'lme-platinum-shade)
+    (let ((height (window-parameter window 'lme-platinum-shade)))
+      (set-window-parameter window 'lme-platinum-shade nil)
+      (window-resize window (- height (window-total-height window)) nil t)))
+   ((window-combined-p window)
+    (set-window-parameter window 'lme-platinum-shade (window-total-height window))
+    (window-resize window (- (window-min-size window nil t)
+                             (window-total-height window))
+                   nil t))))
 
 (declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
 
@@ -692,7 +730,9 @@ Hidden buffers and the sidebar's lists are left out."
 A double click on a title bar does this, as on Mac OS 9; a window alone
 in its column cannot roll up, so it zooms instead.  A side window or
 chrome does neither."
-  (cond ((lme-platinum--fixed-p window))
+  (cond ((lme-platinum--box-function window :collapse)
+         (funcall (lme-platinum--box-function window :collapse) window))
+        ((lme-platinum--fixed-p window))
         ((or (window-parameter window 'lme-platinum-shade) (window-combined-p window))
          (lme-platinum-collapse-window window))
         (t (lme-platinum-zoom-window window))))
@@ -717,6 +757,9 @@ to the left, a file to the right."
 (defvar lme-platinum--open-menu nil
   "The menu bar item whose menu is popped up, drawn highlighted meanwhile.")
 
+(defvar lme-platinum-menu-closed-hook nil
+  "Hook run when a menu dropped from the menu bar closes, chosen or not.")
+
 (defmacro lme-platinum--with-open-menu (key &rest body)
   "Run BODY, which pops up a menu, with menu bar item KEY highlighted."
   (declare (indent 1))
@@ -724,7 +767,8 @@ to the left, a file to the right."
      (force-mode-line-update t)
      (redisplay t)
      (unwind-protect (progn ,@body)
-       (force-mode-line-update t))))
+       (force-mode-line-update t)
+       (run-hooks 'lme-platinum-menu-closed-hook))))
 
 (defconst lme-platinum-menu-padding 10
   "Blank pixels on either side of a menu bar title.")
@@ -804,42 +848,86 @@ Where images cannot be shown, a plain λ stands in."
   "Return non-nil when the embedded browser can run in this Emacs."
   (and (fboundp 'lme-xwidget-available-p) (lme-xwidget-available-p)))
 
+(defvar lme-platinum-menus-function nil
+  "Function returning the frontmost application's menus, or nil.
+The menus follow the λ menu in the menu bar, as Mac OS 9's menu bar held
+the frontmost application's: a list of (KEY TITLE ITEMS), ITEMS a function
+returning the items `lme-popup-menu' takes.  Without it the menu bar
+holds a title per sidebar view, and Web.")
+
+(defvar lme-platinum-application-function nil
+  "Function returning the frontmost application as (ICON . NAME), or nil.
+The Application menu names it; without it, the workspace is named.")
+
+(defvar lme-platinum-applications-function nil
+  "Function returning the Application menu's items, or nil for the workspaces.")
+
+(defun lme-platinum--application-menu-command (key items left)
+  "Return a command dropping menu KEY, whose ITEMS a function returns.
+LEFT is the pixel position of its title's left edge, where the menu drops."
+  (lambda ()
+    (interactive)
+    (lme-platinum--with-open-menu key
+      (lme-popup-menu (funcall items) left (lme-platinum--menu-y)))))
+
+(defun lme-platinum--application-menus (menus left)
+  "Return the menu bar titles of MENUS, the first starting LEFT pixels in.
+MENUS is a value of `lme-platinum-menus-function'."
+  (mapcar (pcase-lambda (`(,key ,title ,items))
+            (let ((item (lme-platinum--menu-title
+                         key title (lme-platinum--application-menu-command key items left)
+                         title (eq lme-platinum--open-menu key))))
+              (setq left (+ left (string-pixel-width (nth 2 item))))
+              item))
+          menus))
+
 (defun lme-platinum-menu-bar ()
-  "Return the left end of the menu bar: the λ menu, a title per view, Web.
-A view's title is highlighted while the sidebar shows it, and Web while
-the browser is in front; Web shows where Emacs can run the browser."
-  (let ((shown (lme-sidebar-current-view)))
-    (append
-     (list (lme-platinum--menu-title 'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
-                                     "LispM" (eq lme-platinum--open-menu 'lme-lambda)))
-     (mapcar (lambda (view)
-               (let ((spec (cdr view)))
-                 (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
-                                           (plist-get spec :title)
-                                           (plist-get spec :command)
-                                           (plist-get spec :help)
-                                           (eq (car view) shown))))
-             lme-sidebar-views)
-     (when (lme-platinum--browser-p)
-       (list (lme-platinum--menu-title 'lme-view-web "Web" 'lme-browser "Browser"
-                                       (lme-browser-workspace-p)))))))
+  "Return the left end of the menu bar: the λ menu, then the frontmost
+application's menus, see `lme-platinum-menus-function'; without one, a
+title per view, highlighted while the sidebar shows it, and Web, while the
+browser is in front."
+  (let ((lambda-title (lme-platinum--menu-title
+                       'lme-lambda (lme-platinum--lambda) #'lme-platinum-lambda-menu
+                       "LispM" (eq lme-platinum--open-menu 'lme-lambda))))
+    (cons
+     lambda-title
+     (if lme-platinum-menus-function
+         (lme-platinum--application-menus (funcall lme-platinum-menus-function)
+                                          (string-pixel-width (nth 2 lambda-title)))
+       (let ((shown (lme-sidebar-current-view)))
+         (append
+          (mapcar (lambda (view)
+                    (let ((spec (cdr view)))
+                      (lme-platinum--menu-title (intern (format "lme-view-%s" (car view)))
+                                                (plist-get spec :title)
+                                                (plist-get spec :command)
+                                                (plist-get spec :help)
+                                                (eq (car view) shown))))
+                  lme-sidebar-views)
+          (when (lme-platinum--browser-p)
+            (list (lme-platinum--menu-title 'lme-view-web "Web" 'lme-browser "Browser"
+                                            (lme-browser-workspace-p))))))))))
 
 (defun lme-platinum-workspace-menu ()
-  "Pop up the Application menu: the workspaces, the current one checked."
+  "Pop up the Application menu: the applications, see
+`lme-platinum-applications-function', or else the workspaces, the current
+one checked."
   (interactive)
   (let ((current (tab-bar--current-tab-index))
         (tabs (funcall tab-bar-tabs-function)))
     (lme-platinum--with-open-menu 'lme-application
       (lme-popup-menu
-       `(,@(seq-map-indexed
-            (lambda (tab index)
-              (list :label (alist-get 'name tab)
-                    :action (lambda () (tab-bar-select-tab (1+ index)))
-                    :checked (= index current)))
-            tabs)
-         separator
-         (:label "New Workspace" :action tab-bar-new-tab)
-         (:label "Close Workspace" :action tab-bar-close-tab :enabled ,(and (cdr tabs) t)))
+       (if lme-platinum-applications-function
+           (funcall lme-platinum-applications-function)
+         `(,@(seq-map-indexed
+              (lambda (tab index)
+                (list :label (alist-get 'name tab)
+                      :action (lambda () (tab-bar-select-tab (1+ index)))
+                      :checked (= index current)))
+              tabs)
+           separator
+           (:label "New Workspace" :action tab-bar-new-tab)
+           (:label "Close Workspace" :action tab-bar-close-tab :enabled ,(and (cdr tabs) t))))
        (- (frame-pixel-width) 4) (lme-platinum--menu-y) 'right))))
 
 (defvar tabspaces-default-tab)
@@ -849,16 +937,19 @@ the browser is in front; Web shows where Emacs can run the browser."
 It names the current workspace with its icon, as Mac OS 9's named the
 frontmost application: the hard disk for the default workspace, a
 project's folder for a project's.  Clicked, it lists every workspace."
-  (let ((name (alist-get 'name (tab-bar--current-tab))))
+  (let ((name (alist-get 'name (tab-bar--current-tab)))
+        (application (and lme-platinum-application-function
+                          (funcall lme-platinum-application-function))))
     (list (lme-platinum--menu-title
            'lme-application
-           (concat (cond ((equal name (bound-and-true-p tabspaces-default-tab))
+           (concat (cond (application (car application))
+                         ((equal name (bound-and-true-p tabspaces-default-tab))
                           (lme-platinum-icon "disk"))
                          ((and (fboundp 'lme-browser-workspace-p) (lme-browser-workspace-p))
                           (lme-platinum-icon "globe"))
                          (t (lme-platinum-folder-icon
                              (car (rassoc name (bound-and-true-p tabspaces-project-tab-map))))))
-                   " " name " ▾")
+                   " " (or (cdr application) name) " ▾")
            #'lme-platinum-workspace-menu "Workspaces"
            (eq lme-platinum--open-menu 'lme-application)))))
 
@@ -884,12 +975,30 @@ centred in HEIGHT pixels."
                 :stroke (plist-get palette :light) :stroke-width 1))
     svg))
 
+(defun lme-platinum--grow-press (event)
+  "Resize the child frame whose grow box EVENT pressed, from its corner.
+The floating editor resizes so; elsewhere windows tile, and the grow box
+only marks the corner."
+  (interactive "e")
+  (let* ((window (posn-window (event-start event)))
+         (frame (and (windowp window) (window-frame window))))
+    (when (and frame (frame-parent frame))
+      (mouse-drag-frame-resize event 'bottom-right))))
+
+(defvar lme-platinum--grow-map
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "<mode-line> <down-mouse-1>" #'lme-platinum--grow-press)
+    (keymap-set map "<mode-line> <mouse-1>" #'ignore)
+    map)
+  "Keymap of the grow box.")
+
 (defun lme-platinum--grow-box ()
   "Return the grow box as a string."
   (propertize " " 'display (lme-platinum--image
                             (list 'grow)
                             (lambda () (lme-platinum-draw-grow-box lme-platinum--palette
-                                                                    lme-platinum-title-height)))))
+                                                                    lme-platinum-title-height)))
+              'keymap lme-platinum--grow-map))
 
 (defun lme-platinum--placard (text active)
   "Return TEXT as a placard, the raised plate Mac OS 9 showed status in.
@@ -1067,7 +1176,8 @@ the desktop; of side windows, only the sidebar's lists."
          (not (lme-terminal-buffer-p buffer))
          (not (let ((mode (buffer-local-value 'major-mode buffer)))
                 (or (provided-mode-derived-p mode 'xwidget-webkit-mode)
-                    (provided-mode-derived-p mode 'lme-desktop-mode))))
+                    (provided-mode-derived-p mode 'lme-desktop-mode)
+                    (provided-mode-derived-p mode 'lme-desktop-empty-mode))))
          (or (not (window-parameter window 'window-side))
              (lme-sidebar-buffer-view buffer)
              (eq (buffer-local-value 'major-mode buffer) 'treemacs-mode)))))
@@ -1642,6 +1752,14 @@ Finder's list view."
   "Face of an edit text field: inset, in the list colour."
   :group 'lme-platinum)
 
+(defface lme-platinum-tab '((t :box (:line-width (1 . 1) :style released-button)))
+  "Face of a tab of a tab control, behind the one chosen."
+  :group 'lme-platinum)
+
+(defface lme-platinum-tab-selected '((t :weight bold :box (:line-width (1 . 1) :style released-button)))
+  "Face of the chosen tab of a tab control: in front, in the content's colour."
+  :group 'lme-platinum)
+
 (defface lme-platinum-button '((t :box (:line-width (1 . 1) :style released-button)))
   "Face of a bevel button."
   :group 'lme-platinum)
@@ -1744,6 +1862,17 @@ it, as on every theme change, is idempotent."
                             :box '(:line-width (1 . 1) :style pressed-button))
         (set-face-attribute 'lme-platinum-button nil
                             :inherit 'lme-platinum-list :background chrome :foreground text
+                            :box '(:line-width (1 . 1) :style released-button))
+        ;; Tabs as Mac OS 9's tab controls drew them: the chosen one in
+        ;; front, in the colour of what it shows, the others behind it.
+        (set-face-attribute 'lme-platinum-tab nil
+                            :inherit 'lme-platinum-list :background chrome
+                            :foreground (lme-platinum--color :muted)
+                            :box '(:line-width (1 . 1) :style released-button))
+        (set-face-attribute 'lme-platinum-tab-selected nil
+                            :inherit 'lme-platinum-list
+                            :background (lme-platinum--color :content)
+                            :foreground text :weight 'bold
                             :box '(:line-width (1 . 1) :style released-button))
         (set-face-attribute 'lme-platinum-button-pressed nil
                             :inherit 'lme-platinum-list :background (lme-platinum--color :shade)

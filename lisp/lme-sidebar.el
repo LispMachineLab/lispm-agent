@@ -453,151 +453,6 @@ The shell is the one Eat would start, run as an independent process."
   "Hide the shell sidebar in the selected frame."
   (lme-sidebar--hide-buffer lme-shell-list-buffer-name))
 
-;;;; Buffers sidebar
-
-(defconst lme-buffer-list-buffer-name "*Buffers*"
-  "Name of the open buffers sidebar buffer.")
-
-(defconst lme-buffer-list-groups
-  '((files "Files") (terminals "Terminals") (other "Other"))
-  "Groups of the open buffers sidebar, in display order, with their headings.")
-
-(defvar lme-agent-list-buffer-name)
-
-(defun lme-buffer-list--kind (buffer)
-  "Return the group of BUFFER: `files', `terminals' or `other'."
-  (cond ((lme-terminal-buffer-p buffer) 'terminals)
-        ((buffer-file-name buffer) 'files)
-        (t 'other)))
-
-(defun lme-buffer-list--candidates ()
-  "Return the open buffers to list, from the current workspace when isolated.
-Internal buffers (named with a leading space) and the sidebars themselves are
-left out."
-  (let ((sidebars (list lme-agent-list-buffer-name lme-shell-list-buffer-name
-                        lme-buffer-list-buffer-name)))
-    (seq-remove (lambda (buffer)
-                  (let ((name (buffer-name buffer)))
-                    (or (string-prefix-p " " name)
-                        (member name sidebars)
-                        (eq (buffer-local-value 'major-mode buffer) 'treemacs-mode)
-                        (minibufferp buffer))))
-                (if (bound-and-true-p tabspaces-mode)
-                    (tabspaces-local-buffer-list)
-                  (buffer-list)))))
-
-(defun lme-buffer-list--mode-label (buffer)
-  "Return a readable name of BUFFER's major mode.
-A plain string `mode-name' is used as is; a mode line construct is formatted;
-an empty result falls back to the major mode's symbol."
-  (let* ((name (buffer-local-value 'mode-name buffer))
-         (label (if (stringp name) name (format-mode-line name nil nil buffer))))
-    (if (string-empty-p label)
-        (symbol-name (buffer-local-value 'major-mode buffer))
-      label)))
-
-(defun lme-buffer-list--entry (buffer)
-  "Insert the sidebar row of BUFFER.
-Its right-hand column names a file's directory, a terminal's working
-directory, and any other buffer's major mode, or its directory when the
-mode merely repeats the buffer's name, as *Messages* in Messages mode
-does.  The full directory is in the row's help."
-  (let* ((kind (lme-buffer-list--kind buffer))
-         (title (or (and (eq kind 'terminals) (lme-agent-buffer-label buffer))
-                    (string-trim (buffer-name buffer) "\\*" "\\*")))
-         (directory (abbreviate-file-name (buffer-local-value 'default-directory buffer)))
-         (place (file-name-nondirectory (directory-file-name directory))))
-    (lme-sidebar--insert-entry
-     (lme-platinum-buffer-icon buffer)
-     title
-     (pcase kind
-       ('files (concat (when (buffer-modified-p buffer)
-                         (propertize "● " 'face 'warning))
-                       place))
-       ('terminals place)
-       ('other (let ((mode (lme-buffer-list--mode-label buffer)))
-                 (if (string-equal-ignore-case mode title) place mode))))
-     (apply-partially #'lme-sidebar-show-in-main buffer)
-     (format "Show %s, in %s" (buffer-name buffer) directory))))
-
-(defvar lme-buffer-list--rendering nil
-  "Non-nil while the open buffers sidebar renders, to ignore its own effects.")
-
-(defun lme-buffer-list--render ()
-  "Render the open buffers, grouped by kind, into the current buffer."
-  (let ((inhibit-read-only t)
-        (lme-buffer-list--rendering t)
-        (buffers (lme-buffer-list--candidates)))
-    (erase-buffer)
-    (lme-sidebar-set-toolbar 'buffers #'lme-buffer-list-refresh
-                            '(("Save All" save-some-buffers "Save modified file buffers")))
-    (setq lme-platinum-info (lme-sidebar--count (length buffers) "buffer"))
-    (lme-sidebar--insert-columns "Name" "Where")
-    (pcase-dolist (`(,kind ,heading) lme-buffer-list-groups)
-      (when-let* ((members (seq-filter (lambda (buffer) (eq (lme-buffer-list--kind buffer) kind))
-                                       buffers)))
-        (lme-sidebar--insert-heading heading)
-        (mapc #'lme-buffer-list--entry members)))))
-
-(defun lme-buffer-list-refresh (&rest _)
-  "Re-render the open buffers sidebar when it exists, keeping point's line."
-  (interactive)
-  (when-let* ((buffer (get-buffer lme-buffer-list-buffer-name)))
-    (with-current-buffer buffer
-      (let ((line (line-number-at-pos)))
-        (lme-buffer-list--render)
-        (goto-char (point-min))
-        (forward-line (1- line))))))
-
-(defvar lme-buffer-list--refresh-timer nil
-  "Pending idle timer refreshing the open buffers sidebar, if any.")
-
-(defun lme-buffer-list--schedule-refresh ()
-  "Refresh the open buffers sidebar once Emacs is idle, when it is shown.
-Run from `buffer-list-update-hook', which fires on every buffer switch: the
-check is cheap, refreshes coalesce into one idle timer, and the sidebar's own
-rendering never schedules another."
-  (unless (or lme-buffer-list--rendering
-              lme-buffer-list--refresh-timer
-              (not (get-buffer-window lme-buffer-list-buffer-name t)))
-    (setq lme-buffer-list--refresh-timer
-          (run-with-idle-timer 0.3 nil
-                               (lambda ()
-                                 (setq lme-buffer-list--refresh-timer nil)
-                                 (lme-buffer-list-refresh))))))
-
-(defvar-keymap lme-buffer-list-mode-map
-  :doc "Keymap for the open buffers sidebar."
-  :parent special-mode-map
-  "g" #'lme-buffer-list-refresh
-  "n" #'forward-button
-  "p" #'backward-button
-  "TAB" #'forward-button
-  "<backtab>" #'backward-button)
-
-(define-derived-mode lme-buffer-list-mode special-mode "Buffers"
-  "Sidebar listing the open buffers of the current workspace.
-\\{lme-buffer-list-mode-map}"
-  (lme-sidebar--setup-buffer))
-
-(defun lme-buffer-list-show ()
-  "Show the open buffers sidebar on the left of this frame and return its window."
-  (let ((buffer (get-buffer-create lme-buffer-list-buffer-name)))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'lme-buffer-list-mode)
-        (lme-buffer-list-mode))
-      (lme-buffer-list--render)
-      (goto-char (point-min)))
-    (lme-sidebar--display buffer)))
-
-(defun lme-buffer-list-visible-p ()
-  "Return non-nil when the open buffers sidebar is shown in the selected frame."
-  (and (get-buffer-window lme-buffer-list-buffer-name) t))
-
-(defun lme-buffer-list-hide ()
-  "Hide the open buffers sidebar in the selected frame."
-  (lme-sidebar--hide-buffer lme-buffer-list-buffer-name))
-
 ;;;; Files sidebar
 
 (declare-function treemacs-current-workspace "treemacs-workspaces" ())
@@ -653,14 +508,8 @@ Outside any project treemacs falls back to the buffer's directory."
             :help "Shells"
             :visible lme-shell-list-visible-p
             :show lme-shell-list-show
-            :hide lme-shell-list-hide)
-    (buffers :title "Buffers" :icon "document" :mode lme-buffer-list-mode
-             :command lme-sidebar-buffers
-             :help "Open buffers"
-             :visible lme-buffer-list-visible-p
-             :show lme-buffer-list-show
-             :hide lme-buffer-list-hide))
-  "Views the left sidebar can show, in menu bar order.
+            :hide lme-shell-list-hide))
+  "Views the left sidebar can show, in the order of the editor's tabs.
 Each view names its TITLE, its Finder icon (see `lme-platinum-icon'),
 the MODE of its list buffer when it has one, the COMMAND its menu bar title
 runs, and the functions that test, show and hide it in the selected frame.")
@@ -670,22 +519,27 @@ runs, and the functions that test, show and hide it in the selected frame.")
   (car (seq-find (lambda (view) (funcall (plist-get (cdr view) :visible)))
                  lme-sidebar-views)))
 
-(declare-function lme-browser-workspace-p "lme-browser" ())
+(defvar lme-sidebar-prepare-function nil
+  "Function called before a view is shown or hidden, or nil.
+The views belong to the editor; it brings the editor in front when a
+view is asked for elsewhere, as on the desktop.")
+
+(defvar lme-sidebar-change-hook nil
+  "Hook run after the sidebar's view changed.")
 
 (defun lme-sidebar-select (view)
   "Show VIEW in the left sidebar, or hide the sidebar when VIEW is shown.
-Every other view is hidden first, so at most one is ever visible.  Views
-belong to the project workspaces: asked for in the browser's, whose window
-fills its main area, VIEW opens in the workspace used before it."
-  (when (and (fboundp 'lme-browser-workspace-p) (lme-browser-workspace-p)
-             (tab-bar--tab-index-recent 1))
-    (tab-bar-switch-to-recent-tab))
+Every other view is hidden first, so at most one is ever visible; see
+`lme-sidebar-prepare-function' for views asked for outside the editor."
+  (when lme-sidebar-prepare-function
+    (funcall lme-sidebar-prepare-function))
   (let ((current (lme-sidebar-current-view)))
     (dolist (entry lme-sidebar-views)
       (when (funcall (plist-get (cdr entry) :visible))
         (funcall (plist-get (cdr entry) :hide))))
     (unless (eq view current)
       (funcall (plist-get (alist-get view lme-sidebar-views) :show))))
+  (run-hooks 'lme-sidebar-change-hook)
   (force-mode-line-update t))
 
 (defun lme-sidebar-files ()
@@ -703,10 +557,6 @@ fills its main area, VIEW opens in the workspace used before it."
   (interactive)
   (lme-sidebar-select 'agents))
 
-(defun lme-sidebar-buffers ()
-  "Show the open buffers in the left sidebar, or hide them when shown."
-  (interactive)
-  (lme-sidebar-select 'buffers))
 
 
 (provide 'lme-sidebar)

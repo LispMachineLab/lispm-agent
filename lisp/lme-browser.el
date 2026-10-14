@@ -23,15 +23,16 @@
 
 ;;; Commentary:
 
-;; The embedded WebKit browser: its own workspace, reached from the menu
-;; bar's Web title, a Mac OS 9 browser window (title bar, toolbar, address
-;; field, tabs), and helpers that open URLs in it.  Requires an Emacs built
-;; with xwidgets.
+;; The embedded WebKit browser: an application on the desktop (see
+;; lme-apps.el) with its own workspace and menus, a Mac OS 9 browser window
+;; (title bar, toolbar, address field, tabs), and helpers that open URLs in
+;; it.  Requires an Emacs built with xwidgets.
 
 ;;; Code:
 
 (require 'browse-url)
 (require 'cl-lib)
+(require 'lme-apps)
 (require 'thingatpt)
 (require 'url-util)
 
@@ -95,7 +96,7 @@
 (declare-function lme-platinum-icon "lme-platinum" (name))
 (defvar lme-platinum-title)
 (defvar lme-platinum-icon)
-(defvar lme-platinum-close-function)
+(defvar lme-platinum-box-functions)
 
 (defconst lme-browser-workspace-name "Browser"
   "Name of the workspace holding the embedded browser.")
@@ -226,6 +227,43 @@ does: the address window shows the page's real address again at once."
   (when-let* ((window (lme-browser--window)))
     (lme-browser-close-tab (window-buffer window))))
 
+;;;;; Menus
+
+(defun lme-browser--file-items ()
+  "Return the items of the browser's File menu."
+  (let ((page (and (lme-browser--window) t)))
+    `((:label "New Tab" :action lme-browser-new-tab)
+      (:label "Open Location…" :action lme-browser-focus-address)
+      (:label "Close Tab" :action lme-browser-close-shown-tab :enabled ,page)
+      separator
+      (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page))))
+
+(defun lme-browser--go-items ()
+  "Return the items of the browser's Go menu."
+  (let ((page (and (lme-browser--window) t)))
+    `((:label "Back" :action lme-browser-back :enabled ,page)
+      (:label "Forward" :action lme-browser-forward :enabled ,page)
+      (:label "Reload" :action lme-browser-reload :enabled ,page)
+      separator
+      (:label "Home" :action lme-browser-home :enabled ,page))))
+
+(defun lme-browser--window-items ()
+  "Return the items of the browser's Window menu: a tab each, the shown one
+checked, as Mac OS 9's Window menus listed an application's windows."
+  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+    (mapcar (lambda (buffer)
+              (list :label (truncate-string-to-width (lme-browser--title buffer) 48 nil nil "…")
+                    :action (lambda () (lme-browser-select-tab buffer))
+                    :checked (eq buffer shown)))
+            (lme-browser--buffers))))
+
+(defun lme-browser-menus ()
+  "Return the browser's menus, for the menu bar while it is in front."
+  '((lme-browser-file "File" lme-browser--file-items)
+    (lme-browser-go "Go" lme-browser--go-items)
+    (lme-browser-window "Window" lme-browser--window-items)))
+
+
 ;;;;; Address window
 
 (defvar-local lme-browser--address-start nil
@@ -346,7 +384,7 @@ its one line the address.
               cursor-type 'bar
               lme-platinum-title lme-browser-workspace-name
               lme-platinum-icon (lme-platinum-icon "globe")
-              lme-platinum-close-function #'lme-browser--close-window)
+              lme-platinum-box-functions (list :close #'lme-browser--close-window))
   (face-remap-add-relative 'default 'lme-platinum-toolbar)
   (face-remap-add-relative 'header-line 'lme-platinum-header)
   (display-line-numbers-mode -1)
@@ -529,7 +567,7 @@ globe until the icon is known and when the page has none."
          (lme-browser--tab-command #'lme-browser-select-tab buffer)
          (or (lme-browser--uri buffer) "Show this tab")
          'tab-line
-         (when (eq buffer shown) 'lme-platinum-button-pressed)))
+         (if (eq buffer shown) 'lme-platinum-tab-selected 'lme-platinum-tab)))
       (lme-browser--buffers) " ")
      " "
      (lme-sidebar--toolbar-button " + " #'lme-browser-new-tab "New tab" 'tab-line))))
@@ -548,6 +586,7 @@ globe until the icon is known and when the page has none."
   (lme-browser--sync t))
 
 (declare-function lme-desktop-show "lme-desktop" (&optional window))
+(declare-function lme-editor-hide "lme-editor" ())
 
 (defun lme-browser-close-tab (buffer)
   "Close browser tab BUFFER without asking, then show another tab.
@@ -641,8 +680,12 @@ The address window is fitted to its lines, see `lme-browser--fit-address'."
 (defun lme-browser-show ()
   "Show the browser: its workspace, with the most recent tab in the main area
 under the address window, opening `lme-browser-home-url' when there is no
-tab.  The desktop's Browser icon runs this."
+tab.  The desktop's Browser icon runs this.  The browser comes in front,
+and the floating editor, whose window would cover the page, is hidden."
   (interactive)
+  (when (fboundp 'lme-editor-hide)
+    (lme-editor-hide))
+  (lme-apps-set-frontmost 'browser)
   (let ((fresh (lme-workspace-enter lme-browser-workspace-name))
         (browser (car (lme-browser--buffers))))
     (cond ((and browser fresh) (lme-workspace-show-alone browser))

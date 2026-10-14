@@ -23,14 +23,16 @@
 
 ;;; Commentary:
 
-;; Mac OS 9's desktop lay behind every window: closing the last window
-;; showed it, and its icons opened the disks, the applications and the
-;; Trash.  Here the desktop is a buffer the main area shows when nothing
-;; else is there: at the start, in a new workspace, and when a close box
-;; closes the main area's last window.  Whatever opens next covers it.
+;; Mac OS 9's desktop lay behind every window, and its icons opened the
+;; disks, the applications and the Trash.  Here the desktop is a workspace
+;; of its own, the one Emacs starts in, and one of the applications (see
+;; lme-apps.el): in front, its menus are File and Special.  Where another
+;; workspace's main area holds nothing, the desktop's colour shows there,
+;; without its icons, as the desktop seen through.
 ;;
 ;; Its icons stand down the right edge, where Mac OS 9 put them: the home
-;; disk at the top, the browser under it, the Trash in the bottom corner.
+;; disk at the top, Emacs and the browser under it, the Trash in the
+;; bottom corner.
 ;; A click selects an icon, darkening it and inverting its name, and a
 ;; double click opens it; the arrow keys select, Return or Command-O opens.
 ;;
@@ -45,12 +47,22 @@
 (require 'subr-x)
 (require 'lme-core)
 (require 'lme-platinum)
+(require 'lme-apps)
 
 (declare-function lme-browser-show "lme-browser" ())
 (declare-function lme-xwidget-available-p "lme-browser" ())
+(declare-function lme-editor-activate "lme-editor" ())
+(declare-function lme-main-area--windows "lme-interface" ())
 
 (defconst lme-desktop-buffer-name " *Desktop*"
   "Name of the desktop's buffer; the leading space keeps it out of buffer lists.")
+
+(defconst lme-desktop-empty-buffer-name " *Desktop Background*"
+  "Name of the buffer showing the desktop's colour without its icons.
+A workspace's main area shows it where it holds nothing else.")
+
+(defconst lme-desktop-tab-name "Desktop"
+  "Name of the desktop's own workspace.")
 
 (defun lme-desktop--browser-p ()
   "Return non-nil when the embedded browser can run in this Emacs."
@@ -59,6 +71,8 @@
 (defvar lme-desktop-items
   '((home :label "Home" :icon "hard-disk-32" :command lme-desktop-open-home
           :help "Your home folder, in the file manager")
+    (editor :label "Emacs" :icon "editor-32" :command lme-editor-activate
+            :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "globe-32" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
     (trash :label "Trash" :icon "trash-32" :command lme-desktop-open-trash
@@ -258,9 +272,11 @@ the bottom corner, a spacer filling the height between."
                          (window-buffer (posn-window position))))))
 
 (defun lme-desktop-mouse-select (event)
-  "Select the desktop icon pressed by EVENT, as Mac OS 9 did on the press."
+  "Select the desktop icon pressed by EVENT, as Mac OS 9 did on the press.
+A click on the desktop brings the desktop in front."
   (interactive "e")
   (select-window (posn-window (event-start event)))
+  (lme-apps-set-frontmost 'desktop)
   (lme-desktop--select (lme-desktop--item-at event)))
 
 (defun lme-desktop-mouse-open (event)
@@ -270,8 +286,10 @@ the bottom corner, a spacer filling the height between."
   (lme-desktop-open))
 
 (defun lme-desktop-deselect ()
-  "Select no desktop icon: a click on the desktop itself."
+  "Select no desktop icon: a click on the desktop itself, which brings the
+desktop in front."
   (interactive)
+  (lme-apps-set-frontmost 'desktop)
   (lme-desktop--select nil))
 
 (defun lme-desktop-open ()
@@ -301,11 +319,21 @@ the bottom corner, a spacer filling the height between."
   (interactive)
   (lme-desktop--step -1))
 
+;;;; Painting
+
 (defvar-local lme-desktop--background nil
-  "Face remapping cookie colouring the desktop.")
+  "Face remapping cookie colouring a desktop buffer.")
+
+(defun lme-desktop--paint-buffer (buffer)
+  "Colour BUFFER as the desktop."
+  (with-current-buffer buffer
+    (when lme-desktop--background
+      (face-remap-remove-relative lme-desktop--background))
+    (setq lme-desktop--background
+          (face-remap-add-relative 'default :background (lme-platinum--color :desktop)))))
 
 (defun lme-desktop--paint ()
-  "Colour the desktop and its names from the palette."
+  "Colour the desktop, its background and its names from the palette."
   (when lme-platinum--palette
     (let ((content (lme-platinum--color :content))
           (text (lme-platinum--color :text)))
@@ -313,20 +341,18 @@ the bottom corner, a spacer filling the height between."
                           :inherit 'lme-platinum-list :background content :foreground text)
       (set-face-attribute 'lme-desktop-label-selected nil
                           :inherit 'lme-platinum-list :background text :foreground content)
-      (when-let* ((buffer (get-buffer lme-desktop-buffer-name)))
-        (with-current-buffer buffer
-          (when lme-desktop--background
-            (face-remap-remove-relative lme-desktop--background))
-          (setq lme-desktop--background
-                (face-remap-add-relative 'default :background (lme-platinum--color :desktop)))
-          (lme-desktop--render))))))
+      (dolist (name (list lme-desktop-buffer-name lme-desktop-empty-buffer-name))
+        (when-let* ((buffer (get-buffer name)))
+          (lme-desktop--paint-buffer buffer)))
+      (when (get-buffer lme-desktop-buffer-name)
+        (lme-desktop--render)))))
 
 (defvar evil-emacs-state-cursor)
 (defvar evil-normal-state-cursor)
 
-(define-derived-mode lme-desktop-mode special-mode "Desktop"
-  "Major mode of the desktop, the place behind every window.
-\\{lme-desktop-mode-map}"
+(defun lme-desktop--bare ()
+  "Strip the current buffer's windows to the desktop: no title bar, no
+bottom edge, no cursor, fringes or line numbers."
   (setq-local mode-line-format nil
               header-line-format nil
               tab-line-format nil
@@ -336,12 +362,28 @@ the bottom corner, a spacer filling the height between."
               right-fringe-width 0
               show-trailing-whitespace nil
               evil-emacs-state-cursor '(nil)
-              evil-normal-state-cursor '(nil)
-              revert-buffer-function (lambda (&rest _) (lme-desktop--render)))
+              evil-normal-state-cursor '(nil))
   (when (fboundp 'display-line-numbers-mode)
-    (display-line-numbers-mode -1))
+    (display-line-numbers-mode -1)))
+
+(define-derived-mode lme-desktop-mode special-mode "Desktop"
+  "Major mode of the desktop, the place behind every window.
+\\{lme-desktop-mode-map}"
+  (lme-desktop--bare)
+  (setq-local revert-buffer-function (lambda (&rest _) (lme-desktop--render)))
   (add-hook 'window-size-change-functions #'lme-desktop--render nil t)
   (add-hook 'window-buffer-change-functions #'lme-desktop--render nil t))
+
+(defvar-keymap lme-desktop-empty-mode-map
+  :doc "Keymap of the desktop's background: nothing to click."
+  "<down-mouse-1>" #'ignore
+  "<mouse-1>" #'ignore
+  "q" #'ignore)
+
+(define-derived-mode lme-desktop-empty-mode special-mode "Desktop"
+  "Major mode of the desktop's colour without its icons, the background of
+a workspace whose main area holds nothing else."
+  (lme-desktop--bare))
 
 (defun lme-desktop-buffer ()
   "Return the desktop's buffer, made when missing."
@@ -352,30 +394,104 @@ the bottom corner, a spacer filling the height between."
         (lme-desktop--paint)
         (current-buffer))))
 
+(defun lme-desktop-empty-buffer ()
+  "Return the desktop's background buffer, made when missing."
+  (or (get-buffer lme-desktop-empty-buffer-name)
+      (with-current-buffer (get-buffer-create lme-desktop-empty-buffer-name)
+        (lme-desktop-empty-mode)
+        (when lme-platinum--palette
+          (lme-desktop--paint-buffer (current-buffer)))
+        (current-buffer))))
+
+;;;; The desktop's workspace
+
+(defun lme-desktop--tab-p (&optional frame)
+  "Return non-nil when FRAME, by default the selected one, is in the
+desktop's workspace."
+  (equal (alist-get 'name (tab-bar--current-tab nil frame)) lme-desktop-tab-name))
+
 (defun lme-desktop-show (&optional window)
-  "Show the desktop in WINDOW, by default the selected window."
+  "Show the desktop in WINDOW, by default the selected window.
+In the desktop's workspace it shows with its icons; in any other, where
+the main area holds nothing else, as its bare colour."
   (let ((window (or window (selected-window))))
     (set-window-dedicated-p window nil)
-    (set-window-buffer window (lme-desktop-buffer))
-    (lme-desktop--render window)))
+    (if (lme-desktop--tab-p (window-frame window))
+        (progn (set-window-buffer window (lme-desktop-buffer))
+               (lme-desktop--render window))
+      (set-window-buffer window (lme-desktop-empty-buffer)))))
 
 (defun lme-desktop-p (&optional window)
   "Return non-nil when WINDOW, by default the selected one, shows the desktop."
-  (equal (buffer-name (window-buffer window)) lme-desktop-buffer-name))
+  (member (buffer-name (window-buffer window))
+          (list lme-desktop-buffer-name lme-desktop-empty-buffer-name)))
+
+(defun lme-desktop--select-tab (&optional frame)
+  "Select the desktop's workspace in FRAME, made when missing: the desktop
+alone, filling the frame."
+  (with-selected-frame (or frame (selected-frame))
+    (if-let* ((index (tab-bar--tab-index-by-name lme-desktop-tab-name)))
+        (unless (lme-desktop--tab-p)
+          (tab-bar-select-tab (1+ index)))
+      (let ((tab-bar-new-tab-choice #'lme-desktop-buffer))
+        (tab-bar-new-tab))
+      (tab-bar-rename-tab lme-desktop-tab-name))
+    (let ((window (car (lme-main-area--windows))))
+      (when (or (cdr (window-list nil 'no-mini)) (not (lme-desktop-p window)))
+        (let ((ignore-window-parameters t))
+          (delete-other-windows window)))
+      (lme-desktop-show window))))
+
+(defvar lme-desktop-activate-hook nil
+  "Hook run when the desktop comes in front, as windows left over it show.")
+
+(defun lme-desktop-activate ()
+  "Bring the desktop in front: its workspace, the floating editor left over it."
+  (interactive)
+  (let ((screen (lme-apps-screen)))
+    (unless (eq (selected-frame) screen)
+      (select-frame-set-input-focus screen))
+    (lme-desktop--select-tab screen))
+  (lme-apps-set-frontmost 'desktop)
+  (run-hooks 'lme-desktop-activate-hook))
 
 (defun lme-desktop--on-new-workspace (&rest _)
-  "Show the desktop in a new workspace that opened onto *scratch*."
+  "Show the desktop's colour in a new workspace that opened onto *scratch*."
   (let ((window (selected-window)))
     (when (and (equal (buffer-name (window-buffer window)) "*scratch*")
                (not (window-parameter window 'window-side)))
       (lme-desktop-show window))))
 
+;;;; The desktop's menus
+
+(defun lme-desktop--file-items ()
+  "Return the items of the desktop's File menu."
+  (let ((selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer))))
+    `((:label "Open" :action lme-desktop-open :enabled ,(and selected t))
+      separator
+      ,@(mapcar (lambda (item)
+                  (list :label (plist-get (cdr item) :label)
+                        :action (plist-get (cdr item) :command)))
+                (lme-desktop--items)))))
+
+(defun lme-desktop--special-items ()
+  "Return the items of the desktop's Special menu, Mac OS 9's last ones."
+  `(,@(when (fboundp 'restart-emacs)
+        '((:label "Restart" :action restart-emacs)))
+    (:label "Shut Down" :action save-buffers-kill-emacs)))
+
+(defun lme-desktop-menus ()
+  "Return the desktop's menus, for the menu bar while it is in front."
+  '((lme-desktop-file "File" lme-desktop--file-items)
+    (lme-desktop-special "Special" lme-desktop--special-items)))
+
 (defun lme-setup-desktop ()
-  "Put the desktop behind every window: at the start and in new workspaces."
-  (setq initial-buffer-choice #'lme-desktop-buffer
-        tab-bar-new-tab-choice #'lme-desktop-buffer)
+  "Put the desktop behind every window, and start Emacs on it."
+  (setq initial-buffer-choice #'lme-desktop-empty-buffer
+        tab-bar-new-tab-choice #'lme-desktop-empty-buffer)
   (add-hook 'tab-bar-tab-post-open-functions #'lme-desktop--on-new-workspace)
-  (add-hook 'enable-theme-functions (lambda (&rest _) (lme-desktop--paint)) 90))
+  (add-hook 'enable-theme-functions (lambda (&rest _) (lme-desktop--paint)) 90)
+  (add-hook 'window-setup-hook #'lme-desktop-activate 95))
 
 (provide 'lme-desktop)
 ;;; lme-desktop.el ends here

@@ -390,7 +390,6 @@ cells and split-pane dividers drawn with box characters stay straight."
                '(lme-workspace--foreign-file-p lme-workspace-display-file))
   (setq switch-to-buffer-obey-display-actions t
         switch-to-buffer-in-dedicated-window 'pop)
-  (add-hook 'buffer-list-update-hook #'lme-buffer-list--schedule-refresh)
   (add-hook 'xwidget-webkit-mode-hook #'lme-browser--setup)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-browser--on-workspace-select)
   (with-eval-after-load 'xwidget
