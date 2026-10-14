@@ -649,17 +649,29 @@ desktop in front."
   (let ((key (lme-desktop--item-at event)))
     (lme-desktop--select key)
     (when key
-      (lme-desktop--drag key (posn-window (event-start event))))))
+      (lme-desktop--drag key (posn-window (event-start event))
+                         (posn-x-y (event-start event))))))
 
 (defconst lme-desktop-drag-threshold 4
   "Pixels the mouse moves, held down on an icon, before the icon is dragged.")
 
 (defun lme-desktop--pointer (window)
-  "Return the mouse's place in WINDOW's text area, in pixels: (X . Y).
-It is read from the screen, so it is known outside the window too."
-  (pcase-let ((`(,mouse-x . ,mouse-y) (mouse-absolute-pixel-position))
-              (`(,left ,top . ,_) (window-inside-absolute-pixel-edges window)))
-    (cons (- mouse-x left) (- mouse-y top))))
+  "Return the mouse's place in WINDOW's text area, in pixels: (X . Y), or
+nil when it is over no frame of WINDOW's.  Over a child frame, such as
+the dragged copy, it is carried into WINDOW's frame through the child's
+position, so no screen coordinates are involved, which macOS reports
+askew in full screen."
+  (pcase-let ((`(,frame ,x . ,y) (mouse-pixel-position))
+              (screen (window-frame window)))
+    (when (and x y)
+      (while (and frame (not (eq frame screen)) (frame-parent frame))
+        (pcase-let ((`(,left . ,top) (frame-position frame)))
+          (setq x (+ x left)
+                y (+ y top)
+                frame (frame-parent frame))))
+      (when (eq frame screen)
+        (pcase-let ((`(,left ,top . ,_) (window-inside-pixel-edges window)))
+          (cons (- x left) (- y top)))))))
 
 (defun lme-desktop--cell-at (key window)
   "Return where the cell of icon KEY stands on the desktop in WINDOW."
@@ -697,38 +709,57 @@ WINDOW: borderless, taking no focus."
                                      (background-color . ,(lme-desktop--color))))
     frame))
 
-(defun lme-desktop--show-copy (frame key x y window picture)
-  "Show in FRAME the copy of icon KEY with its cell at X, Y of the desktop
-in WINDOW, PICTURE under it, and put FRAME there."
+(defun lme-desktop--place-copy (frame x y window)
+  "Put the copy's FRAME with its cell at X, Y of the desktop in WINDOW."
+  (let ((edges (window-inside-pixel-edges window))
+        (cell-width (car (lme-desktop--cell-size))))
+    (set-frame-position frame
+                        (+ (nth 0 edges) x (- (/ (- (frame-text-width frame) cell-width) 2)))
+                        (+ (nth 1 edges) y))))
+
+(defun lme-desktop--draw-copy (frame key x y window picture)
+  "Draw in FRAME the copy of icon KEY with its cell at X, Y of the desktop in
+WINDOW, PICTURE under it, and fit FRAME to it."
   (let* ((width (window-body-width window t))
          (height (1- (window-body-height window t)))
-         (cell-width (car (lme-desktop--cell-size)))
          (image (create-image (lme-desktop--copy-svg key x y width height picture) 'svg t
                               :scale 1 :ascent 'center
                               :base-uri (or picture default-directory)))
          (size (image-size image t))
-         (edges (window-inside-pixel-edges window))
          (buffer (window-buffer (frame-root-window frame))))
     (with-current-buffer buffer
       (let ((old (get-text-property (point-min) 'display)))
         (erase-buffer)
         (insert (propertize " " 'display image))
-        (when (and old (not (equal old image)))
+        (when old
           (image-flush old t))))
-    (lme-popup--size frame (car size) (cdr size))
-    (set-frame-position frame
-                        (+ (nth 0 edges) x (- (/ (- (car size) cell-width) 2)))
-                        (+ (nth 1 edges) y))
-    (unless (frame-visible-p frame)
-      (make-frame-visible frame))))
+    (lme-popup--size frame (car size) (cdr size))))
 
-(defun lme-desktop--drag (key window)
-  "Drag icon KEY of the desktop in WINDOW while the mouse button is held.
+(defun lme-desktop--show-copy (frame key x y window picture)
+  "Show in FRAME the copy of icon KEY with its cell at X, Y of the desktop in
+WINDOW, PICTURE under it.  The copy moves at once.  On the desktop's
+colour it is drawn only the first time, for the colour under it does not
+change; over PICTURE its piece of the picture is drawn again once the
+mouse has no more moves queued, so drawing never holds the copy back."
+  (let ((fresh (not (frame-visible-p frame))))
+    (when fresh
+      (lme-desktop--draw-copy frame key x y window picture))
+    (lme-desktop--place-copy frame x y window)
+    (if fresh
+        (make-frame-visible frame)
+      (when (and picture (not (input-pending-p)))
+        (lme-desktop--draw-copy frame key x y window picture)))))
+
+(defun lme-desktop--drag (key window press)
+  "Drag icon KEY of the desktop in WINDOW while the mouse button is held,
+from PRESS, where it was pressed in WINDOW's text area: (X . Y).
 Once the mouse has moved a few pixels a translucent copy of the icon
 follows it, as Mac OS 9's did, in a small frame of its own so that only
-the copy is drawn as it moves; let go, the icon stays there.  Escape
-gives up, and a press let go where it was only selects."
-  (pcase-let* ((`(,start-x . ,start-y) (lme-desktop--pointer window))
+the copy is drawn as it moves; let go, the icon stays there.  The move is
+measured from the press, not from where the mouse was once the icon was
+drawn selected, so the copy stays where it was grabbed.  Escape gives
+up, and a press let go where it was only selects."
+  (pcase-let* ((`(,start-x . ,start-y) press)
                (`(,cell-x ,cell-y) (lme-desktop--cell-at key window))
                (width (window-body-width window t))
                (height (1- (window-body-height window t)))
@@ -756,7 +787,8 @@ gives up, and a press let go where it was only selects."
                             (let ((next (read-event nil nil 0)))
                               (or (mouse-movement-p next)
                                   (progn (setq unread-command-events (list next)) nil)))))
-                (pcase-let ((`(,x . ,y) (lme-desktop--pointer window)))
+                (pcase-let ((`(,x . ,y) (or (lme-desktop--pointer window)
+                                            (cons start-x start-y))))
                   (when (or to (> (+ (abs (- x start-x)) (abs (- y start-y)))
                                   lme-desktop-drag-threshold))
                     (setq to (lme-desktop--place-xy
