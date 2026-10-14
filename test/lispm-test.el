@@ -1375,6 +1375,75 @@ exist, and cannot be made: / is not writable" . t)))
         (should (equal (with-current-buffer (find-buffer-visiting clean) (buffer-string)) "read\n"))
         (should (equal (lispm-test--disk clean) "changed\n"))))))
 
+(ert-deftest lispm-test-unwritable-file ()
+  "Tools say why they cannot change a file there already, and never ask.
+Nothing is left of such a call: no buffer it visited, no journal
+entry.  A buffer the user made writable is changed only while edits
+are not saved: saving it would ask."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+          (file (expand-file-name "ro.txt" project))
+          (calls '(("edit_file" . ((path . "ro.txt") (old_text . "a") (new_text . "b")))
+                   ("write_file" . ((path . "ro.txt") (content . "b\n")))))
+          (unwritable '("Cannot write ro.txt: it is not writable" . t)))
+      (lispm-test--never-asking
+        ;; A directory is no file to write or edit.
+        (make-directory (expand-file-name "sub" project))
+        (dolist (call '(("write_file" . ((path . "sub") (content . "x\n")))
+                        ("edit_file" . ((path . "sub") (old_text . "x") (new_text . "y")))))
+          (should (equal (lispm-test--call agent (car call) (cdr call))
+                         '("Cannot write sub: it is a directory" . t))))
+        (should-not (get-buffer "sub"))
+        ;; Nor is a buffer the user made read-only changed.
+        (with-temp-file file (insert "a\n"))
+        (with-current-buffer (find-file-noselect file) (read-only-mode 1))
+        (should (equal (lispm-test--call agent "edit_file" (cdar calls))
+                       '("Cannot change buffer ro.txt: it is read-only" . t)))
+        (kill-buffer (find-buffer-visiting file))
+        (should-not (lispm-agent-journal agent))
+        (set-file-modes file #o444)
+        (unwind-protect
+            ;; Root writes whatever the modes say.
+            (unless (file-writable-p file)
+              (dolist (call calls)
+                ;; Not even while the call is proposed.
+                (let ((lispm-current-agent agent))
+                  (should-error (lispm-tool-would-change (lispm-get-tool (car call)) (cdr call))))
+                (should (equal (lispm-test--call agent (car call) (cdr call)) unwritable))
+                (should-not (find-buffer-visiting file)))
+              ;; Open in Emacs, read-only as Emacs made it, or writable as
+              ;; the user made it (C-x C-q): saving would ask all the same.
+              (let ((buffer (find-file-noselect file)))
+                (dolist (read-only '(t nil))
+                  (with-current-buffer buffer (read-only-mode (if read-only 1 -1)))
+                  (dolist (call `(("edit_buffer" . ((buffer . "ro.txt") (old_text . "a")
+                                                    (new_text . "b")))
+                                  ,@calls))
+                    (let ((lispm-current-agent agent))
+                      (should-error (lispm-tool-would-change (lispm-get-tool (car call))
+                                                             (cdr call))))
+                    (should (equal (lispm-test--call agent (car call) (cdr call)) unwritable))))
+                (should (equal (with-current-buffer buffer (buffer-string)) "a\n"))
+                (should-not (buffer-modified-p buffer))
+                (should-not (lispm-agent-journal agent))
+                ;; Edits not saved, the buffer the user made writable is
+                ;; changed; saving it is up to them.
+                (let ((lispm-save-edits nil))
+                  (should (equal (lispm-test--call agent "edit_file" (cdar calls))
+                                 '("Replaced 1 occurrence in ro.txt." . nil)))
+                  (should (equal (with-current-buffer buffer (buffer-string)) "b\n"))
+                  (should (buffer-modified-p buffer))
+                  (should (lispm-agent-journal agent))
+                  ;; Not one read-only, nor the file unless a buffer visits it.
+                  (with-current-buffer buffer (read-only-mode 1))
+                  (should (equal (lispm-test--call agent "write_file" (cdadr calls)) unwritable))
+                  (with-current-buffer buffer (set-buffer-modified-p nil))
+                  (kill-buffer buffer)
+                  (should (equal (lispm-test--call agent "write_file" (cdadr calls)) unwritable))
+                  (should-not (find-buffer-visiting file))))
+              (should (equal (lispm-test--disk file) "a\n")))
+          (set-file-modes file #o644))))))
+
 (ert-deftest lispm-test-memory-changed-on-disk ()
   "Memory a person changed on disk, by hand or with git, is kept, without a question."
   (lispm-test-env
