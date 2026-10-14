@@ -689,14 +689,9 @@ links to start with, made when missing without being shown."
 
 (defun lme-editor--new-workspace-buffer ()
   "Show Emacs's startup screen in a new workspace's window; return nil.
-This is the editor's `tab-bar-new-tab-choice'.  The screen is put in the
-window rather than returned: a returned buffer is shown by
-`switch-to-buffer', which obeys `display-buffer-alist', and while the new
-workspace is made the old one is still in front, so a workspace made from
-the desktop would send its first buffer to the editor's last workspace."
-  (set-window-buffer (selected-window) (lme-editor-splash-buffer))
-  (set-window-start (selected-window) 1)
-  nil)
+This is the editor's `tab-bar-new-tab-choice'; the screen is put in the
+window itself, see `lme-desktop-show-in-new-tab'."
+  (lme-desktop-show-in-new-tab (lme-editor-splash-buffer)))
 
 (defun lme-editor--show-splash (window)
   "Show Emacs's startup screen in WINDOW when it is in an editor workspace

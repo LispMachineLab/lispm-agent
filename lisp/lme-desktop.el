@@ -1050,6 +1050,31 @@ a workspace whose main area holds nothing else."
 
 ;;;; The desktop's workspace
 
+(defun lme-desktop-show-in-new-tab (buffer)
+  "Show BUFFER in the window of a workspace being made, in place; return nil.
+This is how a `tab-bar-new-tab-choice' shows a new workspace's first
+buffer.  A buffer returned to tab-bar instead is shown by
+`switch-to-buffer', which obeys `display-buffer-alist' while the old
+workspace's window is still the one selected: from a session's window,
+an agent's or a terminal's, the buffer would be put beside the session,
+and the session carried into the new workspace; from the desktop, a
+document would be sent to the editor."
+  (let ((window (selected-window)))
+    (set-window-dedicated-p window nil)
+    (set-window-buffer window buffer)
+    (set-window-start window 1))
+  nil)
+
+(defun lme-desktop--new-tab-empty ()
+  "Show the desktop's colour in a workspace being made; return nil.
+A `tab-bar-new-tab-choice', see `lme-desktop-show-in-new-tab'."
+  (lme-desktop-show-in-new-tab (lme-desktop-empty-buffer)))
+
+(defun lme-desktop--new-tab-desktop ()
+  "Show the desktop in its workspace being made; return nil.
+A `tab-bar-new-tab-choice', see `lme-desktop-show-in-new-tab'."
+  (lme-desktop-show-in-new-tab (lme-desktop-buffer)))
+
 (defun lme-desktop--tab-p (&optional frame)
   "Return non-nil when FRAME, by default the selected one, is in the
 desktop's workspace."
@@ -1085,7 +1110,7 @@ alone, filling the frame."
     (if-let* ((index (tab-bar--tab-index-by-name lme-desktop-tab-name)))
         (unless (lme-desktop--tab-p)
           (tab-bar-select-tab (1+ index)))
-      (let ((tab-bar-new-tab-choice #'lme-desktop-buffer))
+      (let ((tab-bar-new-tab-choice #'lme-desktop--new-tab-desktop))
         (tab-bar-new-tab))
       (tab-bar-rename-tab lme-desktop-tab-name))
     (let ((window (car (lme-main-area--windows))))
@@ -1160,7 +1185,7 @@ on the Finder window when it had the keyboard last, else on the desktop."
 Its settings take effect when changed however they are, a `setq' in
 personal.el included, and the Trash is looked at every few seconds."
   (setq initial-buffer-choice #'lme-desktop-empty-buffer
-        tab-bar-new-tab-choice #'lme-desktop-empty-buffer)
+        tab-bar-new-tab-choice #'lme-desktop--new-tab-empty)
   (dolist (setting '(lme-desktop-color lme-desktop-picture lme-desktop-picture-position
                      lme-desktop-icon-places))
     (add-variable-watcher setting #'lme-desktop--setting-changed))

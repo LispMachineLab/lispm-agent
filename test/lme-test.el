@@ -712,6 +712,30 @@ of its own, goes to the editor; popups are left be."
     (setq buffer-file-name nil)
     (kill-buffer)))
 
+(ert-deftest lme-test-new-workspace-leaves-sessions-behind ()
+  "A workspace made while a session's window is selected starts on its own
+first buffer alone: the session is not carried along, as it was when
+the first buffer went through the routing that keeps sessions uncovered."
+  (let ((session (get-buffer-create "lme-test-session"))
+        (display-buffer-alist '((lme-main-area--session-p lme-main-area-display-session)
+                                (lme-main-area--astray-p lme-main-area-display-file)))
+        (switch-to-buffer-obey-display-actions t)
+        (tab-bar-mode-was tab-bar-mode))
+    (cl-letf (((symbol-function 'lme-terminal-buffer-p)
+               (lambda (buffer) (eq (get-buffer buffer) session))))
+      (unwind-protect
+          (progn
+            (delete-other-windows)
+            (set-window-buffer (selected-window) session)
+            (let ((tab-bar-new-tab-choice #'lme-desktop--new-tab-empty))
+              (tab-bar-new-tab))
+            (should (equal (mapcar (lambda (w) (buffer-name (window-buffer w)))
+                                   (window-list nil 'no-mini))
+                           (list lme-desktop-empty-buffer-name))))
+        (tab-bar-close-tab)
+        (unless tab-bar-mode-was (tab-bar-mode -1))
+        (kill-buffer session)))))
+
 (ert-deftest lme-test-new-workspace-starts-on-startup-screen ()
   "A new workspace shows Emacs's startup screen itself, handing tab-bar no
 buffer: one shown through `switch-to-buffer' would obey the editor's

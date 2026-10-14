@@ -1112,6 +1112,7 @@ show it."
 
 (declare-function lme-desktop-show "lme-desktop" (&optional window))
 (declare-function lme-desktop-empty-buffer "lme-desktop" ())
+(declare-function lme-desktop--new-tab-empty "lme-desktop" ())
 (declare-function lme-desktop--select-tab "lme-desktop" (&optional frame))
 (declare-function lme-editor-hide "lme-editor" ())
 (declare-function lme-editor-floating-p "lme-editor" ())
@@ -1252,12 +1253,13 @@ desktop's Browser icon runs this, and the browser comes in front."
   "Show the browser in its workspace, SHOWN or its first tab in the main area
 under the address window.  The floating editor, whose window would cover
 the page, is hidden.  The workspace starts on the desktop's bare colour,
-not the editor's start page: a document there would take it for the
-editor's own."
+not the editor's start page, which a document there would take for the
+editor's own; it is shown in place, see `lme-desktop-show-in-new-tab', so
+no session of the workspace left comes along."
   (when (fboundp 'lme-editor-hide)
     (lme-editor-hide))
   (lme-apps-set-frontmost 'browser)
-  (let* ((fresh (let ((tab-bar-new-tab-choice #'lme-desktop-empty-buffer))
+  (let* ((fresh (let ((tab-bar-new-tab-choice #'lme-desktop--new-tab-empty))
                   (lme-workspace-enter lme-browser-workspace-name)))
          (browser (or shown (car (lme-browser--buffers)))))
     (cond ((and browser fresh) (lme-workspace-show-alone browser))
