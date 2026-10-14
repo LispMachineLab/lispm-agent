@@ -65,11 +65,10 @@
   ;; C-x RET and C-x C-m are the same key sequence; bind it once.
   (global-set-key (kbd "C-x RET") #'toggle-frame-fullscreen)
   (global-set-key (kbd "M-x") #'execute-extended-command)
+  ;; Command-C and Command-V, Command being Meta; C-w, M-w and C-y stay
+  ;; Emacs's own kill and yank, which share the system clipboard.
   (global-set-key (kbd "M-c") #'lme-copy-region)
   (global-set-key (kbd "M-v") #'lme-paste)
-  (global-set-key (kbd "C-w") #'lme-cut-region)
-  (global-set-key (kbd "M-w") #'lme-copy-region)
-  (global-set-key (kbd "C-y") #'lme-paste)
   (lme-setup-meta-key-issue))
 
 

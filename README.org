@@ -278,7 +278,7 @@ Two things to know when both builds run:
 | =C-<tab>=, =C-S-<tab>= | the next, the previous workspace of the editor             |
 | =M-`=, =C-c w=         | the workspaces as thumbnails (Tab moves, Return opens)     |
 | =C-c d=                | Dirvish, the file manager                                  |
-| =C-x b=, =C-s=         | switch buffer, search the buffer (Consult)                 |
+| =C-x b=, =M-s l=       | switch to any buffer, go to a line by its text (Consult)   |
 | =C-.=                  | act on the thing at point (Embark)                         |
 | =M-[=, =M-]=, =M-r=, =M-.= | in the browser: back, forward, reload, stop            |
 | =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history |

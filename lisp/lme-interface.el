@@ -203,39 +203,7 @@ Without `tabspaces-mode' nothing happens."
         (tabspaces--remember-project-tab directory name))
       fresh)))
 
-(declare-function lme-agent--project-root "lme-agent-list" (directory))
-(declare-function lme-agent--git-main-root "lme-agent-list" (directory))
 (declare-function lme-shell-new "lme-sidebar" (&optional directory))
-
-(defun lme-workspace--file-project (buffer)
-  "Return (NAME . ROOT) of the git project holding file BUFFER, or nil.
-Projects resolve as for agent sessions, so a repository's files and sessions,
-its worktrees included, share one workspace."
-  (when-let* ((file (and buffer (buffer-file-name buffer)))
-              (directory (file-name-directory file))
-              ((lme-agent--git-main-root directory))
-              (root (lme-agent--project-root directory))
-              ((stringp root)))
-    (cons (file-name-nondirectory root) root)))
-
-(defun lme-workspace--foreign-file-p (buffer-or-name _action)
-  "Return non-nil when BUFFER-OR-NAME is a file of another workspace's project.
-This is the `display-buffer-alist' condition sending files to their project."
-  (and (bound-and-true-p tabspaces-mode)
-       (when-let* ((project (lme-workspace--file-project (get-buffer buffer-or-name))))
-         (not (equal (car project) (tabspaces--current-tab-name))))))
-
-(defun lme-workspace-display-file (buffer alist)
-  "Display file BUFFER in its project's workspace, per ALIST.
-The workspace is entered, or created with BUFFER alone in it; in a
-workspace already open, BUFFER goes to its file column.
-This is a `display-buffer' action function."
-  (pcase-let* ((`(,name . ,root) (lme-workspace--file-project buffer))
-               (fresh (lme-workspace-enter name root)))
-    (if (not fresh)
-        (lme-main-area-display-file buffer alist)
-      (prog1 (window--display-buffer buffer (lme-agent--main-window) 'reuse alist)
-        (tabspaces-reset-buffer-list)))))
 
 (defun lme-workspace-show-alone (buffer)
   "Show BUFFER as the only buffer of the workspace just created.
@@ -401,17 +369,16 @@ cells and split-pane dividers drawn with box characters stay straight."
     (lme-pin-cjk-font))
   (lme-ansi-apply-faces)
   (add-hook 'enable-theme-functions #'lme-ansi-apply-faces)
-  ;; Each entry is added in front, so the workspace rule is consulted first.
-  ;; `switch-to-buffer' obeys them too, so no command bypasses the columns;
+  ;; `switch-to-buffer' obeys these too, so no command bypasses the columns;
   ;; a dedicated window, such as the sidebar's, sends the buffer elsewhere.
+  ;; A file of another project opens where it is asked for, as in Emacs:
+  ;; only switching projects changes the workspace.
   (add-to-list 'display-buffer-alist
                '(lme-main-area--astray-p lme-main-area-display-file))
   (add-to-list 'display-buffer-alist
                '(lme-main-area--session-p lme-main-area-display-session))
   (add-to-list 'display-buffer-alist
                '(lme-sidebar--view-buffer-p lme-sidebar-display-view))
-  (add-to-list 'display-buffer-alist
-               '(lme-workspace--foreign-file-p lme-workspace-display-file))
   (setq switch-to-buffer-obey-display-actions t
         switch-to-buffer-in-dedicated-window 'pop)
   (add-hook 'xwidget-webkit-mode-hook #'lme-browser--setup)
@@ -421,7 +388,9 @@ cells and split-pane dividers drawn with box characters stay straight."
   (add-hook 'lme-apps-frontmost-functions #'lme-browser--follow-frontmost)
   (add-hook 'lme-platinum-menu-closed-hook #'lme-browser--refocus)
   (with-eval-after-load 'xwidget
-    (lme-browser-bind-keys xwidget-webkit-mode-map))
+    (lme-browser-bind-keys xwidget-webkit-mode-map)
+    ;; C-y pastes into the page, which the buffer's text is not.
+    (keymap-set xwidget-webkit-mode-map "C-y" #'lme-paste))
   ;; Emacs opens on the desktop, as Mac OS did: no splash screen.
   (setq inhibit-startup-screen t
         ring-bell-function 'ignore

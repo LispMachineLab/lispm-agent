@@ -67,7 +67,7 @@
           completion-category-overrides '((file (styles basic partial-completion)))))
 
   (use-package consult
-    :bind (("C-s" . consult-line)
+    :bind (("M-s l" . consult-line)
            ("C-x b" . consult-buffer)
            ("C-x C-r" . consult-recent-file)
            ("M-y" . consult-yank-pop)
@@ -164,10 +164,7 @@
                          evil-emacs-state-map))
         (define-key map (kbd "M-x") #'execute-extended-command)
         (define-key map (kbd "M-c") #'lme-copy-region)
-        (define-key map (kbd "M-v") #'lme-paste)
-        (define-key map (kbd "C-w") #'lme-cut-region)
-        (define-key map (kbd "M-w") #'lme-copy-region)
-        (define-key map (kbd "C-y") #'lme-paste))))
+        (define-key map (kbd "M-v") #'lme-paste))))
 
   (use-package yasnippet
     :init (yas-global-mode 1))
@@ -183,9 +180,9 @@
     (tab-bar-history-mode 1))
 
   ;; Each tab is a workspace owning its own buffers; switching projects opens
-  ;; the project in a workspace of its own.  Buffer pickers (`C-x b',
-  ;; `consult-buffer') and a title bar's buffer menu list the workspace's
-  ;; buffers only.
+  ;; the project in a workspace of its own.  A title bar's buffer menu and
+  ;; `other-buffer' keep to the workspace's buffers; `C-x b' lists them all,
+  ;; as in Emacs.
   (use-package tabspaces
     :demand t
     :init
@@ -202,9 +199,7 @@
     (tabspaces-mode 1)
     ;; The first workspace is the default one; named explicitly, it no longer
     ;; takes the name of whatever buffer its main window shows.
-    (tab-bar-rename-tab tabspaces-default-tab)
-    (with-eval-after-load 'consult
-      (setq consult-buffer-list-function #'tabspaces-local-buffer-list))))
+    (tab-bar-rename-tab tabspaces-default-tab)))
 
 
 (provide 'lme-packages)
