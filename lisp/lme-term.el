@@ -579,15 +579,39 @@ Codex read as a new line.")
   (lme-term-module-scroll lme-term--terminal (or lines 1))
   (lme-term--render t))
 
+(defun lme-term--mouse-report (button event)
+  "Return the report of mouse BUTTON at EVENT's place, in the encoding the
+program asked for: SGR's, else the original one, whose positions stop at
+95 so that the report stays ASCII."
+  (pcase-let* ((`(,column . ,row) (posn-col-row (event-start event)))
+               (`(,columns . ,lines) (or lme-term--size '(80 . 24)))
+               (column (1+ (min (max column 0) (1- columns))))
+               (row (1+ (min (max row 0) (1- lines))))
+               (modifiers (event-modifiers event))
+               (button (+ button
+                          (if (memq 'shift modifiers) 4 0)
+                          (if (memq 'meta modifiers) 8 0)
+                          (if (memq 'control modifiers) 16 0))))
+    (if (/= 0 (logand 16 (lme-term-modes)))
+        (format "\e[<%d;%d;%dM" button column row)
+      (string ?\e ?\[ ?M (+ 32 button) (+ 32 (min column 95)) (+ 32 (min row 95))))))
+
 (defun lme-term--wheel (event lines)
-  "Scroll for the mouse wheel EVENT by LINES: the program's own view when it
-holds the whole screen, else the terminal's history."
+  "Scroll for the mouse wheel EVENT by LINES, as Alacritty does: a program
+that asked for mouse reports is told of the wheel, one holding the whole
+screen gets cursor keys, and otherwise the terminal's history scrolls.
+With Shift the history always scrolls."
   (with-current-buffer (window-buffer (posn-window (event-start event)))
-    (if (/= 0 (logand 4 (lme-term-modes)))
-        (lme-term--send (apply #'concat (make-list (abs lines)
-                                                   (lme-term--cursor-key (if (> lines 0) "A" "B")))))
-      (lme-term-module-scroll lme-term--terminal lines)
-      (lme-term--render t))))
+    (let ((modes (lme-term-modes))
+          (shift (memq 'shift (event-modifiers event))))
+      (cond ((and (/= 0 (logand 8 modes)) (not shift))
+             (lme-term--send
+              (apply #'concat (make-list (max 1 (event-line-count event))
+                                         (lme-term--mouse-report (if (> lines 0) 64 65) event)))))
+            ((and (/= 0 (logand 4 modes)) (not shift))
+             (lme-term--send (apply #'concat (make-list (abs lines) (if (> lines 0) "\eOA" "\eOB")))))
+            (t (lme-term-module-scroll lme-term--terminal lines)
+               (lme-term--render t))))))
 
 (defun lme-term-wheel-up (event)
   "Scroll back for mouse wheel EVENT."
@@ -637,6 +661,8 @@ search and copy."
     (define-key map (kbd "S-<prior>") #'lme-term-scroll-back)
     (define-key map (kbd "<wheel-up>") #'lme-term-wheel-up)
     (define-key map (kbd "<wheel-down>") #'lme-term-wheel-down)
+    (define-key map (kbd "S-<wheel-up>") #'lme-term-wheel-up)
+    (define-key map (kbd "S-<wheel-down>") #'lme-term-wheel-down)
     (define-key map (kbd "<mouse-4>") #'lme-term-wheel-up)
     (define-key map (kbd "<mouse-5>") #'lme-term-wheel-down)
     map)

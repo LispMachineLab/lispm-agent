@@ -1615,6 +1615,43 @@ Emacs is idle: reading transcripts must not stall the terminal scheduler."
           (should (lme-term--stale-p)))
       (delete-directory root t))))
 
+(ert-deftest lme-test-term-wheel ()
+  "The wheel is reported to a program that asked for the mouse, turned into
+cursor keys for one holding the whole screen, and else scrolls the
+history, as Alacritty does; with Shift it always scrolls the history."
+  (let ((window (selected-window))
+        (old (window-buffer (selected-window)))
+        sent scrolled)
+    (with-temp-buffer
+      (setq-local lme-term--size '(80 . 24))
+      (set-window-buffer window (current-buffer))
+      (unwind-protect
+          (cl-letf (((symbol-function 'lme-term--send) (lambda (string) (push string sent)))
+                    ((symbol-function 'lme-term-module-scroll)
+                     (lambda (_ lines) (push lines scrolled)))
+                    ((symbol-function 'lme-term--render) #'ignore))
+            (let ((event (lambda (type)
+                           (list type (list window 1 '(10 . 5) 0 nil 1 '(10 . 5) nil nil '(1 . 1))))))
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) (logior 4 8 16))))
+                (lme-term-wheel-up (funcall event 'wheel-up))
+                (lme-term-wheel-down (funcall event 'wheel-down))
+                (should (equal (reverse sent) '("\e[<64;11;6M" "\e[<65;11;6M")))
+                (setq sent nil)
+                (lme-term-wheel-up (funcall event 'S-wheel-up))
+                (should-not sent)
+                (should (equal scrolled '(3))))
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 8)))
+                (lme-term-wheel-up (funcall event 'wheel-up))
+                (should (equal sent '("\e[M`+&"))))
+              (setq sent nil scrolled nil)
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 4)))
+                (lme-term-wheel-down (funcall event 'wheel-down))
+                (should (equal sent '("\eOB\eOB\eOB"))))
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 0)))
+                (lme-term-wheel-up (funcall event 'wheel-up))
+                (should (equal scrolled '(3))))))
+        (set-window-buffer window old)))))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."
