@@ -236,7 +236,9 @@ does: the address window shows the page's real address again at once."
       (:label "Open Location…" :action lme-browser-focus-address)
       (:label "Close Tab" :action lme-browser-close-shown-tab :enabled ,page)
       separator
-      (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page))))
+      (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page)
+      separator
+      (:label "Quit Browser" :action lme-browser-quit))))
 
 (defun lme-browser--go-items ()
   "Return the items of the browser's Go menu."
@@ -590,8 +592,7 @@ globe until the icon is known and when the page has none."
 
 (defun lme-browser-close-tab (buffer)
   "Close browser tab BUFFER without asking, then show another tab.
-Closing the last tab closes the browser window too, address and all, and
-uncovers the desktop, as closing Mac OS 9's last window did."
+Closing the last tab quits the browser, see `lme-browser-quit'."
   (let ((window (lme-browser--window))
         (kill-buffer-query-functions nil))
     (kill-buffer buffer)
@@ -599,9 +600,24 @@ uncovers the desktop, as closing Mac OS 9's last window did."
         (when (window-live-p window) (set-window-buffer window next))
       (when-let* ((address (lme-browser--address-window)))
         (delete-window address))
-      (when (window-live-p window)
-        (lme-desktop-show window))))
+      ;; Nothing is left open: the browser quits, and the desktop comes in
+      ;; front with its icons.
+      (lme-browser-quit)))
   (lme-browser--sync t))
+
+(declare-function lme-desktop-activate "lme-desktop" ())
+
+(defun lme-browser-quit ()
+  "Quit the browser: close its tabs and its workspace, and bring the desktop
+in front."
+  (interactive)
+  (let ((kill-buffer-query-functions nil))
+    (mapc #'kill-buffer (lme-browser--buffers))
+    (when-let* ((address (get-buffer lme-browser-address-buffer-name)))
+      (kill-buffer address)))
+  (lme-desktop-activate)
+  (when-let* ((index (tab-bar--tab-index-by-name lme-browser-workspace-name)))
+    (tab-bar-close-tab (1+ index))))
 
 ;;;;; Layout and synchronisation
 

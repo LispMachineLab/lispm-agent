@@ -80,6 +80,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   desktop or the λ menu and brought forward from the Application menu; the floating editor
   steps aside while it is in front.  Its window is a Mac OS 9 browser window: a title bar naming
   the page, a toolbar of bevel buttons, the address in an edit field and a row of tabs.
+  Closing its last tab quits it, as File › Quit Browser does, and the desktop comes back.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
