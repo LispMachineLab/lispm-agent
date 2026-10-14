@@ -227,7 +227,7 @@ Each is called with the buffer, its old text and its new text;
   loaded-tools               ; deferred tools loaded by search_tools, by name
   waiting-on                 ; agents this one awaits (ask_agent)
   condition                  ; condition its turn stopped at, awaiting a restart
-  auto-restarts              ; alist TYPE -> restarts chosen by handlers this turn
+  auto-restarts              ; alist TYPE or (TYPE . CALL) -> restarts chosen by handlers this turn
   attended                   ; non-nil if the user started the current turn
   max-tokens                 ; output limit for the rest of the turn, if raised
   continuing                 ; non-nil: the next request resumes a paused response

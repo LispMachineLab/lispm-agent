@@ -99,6 +99,7 @@ agent's context*. Before every model request the runtime parses the whole buffer
 ** DONE edit_file  a.el      a tool call; its TODO state is its approval/execution state
 *** Preview                  the diff shown while the call awaits approval
 *** Result                   the tool's output (or *** Error)
+*** Stopped                  an error the call stopped at, awaiting a restart (section 5)
 * Message from reviewer      a message from another agent
 * Event: after-save-hook     an event produced by a hook or timer
 * From LispM                 LispM passing on a choice of the user's (section 5)
@@ -208,7 +209,14 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   documents one, ~read_info~ reads the manuals of Emacs and its packages, by node or through
   their indexes. Asynchronous work (a process, a page loading) ends with
   ~(lispm-async (lambda (resolve) ...))~, and eval_elisp waits for the value. eval_elisp
-  needs approval by default.
+  needs approval by default. An error in the evaluated code comes back with its backtrace,
+  innermost call first: the frames of that code alone, from where the error was signaled
+  (caught with ~handler-bind~, before the stack unwinds) up to the ~eval~ of the form, at
+  most 20 of them; so the model sees which function called which with what, as a person
+  would in the debugger. The handler runs for errors the code catches as well, so it only
+  collects the frames; they are printed once an error reaches eval_elisp. They show the
+  arguments of those calls, values the model may not have seen otherwise (a password read with
+  ~auth-source~): ~lispm-eval-backtrace~ turns them off.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
 - *C-g interrupts a call* while Emacs runs it. Calls run from the process sentinels and timers
@@ -303,6 +311,7 @@ it. Its restarts:
 | ~refused~           | the model refuses                                    | ~retry~: drop it, ask again; ~abort~                      |
 | ~paused~            | the model pauses (~pause_turn~)                      | ~continue~; ~abort~                                       |
 | ~compaction-failed~ | a handover fails                                     | ~retry~; ~skip~: carry on in the long session; ~abort~    |
+| ~tool-error~        | a tool fails (~lispm-debug-tool-errors~)             | ~report~ it to the model; ~retry~; ~use-value~; ~abort~   |
 
 They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
 in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
@@ -310,8 +319,9 @@ takes the default, to ~DENIED~ aborts; the agenda lists waiting conditions with 
 Whatever the user asks of the agent next goes past the condition, stopping there: a message
 written in the chat, one written in org under a new ~* User~ heading after the condition,
 ~/clear~, ~/compact~. In Lisp, ~lispm-restart~ chooses one, and handlers choose without asking,
-as ~handler-bind~ would, at once or after a delay, at most so many times in a turn, then perhaps
-another restart: ~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
+as ~handler-bind~ would, at once or after a delay, at most so many times in a turn (for a call's
+condition, in that call), then perhaps another restart:
+~((request-failed retry :after 60 :times 2 :then abort))~. Turns the user
 started go by ~lispm-condition-handlers~: they wait for the user, except that a paused response
 goes on. Turns started
 by another agent's message (a helper's) or by an event (a hook, a timer) go by
@@ -330,6 +340,21 @@ the summary, the agent first told to save what should outlive the session, as a 
 turns asks first; a condition that stops a turn in its middle says so (~:RESUME: t~), so that
 ~skip~ goes on with it. Between turns, stopping at a failed handover drops the input that asked
 for it, telling whoever sent it, and records an event: there is no turn to end.
+
+*Tool errors* go to the model, which made the call and can usually handle them: a file not
+found, an ~old_text~ that no longer matches. ~lispm-debug-tool-errors~ (nil, t, or a list of
+tool names) makes them stop instead, as ~debug-on-error~ enters the debugger: the failed call
+waits at a ~tool-error~ condition of its own, carried by the call rather than the turn. Its
+heading goes back to ~WAITING~, with ~:CONDITION: tool-error~ and a ~*** Stopped~ subsection
+holding the error, so the agenda lists it and a reopened session takes it up, as calls awaiting
+approval; the chat asks about it where it would ask for approval, but it is not one: approving a
+tool for the session leaves it alone, and aborting the turn names ~abort~ on it. ~report~ gives
+the model the error as the result, as without the option; ~retry~ runs the call again, once the
+user has fixed what it needed (a handler's ~retry~ runs it only if the policy would run it
+unasked, else it awaits approval again); ~use-value~ gives the model a result the user types;
+~abort~ ends the turn, the call failed, the others stopped, inputs waiting kept. A chosen
+restart is named on the Stopped subsection (~*** Stopped: retry~). Unattended turns report each
+failed call at once; a call interrupted with C-g never stops.
 
 A chosen restart is recorded on the heading (~DONE~, ~:RESTART: retry~, and the value it was
 given, ~:VALUE: (other . "model")~, which a reopened session uses again); ~abort~ removes it and

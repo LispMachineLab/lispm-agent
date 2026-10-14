@@ -1363,6 +1363,15 @@ output also streams into a buffer the user can watch."
   :type 'integer
   :group 'lispm)
 
+(defcustom lispm-eval-backtrace t
+  "Whether an error of the code eval_elisp evaluates comes with its backtrace.
+The backtrace shows the arguments of the calls between the code and
+the error: values the model may not have seen otherwise, such as a
+password read with `auth-source'.  Turn it off if those should not
+leave Emacs."
+  :type 'boolean
+  :group 'lispm)
+
 (cl-defstruct (lispm-async (:constructor lispm-async--create) (:copier nil))
   "A value computed asynchronously: see `lispm-async'."
   settled value failed waiters)
@@ -1400,6 +1409,51 @@ gets the value once it is resolved:
     (concat (if (string-empty-p printed) "" (concat printed "\n"))
             "=> " (if (stringp value) value (prin1-to-string value)))))
 
+(defconst lispm-tools--backtrace-frames 20
+  "How many frames of a backtrace eval_elisp returns with an error, at most.")
+
+(defvar lispm-tools--eval-form nil
+  "The form eval_elisp is evaluating: where its backtraces stop.")
+
+(defvar lispm-tools--backtrace nil
+  "Frames of the last error the code eval_elisp evaluates signaled.
+Each is (FUNCTION . ARGS), innermost first.")
+
+(defun lispm-tools--note-backtrace (_error)
+  "Keep the frames of an error the code eval_elisp evaluates signals.
+A `handler-bind' handler: it runs where the error is signaled, before
+the stack unwinds, and lets the error go on.  As it runs for errors
+the code catches too, it only collects the frames up to the `eval' of
+`lispm-tools--eval-form', one more than `lispm-tools--backtrace-frames'
+at most: they are printed if the error reaches eval_elisp."
+  (when lispm-eval-backtrace
+    (let ((frames nil) (count 0))
+      (catch 'done
+        (mapbacktrace
+         (lambda (_evald function args _flags)
+           (when (and (eq function 'eval) (eq (car-safe args) lispm-tools--eval-form))
+             (throw 'done nil))
+           (unless (eq function #'lispm-tools--note-backtrace)
+             (push (cons function args) frames)
+             (when (> (cl-incf count) lispm-tools--backtrace-frames)
+               (throw 'done nil))))
+         #'lispm-tools--note-backtrace))
+      (setq lispm-tools--backtrace (nreverse frames)))))
+
+(defun lispm-tools--backtrace-text (frames)
+  "FRAMES, each (FUNCTION . ARGS), innermost first, as text.
+Past `lispm-tools--backtrace-frames' of them, \"...\" stands for the rest."
+  (let ((print-length 6) (print-level 3) (print-escape-newlines t))
+    (lispm--truncate
+     (string-join
+      (append (mapcar (lambda (frame)
+                        (concat "  " (truncate-string-to-width (prin1-to-string frame)
+                                                               200 nil nil "…")))
+                      (seq-take frames lispm-tools--backtrace-frames))
+              (and (nthcdr lispm-tools--backtrace-frames frames) (list "  ...")))
+      "\n")
+     4000)))
+
 (lispm-deftool eval_elisp
     ((code string "One or more Emacs Lisp forms, evaluated in order with lexical binding."))
   "Evaluate Emacs Lisp in the running Emacs and return the last value,
@@ -1408,7 +1462,8 @@ processes, the network, org, magit, any installed package.  Find
 functions with apropos; learn them with describe_symbol and read_info.
 To wait for something asynchronous (a process, a page loading, a
 timer), end with (lispm-async (lambda (resolve) ...)) and call
-\(funcall resolve VALUE) once the value is there."
+\(funcall resolve VALUE) once the value is there.  An error comes back
+with the backtrace of the code, innermost call first."
   :permission exec
   :async t
   (let* ((output (generate-new-buffer " *lispm-eval*" t))
@@ -1418,7 +1473,17 @@ timer), end with (lispm-async (lambda (resolve) ...)) and call
     (unwind-protect
         (progn
           (dolist (form (lispm-tools--read-forms code))
-            (setq value (eval form t)))
+            (let ((lispm-tools--eval-form form)
+                  (lispm-tools--backtrace nil))
+              (condition-case err
+                  (setq value (handler-bind ((error #'lispm-tools--note-backtrace))
+                                (eval form t)))
+                (error
+                 (if (not lispm-tools--backtrace)
+                     (signal (car err) (cdr err))
+                   (error "%s\n\nBacktrace, innermost call first:\n%s"
+                          (error-message-string err)
+                          (lispm-tools--backtrace-text lispm-tools--backtrace)))))))
           (setq printed (with-current-buffer output (buffer-string))))
       (kill-buffer output))
     (if (not (lispm-async-p value))
