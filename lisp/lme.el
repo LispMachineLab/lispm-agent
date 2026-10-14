@@ -155,6 +155,8 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lme-setup-editor)
     (lme-setup-workspaces)
     (lme-setup-finder)
+    (setq lme--set-up t)
+    (add-variable-watcher 'lme-theme #'lme--theme-changed)
     (lme-setup-langs)
     (lme-setup-ai)
     (lme-setup-lispm)

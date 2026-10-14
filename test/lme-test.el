@@ -227,32 +227,61 @@ front; without xwidgets it is left out."
     (should (equal (mapcar #'car (lme-desktop--items)) '(home editor browser trash)))))
 
 (ert-deftest lme-test-desktop-selects-and-names ()
-  "The arrow keys step through the icons, wrapping; the selected name is
-inverted."
+  "The arrow keys step through the icons, wrapping; the selected one's name
+is inverted, and a click finds the icon drawn under it, the Trash in the
+bottom corner."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
-    (save-window-excursion
-      ;; The desktop with its icons, as its own workspace shows it.
-      (set-window-buffer (selected-window) (lme-desktop-buffer))
-      (lme-desktop--render (selected-window))
-      (with-current-buffer (lme-desktop-buffer)
-        (setq lme-desktop--selected nil)
-        (lme-desktop-select-next)
-        (should (eq lme-desktop--selected 'home))
-        (lme-desktop-select-previous)
-        (should (eq lme-desktop--selected 'trash))
-        (lme-desktop-select-previous)
-        (should (eq lme-desktop--selected 'editor))
-        (lme-desktop-select-next)
-        (lme-desktop-select-next)
-        (should (eq lme-desktop--selected 'home))
-        (goto-char (point-min))
-        (search-forward "Home")
-        (should (eq (get-text-property (1- (point)) 'face) 'lme-desktop-label-selected))
-        (search-forward "Trash")
-        (should (eq (get-text-property (1- (point)) 'face) 'lme-desktop-label))
-        (should (eq (get-text-property (1- (point)) 'lme-desktop-item) 'trash))
-        (lme-desktop-deselect)
-        (should-not lme-desktop--selected)))))
+    (with-current-buffer (lme-desktop-buffer)
+      (setq lme-desktop--selected nil)
+      (lme-desktop-select-next)
+      (should (eq lme-desktop--selected 'home))
+      (lme-desktop-select-previous)
+      (should (eq lme-desktop--selected 'trash))
+      (lme-desktop-select-previous)
+      (should (eq lme-desktop--selected 'editor))
+      (setq lme-desktop--selected 'home)
+      (let ((svg (lme-desktop--svg 800 600)))
+        (should (string-match-p "fill=\"#000000\"/><text[^>]*fill=\"#FFFFFF\">Home</text>" svg))
+        (should (string-match-p "fill=\"#FFFFFF\"/><text[^>]*fill=\"#000000\">Trash</text>" svg))
+        (pcase-let ((`(,_ ,left ,top ,right ,bottom) (assq 'home lme-desktop--hits)))
+          (should (eq (lme-desktop--key-at (/ (+ left right) 2) (/ (+ top bottom) 2)) 'home)))
+        (should (> (nth 2 (assq 'trash lme-desktop--hits)) 400))
+        (should-not (lme-desktop--key-at 10 10)))
+      (lme-desktop-deselect)
+      (should-not lme-desktop--selected))))
+
+(ert-deftest lme-test-desktop-picture ()
+  "A desktop picture lies over the desktop's colour as its position says."
+  (let ((lme-desktop-picture (expand-file-name "icons/os9/globe-32.svg" lme-directory)))
+    (let ((lme-desktop-picture-position 'fill))
+      (should (string-match-p "<image href=\"globe-32.svg\"[^>]*xMidYMid slice"
+                              (lme-desktop--svg 800 600))))
+    (let ((lme-desktop-picture-position 'fit))
+      (should (string-match-p "xMidYMid meet" (lme-desktop--svg 800 600))))
+    (let ((lme-desktop-picture-position 'tile))
+      (should (string-match-p "<pattern id=\"lme-tile\"" (lme-desktop--svg 800 600)))))
+  (let ((lme-desktop-picture nil)
+        (lme-desktop-color "#123456"))
+    (let ((svg (lme-desktop--svg 800 600)))
+      (should (string-match-p "fill=\"#123456\"" svg))
+      (should-not (string-match-p "<image" svg)))))
+
+(ert-deftest lme-test-trash-full ()
+  "The Trash is full when it holds anything but Finder's .DS_Store: counted
+where it can be read, measured by its link count where it cannot."
+  (cl-letf (((symbol-function 'directory-files)
+             (lambda (&rest _) '(".DS_Store" "old.txt"))))
+    (should (lme-desktop-trash-full-p)))
+  (cl-letf (((symbol-function 'directory-files) (lambda (&rest _) '(".DS_Store"))))
+    (should-not (lme-desktop-trash-full-p)))
+  (dolist (case '((3 t nil) (4 t t) (2 nil nil) (3 nil t)))
+    (pcase-let ((`(,links ,ds-store ,full) case))
+      (cl-letf (((symbol-function 'directory-files)
+                 (lambda (&rest _) (signal 'file-error '("Operation not permitted"))))
+                ((symbol-function 'file-attributes)
+                 (lambda (&rest _) (list t links 501 20 nil nil nil 64)))
+                ((symbol-function 'file-exists-p) (lambda (_) ds-store)))
+        (should (eq (and (lme-desktop-trash-full-p) t) full))))))
 
 (ert-deftest lme-test-closing-the-last-window-shows-the-desktop ()
   "The close box takes a window away while others remain in the main area;

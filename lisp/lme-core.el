@@ -50,12 +50,25 @@ has not been made yet: the first start asks for it and saves the answer."
                  (const :tag "Ask at the next start" nil)))
 
 (defcustom lme-theme nil
-  "The colour theme: `dracula', or `platinum', Mac OS 9's Platinum greys.
+  "The colour theme: `dracula', `platinum' (Mac OS 9's Platinum greys), or
+any other theme installed; the chrome takes its colours from whichever.
 nil means the choice has not been made yet: the first start asks for it.
-Change it from the λ menu's Appearance submenu, or with `lme-set-theme'."
+Change it from the λ menu, with `lme-set-theme', or by setting it in your
+personal.el: once Emacs is set up, a new value is loaded at once."
   :type '(choice (const :tag "Dracula" dracula)
                  (const :tag "Platinum" platinum)
+                 (symbol :tag "Another installed theme")
                  (const :tag "Ask at the next start" nil)))
+
+(defvar lme--set-up nil
+  "Non-nil once lispm-emacs is set up, its theme loaded.")
+
+(defun lme--theme-changed (_symbol theme operation _where)
+  "Load THEME when `lme-theme' is set to it once Emacs is set up.
+This is a variable watcher."
+  (when (and lme--set-up (eq operation 'set) theme
+             (not (equal custom-enabled-themes (list theme))))
+    (run-at-time 0 nil #'lme-load-theme theme)))
 
 (defun lme-load-theme (theme)
   "Make THEME, by default Dracula, the only colour theme enabled."

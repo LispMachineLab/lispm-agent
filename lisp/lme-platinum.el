@@ -840,6 +840,9 @@ Where images cannot be shown, a plain λ stands in."
             :checked ,(eq lme-theme 'dracula))
     (:label "Platinum" :action ,(lambda () (lme-set-theme 'platinum))
             :checked ,(eq lme-theme 'platinum))
+    (:label "Desktop Picture…" :action lme-desktop-choose-picture)
+    (:label "No Desktop Picture" :action lme-desktop-remove-picture
+            :enabled ,(and (bound-and-true-p lme-desktop-picture) t))
     separator
     (:label "Editing Style…" :action ,(lambda () (customize-variable 'lme-editing-style)))
     (:label "Customize lispm-emacs…" :action ,(lambda () (customize-group 'lispm-emacs)))))

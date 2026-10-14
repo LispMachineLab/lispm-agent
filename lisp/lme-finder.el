@@ -352,6 +352,7 @@ after it is selected."
         (condition-case err
             (progn
               (move-file-to-trash (expand-file-name name lme-finder--directory))
+              (lme-desktop-check-trash)
               (lme-finder--go lme-finder--directory nil next)
               (message "“%s” was moved to the Trash" name))
           (error

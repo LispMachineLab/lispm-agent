@@ -83,11 +83,12 @@ A workspace's main area shows it where it holds nothing else.")
             :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "globe-32" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
-    (trash :label "Trash" :icon "trash-32" :command lme-desktop-open-trash
-           :bottom t :help "What was thrown away"))
+    (trash :label "Trash" :icon-function lme-desktop--trash-icon
+           :command lme-desktop-open-trash :bottom t :help "What was thrown away"))
   "The desktop's icons, from the top: (KEY . PROPERTIES).
 :label names an icon, :icon is as `lme-platinum-icon-file' takes it
-\(the 32-pixel drawing, or Emacs's own scalable icon), :command opens it
+\(the 32-pixel drawing, or Emacs's own scalable icon), or :icon-function
+returns it as it changes, as the Trash's does; :command opens it
 and :help describes it.  :visible, when given, is a function deciding
 whether the icon shows; :bottom puts it in the bottom corner, as Mac OS 9
 kept the Trash there.")
@@ -125,7 +126,85 @@ Finder window."
           (call-process "open" nil 0 nil directory)
         (user-error "The Trash cannot be read: %s" directory)))))
 
+;;;; The Trash
+
+(defvar lme-desktop--trash-full nil
+  "Non-nil when the Trash was last found holding something.")
+
+(defun lme-desktop-trash-full-p ()
+  "Return non-nil when the Trash holds something.
+Where Emacs may read the Trash its items are counted.  macOS lets only
+programs with Full Disk Access read it, but it can still be measured: on
+APFS a folder's link count is two more than its entries, and the one
+hidden entry an emptied Trash keeps, Finder's .DS_Store, can be looked
+for by name."
+  (let ((directory (lme-desktop--trash-directory)))
+    (if-let* ((names (ignore-errors
+                       (directory-files directory nil directory-files-no-dot-files-regexp t))))
+        (and (seq-remove (lambda (name) (equal name ".DS_Store")) names) t)
+      (when-let* ((attributes (file-attributes directory)))
+        (> (- (file-attribute-link-number attributes) 2
+              (if (file-exists-p (expand-file-name ".DS_Store" directory)) 1 0))
+           0)))))
+
+(defun lme-desktop--trash-icon ()
+  "Return the Trash's icon: full or empty, as it was last found."
+  (if lme-desktop--trash-full "trash-full-32" "trash-32"))
+
+(defun lme-desktop-check-trash ()
+  "Look whether the Trash holds something, and redraw the desktop when that
+changed, as Mac OS 9's Trash bulged once something was thrown away."
+  (let ((full (lme-desktop-trash-full-p)))
+    (unless (eq full lme-desktop--trash-full)
+      (setq lme-desktop--trash-full full)
+      (when (get-buffer lme-desktop-buffer-name)
+        (lme-desktop--render)))))
+
+(defvar lme-desktop--trash-timer nil
+  "Timer looking at the Trash every few seconds.")
+
+;;;; Settings
+
+(defun lme-desktop--setting-changed (&rest _)
+  "Redraw the desktop once one of its settings changed."
+  (run-at-time 0 nil #'lme-desktop--paint))
+
+(defcustom lme-desktop-color nil
+  "Colour of the desktop, or nil for the theme's background tinted with its
+accent.  `lme-desktop-picture', when set, lies over it."
+  :type '(choice (const :tag "From the theme" nil) color)
+  :group 'lispm-emacs)
+
+(defcustom lme-desktop-picture nil
+  "A picture covering the desktop, an image file, or nil for none.
+`lme-desktop-picture-position' says how it covers it."
+  :type '(choice (const :tag "None" nil) file)
+  :group 'lispm-emacs)
+
+(defcustom lme-desktop-picture-position 'fill
+  "How `lme-desktop-picture' covers the desktop, as Mac OS 9's Desktop
+Pictures placed one: `fill' the whole desktop, cropped to it; `fit' it
+whole, the desktop's colour around; `center' at its own size; `tile'
+repeated over the desktop."
+  :type '(choice (const fill) (const fit) (const center) (const tile))
+  :group 'lispm-emacs)
+
+(defun lme-desktop-choose-picture (file)
+  "Cover the desktop with picture FILE, now and at every later start."
+  (interactive (list (read-file-name "Desktop picture: " "~/Pictures/" nil t)))
+  (customize-save-variable 'lme-desktop-picture (and file (abbreviate-file-name file))))
+
+(defun lme-desktop-remove-picture ()
+  "Show the desktop's colour without a picture, now and at every later start."
+  (interactive)
+  (customize-save-variable 'lme-desktop-picture nil))
+
 ;;;; Drawing
+;;
+;; The desktop is one SVG the size of its window: its colour, the picture
+;; over it, and its icons with their names; a click is matched against
+;; where each icon was drawn.  An icon's SVG is nested in it as it is,
+;; Emacs's own icon included, its namespaces carried along.
 
 (defface lme-desktop-label nil
   "Face of a desktop icon's name: the theme's text on its background."
@@ -135,19 +214,12 @@ Finder window."
   "Face of a selected desktop icon's name: inverted, as Mac OS 9's was."
   :group 'lme-platinum)
 
-(defvar-keymap lme-desktop-item-map
-  :doc "Keymap of a desktop icon: a press selects it, a double click opens it."
+(defvar-keymap lme-desktop-mode-map
+  :doc "Keymap of the desktop."
   "<down-mouse-1>" #'lme-desktop-mouse-select
   "<mouse-1>" #'ignore
   "<double-down-mouse-1>" #'ignore
   "<double-mouse-1>" #'lme-desktop-mouse-open
-  "<drag-mouse-1>" #'ignore)
-
-(defvar-keymap lme-desktop-mode-map
-  :doc "Keymap of the desktop."
-  "<down-mouse-1>" #'lme-desktop-deselect
-  "<mouse-1>" #'ignore
-  "<double-mouse-1>" #'ignore
   "<drag-mouse-1>" #'ignore
   "<down>" #'lme-desktop-select-next
   "<right>" #'lme-desktop-select-next
@@ -161,8 +233,9 @@ Finder window."
   "<escape>" #'lme-desktop-deselect
   "q" #'ignore)
 
-(defvar lme-desktop--icons (make-hash-table :test #'equal)
-  "Desktop icon images by (NAME . SELECTED).")
+(defun lme-desktop--color ()
+  "Return the desktop's colour: `lme-desktop-color', or the theme's."
+  (or lme-desktop-color (lme-platinum--color :desktop) "#666699"))
 
 (defun lme-desktop--darken (svg)
   "Return SVG with every colour halved, as Mac OS 9 darkened a selected icon."
@@ -174,24 +247,48 @@ Finder window."
                     '(1 3 5))))
    svg t t))
 
-(defun lme-desktop--icon (name selected)
-  "Return the icon NAME as a string showing it, darkened when SELECTED.
-Where images cannot be shown, a blank of the icon's width stands in."
-  (if (not (display-images-p))
-      (propertize " " 'display `(space :width (,lme-desktop-icon-size)))
-    (propertize
-     " " 'display
-     (or (gethash (cons name selected) lme-desktop--icons)
-         (puthash (cons name selected)
-                  (let ((svg (with-temp-buffer
-                               (insert-file-contents (lme-platinum-icon-file name))
-                               (buffer-string))))
-                    (create-image (if selected (lme-desktop--darken svg) svg) 'svg t
-                                  :height lme-desktop-icon-size :ascent 'center))
-                  lme-desktop--icons)))))
+(defvar lme-desktop--svg-icons (make-hash-table :test #'equal)
+  "Icons ready to nest, by (NAME . SELECTED): (ROOT-ATTRIBUTES . CONTENT).")
+
+(defun lme-desktop--icon-parts (name selected)
+  "Return icon NAME, darkened when SELECTED, ready to nest in the desktop.
+The value is (ATTRIBUTES . CONTENT): what its root element declares that
+its content needs (its view box, namespaces, rendering) and the content."
+  (or (gethash (cons name selected) lme-desktop--svg-icons)
+      (puthash
+       (cons name selected)
+       (let* ((text (with-temp-buffer
+                      (insert-file-contents (lme-platinum-icon-file name))
+                      (buffer-string)))
+              (text (if selected (lme-desktop--darken text) text))
+              (start (string-match "<svg\\b[^>]*>" text))
+              (root (match-string 0 text))
+              (end (string-match "</svg>[[:space:]]*\\'" text))
+              (box (if (string-match "viewBox=\"\\([^\"]*\\)\"" root)
+                       (match-string 1 root)
+                     (format "0 0 %s %s"
+                             (if (string-match "width=\"\\([0-9.]+\\)" root) (match-string 1 root) 32)
+                             (if (string-match "height=\"\\([0-9.]+\\)" root) (match-string 1 root) 32)))))
+         (cons (concat (format "viewBox=\"%s\"" box)
+                       (let ((pos 0) (kept ""))
+                         (while (string-match "\\(xmlns:[A-Za-z]+\\|shape-rendering\\)=\"[^\"]*\"" root pos)
+                           (setq kept (concat kept " " (match-string 0 root))
+                                 pos (match-end 0)))
+                         kept))
+               (substring text (+ start (length root)) end)))
+       lme-desktop--svg-icons)))
+
+(defun lme-desktop--nest (name selected x y)
+  "Return icon NAME, darkened when SELECTED, as SVG standing at X, Y."
+  (pcase-let ((`(,attributes . ,content) (lme-desktop--icon-parts name selected)))
+    (format "<svg x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" %s>%s</svg>"
+            x y lme-desktop-icon-size lme-desktop-icon-size attributes content)))
 
 (defvar-local lme-desktop--selected nil
   "Key of the selected desktop icon, or nil.")
+
+(defvar-local lme-desktop--hits nil
+  "Where each icon and its name were drawn: (KEY LEFT TOP RIGHT BOTTOM).")
 
 (defun lme-desktop--items ()
   "Return the desktop's icons that show, see `lme-desktop-items'."
@@ -200,62 +297,125 @@ Where images cannot be shown, a blank of the icon's width stands in."
                   (or (not visible) (funcall visible))))
               lme-desktop-items))
 
-(defun lme-desktop--align (half)
-  "Return a blank reaching to HALF pixels left of the icons' column's centre."
-  (propertize " " 'display
-              `(space :align-to (- right (,(+ lme-desktop-margin (/ lme-desktop-column 2) half))))))
+(defun lme-desktop--item-icon (spec)
+  "Return the icon of the desktop item whose properties are SPEC."
+  (if-let* ((function (plist-get spec :icon-function)))
+      (funcall function)
+    (plist-get spec :icon)))
 
-(defun lme-desktop--spacer (height)
-  "Return a line HEIGHT pixels tall."
-  (concat (propertize " " 'display `(space :width (1) :height (,(max 1 height))))
-          "\n"))
+(defun lme-desktop--escape (text)
+  "Return TEXT escaped for SVG."
+  (replace-regexp-in-string
+   "[&<>\"]" (lambda (char) (pcase char ("&" "&amp;") ("<" "&lt;") (">" "&gt;") (_ "&quot;")))
+   text t t))
 
-(defun lme-desktop--insert-item (item)
-  "Insert desktop ITEM: its icon over its name, centred in the icons' column."
-  (let* ((key (car item))
-         (spec (cdr item))
-         (selected (eq key lme-desktop--selected))
-         (label (propertize (concat " " (plist-get spec :label) " ")
-                            'face (if selected 'lme-desktop-label-selected 'lme-desktop-label)))
-         (props `(lme-desktop-item ,key keymap ,lme-desktop-item-map
-                                   help-echo ,(plist-get spec :help) pointer arrow)))
-    (insert (lme-desktop--align (/ lme-desktop-icon-size 2))
-            (apply #'propertize (lme-desktop--icon (plist-get spec :icon) selected) props)
-            "\n"
-            (lme-desktop--align (/ (string-pixel-width label) 2))
-            (apply #'propertize label props)
-            "\n")))
+(defun lme-desktop--font ()
+  "Return the names' font as (FAMILY SIZE ASCENT), sizes in pixels."
+  (let* ((font (ignore-errors (face-font 'lme-platinum-list)))
+         (info (and font (ignore-errors (font-info font))))
+         (family (face-attribute 'lme-platinum-list :family nil t)))
+    (list (if (stringp family) family "Geneva")
+          (if info (aref info 2) 12)
+          (if info (aref info 8) 10))))
+
+(defun lme-desktop--picture-size (file)
+  "Return the size in pixels of picture FILE, as (WIDTH . HEIGHT)."
+  (or (ignore-errors (image-size (create-image file nil nil :scale 1) t))
+      '(256 . 256)))
+
+(defun lme-desktop--picture (width height)
+  "Return the SVG laying `lme-desktop-picture' over WIDTH by HEIGHT, or nil.
+The picture is named relative to its own folder, the desktop image's base."
+  (when-let* ((file (and lme-desktop-picture (expand-file-name lme-desktop-picture)))
+              ((file-readable-p file)))
+    (let ((href (lme-desktop--escape (url-hexify-string (file-name-nondirectory file)))))
+      (pcase lme-desktop-picture-position
+        ('center
+         (pcase-let ((`(,w . ,h) (lme-desktop--picture-size file)))
+           (format "<image href=\"%s\" xlink:href=\"%s\" x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\"/>"
+                   href href (/ (- width w) 2) (/ (- height h) 2) w h)))
+        ('tile
+         (pcase-let ((`(,w . ,h) (lme-desktop--picture-size file)))
+           (concat (format "<defs><pattern id=\"lme-tile\" width=\"%d\" height=\"%d\" patternUnits=\"userSpaceOnUse\">" w h)
+                   (format "<image href=\"%s\" xlink:href=\"%s\" width=\"%d\" height=\"%d\"/>" href href w h)
+                   "</pattern></defs>"
+                   (format "<rect width=\"%d\" height=\"%d\" fill=\"url(#lme-tile)\"/>" width height))))
+        (position
+         (format "<image href=\"%s\" xlink:href=\"%s\" width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid %s\"/>"
+                 href href width height (if (eq position 'fit) "meet" "slice")))))))
+
+(defun lme-desktop--svg (width height)
+  "Return the desktop drawn WIDTH by HEIGHT pixels, as SVG text.
+Icons stand down the right edge from the top, those marked :bottom up from
+the bottom corner; where each went is kept in `lme-desktop--hits'."
+  (pcase-let* ((`(,family ,size ,ascent) (lme-desktop--font))
+               (text (or (lme-platinum--color :text) "#000000"))
+               (content (or (lme-platinum--color :content) "#FFFFFF"))
+               (items (lme-desktop--items))
+               (label-height (+ size 4))
+               (cell (+ lme-desktop-icon-size 4 label-height))
+               (center (- width lme-desktop-margin (/ lme-desktop-column 2)))
+               (places nil)
+               (parts nil))
+    (let ((y lme-desktop-margin))
+      (dolist (item (seq-remove (lambda (item) (plist-get (cdr item) :bottom)) items))
+        (push (cons item y) places)
+        (setq y (+ y cell lme-desktop-gap))))
+    (let ((y (- height lme-desktop-margin cell)))
+      (dolist (item (reverse (seq-filter (lambda (item) (plist-get (cdr item) :bottom)) items)))
+        (push (cons item y) places)
+        (setq y (- y cell lme-desktop-gap))))
+    (setq lme-desktop--hits nil)
+    (pcase-dolist (`((,key . ,spec) . ,y) places)
+      (let* ((selected (eq key lme-desktop--selected))
+             (label (plist-get spec :label))
+             (label-width (+ 8 (string-pixel-width (propertize label 'face 'lme-platinum-list))))
+             (icon-left (- center (/ lme-desktop-icon-size 2)))
+             (label-left (- center (/ label-width 2)))
+             (label-top (+ y lme-desktop-icon-size 4)))
+        (push (list key (min icon-left label-left) y
+                    (max (+ icon-left lme-desktop-icon-size) (+ label-left label-width))
+                    (+ label-top label-height))
+              lme-desktop--hits)
+        (push (concat
+               (lme-desktop--nest (lme-desktop--item-icon spec) selected icon-left y)
+               (format "<rect x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" fill=\"%s\"/>"
+                       label-left label-top label-width label-height (if selected text content))
+               (format "<text x=\"%d\" y=\"%d\" font-family=\"%s\" font-size=\"%d\" text-anchor=\"middle\" fill=\"%s\">%s</text>"
+                       center (+ label-top 2 ascent) (lme-desktop--escape family) size
+                       (if selected content text) (lme-desktop--escape label)))
+              parts)))
+    (concat
+     (format "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">"
+             width height width height)
+     (format "<rect width=\"%d\" height=\"%d\" fill=\"%s\"/>" width height (lme-desktop--color))
+     (or (lme-desktop--picture width height) "")
+     (apply #'concat parts)
+     "</svg>")))
 
 (defun lme-desktop--render (&optional window)
-  "Lay the desktop out for WINDOW, by default the window showing it.
-Icons stand from the top of the right edge; those marked :bottom stand in
-the bottom corner, a spacer filling the height between."
+  "Draw the desktop for WINDOW, by default the window showing it.
+Where images cannot be shown, its icons are listed by name."
   (let ((buffer (lme-desktop-buffer)))
-    (when-let* ((window (or window (get-buffer-window buffer))))
+    (when-let* ((window (or window (get-buffer-window buffer t))))
       (with-current-buffer buffer
         (let ((inhibit-read-only t)
-              (items (lme-desktop--items))
-              spacer)
+              (width (window-body-width window t))
+              (height (1- (window-body-height window t))))
           (erase-buffer)
-          (insert (lme-desktop--spacer lme-desktop-margin))
-          (dolist (item (seq-remove (lambda (item) (plist-get (cdr item) :bottom)) items))
-            (lme-desktop--insert-item item)
-            (insert (lme-desktop--spacer lme-desktop-gap)))
-          (when-let* ((bottom (seq-filter (lambda (item) (plist-get (cdr item) :bottom)) items)))
-            (setq spacer (point))
-            (insert (lme-desktop--spacer 1))
-            (let ((below (point)))
-              (dolist (item bottom)
-                (lme-desktop--insert-item item))
-              ;; The spacer takes up the height the icons above and below
-              ;; leave free.
-              (let ((free (- (window-body-height window t) lme-desktop-margin
-                             (cdr (window-text-pixel-size window (point-min) spacer))
-                             (cdr (window-text-pixel-size window below (point-max))))))
-                (put-text-property spacer (1+ spacer) 'display
-                                   `(space :width (1) :height (,(max 1 free)))))))
+          (if (display-images-p)
+              (insert (propertize
+                       " " 'display
+                       (apply #'create-image (lme-desktop--svg width height) 'svg t
+                              :scale 1 :ascent 100
+                              (when lme-desktop-picture
+                                (list :base-uri (expand-file-name lme-desktop-picture))))
+                       'pointer 'arrow))
+            (dolist (item (lme-desktop--items))
+              (insert (if (eq (car item) lme-desktop--selected) " ▶ " "   ")
+                      (plist-get (cdr item) :label) "\n")))
           (goto-char (point-min))
-          (set-window-start window (point-min))
+          (set-window-start window (point-min) t)
           (set-window-point window (point-min)))))))
 
 ;;;; Selecting and opening
@@ -267,16 +427,21 @@ the bottom corner, a spacer filling the height between."
       (setq lme-desktop--selected key)
       (lme-desktop--render))))
 
+(defun lme-desktop--key-at (x y)
+  "Return the key of the desktop icon drawn at X, Y, or nil."
+  (car (seq-find (pcase-lambda (`(,_ ,left ,top ,right ,bottom))
+                   (and (<= left x right) (<= top y bottom)))
+                 (buffer-local-value 'lme-desktop--hits (lme-desktop-buffer)))))
+
 (defun lme-desktop--item-at (event)
   "Return the key of the desktop icon mouse EVENT is over, or nil."
-  (let ((position (event-start event)))
-    (when-let* ((point (posn-point position)))
-      (get-text-property point 'lme-desktop-item
-                         (window-buffer (posn-window position))))))
+  (when-let* ((xy (posn-object-x-y (event-start event))))
+    (lme-desktop--key-at (car xy) (cdr xy))))
 
 (defun lme-desktop-mouse-select (event)
-  "Select the desktop icon pressed by EVENT, as Mac OS 9 did on the press.
-A click on the desktop brings the desktop in front."
+  "Select the desktop icon pressed by EVENT, as Mac OS 9 did on the press,
+or none on the desktop between them.  A click on the desktop brings the
+desktop in front."
   (interactive "e")
   (select-window (posn-window (event-start event)))
   (setq lme-finder--had-focus nil)
@@ -287,7 +452,8 @@ A click on the desktop brings the desktop in front."
   "Open the desktop icon double-clicked by EVENT."
   (interactive "e")
   (lme-desktop-mouse-select event)
-  (lme-desktop-open))
+  (when (lme-desktop--item-at event)
+    (lme-desktop-open)))
 
 (defun lme-desktop-deselect ()
   "Select no desktop icon: a click on the desktop itself, which brings the
@@ -327,15 +493,15 @@ desktop in front."
 ;;;; Painting
 
 (defvar-local lme-desktop--background nil
-  "Face remapping cookie colouring a desktop buffer.")
+  "Face remapping cookies colouring a desktop buffer.")
 
 (defun lme-desktop--paint-buffer (buffer)
-  "Colour BUFFER as the desktop."
+  "Colour BUFFER as the desktop, its fringes included."
   (with-current-buffer buffer
-    (when lme-desktop--background
-      (face-remap-remove-relative lme-desktop--background))
+    (mapc #'face-remap-remove-relative lme-desktop--background)
     (setq lme-desktop--background
-          (face-remap-add-relative 'default :background (lme-platinum--color :desktop)))))
+          (list (face-remap-add-relative 'default :background (lme-desktop--color))
+                (face-remap-add-relative 'fringe :background (lme-desktop--color))))))
 
 (defun lme-desktop--paint ()
   "Colour the desktop, its background and its names from the palette."
@@ -364,7 +530,10 @@ bottom edge, no cursor, fringes or line numbers."
               cursor-type nil
               truncate-lines t
               left-fringe-width 0
-              right-fringe-width 0
+              ;; A fringe, however thin, keeps Emacs from holding the last
+              ;; column of the text area for its truncation mark, which a
+              ;; picture as wide as the window would stop short of.
+              right-fringe-width 1
               show-trailing-whitespace nil
               evil-emacs-state-cursor '(nil)
               evil-normal-state-cursor '(nil))
@@ -503,9 +672,16 @@ on the Finder window when it had the keyboard last, else on the desktop."
     (lme-desktop-special "Special" lme-desktop--special-items)))
 
 (defun lme-setup-desktop ()
-  "Put the desktop behind every window, and start Emacs on it."
+  "Put the desktop behind every window, and start Emacs on it.
+Its settings take effect when changed however they are, a `setq' in
+personal.el included, and the Trash is looked at every few seconds."
   (setq initial-buffer-choice #'lme-desktop-empty-buffer
         tab-bar-new-tab-choice #'lme-desktop-empty-buffer)
+  (dolist (setting '(lme-desktop-color lme-desktop-picture lme-desktop-picture-position))
+    (add-variable-watcher setting #'lme-desktop--setting-changed))
+  (lme-desktop-check-trash)
+  (unless lme-desktop--trash-timer
+    (setq lme-desktop--trash-timer (run-with-timer 5 5 #'lme-desktop-check-trash)))
   (add-hook 'tab-bar-tab-post-open-functions #'lme-desktop--on-new-workspace)
   (add-hook 'enable-theme-functions (lambda (&rest _) (lme-desktop--paint)) 90)
   (add-hook 'window-setup-hook #'lme-desktop-activate 95))

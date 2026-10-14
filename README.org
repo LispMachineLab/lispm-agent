@@ -11,10 +11,13 @@ Two appearances come with it, asked for at the first start and switched from the
 and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 - *A desktop*, where Emacs starts, in the theme's colours tinted with its accent (Mac OS 8's
-  blue-violet under Platinum).  Its icons stand down the right edge as Mac OS 9's did: the home
-  disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top, the
-  Trash in the bottom corner.  Click one to select it, double-click it (or press Return) to
-  open it.
+  blue-violet under Platinum), or a colour and a picture of your own (see [[*Your own
+  settings][Your own settings]]).  Its icons stand down the right edge as Mac OS 9's did: the
+  home disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top,
+  the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
+  double-click it (or press Return) to open it.  Floating windows (the Finder's, the floating
+  editor) stay on the desktop: their title bars cannot be dragged off it, and when Emacs's
+  frame changes size, as going full screen and back does, they are placed on it again.
 - *A Finder window*, opened by the home disk: a folder's items as large icons, floating over
   the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
   items and the room left counted at its bottom.  A folder opens in the window, a file in the
@@ -157,9 +160,24 @@ included.  With vim keys, =SPC= opens the leader: =SPC e= find a file, =SPC b= s
 * Your own settings
 
 Put them in =personal.el= next to =init.el= (git ignores it); it is loaded after lispm-emacs is
-set up, so it can change anything.  To pick the other editing style later, customize
-~lme-editing-style~; to switch appearance, use the λ menu's Appearance submenu or
-=M-x lme-set-theme=.
+set up, so it can change anything, and the appearance takes a new value at once:
+
+#+begin_src emacs-lisp
+;; The colour theme: dracula, platinum (Mac OS 9's greys), or any theme you
+;; have installed; the menu bar, title bars and lists take their colours from it.
+(setq lme-theme 'platinum)
+
+;; The desktop: a colour of its own, rather than the theme's tinted with its
+;; accent, and a picture over it (a PNG or a JPEG), placed as Mac OS 9's Desktop
+;; Pictures were: fill (cropped to the desktop), fit, center or tile.
+(setq lme-desktop-color "#6666AA")
+(setq lme-desktop-picture "~/Pictures/desktop.jpg"
+      lme-desktop-picture-position 'fill)
+#+end_src
+
+The λ menu sets the theme and the desktop picture too (Desktop Picture…), and keeps them for
+the next start; so do =M-x lme-set-theme= and =M-x lme-desktop-choose-picture=.  To pick the
+other editing style later, customize ~lme-editing-style~.
 
 An existing configuration can use lispm-emacs as a library instead:
 
