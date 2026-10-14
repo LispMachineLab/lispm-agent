@@ -35,9 +35,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then the
   menus of the application in front: the desktop's File, Go and Special (Restart, Shut Down), the
-  editor's File, Edit, View, Project and Window, the browser's File, View, Go and Window.  At its right
-  end, Emacs's own load average, mail flag, battery and time, each a title with a menu of its
-  own (the Mail menu reads, composes and checks mail), then the Application menu.
+  editor's File, Edit, View, Project and Window, the browser's File, View, Go, Bookmarks and
+  Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
+  title with a menu of its own (the Mail menu reads, composes and checks mail), then the
+  Application menu.
 - *The editor*, an application of its own: a title strip across its top, the editor's title bar
   over a row of tabs choosing the sidebar's view (Files, Agents, Shells), then the sidebar and
   the windows.  Its workspaces, one per project, drop from its Project menu as a panel of
@@ -79,12 +80,19 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
-  desktop or the λ menu and brought forward from the Application menu.  Its window is a Mac OS 9
-  browser window: a title bar naming the page, a toolbar of bevel buttons, the address in an
-  edit field and a row of tabs.  Like the editor it is full screen, in a workspace of its own
-  (the floating editor steps aside), or floating over the desktop beside the other windows; its
-  zoom box, or View › Full Screen and Floating Window, moves it, and it opens again as it was.
-  Closing its last tab quits it, as File › Quit Browser does, and the desktop comes back.
+  desktop or the λ menu and brought forward from the Application menu.  Its window is laid out
+  as Netscape Communicator's was, in the theme's colours: the navigation toolbar (Back,
+  Forward, Reload, Home, Search, History, Stop, and the Netscape N, its meteors falling while a
+  page loads), the location toolbar (the Bookmarks button, the page's icon, the address), the
+  personal toolbar of bookmarks, a row of tabs, and a status bar with the padlock, the progress
+  bar and "Document: Done".  It keeps a history of the pages visited (=lme-browser-history-file=)
+  and bookmarks, which are Emacs's own (=bookmark.el=), so =bookmark-jump= opens them too; both
+  list in a pane at the window's left (History, Bookmarks › Edit Bookmarks), where a click
+  opens a page, a middle click opens it in a new tab and a right click renames, deletes or
+  forgets.  Like the editor it is full screen, in a workspace of its own (the floating editor
+  steps aside), or floating over the desktop beside the other windows; its zoom box, or View ›
+  Full Screen and Floating Window, moves it, and it opens again as it was.  Closing its last
+  tab quits it, as File › Quit Browser does, and the desktop comes back.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
@@ -243,6 +251,8 @@ Two things to know when both builds run:
 | =C-c d=                | Dirvish, the file manager                                  |
 | =C-x b=, =C-s=         | switch buffer, search the buffer (Consult)                 |
 | =C-.=                  | act on the thing at point (Embark)                         |
+| =M-[=, =M-]=, =M-r=, =M-.= | in the browser: back, forward, reload, stop            |
+| =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history |
 
 In the Mac OS build the Command key is Meta, so Command-C and Command-V copy and paste
 everywhere, terminals included.  With vim keys, =SPC= opens the leader: =SPC e= find a file,

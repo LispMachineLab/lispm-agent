@@ -48,7 +48,7 @@
              :activate lme-desktop-activate)
     (editor :name "Emacs" :icon emacs :menus lme-editor-menus
             :activate lme-editor-activate)
-    (browser :name "Browser" :icon "globe" :menus lme-browser-menus
+    (browser :name "Browser" :icon "netscape" :menus lme-browser-menus
              :activate lme-browser-show :visible lme-xwidget-available-p))
   "The applications, in the Application menu's order: (KEY . PROPERTIES).
 :name and :icon (see `lme-platinum-icon-file') name an application, :menus is a

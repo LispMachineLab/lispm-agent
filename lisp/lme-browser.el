@@ -33,7 +33,9 @@
 (require 'browse-url)
 (require 'cl-lib)
 (require 'lme-apps)
+(require 'format-spec)
 (require 'thingatpt)
+(require 'url-parse)
 (require 'url-util)
 
 (defun lme-xwidget-available-p ()
@@ -71,16 +73,25 @@
 
 ;;;; Browser
 ;;
-;; The embedded WebKit browser is laid out as a Mac OS 9 browser window:
+;; The embedded WebKit browser is laid out as Netscape Communicator's window
+;; was on Mac OS 9, its icons drawn in the theme's colours:
 ;;
 ;;   address window  title bar     the shown page's icon and title
-;;                   header line   toolbar: back, forward, reload, home
-;;                   text line     the address, in an edit field (RET)
+;;                   header line   navigation toolbar: Back, Forward,
+;;                                 Reload, Home, Search, History, Stop,
+;;                                 and the Netscape N, its meteors falling
+;;                                 while the page loads
+;;                   text line     location toolbar: Bookmarks, the page's
+;;                                 icon, the address in an edit field (RET)
+;;                   mode line     personal toolbar: a button per bookmark
 ;;   page window     tab line      a bevel button per tab, then "+"
 ;;                   below         the page
+;;                   mode line     status bar: the padlock, the progress
+;;                                 bar, what the page is doing
 ;;
 ;; The address window is a real buffer, so the address is edited in place.
 ;; A timer keeps it in step with the page while it is not being edited.
+;; History and bookmarks are lme-browser-places.el's.
 ;;
 ;; The window is drawn in one of two ways, as the editor's is, and its zoom
 ;; box moves it from one to the other:
@@ -99,7 +110,12 @@
 (declare-function xwidget-webkit-back "xwidget" ())
 (declare-function xwidget-webkit-forward "xwidget" ())
 (declare-function xwidget-webkit-reload "xwidget" ())
+(declare-function xwidget-webkit-stop "xwidget" ())
+(declare-function xwidget-webkit-back-forward-list "xwidget.c" (xwidget &optional limit))
+(declare-function xwidget-webkit-goto-history "xwidget.c" (xwidget rel-pos))
+(declare-function xwidget-webkit-estimated-load-progress "xwidget.c" (xwidget))
 (defvar xwidget-webkit-mode-map)
+(defvar xwidget-webkit--loading-p)
 (declare-function lme-sidebar--toolbar-button "lme-sidebar" (label command help row &optional face))
 (declare-function lme-sidebar--toolbar-buttons "lme-sidebar" (actions row))
 (declare-function lme-platinum-icon "lme-platinum" (name))
@@ -144,6 +160,10 @@ screen.  Its zoom box, and the View menu, switch it.")
 
 (defvar lme-browser--shade nil
   "While the floating browser is rolled up: its windows and text height.")
+
+(defvar lme-browser--navigation nil
+  "What the shown tab can do, as the last sync found it:
+\(:page P :back B :forward F :loading L).")
 
 (defun lme-browser-floating-p ()
   "Return non-nil while the browser floats in a window of its own."
@@ -251,6 +271,36 @@ does: the address window shows the page's real address again at once."
   (lme-browser--in-page
    (lambda () (xwidget-webkit-goto-uri (xwidget-at (point-min)) lme-browser-home-url))))
 
+(defun lme-browser-stop ()
+  "Stop loading the shown browser tab's page."
+  (interactive)
+  (lme-browser--in-page #'xwidget-webkit-stop))
+
+(defun lme-browser-search ()
+  "Select the location field for a search: what is typed there that is not
+an address is searched for, see `lme-browser--target'."
+  (interactive)
+  (lme-browser-focus-address))
+
+(defun lme-browser--shown-buffer ()
+  "Return the shown browser tab's buffer, or nil."
+  (when-let* ((window (lme-browser--window)))
+    (window-buffer window)))
+
+(defun lme-browser-open-url (url &optional new-tab)
+  "Show the page at URL in the shown browser tab, or in a new tab when
+NEW-TAB or when none is shown.  The browser comes in front."
+  (let ((window (lme-browser--window)))
+    (cond ((and window (not new-tab))
+           (with-current-buffer (window-buffer window)
+             (xwidget-webkit-goto-uri (xwidget-at (point-min)) url))
+           (lme-browser--sync t))
+          (window (lme-browser-new-tab url))
+          (t (lme-browser-show)
+             (lme-browser-open-url url)))
+    (unless (eq (lme-apps-frontmost) 'browser)
+      (lme-browser-show))))
+
 (defun lme-browser-close-shown-tab ()
   "Close the shown browser tab, see `lme-browser-close-tab'."
   (interactive)
@@ -259,50 +309,411 @@ does: the address window shows the page's real address again at once."
 
 ;;;;; Menus
 
+(declare-function lme-browser-add-bookmark "lme-browser-places" ())
+(declare-function lme-browser-edit-bookmarks "lme-browser-places" ())
+(declare-function lme-browser-show-history "lme-browser-places" ())
+(declare-function lme-browser--bookmark-items "lme-browser-places" ())
+(declare-function lme-browser--places-shown "lme-browser-places" ())
+(declare-function lme-browser--personal-toolbar "lme-browser-places" ())
+(declare-function lme-popup-menu "lme-popup" (items &optional x y align))
+
 (defun lme-browser--file-items ()
   "Return the items of the browser's File menu."
   (let ((page (and (lme-browser--window) t)))
     `((:label "New Tab" :action lme-browser-new-tab)
-      (:label "Open Location…" :action lme-browser-focus-address)
+      (:label "Open Location…" :action lme-browser-focus-address
+              :key ,(lme-browser--key 'lme-browser-focus-address))
       (:label "Close Tab" :action lme-browser-close-shown-tab :enabled ,page)
       separator
       (:label "Open in Default Browser" :action lme-browser-open-external :enabled ,page)
       separator
       (:label "Quit Browser" :action lme-browser-quit))))
 
-(defun lme-browser--go-items ()
-  "Return the items of the browser's Go menu."
-  (let ((page (and (lme-browser--window) t)))
-    `((:label "Back" :action lme-browser-back :enabled ,page)
-      (:label "Forward" :action lme-browser-forward :enabled ,page)
-      (:label "Reload" :action lme-browser-reload :enabled ,page)
-      separator
-      (:label "Home" :action lme-browser-home :enabled ,page))))
-
 (defun lme-browser--view-items ()
-  "Return the items of the browser's View menu: full screen or floating."
-  `((:label "Full Screen" :action lme-browser-full-screen
-            :checked ,(not (lme-browser-floating-p)))
-    (:label "Floating Window" :action lme-browser-float
-            :checked ,(lme-browser-floating-p))))
+  "Return the items of the browser's View menu: full screen or floating,
+then reloading and stopping, as Netscape's View menu had them."
+  (let ((nav lme-browser--navigation))
+    `((:label "Full Screen" :action lme-browser-full-screen
+              :checked ,(not (lme-browser-floating-p)))
+      (:label "Floating Window" :action lme-browser-float
+              :checked ,(lme-browser-floating-p))
+      separator
+      (:label "Reload" :action lme-browser-reload :enabled ,(plist-get nav :page)
+              :key ,(lme-browser--key 'lme-browser-reload))
+      (:label "Stop Loading" :action lme-browser-stop :enabled ,(plist-get nav :loading)
+              :key ,(lme-browser--key 'lme-browser-stop)))))
+
+(defun lme-browser--session-items ()
+  "Return the shown tab's pages back and forward as Go menu items, the one
+shown checked, as Netscape's Go menu listed the window's pages.  Only
+WebKitGTK tells them; on macOS there are none."
+  (when-let* (((fboundp 'xwidget-webkit-back-forward-list))
+              (buffer (lme-browser--shown-buffer))
+              (xwidget (with-current-buffer buffer (xwidget-at (point-min))))
+              (pages (ignore-errors (xwidget-webkit-back-forward-list xwidget 8))))
+    (pcase-let ((`(,back ,here ,forward) pages))
+      (mapcar (pcase-lambda (`(,index ,title ,uri))
+                (list :label (truncate-string-to-width
+                              (if (string-empty-p (or title "")) (or uri "") title)
+                              48 nil nil "…")
+                      :action (lambda ()
+                                (xwidget-webkit-goto-history xwidget index)
+                                (lme-browser--sync t))
+                      :checked (= index 0)))
+              (append (reverse forward) (list here) back)))))
+
+(defun lme-browser--go-items ()
+  "Return the items of the browser's Go menu: Back, Forward and Home, then
+the shown tab's pages."
+  (let* ((nav lme-browser--navigation)
+         (pages (lme-browser--session-items)))
+    `((:label "Back" :action lme-browser-back :enabled ,(plist-get nav :back)
+              :key ,(lme-browser--key 'lme-browser-back))
+      (:label "Forward" :action lme-browser-forward :enabled ,(plist-get nav :forward)
+              :key ,(lme-browser--key 'lme-browser-forward))
+      (:label "Home" :action lme-browser-home :enabled ,(plist-get nav :page))
+      ,@(when pages (cons 'separator pages)))))
 
 (defun lme-browser--window-items ()
-  "Return the items of the browser's Window menu: a tab each, the shown one
-checked, as Mac OS 9's Window menus listed an application's windows."
-  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
-    (mapcar (lambda (buffer)
-              (list :label (truncate-string-to-width (lme-browser--title buffer) 48 nil nil "…")
-                    :action (lambda () (lme-browser-select-tab buffer))
-                    :checked (eq buffer shown)))
-            (lme-browser--buffers))))
+  "Return the items of the browser's Window menu: History, then a tab each,
+the shown one checked, as Mac OS 9's Window menus listed an application's
+windows."
+  (let ((shown (lme-browser--shown-buffer)))
+    `((:label "History" :action lme-browser-show-history
+              :checked ,(eq (lme-browser--places-shown) 'history)
+              :key ,(lme-browser--key 'lme-browser-show-history))
+      separator
+      ,@(mapcar (lambda (buffer)
+                  (list :label (truncate-string-to-width (lme-browser--title buffer) 48 nil nil "…")
+                        :action (lambda () (lme-browser-select-tab buffer))
+                        :checked (eq buffer shown)))
+                (lme-browser--buffers)))))
 
 (defun lme-browser-menus ()
   "Return the browser's menus, for the menu bar while it is in front."
   '((lme-browser-file "File" lme-browser--file-items)
     (lme-browser-view "View" lme-browser--view-items)
     (lme-browser-go "Go" lme-browser--go-items)
+    (lme-browser-bookmarks "Bookmarks" lme-browser--bookmark-items)
     (lme-browser-window "Window" lme-browser--window-items)))
 
+;;;;; Drawing Netscape's chrome
+;;
+;; Each part is an SVG drawn once per palette and state, then kept.
+
+(defvar lme-platinum--generation)
+(declare-function lme-tab-bar--blend "lme-interface" (from to ratio))
+
+(defvar lme-browser--images (make-hash-table :test #'equal)
+  "Drawn chrome images, by palette generation and key.")
+
+(defun lme-browser--image (key draw)
+  "Return the image of KEY, calling DRAW for its SVG text the first time."
+  (let ((key (cons lme-platinum--generation key)))
+    (or (gethash key lme-browser--images)
+        (progn
+          (when (> (hash-table-count lme-browser--images) 256)
+            (clrhash lme-browser--images))
+          (puthash key (create-image (funcall draw) 'svg t :ascent 'center :scale 1)
+                   lme-browser--images)))))
+
+(defun lme-browser--svg (width height &rest parts)
+  "Return an SVG document WIDTH by HEIGHT pixels holding PARTS."
+  (concat (format "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">"
+                  width height width height)
+          (apply #'concat parts)
+          "</svg>"))
+
+(defun lme-browser--escape (text)
+  "Return TEXT safe inside SVG."
+  (replace-regexp-in-string
+   "[&<>\"]" (lambda (c) (pcase c ("&" "&amp;") ("<" "&lt;") (">" "&gt;") (_ "&quot;")))
+   text t t))
+
+(defun lme-browser--font ()
+  "Return the toolbar labels' font as (FAMILY SIZE), the size in pixels:
+a size under the list font's, as Netscape's labels were small."
+  (let* ((font (ignore-errors (face-font 'lme-platinum-list)))
+         (info (and font (ignore-errors (font-info font))))
+         (family (face-attribute 'lme-platinum-list :family nil t)))
+    (list (if (stringp family) family "Geneva")
+          (max 10 (- (if info (aref info 2) 12) 2)))))
+
+(defun lme-browser--label-width (label)
+  "Return the width in pixels of toolbar LABEL."
+  (pcase-let ((`(,family ,size) (lme-browser--font)))
+    (string-pixel-width (propertize label 'face `(:family ,family :height ,(* 10 size))))))
+
+(defun lme-browser--ink (enabled)
+  "Return the icons' colours as an alist for `format-spec': outline (i),
+fill (f), face (c), the stop sign's red (r) and white (w); greyed unless
+ENABLED."
+  (let ((red (or (ignore-errors (face-foreground 'error nil t)) "#CC3333")))
+    (if enabled
+        `((?i . ,(lme-platinum--color :text)) (?f . ,(lme-platinum--color :accent))
+          (?c . ,(lme-platinum--color :content)) (?r . ,red) (?w . "#FFFFFF"))
+      `((?i . ,(lme-platinum--color :shade)) (?f . ,(lme-platinum--color :muted))
+        (?c . ,(lme-platinum--color :chrome)) (?r . ,(lme-platinum--color :muted))
+        (?w . ,(lme-platinum--color :chrome))))))
+
+(defconst lme-browser--icons
+  '((back . "<path d='M2.5 12 L11.5 3.5 L11.5 8 L21.5 8 L21.5 16 L11.5 16 L11.5 20.5 Z' \
+fill='%f' stroke='%i' stroke-linejoin='round'/>")
+    (forward . "<path d='M21.5 12 L12.5 3.5 L12.5 8 L2.5 8 L2.5 16 L12.5 16 L12.5 20.5 Z' \
+fill='%f' stroke='%i' stroke-linejoin='round'/>")
+    (reload . "<path d='M17.6 6.6 A7.6 7.6 0 1 0 19.6 12.6' fill='none' stroke='%i' \
+stroke-width='4.6'/><path d='M17.6 6.6 A7.6 7.6 0 1 0 19.6 12.6' fill='none' stroke='%f' \
+stroke-width='2.6'/><path d='M13.2 6.8 L21 2.4 L21.2 11 Z' fill='%f' stroke='%i' \
+stroke-linejoin='round'/>")
+    (home . "<rect x='15.5' y='4.5' width='3' height='5' fill='%f' stroke='%i'/>\
+<path d='M2 12.5 L12 3 L22 12.5 Z' fill='%f' stroke='%i' stroke-linejoin='round'/>\
+<rect x='5.5' y='12.5' width='13' height='8' fill='%c' stroke='%i'/>\
+<rect x='10.5' y='15' width='3' height='5.5' fill='%f' stroke='%i'/>")
+    (search . "<path d='M14.6 14.6 L20.4 20.4' stroke='%i' stroke-width='4' \
+stroke-linecap='round'/><circle cx='10' cy='10' r='6.2' fill='%c' stroke='%i' \
+stroke-width='2.4'/><path d='M6.6 10 A3.4 3.4 0 0 1 10 6.6' fill='none' stroke='%f' \
+stroke-width='1.6'/>")
+    (history . "<circle cx='12' cy='12' r='9' fill='%c' stroke='%i' stroke-width='1.6'/>\
+<path d='M12 3.8 L12 5.8 M20.2 12 L18.2 12 M12 20.2 L12 18.2 M3.8 12 L5.8 12' stroke='%i' \
+stroke-width='1.4'/><path d='M12 12 L12 6.8 M12 12 L15.8 14.2' stroke='%f' stroke-width='2.2' \
+stroke-linecap='round'/><circle cx='12' cy='12' r='1.3' fill='%i'/>")
+    (stop . "<path d='M8 2.5 L16 2.5 L21.5 8 L21.5 16 L16 21.5 L8 21.5 L2.5 16 L2.5 8 Z' \
+fill='%r' stroke='%i' stroke-linejoin='round'/><path d='M8.8 8.8 L15.2 15.2 M15.2 8.8 \
+L8.8 15.2' stroke='%w' stroke-width='2.6' stroke-linecap='round'/>")
+    (bookmarks . "<path d='M5.5 2.5 L18.5 2.5 L18.5 21.5 L12 16.5 L5.5 21.5 Z' fill='%f' \
+stroke='%i' stroke-linejoin='round'/><path d='M8.5 6.5 L15.5 6.5' stroke='%c' \
+stroke-width='1.5'/>"))
+  "The toolbar's icons, each SVG drawn on a 24-pixel square; see
+`lme-browser--ink' for the colours named in them.")
+
+(defconst lme-browser-tool-height 46
+  "Height in pixels of a navigation toolbar button.")
+
+(defun lme-browser--bevel (width height pressed)
+  "Return SVG of a WIDTH by HEIGHT bevel, pushed in when PRESSED."
+  (let ((light (lme-platinum--color :light))
+        (shade (lme-platinum--color :shade))
+        (chrome (lme-platinum--color :chrome)))
+    (concat
+     (format "<rect width='%d' height='%d' fill='%s'/>" width height
+             (if pressed (lme-tab-bar--blend chrome shade 0.45) chrome))
+     (format "<rect width='%d' height='1' fill='%s'/><rect width='1' height='%d' fill='%s'/>"
+             width (if pressed shade light) height (if pressed shade light))
+     (format "<rect y='%d' width='%d' height='1' fill='%s'/><rect x='%d' width='1' height='%d' fill='%s'/>"
+             (1- height) width (if pressed light shade) (1- width) height (if pressed light shade)))))
+
+(defun lme-browser--draw-tool (icon label enabled pressed width)
+  "Return SVG of the toolbar button ICON named LABEL, WIDTH pixels wide:
+greyed unless ENABLED, pushed in when PRESSED."
+  (pcase-let ((`(,family ,size) (lme-browser--font))
+              (ink (lme-browser--ink enabled))
+              (height lme-browser-tool-height))
+    (lme-browser--svg
+     width height
+     (lme-browser--bevel width height pressed)
+     (format "<g transform='translate(%d %d)'>%s</g>" (/ (- width 24) 2) (if pressed 6 5)
+             (format-spec (alist-get icon lme-browser--icons) ink))
+     (format "<text x='%d' y='%d' font-family='%s' font-size='%d' text-anchor='middle' fill='%s'>%s</text>"
+             (/ width 2) (- height 6 (if pressed -1 0)) (lme-browser--escape family) size
+             (if enabled (lme-platinum--color :text) (lme-platinum--color :shade))
+             (lme-browser--escape label)))))
+
+(defconst lme-browser--logo
+  "<defs><linearGradient id='ns-sky' x1='0' y1='0' x2='0' y2='1'>\
+<stop offset='0' stop-color='#03032A'/><stop offset='1' stop-color='#22449C'/></linearGradient>\
+<linearGradient id='ns-planet' x1='0' y1='0' x2='0' y2='1'><stop offset='0' \
+stop-color='#46C2C2'/><stop offset='1' stop-color='#083650'/></linearGradient>\
+<linearGradient id='ns-n' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#D8FFFF'/>\
+<stop offset='0.55' stop-color='#5CC6D8'/><stop offset='1' stop-color='#1A6E96'/>\
+</linearGradient></defs><rect width='40' height='40' fill='url(#ns-sky)'/><g fill='#FFFFFF'>\
+<rect x='3' y='4' width='1' height='1'/><rect x='8' y='2' width='1' height='1'/>\
+<rect x='19' y='3' width='1' height='1' opacity='0.7'/><rect x='36' y='9' width='1' height='1'/>\
+<rect x='5' y='20' width='1' height='1' opacity='0.6'/><rect x='35' y='22' width='1' \
+height='1' opacity='0.8'/><rect x='21' y='16' width='1' height='1' opacity='0.5'/>\
+<rect x='2' y='12' width='1' height='1' opacity='0.8'/></g>%s<ellipse cx='20' cy='54' \
+rx='36' ry='22' fill='url(#ns-planet)'/><path d='M6 6 L16 6 L26 21 L26 9 L23 9 L23 6 L34 6 \
+L34 9 L31 9 L31 34 L26 34 L14 16 L14 31 L17 31 L17 34 L6 34 L6 31 L9 31 L9 9 L6 9 Z' \
+fill='url(#ns-n)' stroke='#00142E' stroke-width='1.1'/>"
+  "The Netscape N over its planet, on a 40-pixel square; %s takes the
+meteors, drawn behind the planet.")
+
+(defconst lme-browser-throbber-frames 10
+  "Frames of the throbber's meteor shower, one every tick while loading.")
+
+(defun lme-browser--meteor (x y length opacity)
+  "Return SVG of a meteor at X, Y falling down to the left, its tail LENGTH
+long, at OPACITY."
+  (format "<g opacity='%.2f'><path d='M%.1f %.1f L%.1f %.1f L%.1f %.1f Z' fill='#FFFFFF' \
+opacity='0.55'/><circle cx='%.1f' cy='%.1f' r='1.1' fill='#FFFFFF'/></g>"
+          opacity x (- y 0.7) (+ x length) (- y (* 0.55 length)) x (+ y 0.7) x y))
+
+(defun lme-browser--meteors (frame)
+  "Return SVG of the meteors in FRAME of the shower, or of the still sky
+when FRAME is nil."
+  (if (null frame)
+      (lme-browser--meteor 29.5 3.5 7 1)
+    (mapconcat
+     (lambda (start)
+       (let ((step (mod (+ frame start) lme-browser-throbber-frames)))
+         (lme-browser--meteor (- 40 (* 3.6 step)) (+ 1 (* 2.4 step)) 8
+                              (- 1 (/ (float step) lme-browser-throbber-frames)))))
+     '(0 4 7) "")))
+
+(defun lme-browser--draw-throbber (frame pressed)
+  "Return SVG of the throbber: the Netscape N in a bevel, FRAME of its
+meteor shower falling (nil while the page rests), pushed in when PRESSED."
+  (let ((size lme-browser-tool-height))
+    (lme-browser--svg
+     size size
+     (lme-browser--bevel size size pressed)
+     (format "<svg x='4' y='4' width='%d' height='%d' viewBox='0 0 40 40'>%s</svg>"
+             (- size 8) (- size 8) (format lme-browser--logo (lme-browser--meteors frame))))))
+
+(defun lme-browser--draw-padlock (secure)
+  "Return SVG of the status bar's padlock: shut and in the accent colour
+when SECURE, open and grey when not."
+  (let ((ink (lme-platinum--color (if secure :text :shade)))
+        (fill (lme-platinum--color (if secure :accent :muted))))
+    (lme-browser--svg
+     12 14
+     (format "<path d='%s' fill='none' stroke='%s' stroke-width='1.6'/>"
+             (if secure "M3.5 7 L3.5 4.5 A2.5 2.5 0 0 1 8.5 4.5 L8.5 7"
+               "M3.5 7 L3.5 4.5 A2.5 2.5 0 0 1 8.5 4.5 L8.5 5")
+             ink)
+     (format "<rect x='1.5' y='6.5' width='9' height='7' fill='%s' stroke='%s'/>" fill ink))))
+
+(defun lme-browser--draw-progress (fraction)
+  "Return SVG of the status bar's progress bar, FRACTION full."
+  (let ((filled (round (* (min 1 (max 0 fraction)) 78))))
+    (lme-browser--svg
+     80 10
+     (format "<rect width='80' height='10' fill='%s'/>" (lme-platinum--color :frame))
+     (format "<rect x='1' y='1' width='78' height='8' fill='%s'/>" (lme-platinum--color :content))
+     (if (> filled 0)
+         (format "<rect x='1' y='1' width='%d' height='8' fill='%s'/>" filled
+                 (lme-platinum--color :accent))
+       ""))))
+
+;;;;; Navigation toolbar
+
+(defvar lme-browser--throbber-frame nil
+  "The throbber's frame while the shown page loads, or nil.")
+
+(defvar lme-browser--throbber-timer nil
+  "Timer turning the throbber while the shown page loads.")
+
+(defconst lme-browser-tools
+  '((back "Back" lme-browser-back "Go back a page" :back)
+    (forward "Forward" lme-browser-forward "Go forward a page" :forward)
+    (reload "Reload" lme-browser-reload "Load the page again" :page)
+    (home "Home" lme-browser-home "Go to the home page" :page)
+    (search "Search" lme-browser-search "Type a search in the location field" t)
+    (history "History" lme-browser-show-history "List the pages visited" t)
+    (stop "Stop" lme-browser-stop "Stop loading the page" :loading))
+  "The navigation toolbar's buttons: (ICON LABEL COMMAND HELP ENABLED).
+ENABLED is t, or a key of `lme-browser--navigation' saying when.")
+
+(defun lme-browser--press-map (command row)
+  "Return a keymap pressing a button on ROW that runs COMMAND, see
+`lme-platinum-press'."
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map (format "<%s> <down-mouse-1>" row)
+                (lambda (event)
+                  (interactive "e")
+                  (let ((start (event-start event)))
+                    (lme-platinum-press start (lme-platinum--same-target-p start)
+                                        (lambda ()
+                                          (with-selected-window (posn-window start)
+                                            (call-interactively command)))))))
+    (keymap-set map (format "<%s> <mouse-1>" row) #'ignore)
+    map))
+
+(defun lme-browser--tool-button (tool)
+  "Return navigation toolbar button TOOL, an entry of `lme-browser-tools'."
+  (pcase-let* ((`(,icon ,label ,command ,help ,condition) tool)
+               (enabled (or (eq condition t) (plist-get lme-browser--navigation condition)))
+               (target (cons 'header-line icon))
+               (pressed (and enabled (lme-platinum--pressed-p target)))
+               (width (max 46 (+ 14 (lme-browser--label-width label)))))
+    (propertize " " 'display (lme-browser--image
+                              (list 'tool icon enabled pressed width)
+                              (lambda () (lme-browser--draw-tool icon label enabled pressed width)))
+                'help-echo help 'pointer 'arrow 'lme-platinum-target target
+                'keymap (and enabled (lme-browser--press-map command 'header-line)))))
+
+(defun lme-browser--throbber ()
+  "Return the throbber, which goes home when clicked, as Netscape's N went
+to Netscape's own page."
+  (let* ((target '(header-line . throbber))
+         (pressed (lme-platinum--pressed-p target))
+         (frame lme-browser--throbber-frame))
+    (propertize " " 'display (lme-browser--image
+                              (list 'throbber frame pressed)
+                              (lambda () (lme-browser--draw-throbber frame pressed)))
+                'help-echo "Go to the home page" 'pointer 'arrow 'lme-platinum-target target
+                'keymap (lme-browser--press-map #'lme-browser-home 'header-line))))
+
+(defun lme-browser--toolbar ()
+  "Return the navigation toolbar, the address window's header line: big
+buttons, an icon over each name, and the throbber at the right end."
+  (concat (lme-platinum--space 6)
+          (mapconcat #'lme-browser--tool-button lme-browser-tools (lme-platinum--space 2))
+          (propertize " " 'display `(space :align-to (- right (,(+ lme-browser-tool-height 10)))))
+          (lme-browser--throbber)))
+
+(defun lme-browser--turn-throbber ()
+  "Turn the throbber one frame while the shown page loads; stop it, still,
+once the page rests."
+  (let ((loading (when-let* ((buffer (lme-browser--shown-buffer)))
+                   (buffer-local-value 'xwidget-webkit--loading-p buffer))))
+    (if loading
+        (setq lme-browser--throbber-frame
+              (mod (1+ (or lme-browser--throbber-frame -1)) lme-browser-throbber-frames))
+      (setq lme-browser--throbber-frame nil)
+      (when lme-browser--throbber-timer
+        (cancel-timer lme-browser--throbber-timer)
+        (setq lme-browser--throbber-timer nil)))
+    (when-let* ((buffer (get-buffer lme-browser-address-buffer-name)))
+      (with-current-buffer buffer
+        (force-mode-line-update)))))
+
+(defun lme-browser--navigation-state ()
+  "Return what the shown tab can do, see `lme-browser--navigation'.
+Where WebKit cannot tell the pages back and forward, as on macOS, Back and
+Forward are open to any page."
+  (let* ((buffer (lme-browser--shown-buffer))
+         (xwidget (and buffer (with-current-buffer buffer (xwidget-at (point-min)))))
+         (known (fboundp 'xwidget-webkit-back-forward-list))
+         (pages (and xwidget known (ignore-errors (xwidget-webkit-back-forward-list xwidget 1)))))
+    (list :page (and xwidget t)
+          :back (and xwidget (or (not known) (car pages)) t)
+          :forward (and xwidget (or (not known) (nth 2 pages)) t)
+          :loading (and buffer (buffer-local-value 'xwidget-webkit--loading-p buffer) t))))
+
+;;;;; Status bar
+
+(defun lme-browser--status ()
+  "Return the status bar of the page being drawn: the padlock, then the
+progress bar and what is loading, or Netscape's \"Document: Done\"."
+  (let* ((xwidget (xwidget-at (point-min)))
+         (uri (and xwidget (xwidget-webkit-uri xwidget)))
+         (secure (and uri (string-prefix-p "https:" uri)))
+         (host (and uri (url-host (url-generic-parse-url uri)))))
+    (concat (propertize " " 'display (lme-browser--image
+                                      (list 'padlock secure)
+                                      (lambda () (lme-browser--draw-padlock secure))))
+            " "
+            (if (and xwidget xwidget-webkit--loading-p)
+                (let ((progress (or (ignore-errors (xwidget-webkit-estimated-load-progress xwidget))
+                                    0)))
+                  (concat (propertize " " 'display (lme-browser--image
+                                                    (list 'progress (round (* 20 progress)))
+                                                    (lambda () (lme-browser--draw-progress progress))))
+                          " "
+                          (if (and host (not (string-empty-p host)))
+                              (format "Loading %s…" host)
+                            "Loading…")))
+              "Document: Done"))))
 
 ;;;;; Address window
 
@@ -323,18 +734,55 @@ An edited address is kept while the page stays put; see `lme-browser--sync'.")
 (defconst lme-browser-address-height 30
   "Pixel height of the address line, the edit field and the toolbar around it.")
 
+(defvar lme-browser-bookmarks-button-map
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "<down-mouse-1>" #'lme-browser-bookmarks-menu)
+    (keymap-set map "<mouse-1>" #'ignore)
+    map)
+  "Keymap of the location toolbar's Bookmarks button.")
+
+(defun lme-browser-bookmarks-menu (&optional _event)
+  "Pop up the Bookmarks menu, as the location toolbar's Bookmarks button did."
+  (interactive (list last-nonmenu-event))
+  (lme-popup-menu (lme-browser--bookmark-items)))
+
+(defun lme-browser--bookmarks-button ()
+  "Return the location toolbar's Bookmarks button: a bevel button holding
+the bookmark ribbon, its name and a menu arrow."
+  (let ((label (concat " "
+                       (propertize " " 'display (lme-browser--image
+                                                 '(ribbon)
+                                                 (lambda ()
+                                                   (lme-browser--svg
+                                                    16 16
+                                                    (format "<g transform='scale(0.66)'>%s</g>"
+                                                            (format-spec (alist-get 'bookmarks lme-browser--icons)
+                                                                         (lme-browser--ink t)))))))
+                       " Bookmarks ▾ ")))
+    (add-face-text-property 0 (length label) 'lme-platinum-button t label)
+    (propertize label 'keymap lme-browser-bookmarks-button-map 'pointer 'arrow
+                'mouse-face 'lme-platinum-button-pressed
+                'help-echo "Bookmarks: add one, edit them, or go to one")))
+
 (defun lme-browser--render-address (uri)
-  "Fill the address buffer with its label and the editable URI.
-The URI sits in an edit field, see `lme-browser--draw-field'.  Filling is
-not an edit: change hooks are inhibited and the edit mark cleared."
+  "Fill the address buffer with the location toolbar and the editable URI:
+the Bookmarks button, the page's icon and the Location label, as
+Netscape's location toolbar had them.  The URI sits in an edit field, see
+`lme-browser--draw-field'.  Filling is not an edit: change hooks are
+inhibited and the edit mark cleared."
   (with-current-buffer (lme-browser--address-buffer)
     (setq lme-browser--address-edited nil)
     (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t))
+          (inhibit-modification-hooks t)
+          (page (lme-browser--shown-buffer)))
       (erase-buffer)
       (insert (propertize " " 'display `(space :width (8) :height (,lme-browser-address-height)
                                                :ascent 65))
-              (propertize "Address:" 'face 'lme-platinum-toolbar-label)
+              (lme-browser--bookmarks-button)
+              (lme-platinum--space 10)
+              (or (and page (lme-browser--favicon page)) (lme-platinum-icon "globe"))
+              " "
+              (propertize "Location:" 'face 'lme-platinum-toolbar-label)
               " ")
       (add-text-properties (point-min) (point)
                            '(read-only t rear-nonsticky (read-only)))
@@ -387,29 +835,36 @@ The field grows as the address is typed at its end."
     (goto-char (point-max))
     (push-mark lme-browser--address-start t t)))
 
-(defvar-keymap lme-browser-address-mode-map
-  :doc "Keymap of the browser address window."
-  "RET" #'lme-browser-address-submit
-  "C-l" #'lme-browser-focus-address)
+(defconst lme-browser-keys
+  '(("C-l" . lme-browser-focus-address)
+    ("M-l" . lme-browser-focus-address)
+    ("M-[" . lme-browser-back)
+    ("M-]" . lme-browser-forward)
+    ("M-r" . lme-browser-reload)
+    ("M-." . lme-browser-stop)
+    ("M-d" . lme-browser-add-bookmark)
+    ("M-b" . lme-browser-edit-bookmarks)
+    ("M-y" . lme-browser-show-history))
+  "The browser's keys, Command keys as Netscape's were where Command is
+Meta: Command-[ and ] go back and forward, Command-D bookmarks the page,
+Command-B edits the bookmarks.  History is Command-Y, as macOS keeps
+Command-H for hiding.")
 
-(defun lme-browser--toolbar ()
-  "Return the browser's toolbar, the address window's header line.
-Bevel buttons go back, forward, reload and home; one at the right end
-opens the page in the default browser."
-  (let ((trailing (lme-sidebar--toolbar-buttons
-                   '(("Open in Browser" lme-browser-open-external
-                      "Open the page in the default browser"))
-                   'header-line)))
-    (concat " "
-            (lme-sidebar--toolbar-buttons
-             '(("◀ Back" lme-browser-back "Go back a page")
-               ("Forward ▶" lme-browser-forward "Go forward a page")
-               ("Reload" lme-browser-reload "Load the page again")
-               ("Home" lme-browser-home "Go to the home page"))
-             'header-line)
-            (propertize " " 'display
-                        `(space :align-to (- right (,(+ (string-pixel-width trailing) 6)))))
-            trailing)))
+(defun lme-browser-bind-keys (map)
+  "Bind `lme-browser-keys' in keymap MAP."
+  (pcase-dolist (`(,key . ,command) lme-browser-keys)
+    (keymap-set map key command)))
+
+(defun lme-browser--key (command)
+  "Return the key of COMMAND among `lme-browser-keys', for a menu."
+  (car (rassq command lme-browser-keys)))
+
+(defvar lme-browser-address-mode-map
+  (let ((map (make-sparse-keymap)))
+    (lme-browser-bind-keys map)
+    (keymap-set map "RET" #'lme-browser-address-submit)
+    map)
+  "Keymap of the browser address window.")
 
 (defun lme-browser--close-window (_window)
   "Close the browser window's shown tab, from its title bar's close box."
@@ -431,18 +886,22 @@ opens the page in the default browser."
 
 (define-derived-mode lme-browser-address-mode fundamental-mode "Address"
   "Major mode of the browser's address window.
-Its title bar names the shown page, its header line is the toolbar and
-its one line the address.
+Its title bar names the shown page, its header line is the navigation
+toolbar, its one line the location toolbar and its mode line the personal
+toolbar.
 \\{lme-browser-address-mode-map}"
-  (setq-local mode-line-format nil
+  (setq-local mode-line-format '(:eval (lme-browser--personal-toolbar))
               header-line-format '(:eval (lme-browser--toolbar))
               truncate-lines t
               cursor-type 'bar
               lme-platinum-title lme-browser-workspace-name
-              lme-platinum-icon (lme-platinum-icon "globe")
+              lme-platinum-icon (lme-platinum-icon "netscape")
               lme-platinum-box-functions (lme-browser--boxes))
   (face-remap-add-relative 'default 'lme-platinum-toolbar)
   (face-remap-add-relative 'header-line 'lme-platinum-header)
+  ;; The personal toolbar is a toolbar, lit or not.
+  (face-remap-add-relative 'mode-line 'lme-platinum-toolbar)
+  (face-remap-add-relative 'mode-line-inactive 'lme-platinum-toolbar)
   (display-line-numbers-mode -1)
   (visual-line-mode -1)
   (add-hook 'after-change-functions #'lme-browser--note-address-edit nil t))
@@ -634,11 +1093,12 @@ globe until the icon is known and when the page has none."
     (set-window-buffer window buffer)
     (lme-browser--sync t)))
 
-(defun lme-browser-new-tab ()
-  "Open `lme-browser-home-url' in a new browser tab and show it."
+(defun lme-browser-new-tab (&optional url)
+  "Open URL, by default `lme-browser-home-url', in a new browser tab and
+show it."
   (interactive)
   (with-selected-window (or (lme-browser--window) (lme-agent--main-window))
-    (xwidget-webkit-browse-url lme-browser-home-url t))
+    (xwidget-webkit-browse-url (or url lme-browser-home-url) t))
   (lme-browser--sync t))
 
 (declare-function lme-desktop-show "lme-desktop" (&optional window))
@@ -684,19 +1144,19 @@ the desktop in front.  It opens again full screen or floating, as it was."
   "Repeating timer keeping the address window in step with the page.")
 
 (defvar lme-browser--synced-state nil
-  "Address, tab titles, shown tab and its loading flag at the last sync.")
+  "Address, tab titles, shown tab and what it can do at the last sync.")
 
-(defvar xwidget-webkit--loading-p)
 
 (defun lme-browser--state ()
   "Return what the address window shows: the address, tab titles, shown tab.
-The shown tab's loading flag is included, so a finished load redraws the
-tab line, whose page icons are looked up once a page has loaded."
-  (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+What the shown tab can do is included, see `lme-browser--navigation': a
+finished load redraws the tab line, whose page icons are looked up once a
+page has loaded, and the toolbar, whose buttons it enables."
+  (let ((shown (lme-browser--shown-buffer)))
     (list (lme-browser--uri)
           (mapcar #'buffer-name (lme-browser--buffers))
           shown
-          (and shown (buffer-local-value 'xwidget-webkit--loading-p shown)))))
+          (lme-browser--navigation-state))))
 
 (defun lme-browser--sync (&optional force)
   "Show the current page's address and tabs in the address window.
@@ -712,7 +1172,12 @@ shows the page's address.  The timer stops once no address window is left."
              (edited (buffer-local-value 'lme-browser--address-edited
                                          (window-buffer address))))
         (when (or force (not (equal state lme-browser--synced-state)))
-          (setq lme-browser--synced-state state)
+          (setq lme-browser--synced-state state
+                lme-browser--navigation (nth 3 state))
+          (when (and (plist-get lme-browser--navigation :loading)
+                     (not lme-browser--throbber-timer))
+            (setq lme-browser--throbber-timer
+                  (run-with-timer 0 0.12 #'lme-browser--turn-throbber)))
           (lme-browser--redraw-tabs)
           (when (or force (not edited)
                     (and moved (not (eq address (selected-window)))))
@@ -968,7 +1433,9 @@ so the arrow pointer is applied once the current command finishes."
   ;; toolbar; the page's own top line holds the tabs, and WebKit's title
   ;; line would only repeat the title.
   (setq-local tab-line-format '(:eval (lme-browser--tab-line))
-              header-line-format nil)
+              header-line-format nil
+              ;; The bottom edge is Netscape's status bar.
+              lme-platinum-info #'lme-browser--status)
   ;; The title bar above lights and dims with the page.
   (add-hook 'window-selection-change-functions
             (lambda (_) (force-mode-line-update t)) nil t)

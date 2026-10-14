@@ -407,7 +407,7 @@ them, up selecting the folder it came from."
     (let ((lme-apps--frontmost 'browser))
       (should (equal (lme-test--menu-bar-titles)
                      '(lme-lambda lme-browser-file lme-browser-view lme-browser-go
-                                  lme-browser-window))))))
+                                  lme-browser-bookmarks lme-browser-window))))))
 
 (ert-deftest lme-test-application-follows-its-selected-window ()
   "Selecting a floating window puts its application in front; the screen,
@@ -1044,6 +1044,101 @@ _NET_SUPPORTING_WM_CHECK names, or to `gone' for a destroyed window."
       (cl-letf (((symbol-function 'x-window-property)
                  (lme-test--x-properties '((0 . 7) (7 . gone)))))
         (should (lme-exwm-wanted-p 'x))))))
+
+;;;; The browser's history and bookmarks
+
+(defmacro lme-test--with-places (&rest body)
+  "Run BODY with an empty history and bookmark list, in files of their own."
+  (declare (indent 0))
+  `(let* ((directory (make-temp-file "lme-places" t))
+          (lme-browser-history-file (expand-file-name "history.eld" directory))
+          (lme-browser--history nil)
+          (lme-browser--history-loaded nil)
+          (lme-browser--history-timer nil)
+          (bookmark-default-file (expand-file-name "bookmarks" directory))
+          (bookmark-alist nil)
+          (bookmark-bookmarks-timestamp nil)
+          (bookmark-save-flag nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'run-with-idle-timer) #'ignore))
+           ,@body)
+       (delete-directory directory t))))
+
+(ert-deftest lme-test-history-keeps-each-page-once ()
+  "A page visited again moves to the top with its visits counted; only web
+and file pages are kept, and only so many."
+  (lme-test--with-places
+    (let ((lme-browser-history-size 2))
+      (lme-browser-history-add "https://a.example/" "A")
+      (lme-browser-history-add "about:blank" "")
+      (lme-browser-history-add "https://b.example/" "B")
+      (lme-browser-history-add "https://a.example/" "")
+      (should (equal (mapcar #'car lme-browser--history)
+                     '("https://a.example/" "https://b.example/")))
+      (should (equal (nth 1 (car lme-browser--history)) "A"))
+      (should (= (nth 3 (car lme-browser--history)) 2))
+      (lme-browser-history-add "https://c.example/" "C")
+      (should (equal (mapcar #'car lme-browser--history)
+                     '("https://c.example/" "https://a.example/"))))))
+
+(ert-deftest lme-test-history-is-saved-and-read ()
+  "The history is written to its file and read back from it."
+  (lme-test--with-places
+    (lme-browser-history-add "https://a.example/" "A")
+    (lme-browser--save-history)
+    (setq lme-browser--history nil
+          lme-browser--history-loaded nil)
+    (should (equal (car (car (lme-browser--load-history))) "https://a.example/"))))
+
+(ert-deftest lme-test-history-days ()
+  "History is listed under the day of each visit."
+  (let ((now (float-time)))
+    (should (equal (lme-browser--history-day now) "Today"))
+    (should (equal (lme-browser--history-day (- now 86400)) "Yesterday"))
+    (should (equal (lme-browser--history-day (- now (* 10 86400))) "Last Week"))
+    (should (equal (lme-browser--history-day (- now (* 40 86400))) "Earlier"))))
+
+(ert-deftest lme-test-bookmarks-are-emacs-bookmarks ()
+  "A page bookmarked is an Emacs bookmark xwidget can open; it is kept
+once, and the browser lists only web pages' bookmarks, oldest first."
+  (lme-test--with-places
+    (bookmark-store "notes" '((filename . "/tmp/notes.org")) nil)
+    (cl-letf (((symbol-function 'lme-browser--shown-buffer) (lambda () (current-buffer)))
+              ((symbol-function 'lme-browser--title) (lambda (_) "Example"))
+              ((symbol-function 'lme-browser--uri) (lambda (_) "https://example.com/")))
+      (lme-browser-add-bookmark)
+      (lme-browser-add-bookmark))
+    (should (equal (lme-browser-bookmarks) '(("Example" . "https://example.com/"))))
+    (should (eq (bookmark-prop-get "Example" 'handler) 'xwidget-webkit-bookmark-jump-handler))
+    (should (equal (lme-browser--bookmark-name "Example") "Example <2>"))
+    (let ((labels (mapcar (lambda (item) (and (consp item) (plist-get item :label)))
+                          (lme-browser--bookmark-items))))
+      (should (equal labels '("Add Bookmark" "Edit Bookmarks…" nil "Example"))))
+    (lme-browser-delete-bookmark "Example")
+    (should-not (lme-browser-bookmarks))))
+
+(ert-deftest lme-test-browser-keys-show-in-menus ()
+  "The browser's Command keys show beside their menu items."
+  (should (equal (lme-browser--key 'lme-browser-add-bookmark) "M-d"))
+  (let ((lme-browser--navigation '(:page t :back t :forward t)))
+    (should (equal (plist-get (car (lme-browser--go-items)) :key) "M-["))))
+
+(ert-deftest lme-test-throbber-turns-while-loading ()
+  "The throbber turns while the shown page loads and rests once it is done."
+  (let ((lme-browser--throbber-frame nil)
+        (lme-browser--throbber-timer nil)
+        (loading t))
+    (with-temp-buffer
+      (setq-local xwidget-webkit--loading-p t)
+      (cl-letf (((symbol-function 'lme-browser--shown-buffer)
+                 (let ((buffer (current-buffer)))
+                   (lambda () (setq-local xwidget-webkit--loading-p loading) buffer))))
+        (lme-browser--turn-throbber)
+        (lme-browser--turn-throbber)
+        (should (eql lme-browser--throbber-frame 1))
+        (setq loading nil)
+        (lme-browser--turn-throbber)
+        (should-not lme-browser--throbber-frame)))))
 
 (provide 'lme-test)
 ;;; lme-test.el ends here

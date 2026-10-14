@@ -81,7 +81,7 @@ A workspace's main area shows it where it holds nothing else.")
           :help "Your home folder, in a Finder window")
     (editor :label "Emacs" :icon emacs :command lme-editor-activate
             :help "The editor: your projects, agents and shells")
-    (browser :label "Browser" :icon "globe-32" :command lme-browser-show
+    (browser :label "Browser" :icon "netscape" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
     (trash :label "Trash" :icon-function lme-desktop--trash-icon
            :command lme-desktop-open-trash :bottom t :help "What was thrown away"))

@@ -969,7 +969,7 @@ project's folder for a project's.  Clicked, it lists every workspace."
                          ((equal name (bound-and-true-p tabspaces-default-tab))
                           (lme-platinum-icon "disk"))
                          ((and (fboundp 'lme-browser-workspace-p) (lme-browser-workspace-p))
-                          (lme-platinum-icon "globe"))
+                          (lme-platinum-icon "netscape"))
                          (t (lme-platinum-folder-icon
                              (car (rassoc name (bound-and-true-p tabspaces-project-tab-map))))))
                    " " (or (cdr application) name) " ▾")
