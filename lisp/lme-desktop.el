@@ -36,8 +36,9 @@
 ;; A click selects an icon, darkening it and inverting its name, and a
 ;; double click opens it; the arrow keys select, Return or Command-O opens.
 ;; An icon is dragged anywhere on the desktop, a translucent copy following
-;; the mouse, and stays where it is dropped; View › Clean Up puts the icons
-;; back in their column.
+;; the mouse, and is dropped on the grid the column lies on, in the free
+;; cell nearest; Arrange Icons, in the View menu and the desktop's
+;; right-click menu, puts every icon back where it stood at first.
 ;;
 ;;   window --size--> layout: each icon where it was put, from the edges
 ;;                    nearest it, or in the column; the Trash at the bottom
@@ -235,6 +236,8 @@ Dragging an icon sets this."
   "<double-down-mouse-1>" #'ignore
   "<double-mouse-1>" #'lme-desktop-mouse-open
   "<drag-mouse-1>" #'ignore
+  "<down-mouse-3>" #'lme-desktop-context-menu
+  "<mouse-3>" #'ignore
   "<down>" #'lme-desktop-select-next
   "<right>" #'lme-desktop-select-next
   "TAB" #'lme-desktop-select-next
@@ -478,25 +481,29 @@ bottom corner when BOTTOM, else down from the top."
     (list :right lme-desktop-margin
           (if bottom :bottom :top) (+ lme-desktop-margin (* index (+ cell-height lme-desktop-gap))))))
 
+(defun lme-desktop--cell-free-p (xy taken)
+  "Return non-nil when a cell at XY, (X . Y), overlaps none of the cells at
+TAKEN, a list of (X Y)."
+  (pcase-let ((`(,cell-width . ,cell-height) (lme-desktop--cell-size)))
+    (seq-every-p (pcase-lambda (`(,x ,y))
+                   (or (>= (abs (- x (car xy))) cell-width)
+                       (>= (abs (- y (cdr xy))) cell-height)))
+                 taken)))
+
 (defun lme-desktop--layout (width height)
   "Return where each icon stands on a desktop WIDTH by HEIGHT:
 \((ITEM X Y) ...), X and Y its cell's top left corner.  An icon put
 somewhere stands there, see `lme-desktop-icon-places'; the others take the
 first cells of the column no put icon covers."
-  (pcase-let* ((`(,cell-width . ,cell-height) (lme-desktop--cell-size))
-               (items (lme-desktop--items))
-               (placed (seq-keep (lambda (item)
-                                   (when-let* ((place (alist-get (car item) lme-desktop-icon-places)))
-                                     (let ((xy (lme-desktop--place-xy place width height)))
-                                       (list item (car xy) (cdr xy)))))
-                                 items))
-               (taken (mapcar #'cdr placed))
-               (indices (list 0 0)))
-    (cl-flet ((free-p (xy)
-                (seq-every-p (pcase-lambda (`(,x ,y))
-                               (or (>= (abs (- x (car xy))) cell-width)
-                                   (>= (abs (- y (cdr xy))) cell-height)))
-                             taken)))
+  (let* ((items (lme-desktop--items))
+         (placed (seq-keep (lambda (item)
+                             (when-let* ((place (alist-get (car item) lme-desktop-icon-places)))
+                               (let ((xy (lme-desktop--place-xy place width height)))
+                                 (list item (car xy) (cdr xy)))))
+                           items))
+         (taken (mapcar #'cdr placed))
+         (indices (list 0 0)))
+    (cl-flet ((free-p (xy) (lme-desktop--cell-free-p xy taken)))
       (append
        placed
        (seq-keep
@@ -680,21 +687,44 @@ askew in full screen."
     (cdr (seq-find (lambda (entry) (eq (car (car entry)) key))
                    (lme-desktop--layout width height)))))
 
+(defun lme-desktop--snap (x y width height taken)
+  "Return the place on the grid nearest a cell dropped at X, Y of a desktop
+WIDTH by HEIGHT, among those no cell at TAKEN, a list of (X Y), covers.
+The grid is the column's: cells a column wide and a row apart, counted
+from the edges nearest the drop, as the column counts from the right edge
+and the Trash from the bottom, so a dropped icon lines up with them."
+  (pcase-let* ((`(,cell-width . ,cell-height) (lme-desktop--cell-size))
+               (pitch (+ cell-height lme-desktop-gap))
+               (horizontal (if (> (+ x (/ cell-width 2)) (/ width 2)) :right :left))
+               (vertical (if (> (+ y (/ cell-height 2)) (/ height 2)) :bottom :top))
+               (columns (max 1 (/ (- width (* 2 lme-desktop-margin)) cell-width)))
+               (rows (max 1 (/ (+ (- height (* 2 lme-desktop-margin)) lme-desktop-gap) pitch)))
+               (cells nil))
+    (dotimes (column columns)
+      (dotimes (row rows)
+        (let* ((place (list horizontal (+ lme-desktop-margin (* column cell-width))
+                            vertical (+ lme-desktop-margin (* row pitch))))
+               (xy (lme-desktop--place-xy place width height)))
+          (push (list (+ (expt (- (car xy) x) 2) (expt (- (cdr xy) y) 2)) place xy) cells))))
+    (setq cells (sort cells (lambda (a b) (< (car a) (car b)))))
+    (nth 1 (or (seq-find (lambda (cell) (lme-desktop--cell-free-p (nth 2 cell) taken)) cells)
+               (car cells)))))
+
 (defun lme-desktop--drop (key x y window)
-  "Leave icon KEY with its cell's top left at X, Y of the desktop in WINDOW.
-Every icon is kept where it stands now, so that only KEY moves, and the
-places are saved for the next start."
+  "Leave icon KEY dropped with its cell's top left at X, Y of the desktop in
+WINDOW, on the nearest free cell of the grid, see `lme-desktop--snap'.
+Every other icon is kept where it stands now, so that only KEY moves,
+and the places are saved for the next start."
   (let* ((width (window-body-width window t))
          (height (1- (window-body-height window t)))
+         (layout (lme-desktop--layout width height))
+         (others (seq-remove (lambda (entry) (eq (car (car entry)) key)) layout))
          (places (mapcar (pcase-lambda (`((,item . ,_) ,item-x ,item-y))
-                           (cons item (if (eq item key)
-                                          (pcase-let ((`(,cell-x . ,cell-y)
-                                                       (lme-desktop--place-xy
-                                                        (lme-desktop--xy-place x y width height)
-                                                        width height)))
-                                            (lme-desktop--xy-place cell-x cell-y width height))
-                                        (lme-desktop--xy-place item-x item-y width height))))
-                         (lme-desktop--layout width height))))
+                           (cons item
+                                 (if (eq item key)
+                                     (lme-desktop--snap x y width height (mapcar #'cdr others))
+                                   (lme-desktop--xy-place item-x item-y width height))))
+                         layout)))
     (customize-save-variable 'lme-desktop-icon-places places)))
 
 (declare-function lme-popup--frame "lme-popup" (parent))
@@ -812,11 +842,40 @@ up, and a press let go where it was only selects."
           ((not (memq (event-basic-type event) '(mouse-1 drag-mouse-1 escape)))
            (setq unread-command-events (list event))))))
 
-(defun lme-desktop-clean-up ()
-  "Put the desktop's icons back in their column, as they stood at first."
+(defun lme-desktop-arrange-icons ()
+  "Arrange the desktop's icons as they stood at first: down the column at
+the right edge, the Trash in the bottom corner.  However they were
+dragged about, this puts them back."
   (interactive)
   (customize-save-variable 'lme-desktop-icon-places nil)
   (lme-desktop--render))
+
+(declare-function lme-popup-menu "lme-popup" (items &optional x y align))
+(declare-function lme-popup--frame-xy "lme-popup" (position))
+
+(defun lme-desktop--arrange-items ()
+  "Return the menu items arranging the desktop's icons."
+  `((:label "Arrange Icons" :action lme-desktop-arrange-icons
+            :enabled ,(and lme-desktop-icon-places t))))
+
+(defun lme-desktop-context-menu (event)
+  "Pop up the desktop's menu where EVENT right-clicked: Open for the icon
+under it, then Arrange Icons and the desktop picture, as Mac OS 9's
+desktop offered them."
+  (interactive "e")
+  (lme-desktop-mouse-select event)
+  (let ((selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer)))
+        (xy (lme-popup--frame-xy event)))
+    (lme-popup-menu
+     `(,@(when selected
+           '((:label "Open" :action lme-desktop-open :key "M-o")
+             separator))
+       ,@(lme-desktop--arrange-items)
+       separator
+       (:label "Desktop Picture…" :action lme-desktop-choose-picture)
+       (:label "No Desktop Picture" :action lme-desktop-remove-picture
+               :enabled ,(and lme-desktop-picture t)))
+     (car xy) (cdr xy))))
 
 (defun lme-desktop-mouse-open (event)
   "Open the desktop icon double-clicked by EVENT."
@@ -1047,8 +1106,7 @@ on the Finder window when it had the keyboard last, else on the desktop."
 
 (defun lme-desktop--view-items ()
   "Return the items of the desktop's View menu."
-  `((:label "Clean Up" :action lme-desktop-clean-up
-            :enabled ,(and lme-desktop-icon-places t))))
+  (lme-desktop--arrange-items))
 
 (defun lme-desktop-menus ()
   "Return the desktop's menus, for the menu bar while it is in front."

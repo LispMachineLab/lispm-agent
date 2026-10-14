@@ -16,9 +16,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   home disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
   double-click it (or press Return) to open it.  Drag one anywhere, a translucent copy following
-  the mouse, and it stays where it is dropped, at the next start too, kept by the edges nearest
-  it so that it follows them as the desktop changes size; View › Clean Up puts the icons back in
-  their column.  A desktop picture is drawn from a copy scaled to the desktop, made once by the
+  the mouse, and it is dropped on the grid the column lies on, in the free cell nearest, and stays
+  there at the next start too, kept by the edges nearest it so that it follows them as the
+  desktop changes size.  Arrange Icons, in the desktop's right-click menu and its View menu,
+  puts every icon back where it stood at first.  A desktop picture is drawn from a copy scaled to the desktop, made once by the
   system's =sips= (or ImageMagick), so clicks and drags stay quick.  Floating windows (the Finder's, the floating
   editor) stay whole on the desktop, which on macOS does not clip them: dragged past its edge
   they come back onto it, and when Emacs's frame changes size, as going full screen and back

@@ -270,17 +270,35 @@ nearest it, kept whole on the desktop; the others keep to free cells."
             ((symbol-function 'lme-desktop--font) (lambda () '("Geneva" 12 10)))
             ((symbol-function 'window-body-width) (lambda (&rest _) 800))
             ((symbol-function 'window-body-height) (lambda (&rest _) 601))
+            ((symbol-function 'lme-desktop--render) #'ignore)
             ((symbol-function 'customize-save-variable)
              (lambda (variable value) (set variable value))))
-    (let ((lme-desktop-icon-places nil))
+    (let ((lme-desktop-icon-places nil)
+          (pitch (+ (cdr (lme-desktop--cell-size)) lme-desktop-gap)))
+      ;; Dropped near the top left, it lands on the grid cell nearest.
       (lme-desktop--drop 'home 100 120 nil)
-      (should (equal (alist-get 'home lme-desktop-icon-places) '(:left 100 :top 120)))
+      (should (equal (alist-get 'home lme-desktop-icon-places)
+                     (list :left (+ lme-desktop-margin lme-desktop-column)
+                           :top (+ lme-desktop-margin (* 2 pitch)))))
       (should (equal (alist-get 'editor lme-desktop-icon-places)
                      (lme-desktop--xy-place (- 800 lme-desktop-margin lme-desktop-column)
-                                            (+ lme-desktop-margin
-                                               (cdr (lme-desktop--cell-size)) lme-desktop-gap)
+                                            (+ lme-desktop-margin pitch)
                                             800 600)))
-      (lme-desktop-clean-up)
+      ;; Dropped on Emacs's cell, it takes the free cell nearest instead.
+      (lme-desktop--drop 'home (- 800 lme-desktop-margin lme-desktop-column)
+                         (+ lme-desktop-margin pitch 5) nil)
+      (let ((home (lme-desktop--place-xy (alist-get 'home lme-desktop-icon-places) 800 600))
+            (editor (lme-desktop--place-xy (alist-get 'editor lme-desktop-icon-places) 800 600)))
+        (should-not (equal home editor))
+        (should (lme-desktop--cell-free-p home (list (list (car editor) (cdr editor))))))
+      ;; Near the bottom right corner, it lines up with the Trash's row.
+      (lme-desktop--drop 'home (- 800 200) (- 600 lme-desktop-margin 60) nil)
+      (should (equal (plist-get (alist-get 'home lme-desktop-icon-places) :bottom)
+                     lme-desktop-margin))
+      (should (zerop (mod (- (plist-get (alist-get 'home lme-desktop-icon-places) :right)
+                             lme-desktop-margin)
+                          lme-desktop-column)))
+      (lme-desktop-arrange-icons)
       (should-not lme-desktop-icon-places))))
 
 (ert-deftest lme-test-desktop-drag-survives-empty-reads ()
@@ -315,9 +333,33 @@ yet does not end the drag: the icon is still dropped where it is let go."
                           '(mouse-movement (nil)))
                          (t '(drag-mouse-1 (nil) (nil)))))))
         (lme-desktop--drag 'home nil press))
-      (should (equal (lme-desktop--place-xy (alist-get 'home lme-desktop-icon-places) 800 600)
-                     (cons (- (car cell) 100) (+ (cadr cell) 50))))
+      (should (equal (alist-get 'home lme-desktop-icon-places)
+                     (lme-desktop--snap (- (car cell) 100) (+ (cadr cell) 50) 800 600
+                                        (mapcar #'cdr (seq-remove
+                                                       (lambda (entry) (eq (car (car entry)) 'home))
+                                                       (lme-desktop--layout 800 600))))))
       (should-not unread-command-events))))
+
+(ert-deftest lme-test-desktop-right-click-menu ()
+  "A right click on the desktop offers Arrange Icons and the picture; on an
+icon, Open first."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (let ((shown nil)
+          (key nil)
+          (lme-desktop-icon-places '((home :left 10 :top 10))))
+      (cl-letf (((symbol-function 'lme-desktop-mouse-select)
+                 (lambda (_) (with-current-buffer (lme-desktop-buffer)
+                               (setq lme-desktop--selected key))))
+                ((symbol-function 'lme-popup--frame-xy) (lambda (_) '(0 . 0)))
+                ((symbol-function 'lme-popup-menu) (lambda (items &rest _) (setq shown items))))
+        (lme-desktop-context-menu nil)
+        (should (equal (plist-get (car shown) :label) "Arrange Icons"))
+        (should (plist-get (car shown) :enabled))
+        (setq key 'home)
+        (lme-desktop-context-menu nil)
+        (should (equal (plist-get (car shown) :label) "Open"))
+        (should (member "Desktop Picture…"
+                        (mapcar (lambda (item) (and (consp item) (plist-get item :label))) shown)))))))
 
 (ert-deftest lme-test-desktop-draws-the-dragged-copy ()
   "The dragged copy is its cell's piece of the desktop, the icon translucent
