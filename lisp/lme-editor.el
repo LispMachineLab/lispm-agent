@@ -65,8 +65,6 @@
 (declare-function lme-popup--keyboard-p "lme-popup" (keys))
 (declare-function tabspaces--current-tab-name "tabspaces" ())
 (declare-function tabspaces-local-buffer-list "tabspaces" (&optional frame tabnum))
-(declare-function tabspaces-switch-or-create-workspace "tabspaces" (&optional workspace))
-(declare-function tabspaces-close-workspace "tabspaces" ())
 (declare-function tabspaces--set-buffer-predicate "tabspaces" (frame))
 (defvar lme-sidebar-views)
 (defvar lme-browser-workspace-name)
@@ -255,6 +253,20 @@ This is a `tab-bar-tab-post-select-functions' function."
     (when (and (window-live-p window) (window-parameter window 'window-side))
       (delete-window window))))
 
+(defvar lme-editor--views nil
+  "The sidebar view of each workspace taken off for a move: (NAME . VIEW).
+Each is put back when its workspace is next in front.")
+
+(defun lme-editor--restore-chrome ()
+  "Put the title strip on the workspace in front, and the sidebar view it
+showed before the editor last moved."
+  (lme-editor--show-strip)
+  (when-let* ((entry (assoc (alist-get 'name (tab-bar--current-tab)) lme-editor--views)))
+    (setq lme-editor--views (delq entry lme-editor--views))
+    (when (and (cdr entry) (not (eq (cdr entry) (lme-sidebar-current-view))))
+      (let ((lme-editor--moving nil))
+        (lme-sidebar-select (cdr entry))))))
+
 (defun lme-editor--keep-chrome ()
   "Keep the title strip on the editor's workspaces, and off any other.
 Run after every command, so a workspace made or switched to by any means
@@ -265,7 +277,7 @@ floating editor, are left alone."
                 (and (frame-parent frame) (not (eq frame lme-editor--frame))))
       (let ((strip (get-buffer-window lme-editor-strip-buffer-name)))
         (cond ((lme-editor--in-workspace-p)
-               (unless strip (lme-editor--show-strip)))
+               (unless strip (lme-editor--restore-chrome)))
               (strip (delete-window strip)))))))
 
 (defun lme-editor--keep-floating-chrome ()
@@ -391,24 +403,25 @@ This is a `display-buffer' action function."
 
 (defun lme-editor--take-off-chrome (frame)
   "Take the title strip and the sidebar off FRAME's editor workspaces.
-Return the sidebar view the workspace in front showed.  The project tree
-of FRAME goes too: treemacs keeps one per frame, and the editor's next
-frame builds its own."
+The view each showed is kept in `lme-editor--views', to be put back.  The
+project tree of FRAME goes too: treemacs keeps one per frame, and the
+editor's next frame builds its own."
   (with-selected-frame frame
-    (let ((view (lme-sidebar-current-view))
-          (current (tab-bar--current-tab-index)))
+    (let ((current (tab-bar--current-tab-index))
+          (views nil))
       (seq-do-indexed (lambda (tab index)
                         (when (lme-editor--workspace-tab-p tab)
                           (unless (= index (tab-bar--current-tab-index))
                             (tab-bar-select-tab (1+ index)))
+                          (push (cons (alist-get 'name tab) (lme-sidebar-current-view)) views)
                           (lme-editor--delete-side-windows)))
                       (funcall tab-bar-tabs-function))
+      (setq lme-editor--views views)
       (unless (= current (tab-bar--current-tab-index))
         (tab-bar-select-tab (1+ current)))
       (when-let* (((fboundp 'treemacs-get-local-buffer))
                   (tree (treemacs-get-local-buffer)))
-        (kill-buffer tree))
-      view)))
+        (kill-buffer tree)))))
 
 (defun lme-editor--move-workspaces (from to)
   "Move the editor's workspaces from frame FROM to the end of frame TO's tabs.
@@ -472,7 +485,7 @@ without the window configuration that ties it to FROM."
   (unless (lme-editor-floating-p)
     (let* ((screen (lme-apps-screen))
            (lme-editor--moving t)
-           (view (lme-editor--take-off-chrome screen))
+           (_ (lme-editor--take-off-chrome screen))
            (workspace (or (with-selected-frame screen (lme-editor--current-workspace))
                           lme-editor--last-workspace))
            (frame (lme-editor--make-frame screen)))
@@ -493,8 +506,7 @@ without the window configuration that ties it to FROM."
       (select-frame-set-input-focus frame)
       (let ((lme-editor--moving nil))
         (with-selected-frame frame
-          (lme-editor--show-strip)
-          (when view (lme-sidebar-select view))))
+          (lme-editor--restore-chrome)))
       (lme-apps-set-frontmost 'editor))))
 
 (defun lme-editor-full-screen ()
@@ -504,7 +516,7 @@ without the window configuration that ties it to FROM."
     (let* ((frame lme-editor--frame)
            (screen (frame-parent frame))
            (lme-editor--moving t)
-           (view (lme-editor--take-off-chrome frame))
+           (_ (lme-editor--take-off-chrome frame))
            (workspace (with-selected-frame frame (lme-editor--current-workspace))))
       (lme-editor--unshade)
       (setq lme-editor--geometry (lme-editor--geometry-of frame))
@@ -514,8 +526,7 @@ without the window configuration that ties it to FROM."
       (tab-bar-switch-to-tab workspace)
       (delete-frame frame)
       (let ((lme-editor--moving nil))
-        (lme-editor--show-strip)
-        (when view (lme-sidebar-select view)))
+        (lme-editor--restore-chrome))
       (lme-apps-set-frontmost 'editor))))
 
 (defun lme-editor-toggle-floating ()
@@ -618,21 +629,6 @@ the editor full screen or floating."
       ,(lme-editor--item "Floating Window" #'lme-editor-float
                          :checked (lme-editor-floating-p)))))
 
-(defun lme-editor--project-items ()
-  "Return the items of the editor's Project menu: its workspaces, the one
-in front checked, as the Application menu once listed them."
-  (let ((current (lme-editor--current-workspace))
-        (workspaces (lme-editor-workspaces)))
-    `(,@(mapcar (lambda (name)
-                  (lme-editor--item name (lambda () (tab-bar-switch-to-tab name))
-                                    :checked (equal name current)))
-                workspaces)
-      separator
-      ,(lme-editor--item "Open Project…" #'project-switch-project)
-      ,(lme-editor--item "New Workspace…" #'tabspaces-switch-or-create-workspace)
-      ,(lme-editor--item "Close Workspace" #'tabspaces-close-workspace
-                         :enabled (and (cdr workspaces) t)))))
-
 (defun lme-editor--window-items ()
   "Return the items of the editor's Window menu: the buffer manager, then
 the workspace's buffers, the one shown checked, as Mac OS 9's Window menus
@@ -654,7 +650,8 @@ listed an application's windows."
   '((lme-editor-file "File" lme-editor--file-items)
     (lme-editor-edit "Edit" lme-editor--edit-items)
     (lme-editor-view "View" lme-editor--view-items)
-    (lme-editor-project "Project" lme-editor--project-items)
+    ;; The workspaces show as thumbnails, see lme-workspaces.el.
+    (lme-editor-project "Project" lme-workspaces-menu-panel)
     (lme-editor-window "Window" lme-editor--window-items)))
 
 ;;;; Setup

@@ -875,11 +875,15 @@ The Application menu names it; without it, the workspace is named.")
 
 (defun lme-platinum--application-menu-command (key items left)
   "Return a command dropping menu KEY, whose ITEMS a function returns.
-LEFT is the pixel position of its title's left edge, where the menu drops."
+LEFT is the pixel position of its title's left edge, where the menu drops.
+A function whose `lme-platinum-panel' property is set drops a panel of
+its own instead, called with KEY, LEFT and the menu bar's bottom."
   (lambda ()
     (interactive)
-    (lme-platinum--with-open-menu key
-      (lme-popup-menu (funcall items) left (lme-platinum--menu-y)))))
+    (if (and (symbolp items) (get items 'lme-platinum-panel))
+        (funcall items key left (lme-platinum--menu-y))
+      (lme-platinum--with-open-menu key
+        (lme-popup-menu (funcall items) left (lme-platinum--menu-y))))))
 
 (defun lme-platinum--application-menus (menus left)
   "Return the menu bar titles of MENUS, the first starting LEFT pixels in.

@@ -40,6 +40,7 @@
     ("2" . split-window-below)
     ("3" . split-window-right)
     ("4" . other-window)
+    ("w" . lme-workspaces-switch)
     ("5" . other-frame)
     ("g" . magit-status)
     ("t" . eat)
