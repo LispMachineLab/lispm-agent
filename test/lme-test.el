@@ -937,5 +937,65 @@ pops up its buffers on a Meta click."
      (should (= (length (window-list)) 2))
      (should (lme-test--left-p session b)))))
 
+(ert-deftest lme-test-menu-bar-only-outside-the-frame ()
+  "A graphical frame keeps its menu bar only where NS draws it, outside."
+  (let (set)
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (frame) (not (eq frame 'tty))))
+              ((symbol-function 'framep)
+               (lambda (frame) (if (eq frame 'tty) t frame)))
+              ((symbol-function 'set-frame-parameter)
+               (lambda (frame parameter value)
+                 (push (list frame parameter value) set))))
+      (lme-frame-menu-bar 'ns)
+      (lme-frame-menu-bar 'tty)
+      (lme-frame-menu-bar 'x))
+    (should (equal set '((x menu-bar-lines 0))))))
+
+(ert-deftest lme-test-default-font-first-installed ()
+  "The default face takes the first preferred family that is installed,
+unless the user customized it."
+  (let (set)
+    (cl-letf (((symbol-function 'font-family-list)
+               (lambda (&optional _frame) '("Andale Mono" "Menlo")))
+              ((symbol-function 'set-face-attribute)
+               (lambda (face _frame &rest attributes)
+                 (push (cons face attributes) set))))
+      (lme-pin-default-font)
+      (should (equal set '((default :family "Menlo" :height 120))))
+      (setq set nil)
+      (cl-letf (((get 'default 'saved-face) '((t :family "Iosevka"))))
+        (lme-pin-default-font))
+      (should-not set))))
+
+(defun lme-test--x-properties (checks)
+  "Stand in for `x-window-property', reading CHECKS.
+CHECKS maps a window (0 for the root) to the window its
+_NET_SUPPORTING_WM_CHECK names, or to `gone' for a destroyed window."
+  (lambda (_property _frame _type source &rest _)
+    (pcase (alist-get source checks)
+      ('nil nil)
+      ('gone (error "BadWindow"))
+      (check check))))
+
+(ert-deftest lme-test-exwm-only-without-a-window-manager ()
+  "Emacs manages an X display only when no window manager runs on it."
+  (let ((lme-window-manager 'auto))
+    (cl-letf (((symbol-function 'framep) (lambda (frame) frame)))
+      (cl-letf (((symbol-function 'x-window-property)
+                 (lme-test--x-properties nil)))
+        (should-not (lme-exwm-wanted-p 'ns))
+        (should (lme-exwm-wanted-p 'x))
+        (let ((lme-window-manager nil))
+          (should-not (lme-exwm-wanted-p 'x))))
+      ;; A running window manager: the root names a window naming itself.
+      (cl-letf (((symbol-function 'x-window-property)
+                 (lme-test--x-properties '((0 . 7) (7 . 7)))))
+        (should-not (lme-exwm-wanted-p 'x)))
+      ;; A window manager that quit left its check window's name behind.
+      (cl-letf (((symbol-function 'x-window-property)
+                 (lme-test--x-properties '((0 . 7) (7 . gone)))))
+        (should (lme-exwm-wanted-p 'x))))))
+
 (provide 'lme-test)
 ;;; lme-test.el ends here

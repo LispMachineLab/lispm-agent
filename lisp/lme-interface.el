@@ -291,6 +291,28 @@ Agent terminals are named by their session title."
          (buffer (window-buffer window)))
     (or (lme-agent-buffer-label buffer) (buffer-name buffer))))
 
+(defconst lme-default-font-families '("Monaco" "Menlo" "DejaVu Sans Mono")
+  "Font families for the default face, in order of preference.
+Mac OS Emacs (NS) draws in Monaco when nothing is set, but X Emacs asks
+fontconfig for \"monospace\", which on a Mac is Andale Mono; naming the
+family keeps every build of Emacs alike.")
+
+(defun lme-pin-default-font ()
+  "Draw the default face in the first installed of `lme-default-font-families'.
+A default face customized with Customize is left as it is."
+  (unless (or (get 'default 'saved-face) (get 'default 'customized-face))
+    (when-let* ((family (seq-find (lambda (family) (member family (font-family-list)))
+                                  lme-default-font-families)))
+      (set-face-attribute 'default nil :family family :height 120))))
+
+(defun lme-frame-menu-bar (&optional frame)
+  "Keep FRAME's menu bar only where it is drawn outside the frame.
+Mac OS Emacs (NS) puts it at the top of the screen; on X it would be a
+second bar inside the frame, above the Platinum menu bar."
+  (let ((frame (or frame (selected-frame))))
+    (when (and (display-graphic-p frame) (not (eq (framep frame) 'ns)))
+      (set-frame-parameter frame 'menu-bar-lines 0))))
+
 (defconst lme-terminal-font-family "Maple Mono NF CN"
   "Monospace family whose glyphs all occupy whole terminal cells.
 A CJK ideograph is exactly two Latin cells wide, and box drawing, block
@@ -374,6 +396,7 @@ cells and split-pane dividers drawn with box characters stay straight."
   (when (lme-macos-p)
     (define-key global-map [ns-drag-file] 'ns-find-file))
   (when (lme-gui-p)
+    (lme-pin-default-font)
     (lme-pin-cjk-font))
   (lme-ansi-apply-faces)
   (add-hook 'enable-theme-functions #'lme-ansi-apply-faces)
@@ -404,7 +427,9 @@ cells and split-pane dividers drawn with box characters stay straight."
         doc-view-continuous t)
   (set-face-attribute 'mode-line nil :height 120)
   (when (fboundp 'menu-bar-mode)
-    (menu-bar-mode 1))
+    (menu-bar-mode 1)
+    (mapc #'lme-frame-menu-bar (frame-list))
+    (add-hook 'after-make-frame-functions #'lme-frame-menu-bar))
   (show-paren-mode 1)
   (when (fboundp 'tooltip-mode)
     (tooltip-mode 1))

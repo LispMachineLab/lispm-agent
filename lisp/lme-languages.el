@@ -35,13 +35,16 @@
     :ensure nil
     :init
     (setq treesit-auto-install-grammar 'always)
-    (setopt treesit-enabled-modes '(typescript-ts-mode
-                                    tsx-ts-mode
-                                    js-ts-mode
-                                    go-ts-mode
-                                    go-mod-ts-mode
-                                    yaml-ts-mode
-                                    json-ts-mode)))
+    ;; An Emacs built without tree-sitter offers no such modes, and the
+    ;; option's type would reject every one of them.
+    (when (treesit-available-p)
+      (setopt treesit-enabled-modes '(typescript-ts-mode
+                                      tsx-ts-mode
+                                      js-ts-mode
+                                      go-ts-mode
+                                      go-mod-ts-mode
+                                      yaml-ts-mode
+                                      json-ts-mode))))
 
   (use-package eldoc
     :ensure nil

@@ -61,6 +61,7 @@
 (require 'lme-buffer-manager)
 (require 'lme-workspaces)
 (require 'lme-finder)
+(require 'lme-exwm)
 (require 'lme-languages)
 (require 'lme-ai)
 (require 'lme-agent-list)
@@ -160,6 +161,8 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lme-setup-langs)
     (lme-setup-ai)
     (lme-setup-lispm)
+    ;; After init, so personal.el can still set `lme-window-manager'.
+    (add-hook 'window-setup-hook #'lme-setup-exwm)
     (add-hook 'window-setup-hook #'lme--show-startup-view)
     (when first
       (lme--offer-fonts)
