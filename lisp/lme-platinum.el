@@ -704,6 +704,96 @@ buffer whose process still runs asks before the process is stopped."
                   "What runs in it will be stopped.")))
      (t t))))
 
+(defun lme-platinum--yes-or-no (prompt &rest _)
+  "Ask PROMPT, a question answered yes or no, in an alert; non-nil for Yes."
+  (eq 'yes (lme-popup-alert
+            'caution
+            (replace-regexp-in-string "\\s-*([^()]*)\\s-*\\'" "" (string-trim prompt))
+            '(("No" no cancel) ("Yes" yes default)))))
+
+(defun lme-platinum--names (names)
+  "Return NAMES as a phrase: the first three quoted, then a count of the rest."
+  (let ((quoted (mapcar (lambda (name) (format "“%s”" (string-trim name "\\*" "\\*")))
+                        (seq-take names 3)))
+        (rest (- (length names) 3)))
+    (cond ((> rest 0)
+           (format "%s and %d other%s" (string-join quoted ", ") rest (if (= rest 1) "" "s")))
+          ((cdr quoted)
+           (concat (string-join (butlast quoted) ", ") " and " (car (last quoted))))
+          (t (car quoted)))))
+
+(defun lme-platinum--running-programs ()
+  "Return the titles of the buffers whose programs quitting Emacs stops:
+those of Emacs's processes that ask before they are killed, and of
+lme-term's terminals, whose programs are not Emacs's processes."
+  (delete-dups
+   (append
+    (delq nil (mapcar (lambda (process)
+                        (when (and (memq (process-status process) '(run stop open listen))
+                                   (process-query-on-exit-flag process))
+                          (if (buffer-live-p (process-buffer process))
+                              (lme-platinum--buffer-title (process-buffer process))
+                            (process-name process))))
+                      (process-list)))
+    (mapcar #'lme-platinum--buffer-title
+            (and (fboundp 'lme-term-running-buffers) (lme-term-running-buffers))))))
+
+(defun lme-platinum--unsaved-documents ()
+  "Return the buffers `save-buffers-kill-emacs' offers to save."
+  (if (fboundp 'files--buffers-needing-to-be-saved)
+      (files--buffers-needing-to-be-saved t)
+    (seq-filter (lambda (buffer) (and (buffer-file-name buffer) (buffer-modified-p buffer)))
+                (buffer-list))))
+
+(defun lme-platinum--quit-documents (documents restart)
+  "Ask of each of DOCUMENTS whether to save it before quitting, or
+RESTART'ing, as Mac OS 9 asked; return nil if one was cancelled."
+  (catch 'cancel
+    (dolist (buffer documents)
+      (pcase (lme-popup-alert
+              'caution (format "Save changes to the document “%s” before %s?"
+                               (lme-platinum--buffer-title buffer)
+                               (if restart "restarting" "quitting"))
+              '(("Don’t Save" discard nil ?\M-d) ("Cancel" cancel cancel) ("Save" save default))
+              "If you don’t save, your changes will be lost.")
+        ('save (with-current-buffer buffer (save-buffer)))
+        ('cancel (throw 'cancel nil))))
+    t))
+
+(defun lme-platinum--quit (quit &optional arg restart)
+  "Quit Emacs as QUIT, `save-buffers-kill-emacs', does, asking in alerts
+instead of the minibuffer: whether to save each modified document, and
+whether to stop the programs still running, agents in lme-term's
+terminals among them.  ARG saves every document unasked; RESTART starts
+Emacs again.  Where alerts cannot be drawn, QUIT asks."
+  (if (not (lme-popup-available-p))
+      (funcall quit arg restart)
+    (cl-letf (((symbol-function 'yes-or-no-p) #'lme-platinum--yes-or-no)
+              ((symbol-function 'y-or-n-p) #'lme-platinum--yes-or-no))
+      (let* ((verb (if restart "Restart" "Quit"))
+             (documents (lme-platinum--unsaved-documents))
+             (programs (and confirm-kill-processes (lme-platinum--running-programs))))
+        (when (and (if arg
+                       (progn (save-some-buffers t t) t)
+                     (lme-platinum--quit-documents documents restart))
+                   ;; Abbrevs and the like, which ask yes or no.
+                   (progn (dolist (function save-some-buffers-functions)
+                            (funcall function nil arg))
+                          t)
+                   (or (null programs)
+                       (eq 'quit (lme-popup-alert
+                                  'caution (format "%s Emacs while programs are running?" verb)
+                                  `(("Cancel" cancel cancel) (,verb quit default))
+                                  (format "%s stops %s." (if restart "Restarting" "Quitting")
+                                          (lme-platinum--names programs)))))
+                   (run-hook-with-args-until-failure 'kill-emacs-query-functions)
+                   ;; As `save-buffers-kill-emacs', confirm only when nothing
+                   ;; was asked already.
+                   (or (null confirm-kill-emacs) documents programs
+                       (funcall confirm-kill-emacs
+                                (format "Really %s Emacs? " (downcase verb)))))
+          (kill-emacs nil restart))))))
+
 (defun lme-platinum-zoom-window (window)
   "Zoom WINDOW to the whole main area, or back to where it was.
 The sidebar stays, as `delete-other-windows' leaves side windows be."
@@ -818,6 +908,7 @@ Where images cannot be shown, a plain λ stands in."
 
 (declare-function lme-popup-menu "lme-popup" (items &optional x y align))
 (declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
+(declare-function lme-popup-available-p "lme-popup" ())
 (declare-function lme-agent-installed-p "lme-ai" (agent))
 (defvar lme-theme)
 
@@ -1958,7 +2049,9 @@ it, as on every theme change, is idempotent."
     (lme-platinum-treemacs-theme)
     (add-hook 'enable-theme-functions (lambda (&rest _) (lme-platinum-treemacs-theme)) 90))
   (add-hook 'which-key-init-buffer-hook #'lme-platinum-no-title-bar)
-  (add-hook 'transient-setup-buffer-hook #'lme-platinum-no-title-bar))
+  (add-hook 'transient-setup-buffer-hook #'lme-platinum-no-title-bar)
+  ;; Quitting asks in alerts, as Mac OS 9's Quit and Shut Down did.
+  (advice-add 'save-buffers-kill-emacs :around #'lme-platinum--quit))
 
 
 (provide 'lme-platinum)

@@ -210,6 +210,11 @@ exits, as `eat-exit-hook' is for Eat.")
                              (buffer-local-value 'lme-term--terminal (or buffer (current-buffer))))))
     (lme-term-module-alive-p terminal)))
 
+(defun lme-term-running-buffers ()
+  "Return the buffers of the terminals whose programs run.
+Their programs are not Emacs's processes: `process-list' leaves them out."
+  (seq-filter #'lme-term-live-p (hash-table-values lme-term--buffers)))
+
 (defun lme-term-pid (&optional buffer)
   "Return the process id of BUFFER's terminal program, or nil."
   (when-let* ((terminal (and (lme-term-buffer-p buffer)

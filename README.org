@@ -111,8 +111,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
   and hierarchical submenus; closing a modified document asks to save it (Return saves, Escape
-  cancels, Command-D doesn't save), closing a running session or deleting one asks first, each
-  in an alert with the caution, stop or note icon and the default button ringed.
+  cancels, Command-D doesn't save), closing a running session or deleting one asks first, and
+  quitting asks so of each unsaved document and before stopping the programs still running,
+  agents in terminals included, each in an alert with the caution, stop or note icon and the
+  default button ringed.
 - *Details*: a thin insertion point (Evil's normal state keeps its block), and help over a
   control shown as Balloon Help.
 - *A main area* that keeps agent chats and terminals on the left and everything else, files

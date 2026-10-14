@@ -1689,6 +1689,69 @@ mouse reports, and with Shift, clicks stay Emacs's."
                 (should-not (eq (key-binding [mouse-1]) #'ignore)))))
         (set-window-buffer window old)))))
 
+(defmacro lme-test--with-quit (answers documents programs &rest body)
+  "Run BODY quitting through alerts answered by ANSWERS in turn, with
+DOCUMENTS unsaved and PROGRAMS running.  Bind `asked' to the alerts'
+messages and details, `killed', `saved' to what was killed and saved."
+  (declare (indent 3))
+  `(let ((answers ,answers) (asked nil) (killed nil) (saved nil)
+         (kill-emacs-query-functions nil) (save-some-buffers-functions nil)
+         (confirm-kill-processes t))
+     (cl-letf (((symbol-function 'lme-popup-available-p) (lambda () t))
+               ((symbol-function 'lme-popup-alert)
+                (lambda (_icon message buttons &optional detail)
+                  (push (list message detail (mapcar #'car buttons)) asked)
+                  (pop answers)))
+               ((symbol-function 'lme-platinum--unsaved-documents) (lambda () ,documents))
+               ((symbol-function 'lme-platinum--running-programs) (lambda () ,programs))
+               ((symbol-function 'save-buffer) (lambda (&rest _) (push (current-buffer) saved)))
+               ((symbol-function 'kill-emacs) (lambda (&rest args) (push args killed))))
+       ,@body)))
+
+(ert-deftest lme-test-quit-asks-in-alerts ()
+  "Quitting asks of each unsaved document and of the programs running in
+alerts; Cancel keeps Emacs, Don't Save and Quit end it."
+  (with-temp-buffer
+    (let ((document (current-buffer))
+          (confirm-kill-emacs nil))
+      (lme-test--with-quit '(cancel) (list document) nil
+        (lme-platinum--quit #'ignore)
+        (should-not killed)
+        (should (= (length asked) 1))
+        (should (string-match-p "Save changes to the document .* before quitting\\?"
+                                (car (car asked)))))
+      (lme-test--with-quit '(discard quit) (list document) '("claude" "zsh")
+        (lme-platinum--quit #'ignore)
+        (should (equal killed '((nil nil))))
+        (should-not saved)
+        (should (equal (cadr (car asked)) "Quitting stops “claude” and “zsh”."))
+        (should (equal (nth 2 (car asked)) '("Cancel" "Quit"))))
+      (lme-test--with-quit '(save cancel) (list document) '("zsh")
+        (lme-platinum--quit #'ignore nil t)
+        (should (equal saved (list document)))
+        (should-not killed)
+        (should (equal (car (car asked)) "Restart Emacs while programs are running?"))))))
+
+(ert-deftest lme-test-quit-yes-or-no-questions-are-alerts ()
+  "The questions of `kill-emacs-query-functions' and `confirm-kill-emacs'
+are alerts too, the latter asked only when nothing else was."
+  (lme-test--with-quit '(yes no) nil nil
+    (let ((confirm-kill-emacs #'y-or-n-p))
+      (add-hook 'kill-emacs-query-functions
+                (lambda () (yes-or-no-p "This Emacs session has clients; exit anyway? ")))
+      (lme-platinum--quit #'ignore)
+      (should-not killed)
+      (should (equal (mapcar #'car (reverse asked))
+                     '("This Emacs session has clients; exit anyway?" "Really quit Emacs?")))
+      (should (equal (nth 2 (car asked)) '("No" "Yes")))))
+  (lme-test--with-quit '() nil nil
+    (let ((confirm-kill-emacs nil))
+      (lme-platinum--quit #'ignore)
+      (should (equal killed '((nil nil))))
+      (should-not asked)))
+  (should (equal (lme-platinum--names '("a" "b" "c" "d" "e")) "“a”, “b”, “c” and 2 others"))
+  (should (equal (lme-platinum--names '("*shell:a*")) "“shell:a”")))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."
