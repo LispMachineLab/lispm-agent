@@ -893,6 +893,13 @@ stand in."
       (should (= asked 1))
       (should (equal (lispm-session-title agent) "Mine")))))
 
+(ert-deftest lispm-test-title-language ()
+  "Titles are asked for in `lispm-title-language', else in the user's language."
+  (let ((lispm-title-language nil))
+    (should (string-match-p "topic, in the language the user writes in\\. " (lispm-title--system))))
+  (let ((lispm-title-language "English"))
+    (should (string-match-p "topic, in English\\. " (lispm-title--system)))))
+
 ;;;; Emacs itself, and skills
 
 (ert-deftest lispm-test-eval-async ()
