@@ -579,22 +579,29 @@ Codex read as a new line.")
   (lme-term-module-scroll lme-term--terminal (or lines 1))
   (lme-term--render t))
 
-(defun lme-term--mouse-report (button event)
-  "Return the report of mouse BUTTON at EVENT's place, in the encoding the
-program asked for: SGR's, else the original one, whose positions stop at
-95 so that the report stays ASCII."
-  (pcase-let* ((`(,column . ,row) (posn-col-row (event-start event)))
-               (`(,columns . ,lines) (or lme-term--size '(80 . 24)))
-               (column (1+ (min (max column 0) (1- columns))))
-               (row (1+ (min (max row 0) (1- lines))))
-               (modifiers (event-modifiers event))
-               (button (+ button
-                          (if (memq 'shift modifiers) 4 0)
-                          (if (memq 'meta modifiers) 8 0)
-                          (if (memq 'control modifiers) 16 0))))
+(defun lme-term--mouse-cell (posn)
+  "Return the terminal's cell at POSN, as (COLUMN . LINE) counted from 1.
+It is measured in the terminal's font, which may not be the frame's."
+  (pcase-let ((`(,x . ,y) (posn-x-y posn))
+              (`(,columns . ,lines) (or lme-term--size '(80 . 24))))
+    (with-selected-window (posn-window posn)
+      (cons (1+ (min (max (/ x (max 1 (default-font-width))) 0) (1- columns)))
+            (1+ (min (max (/ y (max 1 (default-line-height))) 0) (1- lines)))))))
+
+(defun lme-term--mouse-report (button cell &optional modifiers release)
+  "Return the report of mouse BUTTON at CELL, see `lme-term--mouse-cell',
+with the MODIFIERS of an event, pressed or else RELEASE'd, in the encoding
+the program asked for: SGR's, else the original one, whose positions stop
+at 95 so that the report stays ASCII and which tells no button released."
+  (pcase-let ((`(,column . ,line) cell)
+              (button (+ button
+                         (if (memq 'shift modifiers) 4 0)
+                         (if (memq 'meta modifiers) 8 0)
+                         (if (memq 'control modifiers) 16 0))))
     (if (/= 0 (logand 16 (lme-term-modes)))
-        (format "\e[<%d;%d;%dM" button column row)
-      (string ?\e ?\[ ?M (+ 32 button) (+ 32 (min column 95)) (+ 32 (min row 95))))))
+        (format "\e[<%d;%d;%d%c" button column line (if release ?m ?M))
+      (string ?\e ?\[ ?M (+ 32 (if release (logior 3 (logand button -4)) button))
+              (+ 32 (min column 95)) (+ 32 (min line 95))))))
 
 (defun lme-term--wheel (event lines)
   "Scroll for the mouse wheel EVENT by LINES, as Alacritty does: a program
@@ -607,7 +614,10 @@ With Shift the history always scrolls."
       (cond ((and (/= 0 (logand 8 modes)) (not shift))
              (lme-term--send
               (apply #'concat (make-list (max 1 (event-line-count event))
-                                         (lme-term--mouse-report (if (> lines 0) 64 65) event)))))
+                                         (lme-term--mouse-report
+                                          (if (> lines 0) 64 65)
+                                          (lme-term--mouse-cell (event-start event))
+                                          (event-modifiers event))))))
             ((and (/= 0 (logand 4 modes)) (not shift))
              (lme-term--send (apply #'concat (make-list (abs lines) (if (> lines 0) "\eOA" "\eOB")))))
             (t (lme-term-module-scroll lme-term--terminal lines)
@@ -622,6 +632,72 @@ With Shift the history always scrolls."
   "Scroll forward for mouse wheel EVENT."
   (interactive "e")
   (lme-term--wheel event -3))
+
+(defun lme-term--mouse-button (event)
+  "Return the number mouse EVENT's button has in mouse reports."
+  (pcase (event-basic-type event) ('mouse-1 0) ('mouse-2 1) ('mouse-3 2) (_ 0)))
+
+(defun lme-term-mouse-press (event)
+  "Tell the program of the button pressed by mouse EVENT, of the mouse's
+moves while it is held when the program asked for them, and of its
+release.  The press selects the terminal's window, as a click does."
+  (interactive "e")
+  (let* ((window (posn-window (event-start event)))
+         (button (lme-term--mouse-button event))
+         (done nil))
+    (when (window-live-p window)
+      (select-window window)
+      (with-current-buffer (window-buffer window)
+        (let ((cell (lme-term--mouse-cell (event-start event)))
+              (moves (/= 0 (logand (logior 128 256) (lme-term-modes)))))
+          (lme-term--send (lme-term--mouse-report button cell))
+          (track-mouse
+            (while (not done)
+              (let ((next (read-event)))
+                (cond
+                 ((mouse-movement-p next)
+                  (let ((posn (event-start next)))
+                    (when (and moves (eq (posn-window posn) window) (posn-x-y posn))
+                      (let ((moved (lme-term--mouse-cell posn)))
+                        (unless (equal moved cell)
+                          (setq cell moved)
+                          (lme-term--send (lme-term--mouse-report (+ button 32) cell)))))))
+                 ;; The release: a click, a drag, a double or triple click.
+                 ((and (consp next) (memq (event-basic-type next) '(mouse-1 mouse-2 mouse-3))
+                       (not (memq 'down (event-modifiers next))))
+                  (let ((posn (event-end next)))
+                    (when (and (eq (posn-window posn) window) (posn-x-y posn))
+                      (setq cell (lme-term--mouse-cell posn))))
+                  (setq done t))
+                 ;; Keyboard input ends the press; it is read again.
+                 ((or (integerp next) (and (symbolp next) (not (memq next '(focus-in focus-out)))))
+                  (push next unread-command-events)
+                  (setq done t)))))
+            (lme-term--send (lme-term--mouse-report button cell nil t))))))))
+
+(defun lme-term--mouse-taken (command)
+  "Return COMMAND while the current terminal's program takes the mouse."
+  (and (/= 0 (logand 8 (lme-term-modes))) command))
+
+(defvar lme-term-keys-mode)
+
+(defun lme-term-mouse-emacs (event)
+  "Do what the mouse EVENT, which Shift was held for, does outside a
+terminal: with Shift the mouse stays Emacs's, to select text, when the
+program takes it."
+  (interactive "e")
+  (let* ((name (symbol-name (car event)))
+         (plain (string-remove-prefix "S-" name))
+         (command (with-current-buffer (window-buffer (posn-window (event-start event)))
+                    (let ((lme-term-keys-mode nil))
+                      (seq-some (lambda (name)
+                                  (key-binding (vector (intern name)) t nil (event-start event)))
+                                (list name plain
+                                      (replace-regexp-in-string
+                                       "\\`\\(?:double\\|triple\\)-" "" plain)))))))
+    (when (commandp command)
+      (setq this-command command)
+      (call-interactively command nil (vector event)))))
 
 (defun lme-term-history ()
   "Show the terminal's history and screen in a buffer of their own, to read,
@@ -663,6 +739,18 @@ search and copy."
     (define-key map (kbd "<wheel-down>") #'lme-term-wheel-down)
     (define-key map (kbd "S-<wheel-up>") #'lme-term-wheel-up)
     (define-key map (kbd "S-<wheel-down>") #'lme-term-wheel-down)
+    ;; Clicks go to a program that takes the mouse; with Shift, and when it
+    ;; does not, they are Emacs's.
+    (dolist (button '(1 2 3))
+      (dolist (count '("" "double-" "triple-"))
+        (define-key map (vector (intern (format "%sdown-mouse-%d" count button)))
+                    `(menu-item "" lme-term-mouse-press :filter lme-term--mouse-taken))
+        (dolist (kind '("" "drag-"))
+          (define-key map (vector (intern (format "%s%smouse-%d" count kind button)))
+                      `(menu-item "" ignore :filter lme-term--mouse-taken)))
+        (dolist (kind '("down-" "" "drag-"))
+          (define-key map (vector (intern (format "S-%s%smouse-%d" count kind button)))
+                      #'lme-term-mouse-emacs))))
     (define-key map (kbd "<mouse-4>") #'lme-term-wheel-up)
     (define-key map (kbd "<mouse-5>") #'lme-term-wheel-down)
     map)

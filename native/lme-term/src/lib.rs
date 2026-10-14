@@ -391,7 +391,8 @@ fn scroll(terminal: &Terminal, lines: Option<i32>) -> Result<usize> {
 /// Return the modes of TERMINAL Emacs's keys depend on, as a bit set:
 /// 1 cursor keys in application mode, 2 bracketed paste, 4 the alternate
 /// screen, 8 the program wants mouse reports, 16 in SGR form, 32 focus
-/// reports, 64 keypad in application mode.
+/// reports, 64 keypad in application mode, 128 it wants the mouse's moves
+/// while a button is held, 256 all its moves.
 #[defun]
 fn modes(terminal: &Terminal) -> Result<u32> {
     let mode = *terminal.term.lock().mode();
@@ -404,6 +405,8 @@ fn modes(terminal: &Terminal) -> Result<u32> {
         (TermMode::SGR_MOUSE, 16),
         (TermMode::FOCUS_IN_OUT, 32),
         (TermMode::APP_KEYPAD, 64),
+        (TermMode::MOUSE_DRAG, 128),
+        (TermMode::MOUSE_MOTION, 256),
     ] {
         if mode.intersects(flag) {
             bits |= bit;

@@ -1652,6 +1652,43 @@ history, as Alacritty does; with Shift it always scrolls the history."
                 (should (equal scrolled '(3))))))
         (set-window-buffer window old)))))
 
+(ert-deftest lme-test-term-clicks ()
+  "A program that takes the mouse is told of a press, of the moves while
+the button is held when it asked for them, and of the release; without
+mouse reports, and with Shift, clicks stay Emacs's."
+  (let ((window (selected-window))
+        (old (window-buffer (selected-window)))
+        sent)
+    (with-temp-buffer
+      (setq-local lme-term--size '(80 . 24))
+      (lme-term-keys-mode 1)
+      (set-window-buffer window (current-buffer))
+      (unwind-protect
+          (cl-letf (((symbol-function 'lme-term--send) (lambda (string) (push string sent))))
+            (let ((posn (lambda (x y) (list window 1 (cons x y) 0 nil 1 (cons x y) nil nil '(1 . 1)))))
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) (logior 8 16 128))))
+                (should (eq (key-binding [down-mouse-1]) #'lme-term-mouse-press))
+                (should (eq (key-binding [mouse-1]) #'ignore))
+                (should (eq (key-binding [S-down-mouse-1]) #'lme-term-mouse-emacs))
+                (let ((unread-command-events
+                       (list (list 'mouse-movement (funcall posn 4 2))
+                             (list 'mouse-movement (funcall posn 4 2))
+                             (list 'drag-mouse-1 (funcall posn 1 1) (funcall posn 6 3)))))
+                  (lme-term-mouse-press (list 'down-mouse-1 (funcall posn 1 1)))
+                  (should (equal (reverse sent)
+                                 '("\e[<0;2;2M" "\e[<32;5;3M" "\e[<0;7;4m")))))
+              (setq sent nil)
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 8)))
+                (let ((unread-command-events
+                       (list (list 'mouse-movement (funcall posn 4 2))
+                             (list 'mouse-3 (funcall posn 2 0)))))
+                  (lme-term-mouse-press (list 'down-mouse-3 (funcall posn 2 0)))
+                  (should (equal (reverse sent) '("\e[M\"#!" "\e[M##!")))))
+              (cl-letf (((symbol-function 'lme-term-modes) (lambda (&rest _) 0)))
+                (should-not (eq (key-binding [down-mouse-1]) #'lme-term-mouse-press))
+                (should-not (eq (key-binding [mouse-1]) #'ignore)))))
+        (set-window-buffer window old)))))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."

@@ -129,7 +129,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   follows the windows on screen, not the number of agents running or how much they write.
   Shells and agents run in it once it is built, which happens in the background at the first
   start where Rust's Cargo is installed, and again when an update changes its sources; until
-  then, and without Rust, they run in Eat.
+  then, and without Rust, they run in Eat.  A program that takes the mouse, as Claude Code
+  does, gets the clicks, drags and wheel; with Shift held they stay Emacs's, to select text.
 - *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot and
   tree-sitter modes.
 - *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
