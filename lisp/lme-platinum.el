@@ -845,7 +845,7 @@ Where images cannot be shown, a plain λ stands in."
     (:label "Magit Status" :action magit-status)
     separator
     ,@(when (fboundp 'lme-settings-panel-items)
-        `((:label "Settings" :submenu lme-settings-panel-items)))
+        `((:label "Control Panels" :submenu lme-settings-panel-items)))
     (:label "Customize lispm-emacs…" :action ,(lambda () (customize-group 'lispm-emacs)))))
 
 (defun lme-platinum-lambda-menu ()

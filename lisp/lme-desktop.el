@@ -31,8 +31,8 @@
 ;; without its icons, as the desktop seen through.
 ;;
 ;; Its icons stand down the right edge, where Mac OS 9 put them: the home
-;; disk at the top, Emacs, the browser and Settings under it, the Trash in
-;; the bottom corner.
+;; disk at the top, Emacs, the browser and the Control Panels folder under
+;; it, the Trash in the bottom corner.
 ;; A click selects an icon, darkening it and inverting its name, and a
 ;; double click opens it; the arrow keys select, Return or Command-O opens.
 ;; An icon is dragged anywhere on the desktop, a translucent copy following
@@ -55,7 +55,7 @@
 (require 'lme-apps)
 
 (declare-function lme-browser-show "lme-browser" ())
-(declare-function lme-settings-show "lme-settings" (&optional panel))
+(declare-function lme-settings-open-folder "lme-settings" ())
 (declare-function lme-xwidget-available-p "lme-browser" ())
 (declare-function lme-editor-activate "lme-editor" ())
 (declare-function lme-finder-home "lme-finder" ())
@@ -64,6 +64,7 @@
 (declare-function lme-finder-open "lme-finder" ())
 (declare-function lme-finder-close "lme-finder" ())
 (declare-function lme-finder--buffer "lme-finder" ())
+(declare-function lme-finder-real-p "lme-finder" ())
 (defvar lme-finder--selected)
 (defvar lme-finder--had-focus)
 (declare-function lme-main-area--windows "lme-interface" ())
@@ -89,8 +90,9 @@ A workspace's main area shows it where it holds nothing else.")
             :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "netscape" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
-    (settings :label "Settings" :icon "control-panels-32" :command lme-settings-show
-              :help "Settings: the theme, the desktop, the keys, the browser")
+    (control-panels :label "Control Panels" :icon "control-panels-32"
+                    :command lme-settings-open-folder
+                    :help "The control panels: appearance, desktop, keyboard, Internet")
     (trash :label "Trash" :icon-function lme-desktop--trash-icon
            :command lme-desktop-open-trash :bottom t :help "What was thrown away"))
   "The desktop's icons, from the top: (KEY . PROPERTIES).
@@ -1120,13 +1122,14 @@ on the Finder window when it had the keyboard last, else on the desktop."
   (let* ((finder (and (fboundp 'lme-finder-shown-p) (lme-finder-shown-p)))
          (in-finder (and finder (bound-and-true-p lme-finder--had-focus)))
          (selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer))))
-    `((:label "New Folder…" :action lme-finder-new-folder :enabled ,(and finder t))
+    `((:label "New Folder…" :action lme-finder-new-folder
+              :enabled ,(and finder (lme-finder-real-p) t))
       (:label "Open" :action ,(if in-finder 'lme-finder-open 'lme-desktop-open)
               :enabled ,(and (or in-finder selected) t))
       (:label "Close Window" :action lme-finder-close :enabled ,(and finder t))
       separator
       (:label "Move to Trash" :action lme-finder-move-to-trash :key "M-DEL"
-              :enabled ,(and in-finder
+              :enabled ,(and in-finder (lme-finder-real-p)
                              (with-current-buffer (lme-finder--buffer) lme-finder--selected)
                              t))
       separator

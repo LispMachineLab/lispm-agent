@@ -1389,7 +1389,7 @@ again, as Mac OS 9 rolled a window up into its title bar."
 editor; hide it from the full-screen editor, whose workspace it would
 cover.  This is one of `lme-apps-frontmost-functions'."
   (when (lme-browser-floating-p)
-    (let ((shown (or (memq app '(desktop browser))
+    (let ((shown (or (memq app '(desktop browser settings))
                      (and (eq app 'editor) (fboundp 'lme-editor-floating-p)
                           (lme-editor-floating-p)))))
       (cond ((and shown (not (frame-visible-p lme-browser--frame)))

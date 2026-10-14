@@ -1,4 +1,4 @@
-;;; lme-settings.el --- Settings, as Mac OS 9's control panels  -*- lexical-binding: t; -*-
+;;; lme-settings.el --- Control Panels, as Mac OS 9's  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Ryan.K
 
@@ -23,17 +23,19 @@
 
 ;;; Commentary:
 
-;; Settings is an application of its own, as Mac OS 9's control panels
-;; were: a window floating over the desktop, opened from the λ menu's
-;; Settings, its tabs choosing a panel as the Appearance control panel's
-;; did:
+;; Control Panels is an application of its own, as Mac OS 9's control
+;; panels were.  Its folder, opened from the desktop's Control Panels icon,
+;; is a Finder window holding a panel each; the λ menu's Control Panels
+;; lists them too.  A panel opens in a window floating over the desktop,
+;; titled with its name, its tabs choosing among the panels as the
+;; Appearance control panel's did:
 ;;
-;;   Themes     the colour theme
-;;   Desktop    the desktop's colour, its picture and how it covers it,
-;;              and Arrange Icons
-;;   Keyboard   Vim or Emacs keys
-;;   Browser    the home page, the search address, the history and the
-;;              bookmarks
+;;   Appearance  the colour theme
+;;   Desktop     the desktop's colour, its picture and how it covers it,
+;;               and Arrange Icons
+;;   Keyboard    Vim or Emacs keys
+;;   Internet    the browser's home page and search address, its history
+;;               and its bookmarks
 ;;
 ;; Each choice takes effect at once where it can, and is saved for the next
 ;; start with Customize, as the menus' choices are; personal.el can still
@@ -72,26 +74,27 @@
 (declare-function lme-browser-edit-bookmarks "lme-browser-places" ())
 (declare-function lme-xwidget-available-p "lme-browser" ())
 
-(defconst lme-settings-buffer-name " *Settings*"
-  "Name of the Settings window's buffer.")
+(defconst lme-settings-buffer-name " *Control Panels*"
+  "Name of the control panel's window's buffer.")
 
 (defconst lme-settings-panels
-  '((themes "Themes" lme-settings--themes)
-    (desktop "Desktop" lme-settings--desktop)
-    (keyboard "Keyboard" lme-settings--keyboard)
-    (browser "Browser" lme-settings--browser lme-settings--browser-p))
-  "The panels, in their tabs' order: (KEY LABEL INSERT [VISIBLE]).
-INSERT fills the window with the panel; VISIBLE, when given, is a
-function deciding whether the panel shows.")
+  '((themes "Appearance" lme-settings--themes "appearance-32")
+    (desktop "Desktop" lme-settings--desktop "desktop-picture-32")
+    (keyboard "Keyboard" lme-settings--keyboard "keyboard-32")
+    (browser "Internet" lme-settings--browser "globe-32" lme-settings--browser-p))
+  "The panels, in their tabs' order: (KEY LABEL INSERT ICON [VISIBLE]).
+INSERT fills the window with the panel, ICON is its large icon in the
+Control Panels folder; VISIBLE, when given, is a function deciding whether
+the panel shows.")
 
 (defvar lme-settings--frame nil
-  "The Settings window's frame, while it is open.")
+  "The control panel's window's frame, while it is open.")
 
 (defvar lme-settings--geometry nil
-  "Where the Settings window was last: (LEFT TOP WIDTH HEIGHT) in pixels.")
+  "Where the control panel's window was last: (LEFT TOP WIDTH HEIGHT) in pixels.")
 
 (defvar-local lme-settings--panel 'themes
-  "The panel the Settings window shows.")
+  "The panel the control panel's window shows.")
 
 (defun lme-settings--browser-p ()
   "Return non-nil when the browser can run, and so has settings."
@@ -100,12 +103,12 @@ function deciding whether the panel shows.")
 (defun lme-settings--panels ()
   "Return the panels that show here."
   (seq-filter (lambda (panel)
-                (let ((visible (nth 3 panel)))
+                (let ((visible (nth 4 panel)))
                   (or (not visible) (funcall visible))))
               lme-settings-panels))
 
 (defun lme-settings-open-p ()
-  "Return non-nil while the Settings window is open."
+  "Return non-nil while the control panel's window is open."
   (frame-live-p lme-settings--frame))
 
 ;;;; Controls
@@ -338,7 +341,7 @@ pushed in."
               (lme-settings--panels) " ")))
 
 (defun lme-settings--render ()
-  "Fill the Settings window with the panel it shows, point kept."
+  "Fill the control panel's window with the panel it shows, point kept."
   (when-let* ((buffer (get-buffer lme-settings-buffer-name)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)
@@ -350,11 +353,11 @@ pushed in."
         (funcall (nth 2 panel))
         (goto-char (point-min))
         (forward-line (1- line))
-        (setq lme-platinum-title (format "Settings — %s" (nth 1 panel)))
+        (setq lme-platinum-title (nth 1 panel))
         (force-mode-line-update)))))
 
 (defun lme-settings-select (panel)
-  "Show PANEL, a key of `lme-settings-panels', in the Settings window."
+  "Show PANEL, a key of `lme-settings-panels', in the control panel's window."
   (with-current-buffer (lme-settings--buffer)
     (setq lme-settings--panel panel)
     (goto-char (point-min))
@@ -373,19 +376,19 @@ pushed in."
   (lme-settings-next-panel t))
 
 (defun lme-settings--close-box (_window)
-  "Close the Settings window, from its close box."
+  "Close the control panel's window, from its close box."
   (lme-settings-close))
 
 (defvar-keymap lme-settings-mode-map
-  :doc "Keymap of the Settings window."
+  :doc "Keymap of the control panel's window."
   :parent button-buffer-map
   "<right>" #'lme-settings-next-panel
   "<left>" #'lme-settings-previous-panel
   "q" #'lme-settings-close
   "M-w" #'lme-settings-close)
 
-(define-derived-mode lme-settings-mode special-mode "Settings"
-  "Major mode of the Settings window: a panel of settings, a tab each.
+(define-derived-mode lme-settings-mode special-mode "Control Panels"
+  "Major mode of the control panel's window: a panel of settings, a tab each.
 \\{lme-settings-mode-map}"
   (visual-line-mode -1)
   (setq-local cursor-type nil
@@ -397,7 +400,7 @@ pushed in."
               show-trailing-whitespace nil
               lme-platinum-info "Choices are kept for the next start."
               header-line-format '(:eval (lme-settings--tabs))
-              lme-platinum-title "Settings"
+              lme-platinum-title "Control Panels"
               lme-platinum-icon (lme-platinum-icon "control-panels")
               lme-platinum-box-functions (list :close #'lme-settings--close-box))
   (face-remap-add-relative 'default 'lme-platinum-list)
@@ -407,14 +410,14 @@ pushed in."
     (display-line-numbers-mode -1)))
 
 (defun lme-settings--buffer ()
-  "Return the Settings window's buffer, made when missing."
+  "Return the control panel's window's buffer, made when missing."
   (or (get-buffer lme-settings-buffer-name)
       (with-current-buffer (get-buffer-create lme-settings-buffer-name)
         (lme-settings-mode)
         (current-buffer))))
 
 (defun lme-settings--default-geometry (screen)
-  "Return where the Settings window opens first: the middle of SCREEN."
+  "Return where the control panel's window opens first: the middle of SCREEN."
   (let ((width 520)
         (height 460))
     (list (max 20 (/ (- (frame-inner-width screen) width) 2))
@@ -422,7 +425,7 @@ pushed in."
           width height)))
 
 (defun lme-settings--make-frame (screen)
-  "Return a Settings window over SCREEN's desktop, not yet shown."
+  "Return a control panel's window over SCREEN's desktop, not yet shown."
   (pcase-let* ((`(,left ,top ,width ,height)
                 (or lme-settings--geometry (lme-settings--default-geometry screen)))
                (frame (let ((after-make-frame-functions nil)
@@ -430,7 +433,7 @@ pushed in."
                         (make-frame
                          `((parent-frame . ,screen)
                            (minibuffer . ,(minibuffer-window screen))
-                           (name . "Settings") (lme-app . settings)
+                           (name . "Control Panels") (lme-app . settings)
                            (lme-window . t) (top-visible . 30)
                            (undecorated . t) (visibility . nil)
                            (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
@@ -449,7 +452,7 @@ pushed in."
     frame))
 
 (defun lme-settings-show (&optional panel)
-  "Open the Settings window over the desktop, showing PANEL, a key of
+  "Open the control panel's window over the desktop, showing PANEL, a key of
 `lme-settings-panels', or the panel it showed last."
   (interactive)
   (lme-desktop-activate)
@@ -465,7 +468,7 @@ pushed in."
   (lme-apps-set-frontmost 'settings))
 
 (defun lme-settings-close ()
-  "Close the Settings window; the desktop comes in front."
+  "Close the control panel's window; the desktop comes in front."
   (interactive)
   (when (lme-settings-open-p)
     (pcase-let ((`(,left . ,top) (frame-position lme-settings--frame)))
@@ -478,7 +481,7 @@ pushed in."
   (lme-apps-set-frontmost 'desktop))
 
 (defun lme-settings--follow-frontmost (app)
-  "Show the Settings window with the desktop and the floating applications;
+  "Show the control panel's window with the desktop and the floating applications;
 hide it from the full-screen editor and browser, as the Finder window.
 This is one of `lme-apps-frontmost-functions'."
   (when (lme-settings-open-p)
@@ -497,8 +500,8 @@ This is one of `lme-apps-frontmost-functions'."
              (make-frame-invisible lme-settings--frame))))))
 
 (defun lme-settings--refocus ()
-  "Give the Settings window the keyboard back after a menu bar menu closes,
-while Settings is in front."
+  "Give the control panel's window the keyboard back after a menu bar menu closes,
+while Control Panels is in front."
   (when (and (eq (lme-apps-frontmost) 'settings) (lme-settings-open-p)
              (frame-visible-p lme-settings--frame)
              (not (eq (selected-frame) lme-settings--frame)))
@@ -507,17 +510,33 @@ while Settings is in front."
 ;;;; Menus
 
 (defun lme-settings-panel-items ()
-  "Return a menu item opening each panel, as the λ menu's Settings lists them."
+  "Return a menu item opening each panel, as the λ menu's Control Panels
+lists them, as Mac OS 9's Apple menu listed its control panels."
   (mapcar (pcase-lambda (`(,key ,label . ,_))
-            (list :label (concat label "…") :action (lambda () (lme-settings-show key))))
+            (list :label label :action (lambda () (lme-settings-show key))))
           (lme-settings--panels)))
 
+(defun lme-settings--folder-items ()
+  "Return the Control Panels folder's items, see `lme-finder-folders'."
+  (mapcar (pcase-lambda (`(,key ,label ,_ ,icon . ,_))
+            (list label icon (lambda () (lme-settings-show key))))
+          (lme-settings--panels)))
+
+(declare-function lme-finder-open-directory "lme-finder" (directory))
+(defvar lme-finder-folders)
+
+(defun lme-settings-open-folder ()
+  "Open the Control Panels folder in the Finder window: a panel each, as
+the Control Panels folder of Mac OS 9's System Folder."
+  (interactive)
+  (lme-finder-open-directory 'control-panels))
+
 (defun lme-settings--file-items ()
-  "Return the items of the Settings File menu."
+  "Return the items of the Control Panels File menu."
   '((:label "Close Window" :action lme-settings-close)))
 
 (defun lme-settings--view-items ()
-  "Return the items of the Settings View menu: a panel each, the shown one
+  "Return the items of the Control Panels View menu: a panel each, the shown one
 checked."
   (let ((shown (buffer-local-value 'lme-settings--panel (lme-settings--buffer))))
     (mapcar (pcase-lambda (`(,key ,label . ,_))
@@ -526,13 +545,16 @@ checked."
             (lme-settings--panels))))
 
 (defun lme-settings-menus ()
-  "Return the Settings menus, for the menu bar while Settings is in front."
+  "Return the Control Panels menus, for the menu bar while they are in front."
   '((lme-settings-file "File" lme-settings--file-items)
     (lme-settings-view "View" lme-settings--view-items)))
 
 (defun lme-setup-settings ()
-  "Make Settings an application: its window follows the one in front, and
-shows the theme's colours when they change."
+  "Make Control Panels an application: its folder holds a panel each, and
+its window follows the application in front and shows the theme's colours
+when they change."
+  (setf (alist-get 'control-panels lme-finder-folders)
+        '(:title "Control Panels" :icon "control-panels" :items lme-settings--folder-items))
   (add-hook 'lme-apps-frontmost-functions #'lme-settings--follow-frontmost)
   (add-hook 'lme-platinum-menu-closed-hook #'lme-settings--refocus)
   (add-hook 'enable-theme-functions (lambda (&rest _) (lme-settings--render)) 95))

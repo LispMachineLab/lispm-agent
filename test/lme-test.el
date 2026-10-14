@@ -222,10 +222,10 @@ front; without xwidgets it is left out."
 (ert-deftest lme-test-desktop-items ()
   "The browser's icon shows where the browser can run; the Trash is last."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
-    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor settings trash))))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor control-panels trash))))
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
     (should (equal (mapcar #'car (lme-desktop--items))
-                   '(home editor browser settings trash)))))
+                   '(home editor browser control-panels trash)))))
 
 (ert-deftest lme-test-desktop-icons-stand-where-put ()
   "Icons with no place stand in the column at the right edge, the Trash in
@@ -472,7 +472,7 @@ bottom corner."
       (lme-desktop-select-previous)
       (should (eq lme-desktop--selected 'trash))
       (lme-desktop-select-previous)
-      (should (eq lme-desktop--selected 'settings))
+      (should (eq lme-desktop--selected 'control-panels))
       (setq lme-desktop--selected 'home)
       (let ((svg (lme-desktop--svg 800 600)))
         (should (string-match-p "fill=\"#000000\"/><text[^>]*fill=\"#FFFFFF\">Home</text>" svg))
@@ -1392,7 +1392,7 @@ positions, the keys, the browser's pages."
         (lme-settings-select panel)
         (dolist (label labels)
           (should (string-search label (buffer-string))))
-        (should (string-search (capitalize (symbol-name panel)) lme-platinum-title))))))
+        (should (equal (nth 1 (assq panel lme-settings-panels)) lme-platinum-title))))))
 
 (ert-deftest lme-test-settings-radio-saves ()
   "Pressing a radio button saves its choice and draws the panel again."
@@ -1409,20 +1409,45 @@ positions, the keys, the browser's pages."
           (button-activate button))
         (should (equal (car saved) '(lme-editing-style . emacs)))))))
 
+(ert-deftest lme-test-control-panels-folder ()
+  "The Control Panels folder is a Finder folder of a panel each: opening an
+item opens its panel, and nothing is made, renamed or thrown away there."
+  (let ((opened nil)
+        (lme-finder-folders nil))
+    (setf (alist-get 'control-panels lme-finder-folders)
+          '(:title "Control Panels" :icon "control-panels" :items lme-settings--folder-items))
+    (cl-letf (((symbol-function 'lme-settings-show) (lambda (panel) (setq opened panel)))
+              ((symbol-function 'lme-finder--render) #'ignore))
+      (lme-finder--go 'control-panels)
+      (with-current-buffer (lme-finder--buffer)
+        (should (member "Appearance" (mapcar #'car lme-finder--items)))
+        (should (equal (lme-finder--icon-name lme-finder--directory '("Keyboard"))
+                       "keyboard-32"))
+        (should (equal (lme-finder--title lme-finder--directory) "Control Panels"))
+        (should-not (lme-finder-real-p))
+        (should-not (lme-finder--parent lme-finder--directory))
+        (setq lme-finder--selected "Appearance"))
+      (lme-finder-open)
+      (should (eq opened 'themes))
+      (should-error (lme-finder-new-folder "x") :type 'user-error)
+      (should-error (lme-finder-move-to-trash) :type 'user-error)
+      (lme-finder--go temporary-file-directory)
+      (should (lme-finder-real-p)))))
+
 (ert-deftest lme-test-settings-in-menus ()
   "The λ menu opens each panel; the Application menu lists Settings while
 its window is open."
-  (let ((settings (seq-find (lambda (item) (and (consp item) (equal (plist-get item :label) "Settings")))
+  (let ((settings (seq-find (lambda (item) (and (consp item) (equal (plist-get item :label) "Control Panels")))
                             (lme-platinum-lambda-items))))
     (should settings)
-    (should (member "Themes…" (mapcar (lambda (item) (plist-get item :label))
+    (should (member "Appearance" (mapcar (lambda (item) (plist-get item :label))
                                       (funcall (plist-get settings :submenu))))))
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
     (cl-letf (((symbol-function 'lme-settings-open-p) #'ignore))
-      (should-not (member "Settings" (mapcar (lambda (item) (plist-get item :label))
+      (should-not (member "Control Panels" (mapcar (lambda (item) (plist-get item :label))
                                              (lme-apps-application-items)))))
     (cl-letf (((symbol-function 'lme-settings-open-p) #'always))
-      (should (member "Settings" (mapcar (lambda (item) (plist-get item :label))
+      (should (member "Control Panels" (mapcar (lambda (item) (plist-get item :label))
                                          (lme-apps-application-items)))))))
 
 (provide 'lme-test)

@@ -13,7 +13,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *A desktop*, where Emacs starts, in the theme's colours tinted with its accent (Mac OS 8's
   blue-violet under Platinum), or a colour and a picture of your own (see [[*Your own
   settings][Your own settings]]).  Its icons stand down the right edge as Mac OS 9's did: the
-  home disk and the applications, Emacs (with Emacs's own icon), the browser and Settings, at the top,
+  home disk and the applications, Emacs (with Emacs's own icon), the browser and the Control
+  Panels folder, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
   double-click it (or press Return) to open it.  Drag one anywhere, a translucent copy following
   the mouse, and it is dropped on the grid the column lies on, in the free cell nearest, and stays
@@ -38,7 +39,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   right end names it and lists the others.  Files, folders, terminals and agents opened while the
   desktop or the browser is in front open in the editor, which comes forward.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
-  Apple, opening the λ menu (new agents, sessions, shells, the browser, Settings), then the
+  Apple, opening the λ menu (new agents, sessions, shells, the browser, Control Panels), then the
   menus of the application in front: the desktop's File, View, Go and Special (Restart, Shut
   Down), the editor's File, Edit, View, Project and Window, the browser's File, View, Go,
   Bookmarks and Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
@@ -84,12 +85,14 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   colour, and a count of the items at the bottom.  The agents view lists every agent session,
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
-- *Settings*, an application as Mac OS 9's control panels were: a window over the desktop,
-  opened from its desktop icon or the λ menu's Settings, its tabs choosing a panel as the Appearance control panel's
-  did.  Themes chooses the colour theme (Dracula, Platinum, or any other installed); Desktop its
-  colour, its picture and how the picture covers it (fill, fit, center, tile), and arranges its
-  icons; Keyboard Vim or Emacs keys; Browser the home page, the search address, the history and
-  the bookmarks.  Each choice takes effect at once where it can and is kept for the next start.
+- *Control Panels*, as Mac OS 9's: the desktop's Control Panels folder opens a Finder window
+  holding a panel each, and the λ menu's Control Panels lists them too.  A panel opens in a
+  window floating over the desktop, titled with its name, its tabs choosing among the panels as
+  the Appearance control panel's did.  Appearance chooses the colour theme (Dracula, Platinum,
+  or any other installed); Desktop the desktop's colour, its picture and how the picture covers
+  it (fill, fit, center, tile), and arranges its icons; Keyboard Vim or Emacs keys; Internet the
+  browser's home page and search address, its history and its bookmarks.  Each choice takes
+  effect at once where it can and is kept for the next start.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
   desktop or the λ menu and brought forward from the Application menu.  Its window is laid out
   as Netscape Communicator's was, in the theme's colours: the navigation toolbar (Back,
@@ -288,8 +291,8 @@ set up, so it can change anything, and the appearance takes a new value at once:
       lme-desktop-picture-position 'fill)
 #+end_src
 
-Settings, in the λ menu, sets the theme, the desktop, the keys and the browser too, and keeps
-them for the next start, as dragging the desktop's icons keeps their places
+The control panels set the theme, the desktop, the keys and the browser too, and keep them
+for the next start, as dragging the desktop's icons keeps their places
 (~lme-desktop-icon-places~); so do =M-x lme-set-theme= and =M-x lme-desktop-choose-picture=.
 
 An existing configuration can use lispm-emacs as a library instead:

@@ -106,15 +106,40 @@
 
 ;;;; Items
 
+(defvar lme-finder-folders nil
+  "Folders that are no directory on disk, shown as the Finder shows one, as
+Mac OS 9's Control Panels folder was: (KEY . PROPERTIES).  KEY, a symbol,
+stands for the folder where a directory's name would.  :title names the
+folder, :icon gives its small icon as `lme-platinum-icon-file' takes it,
+and :items is a function returning its items, each (NAME ICON ACTION):
+ICON its large icon, ACTION a function opening it.  Nothing is made,
+renamed or thrown away in such a folder.")
+
+(defun lme-finder--folder (directory)
+  "Return the properties of DIRECTORY when it is one of `lme-finder-folders'."
+  (and directory (symbolp directory) (alist-get directory lme-finder-folders)))
+
+(defun lme-finder--folder-items (directory)
+  "Return the items of DIRECTORY, one of `lme-finder-folders'."
+  (funcall (plist-get (lme-finder--folder directory) :items)))
+
 (defun lme-finder--read (directory)
   "Return DIRECTORY's items by name, hidden ones left out: (NAME . FOLDER-P)."
-  (sort (mapcar (lambda (name)
-                  (cons name (file-directory-p (expand-file-name name directory))))
-                (ignore-errors (directory-files directory nil "\\`[^.]" t)))
+  (sort (if (lme-finder--folder directory)
+            (mapcar (lambda (item) (cons (car item) nil)) (lme-finder--folder-items directory))
+          (mapcar (lambda (name)
+                    (cons name (file-directory-p (expand-file-name name directory))))
+                  (ignore-errors (directory-files directory nil "\\`[^.]" t))))
         (lambda (a b) (string-collate-lessp (car a) (car b) nil t))))
 
 (defun lme-finder--icon-name (directory item)
   "Return the name of the large icon of ITEM of DIRECTORY."
+  (if (lme-finder--folder directory)
+      (nth 1 (assoc (car item) (lme-finder--folder-items directory)))
+    (lme-finder--file-icon-name directory item)))
+
+(defun lme-finder--file-icon-name (directory item)
+  "Return the name of the large icon of ITEM of DIRECTORY, a directory."
   (let ((path (expand-file-name (car item) directory)))
     (if (cdr item)
         (if (file-exists-p (expand-file-name ".git" path)) "folder-git-32" "folder-32")
@@ -176,7 +201,7 @@ When not ENABLED it is drawn dimmed and does nothing."
 (defun lme-finder--toolbar ()
   "Return the window's toolbar: back, forward, enclosing folder, New Folder."
   (let ((new (lme-finder--button "New Folder" #'lme-finder-new-folder
-                                 "Make a new folder here" t)))
+                                 "Make a new folder here" (stringp lme-finder--directory))))
     (concat " "
             (lme-finder--button "◀" #'lme-finder-back "Back" lme-finder--back) " "
             (lme-finder--button "▶" #'lme-finder-forward "Forward" lme-finder--forward) " "
@@ -189,15 +214,18 @@ When not ENABLED it is drawn dimmed and does nothing."
 (defun lme-finder--info ()
   "Return the window's bottom line: its items, and the room left on the disk."
   (let ((count (length lme-finder--items))
-        (available (nth 2 (ignore-errors (file-system-info lme-finder--directory)))))
+        (available (and (stringp lme-finder--directory)
+                        (nth 2 (ignore-errors (file-system-info lme-finder--directory))))))
     (concat (format "%d item%s" count (if (= count 1) "" "s"))
             (when available
               (format ", %s available" (file-size-human-readable available 'si " " "B"))))))
 
 (defun lme-finder--title (directory)
   "Return the window's title for DIRECTORY: the folder's name."
-  (let ((name (file-name-nondirectory (directory-file-name directory))))
-    (if (string-empty-p name) directory name)))
+  (if-let* ((folder (lme-finder--folder directory)))
+      (plist-get folder :title)
+    (let ((name (file-name-nondirectory (directory-file-name directory))))
+      (if (string-empty-p name) directory name))))
 
 (defun lme-finder--cell-left (column)
   "Return the pixel left of the window's cell COLUMN."
@@ -245,7 +273,9 @@ When not ENABLED it is drawn dimmed and does nothing."
            row)
           (insert "\n" (propertize " " 'display '(space :height (14))) "\n"))
         (setq lme-platinum-title (lme-finder--title lme-finder--directory)
-              lme-platinum-icon (lme-platinum-folder-icon lme-finder--directory)
+              lme-platinum-icon (if-let* ((folder (lme-finder--folder lme-finder--directory)))
+                                    (lme-platinum-icon (plist-get folder :icon))
+                                  (lme-platinum-folder-icon lme-finder--directory))
               lme-platinum-info (lme-finder--info))
         ;; The selected item is kept in view.
         (let ((at (or (and lme-finder--selected
@@ -270,10 +300,17 @@ When not ENABLED it is drawn dimmed and does nothing."
   (declare (indent 0))
   `(with-current-buffer (lme-finder--buffer) ,@body))
 
+(defun lme-finder-real-p ()
+  "Return non-nil when the Finder window shows a directory on disk, where
+items are made, renamed and thrown away."
+  (lme-finder--in (and lme-finder--directory (stringp lme-finder--directory))))
+
 (defun lme-finder--parent (directory)
-  "Return the folder enclosing DIRECTORY, or nil at the top."
-  (let ((parent (file-name-directory (directory-file-name directory))))
-    (unless (or (null parent) (equal parent directory)) parent)))
+  "Return the folder enclosing DIRECTORY, or nil at the top, as for a folder
+of `lme-finder-folders'."
+  (when (stringp directory)
+    (let ((parent (file-name-directory (directory-file-name directory))))
+      (unless (or (null parent) (equal parent directory)) parent))))
 
 (defun lme-finder--go (directory &optional record select)
   "Show DIRECTORY, with SELECT selected; RECORD keeps the folder left in
@@ -282,7 +319,9 @@ the history, as going there by hand does."
     (when (and record lme-finder--directory)
       (push lme-finder--directory lme-finder--back)
       (setq lme-finder--forward nil))
-    (setq lme-finder--directory (file-name-as-directory (expand-file-name directory))
+    (setq lme-finder--directory (if (lme-finder--folder directory)
+                                    directory
+                                  (file-name-as-directory (expand-file-name directory)))
           lme-finder--items (lme-finder--read lme-finder--directory)
           lme-finder--selected select)
     (lme-finder--render)))
@@ -322,18 +361,32 @@ the history, as going there by hand does."
   (find-file file))
 
 (defun lme-finder-open ()
-  "Open the selected item: a folder in the window, a file in the editor."
+  "Open the selected item: a folder in the window, a file in the editor, an
+item of a folder of `lme-finder-folders' by its own action."
   (interactive)
-  (lme-finder--in
-    (when-let* ((name lme-finder--selected))
-      (let ((path (expand-file-name name lme-finder--directory)))
-        (if (file-directory-p path)
-            (lme-finder--go path t)
-          (lme-finder--edit path))))))
+  (let ((action nil))
+    (lme-finder--in
+      (when-let* ((name lme-finder--selected))
+        (if (lme-finder--folder lme-finder--directory)
+            (setq action (nth 2 (assoc name (lme-finder--folder-items lme-finder--directory))))
+          (let ((path (expand-file-name name lme-finder--directory)))
+            (if (file-directory-p path)
+                (lme-finder--go path t)
+              (lme-finder--edit path))))))
+    (when action
+      (funcall action))))
+
+(defun lme-finder--real-only ()
+  "Refuse to change the folder shown unless it is a directory on disk."
+  (unless (lme-finder-real-p)
+    (user-error "Nothing can be made, renamed or thrown away in “%s”"
+                (lme-finder--in (lme-finder--title lme-finder--directory)))))
 
 (defun lme-finder-new-folder (name)
   "Make a folder called NAME in the folder shown, and select it."
-  (interactive (list (read-string "Name of the new folder: " "untitled folder")))
+  (interactive (progn (lme-finder--real-only)
+                      (list (read-string "Name of the new folder: " "untitled folder"))))
+  (lme-finder--real-only)
   (lme-finder--in
     (let ((path (expand-file-name name lme-finder--directory)))
       (when (file-exists-p path)
@@ -346,6 +399,7 @@ the history, as going there by hand does."
 It goes to the system's own Trash, from where it can be put back; the item
 after it is selected."
   (interactive)
+  (lme-finder--real-only)
   (lme-finder--in
     (when-let* ((name lme-finder--selected))
       (let* ((names (mapcar #'car lme-finder--items))
@@ -364,7 +418,9 @@ after it is selected."
 
 (defun lme-finder-rename (name)
   "Rename the selected item to NAME."
-  (interactive (list (read-string "Rename to: " (lme-finder--in lme-finder--selected))))
+  (interactive (progn (lme-finder--real-only)
+                      (list (read-string "Rename to: " (lme-finder--in lme-finder--selected)))))
+  (lme-finder--real-only)
   (lme-finder--in
     (when lme-finder--selected
       (rename-file (expand-file-name lme-finder--selected lme-finder--directory)
@@ -437,15 +493,17 @@ after it is selected."
   "Pop up the menu of the item right-clicked by EVENT, or of the folder."
   (interactive "e")
   (lme-finder-mouse-select event)
-  (let ((selected (lme-finder--in lme-finder--selected)))
+  (let* ((selected (lme-finder--in lme-finder--selected))
+         (real (lme-finder-real-p))
+         (file (and selected real t)))
     (lme-popup-menu
      `((:label "Open" :action lme-finder-open :enabled ,(and selected t))
        separator
-       (:label "New Folder…" :action lme-finder-new-folder)
-       (:label "Rename…" :action lme-finder-rename :enabled ,(and selected t))
+       (:label "New Folder…" :action lme-finder-new-folder :enabled ,real)
+       (:label "Rename…" :action lme-finder-rename :enabled ,file)
        (:label "Move to Trash" :action lme-finder-move-to-trash :key "M-DEL"
-               :enabled ,(and selected t))
-       (:label "Copy Path" :enabled ,(and selected t)
+               :enabled ,file)
+       (:label "Copy Path" :enabled ,file
                :action ,(lambda ()
                           (lme-finder--in
                             (kill-new (expand-file-name lme-finder--selected
@@ -543,7 +601,8 @@ after it is selected."
     frame))
 
 (defun lme-finder-open-directory (directory)
-  "Show DIRECTORY in the Finder window over the desktop, the desktop in front."
+  "Show DIRECTORY in the Finder window over the desktop, the desktop in front.
+DIRECTORY is a directory's name, or a key of `lme-finder-folders'."
   (interactive "DFolder: ")
   (lme-desktop-activate)
   (unless (frame-live-p lme-finder--frame)
@@ -619,11 +678,12 @@ after it is selected."
 ;;;; With the desktop
 
 (defun lme-finder--follow-frontmost (app)
-  "Show the Finder window with the desktop, and with the floating editor or
-browser; hide it from the full-screen editor and browser.
+  "Show the Finder window with the desktop and the control panels, and with
+the floating editor or browser; hide it from the full-screen editor and
+browser.
 This is one of `lme-apps-frontmost-functions'."
   (when (frame-live-p lme-finder--frame)
-    (let ((shown (or (eq app 'desktop)
+    (let ((shown (or (memq app '(desktop settings))
                      (and (eq app 'editor) (fboundp 'lme-editor-floating-p)
                           (lme-editor-floating-p))
                      (and (eq app 'browser) (bound-and-true-p lme-browser-floating)))))
