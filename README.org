@@ -13,7 +13,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *A desktop*, where Emacs starts, in the theme's colours tinted with its accent (Mac OS 8's
   blue-violet under Platinum), or a colour and a picture of your own (see [[*Your own
   settings][Your own settings]]).  Its icons stand down the right edge as Mac OS 9's did: the
-  home disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top,
+  home disk and the applications, Emacs (with Emacs's own icon), the browser and Settings, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
   double-click it (or press Return) to open it.  Drag one anywhere, a translucent copy following
   the mouse, and it is dropped on the grid the column lies on, in the free cell nearest, and stays
@@ -85,7 +85,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
 - *Settings*, an application as Mac OS 9's control panels were: a window over the desktop,
-  opened from the λ menu's Settings, its tabs choosing a panel as the Appearance control panel's
+  opened from its desktop icon or the λ menu's Settings, its tabs choosing a panel as the Appearance control panel's
   did.  Themes chooses the colour theme (Dracula, Platinum, or any other installed); Desktop its
   colour, its picture and how the picture covers it (fill, fit, center, tile), and arranges its
   icons; Keyboard Vim or Emacs keys; Browser the home page, the search address, the history and

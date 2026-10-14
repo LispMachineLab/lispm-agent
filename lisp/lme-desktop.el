@@ -31,8 +31,8 @@
 ;; without its icons, as the desktop seen through.
 ;;
 ;; Its icons stand down the right edge, where Mac OS 9 put them: the home
-;; disk at the top, Emacs and the browser under it, the Trash in the
-;; bottom corner.
+;; disk at the top, Emacs, the browser and Settings under it, the Trash in
+;; the bottom corner.
 ;; A click selects an icon, darkening it and inverting its name, and a
 ;; double click opens it; the arrow keys select, Return or Command-O opens.
 ;; An icon is dragged anywhere on the desktop, a translucent copy following
@@ -55,6 +55,7 @@
 (require 'lme-apps)
 
 (declare-function lme-browser-show "lme-browser" ())
+(declare-function lme-settings-show "lme-settings" (&optional panel))
 (declare-function lme-xwidget-available-p "lme-browser" ())
 (declare-function lme-editor-activate "lme-editor" ())
 (declare-function lme-finder-home "lme-finder" ())
@@ -88,6 +89,8 @@ A workspace's main area shows it where it holds nothing else.")
             :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "netscape" :command lme-browser-show
              :visible lme-desktop--browser-p :help "The web browser")
+    (settings :label "Settings" :icon "control-panels-32" :command lme-settings-show
+              :help "Settings: the theme, the desktop, the keys, the browser")
     (trash :label "Trash" :icon-function lme-desktop--trash-icon
            :command lme-desktop-open-trash :bottom t :help "What was thrown away"))
   "The desktop's icons, from the top: (KEY . PROPERTIES).

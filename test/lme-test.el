@@ -222,9 +222,10 @@ front; without xwidgets it is left out."
 (ert-deftest lme-test-desktop-items ()
   "The browser's icon shows where the browser can run; the Trash is last."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
-    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor trash))))
+    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor settings trash))))
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
-    (should (equal (mapcar #'car (lme-desktop--items)) '(home editor browser trash)))))
+    (should (equal (mapcar #'car (lme-desktop--items))
+                   '(home editor browser settings trash)))))
 
 (ert-deftest lme-test-desktop-icons-stand-where-put ()
   "Icons with no place stand in the column at the right edge, the Trash in
@@ -239,6 +240,8 @@ nearest it, kept whole on the desktop; the others keep to free cells."
                          `((,(- 800 lme-desktop-margin cell-width) ,lme-desktop-margin)
                            (,(- 800 lme-desktop-margin cell-width)
                             ,(+ lme-desktop-margin cell-height lme-desktop-gap))
+                           (,(- 800 lme-desktop-margin cell-width)
+                            ,(+ lme-desktop-margin (* 2 (+ cell-height lme-desktop-gap))))
                            (,(- 800 lme-desktop-margin cell-width)
                             ,(- 600 lme-desktop-margin cell-height)))))))
       ;; Home put at the top left; Emacs keeps its cell, the second.
@@ -469,7 +472,7 @@ bottom corner."
       (lme-desktop-select-previous)
       (should (eq lme-desktop--selected 'trash))
       (lme-desktop-select-previous)
-      (should (eq lme-desktop--selected 'editor))
+      (should (eq lme-desktop--selected 'settings))
       (setq lme-desktop--selected 'home)
       (let ((svg (lme-desktop--svg 800 600)))
         (should (string-match-p "fill=\"#000000\"/><text[^>]*fill=\"#FFFFFF\">Home</text>" svg))
