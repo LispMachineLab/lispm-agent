@@ -777,16 +777,21 @@ up, and a press let go where it was only selects."
                      (setq event (read-event))
                      ;; The copy under the mouse, a frame of its own, brings
                      ;; focus and frame events: they do not end the drag.
-                     (or (mouse-movement-p event)
+                     (or (null event)
+                         (mouse-movement-p event)
                          (memq (event-basic-type event)
-                               '(switch-frame focus-in focus-out select-window help-echo
-                                 down-mouse-1))))
+                               '(switch-frame focus-in focus-out select-window help-echo))))
               (when (mouse-movement-p event)
-                ;; Only the latest position counts.
+                ;; Only the latest position counts.  Input can be pending
+                ;; with nothing to read yet: a read that times out gives
+                ;; nil, which ends the catching up and is never put back.
                 (while (and (input-pending-p)
                             (let ((next (read-event nil nil 0)))
-                              (or (mouse-movement-p next)
-                                  (progn (setq unread-command-events (list next)) nil)))))
+                              (cond ((null next) nil)
+                                    ((mouse-movement-p next) t)
+                                    (t (setq unread-command-events
+                                             (append unread-command-events (list next)))
+                                       nil)))))
                 (pcase-let ((`(,x . ,y) (or (lme-desktop--pointer window)
                                             (cons start-x start-y))))
                   (when (or to (> (+ (abs (- x start-x)) (abs (- y start-y)))
