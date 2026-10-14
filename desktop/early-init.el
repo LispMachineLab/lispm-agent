@@ -1,12 +1,12 @@
-;;; early-init.el --- lispm-emacs, before the first frame  -*- lexical-binding: t; -*-
+;;; early-init.el --- lispm-desktop, before the first frame  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Emacs runs this file when this checkout is its init directory: cloned
-;; to ~/.emacs.d, or named with emacs --init-directory.
+;; Emacs runs this file when desktop/ of LispM's repository is its init
+;; directory: linked from ~/.emacs.d, or named with emacs --init-directory.
 
 ;;; Code:
 
-(load (expand-file-name "lisp/lme-early" (file-name-directory load-file-name)) nil t)
+(load (expand-file-name "lisp/lispm-desktop-early" (file-name-directory load-file-name)) nil t)
 
 ;;; early-init.el ends here

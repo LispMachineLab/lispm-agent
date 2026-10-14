@@ -20,5 +20,5 @@
 *.elc
 *~
 .DS_Store
-# lme-term's Rust build
-/native/lme-term/target/
+# lispm-desktop-term's Rust build
+/native/lispm-desktop-term/target/

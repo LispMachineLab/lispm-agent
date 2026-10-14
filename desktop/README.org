@@ -1,8 +1,10 @@
-#+title: lispm-emacs
+#+title: LispM Desktop
 
 LispM's Emacs distribution: Emacs set up as a workspace for coding agents, ready from the first
-start.  [[https://github.com/RyanKung/lispm][LispM]] runs agents inside Emacs; lispm-emacs gives them a
-place to work, and puts Claude Code, Codex and Hermes beside them when you have those installed.
+start.  [[file:../README.org][LispM]], in =lisp/= beside this directory, runs agents inside Emacs; LispM Desktop gives
+them a place to work, and puts Claude Code, Codex and Hermes beside them when you have those
+installed.  It lives in LispM's repository and runs the LispM next to it; installing LispM as a
+package leaves it out.
 
 * What you get
 
@@ -100,7 +102,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   Forward, Reload, Home, Search, History, Stop, and the Netscape N, its meteors falling while a
   page loads), the location toolbar (the Bookmarks button, the page's icon, the address), the
   personal toolbar of bookmarks, a row of tabs, and a status bar with the padlock, the progress
-  bar and "Document: Done".  It keeps a history of the pages visited (=lme-browser-history-file=)
+  bar and "Document: Done".  It keeps a history of the pages visited (=lispm-desktop-browser-history-file=)
   and bookmarks, which are Emacs's own (=bookmark.el=), so =bookmark-jump= opens them too; both
   list in a pane at the window's left (History, Bookmarks › Edit Bookmarks), where a click
   opens a page, a middle click opens it in a new tab and a right click renames, deletes or
@@ -130,9 +132,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   and all of them can read the selection, the open and unsaved files, and Flymake's diagnostics.
 - *Terminals that never stall Emacs*.  Emacs runs Lisp, process output and redisplay on one
   thread, so a terminal emulated in Lisp decodes everything its program writes on that thread,
-  shown or not, and a few agents resuming long sessions at once froze Emacs.  lispm-emacs
+  shown or not, and a few agents resuming long sessions at once froze Emacs.  lispm-desktop
   emulates each terminal on a thread of its own instead, in a dynamic module written in Rust
-  (=native/lme-term=, on [[https://github.com/alacritty/alacritty][Alacritty]]'s terminal), and
+  (=native/lispm-desktop-term=, on [[https://github.com/alacritty/alacritty][Alacritty]]'s terminal), and
   wakes Emacs only for the terminals a window shows, to draw the lines that changed: Emacs's work
   follows the windows on screen, not the number of agents running or how much they write.
   Shells and agents run in it once it is built, which happens in the background at the first
@@ -149,7 +151,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 Title bars and menus are set in Charcoal when it is installed, else Chicago (ChicagoFLF, a free
 revival whose author considers it public domain, works too) or Geneva; lists in Geneva.  macOS
-still ships Geneva; the others are not distributed with lispm-emacs.
+still ships Geneva; the others are not distributed with lispm-desktop.
 
 * Installation
 
@@ -158,16 +160,20 @@ Requires Emacs 30.1 or later (31 recommended), git and curl, on macOS or GNU/Lin
 Try it without touching your configuration:
 
 #+begin_src sh
-git clone https://github.com/RyanKung/lispm-emacs ~/lispm-emacs
-emacs --init-directory ~/lispm-emacs
+git clone https://github.com/RyanKung/lispm ~/lispm
+emacs --init-directory ~/lispm/desktop
 #+end_src
 
 or make it your configuration (move an existing =~/.emacs.d= and =~/.emacs= out of the way first):
 
 #+begin_src sh
-git clone https://github.com/RyanKung/lispm-emacs ~/.emacs.d
+git clone https://github.com/RyanKung/lispm ~/lispm
+ln -s ~/lispm/desktop ~/.emacs.d
 emacs
 #+end_src
+
+=git clone --depth 1= skips the repository's history, its pictures and recordings of earlier
+versions among it.
 
 The first start asks whether you edit with vim or Emacs keys and which appearance you want,
 installs the packages (a few minutes, once), and offers to install the icon font agents' marks
@@ -217,7 +223,7 @@ the check window an EWMH window manager names on the root window, and one named 
 manager that has quit does not count.  To never manage windows, put this in =personal.el=:
 
 #+begin_src emacs-lisp
-(setq lme-window-manager nil)
+(setq lispm-desktop-window-manager nil)
 #+end_src
 
 On GNU/Linux, run Emacs as the X session itself, for instance with =exec emacs= at the end of
@@ -238,7 +244,7 @@ make && make install
 
 Take every X library from Homebrew (=libx11=, =cairo=, =harfbuzz=, =librsvg=), not from
 XQuartz's =/opt/X11=: Homebrew's cairo and librsvg bring Homebrew's libX11, and two libX11s in
-one process do not mix.  Homebrew has no libXaw, hence no toolkit; lispm-emacs draws its own
+one process do not mix.  Homebrew has no libXaw, hence no toolkit; lispm-desktop draws its own
 menus.  librsvg is what the Platinum chrome's pictures need.
 
 XQuartz normally runs rootless: each X window is a Mac window, and quartz-wm is the window
@@ -302,46 +308,45 @@ shows the rest.
 
 * Your own settings
 
-Put them in =personal.el= next to =init.el= (git ignores it); it is loaded after lispm-emacs is
+Put them in =personal.el= next to =init.el= (git ignores it); it is loaded after lispm-desktop is
 set up, so it can change anything, and the appearance takes a new value at once:
 
 #+begin_src emacs-lisp
 ;; The colour theme: dracula, platinum (Mac OS 9's greys), or any theme you
 ;; have installed; the menu bar, title bars and lists take their colours from it.
-(setq lme-theme 'platinum)
+(setq lispm-desktop-theme 'platinum)
 
 ;; The desktop: a colour of its own, rather than the theme's tinted with its
 ;; accent, and a picture over it (a PNG or a JPEG), placed as Mac OS 9's Desktop
 ;; Pictures were: fill (cropped to the desktop), fit, center or tile.
-(setq lme-desktop-color "#6666AA")
-(setq lme-desktop-picture "~/Pictures/desktop.jpg"
-      lme-desktop-picture-position 'fill)
+(setq lispm-desktop-color "#6666AA")
+(setq lispm-desktop-picture "~/Pictures/desktop.jpg"
+      lispm-desktop-picture-position 'fill)
 #+end_src
 
 The control panels set the theme, the desktop, the keys and the browser too, and keep them
 for the next start, as dragging the desktop's icons keeps their places
-(~lme-desktop-icon-places~); so do =M-x lme-set-theme= and =M-x lme-desktop-choose-picture=.
+(~lispm-desktop-icon-places~); so do =M-x lispm-desktop-set-theme= and =M-x lispm-desktop-choose-picture=.
 
-An existing configuration can use lispm-emacs as a library instead:
+An existing configuration can use lispm-desktop as a library instead:
 
 #+begin_src emacs-lisp
-(add-to-list 'load-path "~/src/lispm-emacs/lisp")
-(setq lme-editing-style 'vim)           ; or 'emacs; nil asks
-(require 'lme)
-(lme-setup)
+(add-to-list 'load-path "~/lispm/desktop/lisp")
+(setq lispm-desktop-editing-style 'vim)           ; or 'emacs; nil asks
+(require 'lispm-desktop)
+(lispm-desktop-setup)
 ;; ... your settings
 #+end_src
 
-LispM comes from a checkout on ~load-path~ when there is one, and is otherwise installed from
-GitHub.
+LispM comes from the repository's =lisp/=, unless a copy of it is already on ~load-path~.
 
 * Updating
 
 #+begin_src sh
-git -C ~/.emacs.d pull
+git -C ~/lispm pull
 #+end_src
 
-then =M-x package-upgrade-all= for the packages and =M-x package-vc-upgrade= for LispM.  When the
+updates LispM and the desktop together; =M-x package-upgrade-all= updates the packages.  When the
 update changed the terminals' module, the next start rebuilds it in the background, terminals
 running in Eat until it is ready.
 
@@ -352,4 +357,4 @@ installed packages, to check for warnings, and leaves no =.elc= files behind.
 
 * License
 
-GPL-3.0-or-later.  See [[file:LICENSE][LICENSE]].
+GPL-3.0-or-later.  See [[file:../LICENSE][LICENSE]].

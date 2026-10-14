@@ -3,11 +3,11 @@
 
 Hermes reads its MCP servers from its config file alone and starts a stdio
 server as a subprocess.  Emacs serves each Hermes terminal over HTTP on a
-port of its own (see lme-agent-mcp.el), so this bridge carries each JSON-RPC
+port of its own (see lispm-desktop-agent-mcp.el), so this bridge carries each JSON-RPC
 line from stdin to that server and writes the response to stdout:
 
-  stdin line --POST LME_EMACS_MCP_URL, bearer token from
-             LME_EMACS_MCP_TOKEN_FILE--> response line on stdout
+  stdin line --POST LISPM_DESKTOP_EMACS_MCP_URL, bearer token from
+             LISPM_DESKTOP_EMACS_MCP_TOKEN_FILE--> response line on stdout
 
 Outside an Emacs terminal neither variable is set (Hermes leaves its ${...}
 placeholders in place), and the bridge is a server with no tools, so Hermes
@@ -26,8 +26,8 @@ def setting(name):
     return None if not value or "${" in value else value
 
 
-URL = setting("LME_EMACS_MCP_URL")
-TOKEN_FILE = setting("LME_EMACS_MCP_TOKEN_FILE")
+URL = setting("LISPM_DESKTOP_EMACS_MCP_URL")
+TOKEN_FILE = setting("LISPM_DESKTOP_EMACS_MCP_TOKEN_FILE")
 # Emacs listens on loopback; a system proxy must not see these requests.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 

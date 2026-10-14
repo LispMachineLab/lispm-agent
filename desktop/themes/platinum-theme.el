@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Ryan.K
 
 ;; Author: Ryan.K
-;; URL: https://github.com/RyanKung/lispm-emacs
+;; URL: https://github.com/RyanKung/lispm
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is not part of GNU Emacs.
@@ -30,8 +30,8 @@
 ;; variation colours, keywords in Sapphire and comments in Crimson, as the
 ;; Mac's IDEs of the time coloured them.
 ;;
-;; lispm-emacs's chrome (lme-platinum.el) takes Platinum's greys from
-;; `lme-platinum-colors', which this theme sets.
+;; lispm-desktop's chrome (lispm-desktop-platinum.el) takes Platinum's greys from
+;; `lispm-desktop-platinum-colors', which this theme sets.
 
 ;;; Code:
 
@@ -109,7 +109,7 @@
    `(font-lock-preprocessor-face ((t :foreground ,gold)))
    `(font-lock-negation-char-face ((t :foreground ,crimson)))
    `(font-lock-warning-face ((t :foreground ,poppy :weight bold)))
-   ;; Chrome: lispm-emacs derives the rest from `lme-platinum-colors'.
+   ;; Chrome: lispm-desktop derives the rest from `lispm-desktop-platinum-colors'.
    `(mode-line ((t :background ,platinum :foreground ,black)))
    `(mode-line-inactive ((t :background ,platinum :foreground ,muted)))
    `(header-line ((t :background ,platinum-light :foreground ,black)))
@@ -178,11 +178,11 @@
 
   (custom-theme-set-variables
    'platinum
-   `(lme-platinum-colors '(:chrome ,platinum :header ,platinum-light
-                           :light ,white :shade ,shadow :frame ,frame
-                           :muted ,muted :accent ,lavender
-                           ;; Mac OS 8's default desktop, its blue-violet.
-                           :desktop "#6666AA"))))
+   `(lispm-desktop-platinum-colors '(:chrome ,platinum :header ,platinum-light
+                                     :light ,white :shade ,shadow :frame ,frame
+                                     :muted ,muted :accent ,lavender
+                                     ;; Mac OS 8's default desktop, its blue-violet.
+                                     :desktop "#6666AA"))))
 
 (provide-theme 'platinum)
 
