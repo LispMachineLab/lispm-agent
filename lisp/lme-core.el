@@ -178,20 +178,6 @@ that cannot take it as buffer text, such as a web page; nil inserts it.")
       (message "Copied"))
      (t (user-error "No active region")))))
 
-(defun lme-cut-region ()
-  "Cut the active region."
-  (interactive)
-  (let ((range (lme-selection-range)))
-    (if range
-        (let ((beg (car range))
-              (end (cdr range)))
-          (kill-new (filter-buffer-substring beg end))
-          (unless (or (lme-eat-buffer-p) buffer-read-only)
-            (delete-region beg end))
-          (lme-clear-selection)
-          (message "Cut"))
-      (user-error "No active region"))))
-
 (defun lme-eat-buffer-p ()
   "Return non-nil in an Eat terminal buffer."
   (bound-and-true-p eat-terminal))

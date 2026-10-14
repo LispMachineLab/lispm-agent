@@ -1764,6 +1764,24 @@ from the menu bar outlives the release of the click that dropped it."
   (should-not (lme-typed-event-p '(mouse-1 nil)))
   (should-not (lme-typed-event-p nil)))
 
+(ert-deftest lme-test-menu-typed-keys ()
+  "Menus are walked from the keyboard: a typed letter goes to the next
+enabled item it starts, and the keys shown beside items can be typed:
+no function keys, and no Super keys where no key is Super."
+  (let ((items '((:label "Undo" :action ignore) separator (:label "Paste" :action ignore)
+                 (:label "Print" :action ignore :enabled nil)
+                 (:label " paste again" :action ignore))))
+    (should (= (lme-popup--item-starting items nil ?p) 2))
+    (should (= (lme-popup--item-starting items 2 ?P) 4))
+    (should (= (lme-popup--item-starting items 4 ?p) 2))
+    (should-not (lme-popup--item-starting items nil ?z)))
+  (should (lme-popup--keyboard-p (kbd "C-x h")))
+  (should-not (lme-popup--keyboard-p (kbd "<f10>")))
+  (should-not (lme-popup--keyboard-p (kbd "<mouse-1>")))
+  (let ((window-system 'ns) (ns-command-modifier 'meta) (ns-alternate-modifier 'none))
+    (should-not (lme-popup--keyboard-p (kbd "s-a"))))
+  (should (lme-popup--keyboard-p (kbd "M-c"))))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."

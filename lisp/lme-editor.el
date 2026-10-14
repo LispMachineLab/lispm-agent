@@ -626,7 +626,7 @@ under it."
   (list (lme-editor--item "Undo" #'undo)
         (lme-editor--item "Redo" #'undo-redo)
         'separator
-        (lme-editor--item "Cut" #'lme-cut-region)
+        (lme-editor--item "Cut" #'kill-region)
         (lme-editor--item "Copy" #'lme-copy-region)
         (lme-editor--item "Paste" #'lme-paste)
         (lme-editor--item "Select All" #'mark-whole-buffer)

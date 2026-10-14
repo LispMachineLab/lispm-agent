@@ -214,15 +214,30 @@ It needs an action, a submenu or a value to return; an item without
        (or (plist-get item :action) (plist-get item :submenu) (plist-member item :value))
        (or (not (plist-member item :enabled)) (plist-get item :enabled))))
 
+(defun lme-popup--super-key-p ()
+  "Return non-nil when a key of the keyboard is Super.
+On macOS lispm-emacs makes Command Meta, which leaves Super to no key."
+  (or (not (eq window-system 'ns))
+      (seq-some (lambda (variable) (and (boundp variable) (eq (symbol-value variable) 'super)))
+                '(ns-command-modifier ns-right-command-modifier ns-alternate-modifier
+                  ns-right-alternate-modifier ns-control-modifier ns-function-modifier))))
+
 (defun lme-popup--keyboard-p (keys)
-  "Return non-nil when KEYS is typed on the keyboard alone.
-Mouse, wheel, touch and menu bar events do not count."
-  (seq-every-p (lambda (event)
-                 (not (and (symbolp event)
-                           (string-match-p (concat "mouse\\|wheel\\|drag\\|touch\\|pinch"
-                                                   "\\|swipe\\|menu-bar\\|tab-bar\\|tool-bar")
-                                           (symbol-name event)))))
-               keys))
+  "Return non-nil when KEYS is typed on the keyboard alone, as a menu
+shows it beside an item.  Mouse, wheel, touch and menu bar events do not
+count, nor function keys, which lispm-emacs leaves out, nor Super keys
+where no key is Super."
+  (let ((super (lme-popup--super-key-p)))
+    (seq-every-p (lambda (event)
+                   (let ((name (and (symbolp (event-basic-type event))
+                                    (symbol-name (event-basic-type event)))))
+                     (not (or (and name
+                                   (string-match-p
+                                    (concat "mouse\\|wheel\\|drag\\|touch\\|pinch\\|swipe"
+                                            "\\|menu-bar\\|tab-bar\\|tool-bar\\|\\`f[0-9]+\\'")
+                                    name))
+                              (and (not super) (memq 'super (event-modifiers event)))))))
+                 keys)))
 
 (defun lme-popup--key (item)
   "Return the key equivalent shown for menu ITEM, or nil.
@@ -351,6 +366,25 @@ A submenu given as a function is asked for its items only now."
       (when (and (< -1 index (length items)) (lme-popup--enabled-p (nth index items)))
         index))))
 
+(defvar lme-popup-menu-bar-step nil
+  "Non-nil while the menu bar is walked from the keyboard.
+Left in a menu's top level, and Right on an item without a submenu,
+then leave the menu for the one beside it in the menu bar: the menu
+throws `lme-popup-menu-bar-step' with -1 or 1.")
+
+(defun lme-popup--item-starting (items from char)
+  "Return the index of the next enabled item of ITEMS after FROM whose
+label starts with CHAR, ignoring case, or nil."
+  (let ((count (length items))
+        (prefix (downcase (char-to-string char))))
+    (cl-loop for step from 1 to count
+             for index = (mod (+ (or from -1) step) count)
+             for item = (nth index items)
+             when (and (lme-popup--enabled-p item)
+                       (string-prefix-p prefix (downcase (string-trim-left
+                                                          (plist-get item :label)))))
+             return index)))
+
 (defun lme-popup-menu (items &optional x y align)
   "Pop up ITEMS as a Mac OS 9 menu and run the action of the one chosen.
 X and Y place the menu in the selected frame, by default under the
@@ -424,6 +458,10 @@ without entering it."
          (under (event)
            (seq-find (lambda (level) (lme-popup--over event (plist-get level :frame)))
                      (levels))))
+      ;; A menu opened from the keyboard starts on its first item, so
+      ;; Return chooses at once.
+      (when (lme-typed-event-p last-input-event)
+        (highlight focus (lme-popup--step (plist-get focus :items) nil 1)))
       (track-mouse
         (catch 'done
           (while t
@@ -437,14 +475,21 @@ without entering it."
                 (highlight focus (lme-popup--step (plist-get focus :items)
                                                   (plist-get focus :highlight) -1)))
                ((memq event '(right ?\C-f))
-                (enter focus))
+                (cond ((child focus) (enter focus))
+                      (lme-popup-menu-bar-step (throw 'lme-popup-menu-bar-step 1))))
                ((memq event '(left ?\C-b))
                 (let ((parent (cadr (memq focus (levels)))))
-                  (when parent
-                    (close-to focus)
-                    (plist-put focus :highlight nil)
-                    (redraw focus)
-                    (setq focus parent))))
+                  (cond (parent
+                         (close-to focus)
+                         (plist-put focus :highlight nil)
+                         (redraw focus)
+                         (setq focus parent))
+                        (lme-popup-menu-bar-step (throw 'lme-popup-menu-bar-step -1)))))
+               ((and (characterp event) (>= event ?\s) (/= event ?\d))
+                ;; Typing an item's first letter goes to it, as in lists.
+                (when-let* ((index (lme-popup--item-starting
+                                    (plist-get focus :items) (plist-get focus :highlight) event)))
+                  (highlight focus index)))
                ((lme-popup--confirm-p event)
                 (let ((chosen (item focus)))
                   (cond ((null chosen))
@@ -468,9 +513,11 @@ without entering it."
                     (throw 'done chosen))))))))))))
 
 (defun lme-popup--run (item)
-  "Run the action of menu ITEM, when there is one; return ITEM."
+  "Run the action of menu ITEM, when there is one; return ITEM.
+A menu the action pops up is its own, not a step of a menu bar walk."
   (when-let* ((action (and item (plist-get item :action))))
-    (if (commandp action) (call-interactively action) (funcall action)))
+    (let ((lme-popup-menu-bar-step nil))
+      (if (commandp action) (call-interactively action) (funcall action))))
   item)
 
 (defun lme-popup--menu-fallback (items)
@@ -798,9 +845,10 @@ did.  Return its frame; nothing is read from the user."
 (defun lme-popup-alert (icon message buttons &optional detail)
   "Show a Mac OS 9 alert and return the value of the button chosen.
 ICON is `caution', `stop' or `note'; MESSAGE is the question, DETAIL a
-line or two under it.  BUTTONS is a list of (LABEL VALUE ROLE [KEY]):
+line or two under it.  BUTTONS is a list of (LABEL VALUE ROLE KEYS...):
 ROLE `default' marks the button Return presses, `cancel' the one Escape
-does; KEY is an event pressing it too, as Command-D pressed Don't Save."
+does, and without one Escape dismisses the alert by its default; KEYS
+are events pressing a button too, as Command-D pressed Don't Save."
   (let ((default (nth 1 (seq-find (lambda (button) (eq (nth 2 button) 'default)) buttons)))
         (cancel (nth 1 (seq-find (lambda (button) (eq (nth 2 button) 'cancel)) buttons))))
     (if (not (lme-popup-available-p))
@@ -817,14 +865,15 @@ does; KEY is an event pressing it too, as Command-D pressed Don't Save."
                   (while t
                     (let ((event (lme-popup--read)))
                       (cond
-                       ((seq-find (lambda (button) (eql (nth 3 button) event)) buttons)
+                       ((seq-find (lambda (button) (memql event (nthcdr 3 button))) buttons)
                         (setq pressed (nth 1 (seq-find (lambda (button)
-                                                         (eql (nth 3 button) event))
+                                                         (memql event (nthcdr 3 button)))
                                                        buttons)))
                         (redraw) (sit-for 0.12)
                         (setq choice pressed) (throw 'done nil))
-                       ((and (lme-popup--cancel-p event) cancel)
-                        (setq choice cancel) (throw 'done nil))
+                       ((and (lme-popup--cancel-p event) (or cancel default))
+                        ;; An alert with no Cancel, only OK, is dismissed.
+                        (setq choice (or cancel default)) (throw 'done nil))
                        ((and (lme-popup--confirm-p event) default)
                         ;; The default button blinks as it is pressed.
                         (setq pressed default) (redraw) (sit-for 0.12)

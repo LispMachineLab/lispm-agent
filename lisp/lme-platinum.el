@@ -725,7 +725,7 @@ buffer whose process still runs asks before the process is stopped."
   (eq 'yes (lme-popup-alert
             'caution
             (replace-regexp-in-string "\\s-*([^()]*)\\s-*\\'" "" (string-trim prompt))
-            '(("No" no cancel) ("Yes" yes default)))))
+            '(("No" no cancel ?n) ("Yes" yes default ?y)))))
 
 (defun lme-platinum--names (names)
   "Return NAMES as a phrase: the first three quoted, then a count of the rest."
@@ -770,7 +770,9 @@ RESTART'ing, as Mac OS 9 asked; return nil if one was cancelled."
               'caution (format "Save changes to the document “%s” before %s?"
                                (lme-platinum--buffer-title buffer)
                                (if restart "restarting" "quitting"))
-              '(("Don’t Save" discard nil ?\M-d) ("Cancel" cancel cancel) ("Save" save default))
+              ;; y and n answer as `save-some-buffers' takes them.
+              '(("Don’t Save" discard nil ?\M-d ?n) ("Cancel" cancel cancel)
+                ("Save" save default ?y))
               "If you don’t save, your changes will be lost.")
         ('save (with-current-buffer buffer (save-buffer)))
         ('cancel (throw 'cancel nil))))
@@ -925,6 +927,7 @@ Where images cannot be shown, a plain λ stands in."
 (declare-function lme-popup-menu "lme-popup" (items &optional x y align))
 (declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
 (declare-function lme-popup-available-p "lme-popup" ())
+(defvar lme-popup-menu-bar-step)
 (declare-function lme-agent-installed-p "lme-ai" (agent))
 (defvar lme-theme)
 
@@ -1083,6 +1086,30 @@ project's folder for a project's.  Clicked, it lists every workspace."
                    " " (or (cdr application) name) " ▾")
            #'lme-platinum-workspace-menu "Workspaces"
            (eq lme-platinum--open-menu 'lme-application)))))
+
+(defun lme-platinum--menu-bar-menus ()
+  "Return the menus of the menu bar, left to right, as (KEY . COMMAND):
+the λ menu, the frontmost application's menus and the Application menu."
+  (mapcar (lambda (item) (cons (car item) (nth 3 item)))
+          (append (if lme-platinum-menus-function
+                      (lme-platinum-menu-bar)
+                    (list (car (lme-platinum-menu-bar))))
+                  (lme-platinum-application-menu))))
+
+(defun lme-platinum-menu-bar-open ()
+  "Open the menu bar from the keyboard: the λ menu drops with its first
+item highlighted.  Up and Down move through a menu, typing a letter goes
+to the item it starts, Left and Right go to the menu beside, Return
+chooses and Escape closes, so every menu is reached without the mouse."
+  (interactive)
+  (let ((menus (lme-platinum--menu-bar-menus))
+        (index 0)
+        step)
+    (while (setq step (catch 'lme-popup-menu-bar-step
+                        (let ((lme-popup-menu-bar-step t))
+                          (call-interactively (cdr (nth index menus))))
+                        nil))
+      (setq index (mod (+ index step) (length menus))))))
 
 ;;;; Window bottoms
 
@@ -2067,7 +2094,10 @@ it, as on every theme change, is idempotent."
   (add-hook 'which-key-init-buffer-hook #'lme-platinum-no-title-bar)
   (add-hook 'transient-setup-buffer-hook #'lme-platinum-no-title-bar)
   ;; Quitting asks in alerts, as Mac OS 9's Quit and Shut Down did.
-  (advice-add 'save-buffers-kill-emacs :around #'lme-platinum--quit))
+  (advice-add 'save-buffers-kill-emacs :around #'lme-platinum--quit)
+  ;; The menu bar from the keyboard; a C-c key, which terminals leave to
+  ;; Emacs too.
+  (keymap-global-set "C-c m" #'lme-platinum-menu-bar-open))
 
 
 (provide 'lme-platinum)

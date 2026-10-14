@@ -32,8 +32,9 @@
 ;;   workspace --window state--> boxes --buffer text--> thumbnail (SVG)
 ;;
 ;; The editor's Project menu opens the panel, as does Command-` (M-`);
-;; in it Tab, Command-` and the arrows move, Return or a click opens the
-;; workspace chosen, Escape keeps the one in front.  C-<tab> and
+;; in it Tab, Command-`, C-f, C-b, C-n, C-p and the arrows move, a digit
+;; or Return or a click opens the workspace chosen, Escape keeps the one
+;; in front.  C-<tab> and
 ;; C-S-<tab> go straight to the next and the previous workspace, and so do
 ;; Emacs's own commands for the next and previous tab, skipping the
 ;; desktop's and the browser's.
@@ -398,13 +399,19 @@ X, Y of the screen frame, or stands over its upper middle."
                      ((or (lme-popup--confirm-p event) (eq event ?\s))
                       (setq choice (cons 'workspace (nth selected names)))
                       (throw 'done nil))
-                     ((memq event '(tab ?\t C-tab ?\M-` right))
+                     ;; Walking the menu bar, Left and Right go to the
+                     ;; menus beside; Tab still moves among workspaces.
+                     ((and lme-popup-menu-bar-step (memq event '(right ?\C-f)))
+                      (throw 'lme-popup-menu-bar-step 1))
+                     ((and lme-popup-menu-bar-step (memq event '(left ?\C-b)))
+                      (throw 'lme-popup-menu-bar-step -1))
+                     ((memq event '(tab ?\t C-tab ?\M-` right ?\C-f))
                       (setq selected (lme-workspaces--move selected 1 count)) (redraw))
-                     ((memq event '(backtab S-tab C-S-tab ?\M-~ left))
+                     ((memq event '(backtab S-tab C-S-tab ?\M-~ left ?\C-b))
                       (setq selected (lme-workspaces--move selected -1 count)) (redraw))
-                     ((eq event 'down)
+                     ((memq event '(down ?\C-n))
                       (setq selected (lme-workspaces--move selected columns count)) (redraw))
-                     ((eq event 'up)
+                     ((memq event '(up ?\C-p))
                       (setq selected (lme-workspaces--move selected (- columns) count))
                       (redraw))
                      ((and (characterp event) (<= ?1 event ?9) (<= (- event ?0) count))
