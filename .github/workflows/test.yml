@@ -40,8 +40,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # LispM Desktop needs what LispM does; its terminals' Rust module
-        # is not built here, so the tests needing it are skipped.
+        # LispM Desktop needs what LispM does.  Its terminals' Rust module is
+        # not built here, and these Emacs builds draw no SVG, so the tests
+        # needing either are skipped.
         emacs: ['30.1', '31.1']
     steps:
       - uses: actions/checkout@v7

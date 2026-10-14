@@ -155,7 +155,8 @@ still ships Geneva; the others are not distributed with lispm-desktop.
 
 * Installation
 
-Requires Emacs 30.1 or later (31 recommended), git and curl, on macOS or GNU/Linux.
+Requires Emacs 30.1 or later (31 recommended) built with SVG images (librsvg, as macOS builds
+and most distributions' are), git and curl, on macOS or GNU/Linux.
 
 Try it without touching your configuration:
 

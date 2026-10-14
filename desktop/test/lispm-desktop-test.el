@@ -800,6 +800,8 @@ routing while the old workspace is still in front."
 
 (ert-deftest lispm-desktop-test-window-bottom ()
   "A window's bottom edge counts a list's items, or shows the buffer."
+  ;; Drawn as SVG: an Emacs without librsvg cannot.
+  (skip-unless (image-type-available-p 'svg))
   (let ((lispm-desktop-platinum--palette (lispm-desktop-platinum--derive-palette "#282a36" "#f8f8f2"
                                                                                  "#6272a4" "#bd93f9")))
     (with-temp-buffer
@@ -1063,6 +1065,8 @@ cannot be chosen, and panes are parted by separators."
 
 (ert-deftest lispm-desktop-test-alert-text ()
   "An alert shows its message, its detail and a button per choice."
+  ;; Drawn as SVG: an Emacs without librsvg cannot.
+  (skip-unless (image-type-available-p 'svg))
   (let* ((lispm-desktop-platinum--palette (lispm-desktop-platinum--derive-palette "#FFFFFF" "#000000"
                                                                                   "#777777" "#6363CE"))
          (text (lispm-desktop-popup-alert-text 'caution "Save?" "Changes will be lost."
@@ -1424,6 +1428,8 @@ once, and the browser lists only web pages' bookmarks, oldest first."
 (ert-deftest lispm-desktop-test-settings-panels-draw ()
   "Each panel draws its settings: the themes, the desktop's picture and its
 positions, the keys, the browser's pages."
+  ;; Drawn as SVG: an Emacs without librsvg cannot.
+  (skip-unless (image-type-available-p 'svg))
   (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'always)
             ((symbol-function 'lispm-desktop-browser--load-history) (lambda () '(("u" "t" 0 1))))
             ((symbol-function 'lispm-desktop-browser-bookmarks) (lambda () nil)))
@@ -1440,6 +1446,8 @@ positions, the keys, the browser's pages."
 
 (ert-deftest lispm-desktop-test-settings-radio-saves ()
   "Pressing a radio button saves its choice and draws the panel again."
+  ;; Drawn as SVG: an Emacs without librsvg cannot.
+  (skip-unless (image-type-available-p 'svg))
   (let ((saved nil)
         (lispm-desktop-editing-style 'vim))
     (cl-letf (((symbol-function 'customize-save-variable)
