@@ -1247,6 +1247,30 @@ current contents exactly, so read the file first."
     (format "Replaced %d occurrence%s in %s." (cdr edit) (if (= (cdr edit) 1) "" "s")
             (lispm-tools--label file))))
 
+(defun lispm-tools--check-new-file (file)
+  "Signal an error if FILE is new and cannot be written; change nothing.
+The error names FILE and the cause: a parent is not a directory, or
+the directory to write FILE in, or to make that directory in, is not
+writable.  A missing directory that can be made is no error."
+  (unless (file-exists-p file)
+    (let* ((directory (file-name-directory file))
+           (parent (directory-file-name directory)))
+      ;; The nearest of DIRECTORY and its parents that is there, whatever it is.
+      (while (not (or (file-exists-p parent) (file-symlink-p parent)
+                      (equal parent (file-name-directory parent))))
+        (setq parent (directory-file-name (file-name-directory parent))))
+      (let ((label (lispm-tools--label file))
+            (where (lispm-tools--label (file-name-as-directory parent))))
+        (cond ((not (file-directory-p parent))
+               (error "Cannot write %s: %s is not a directory"
+                      label (lispm-tools--label parent)))
+              ((file-writable-p (file-name-as-directory parent)))
+              ((file-directory-p directory)
+               (error "Cannot write %s: %s is not writable" label where))
+              (t
+               (error "Cannot write %s: %s does not exist, and cannot be made: %s is not writable"
+                      label (lispm-tools--label directory) where)))))))
+
 (lispm-deftool write_file
     ((path string "File to create or overwrite, absolute or relative to your root.")
      (content string "The complete new contents."))
@@ -1257,10 +1281,19 @@ for changes to existing files."
              (let ((file (lispm-tools--file path)))
                (lispm--diff (lispm--file-text file) content (lispm-tools--label file))))
   :changes (lambda (path content)
-             (when-let* ((buffer (lispm-tools--to-show (lispm-tools--file path) t)))
-               (cons buffer content)))
+             (let ((file (lispm-tools--file path)))
+               ;; No buffer is visited to show a file that cannot be written.
+               (lispm-tools--check-new-file file)
+               (when-let* ((buffer (lispm-tools--to-show file t)))
+                 (cons buffer content))))
   (let* ((file (lispm-tools--file path))
+         (directory (file-name-directory file))
          (existed (file-exists-p file)))
+    (lispm-tools--check-new-file file)
+    ;; Made before FILE is visited: Emacs makes the buffer of a file it
+    ;; cannot write read-only, in batch even for want of its directory.
+    (when (and lispm-save-edits (not (file-directory-p directory)))
+      (make-directory directory t))
     (lispm-tools--set-text (lispm-tools--visit file) content)
     (format "%s %s." (if existed "Overwrote" "Created") (lispm-tools--label file))))
 

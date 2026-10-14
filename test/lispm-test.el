@@ -1264,6 +1264,51 @@ starts is, so its schema is made outside the call that loaded it."
                                                          (old_text . "six") (new_text . "6"))))))
         (should-not (file-exists-p file))))))
 
+(ert-deftest lispm-test-write-file-directory ()
+  "write_file makes the directory a new file goes in, or says why it cannot.
+When it cannot, nothing is left of the call: no buffer, no journal entry."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+          (locked (expand-file-name "locked/" project)))
+      (lispm-test--never-asking
+        (with-temp-file (expand-file-name "a.txt" project) (insert "a\n"))
+        (make-directory locked)
+        (set-file-modes locked #o555)
+        (unwind-protect
+            (dolist (case `(("a.txt/x" . "Cannot write a.txt/x: a.txt is not a directory")
+                            ("a.txt/deeper/x" . "Cannot write a.txt/deeper/x: a.txt is not a directory")
+                            ,@(unless (file-writable-p locked)
+                                '(("locked/x" . "Cannot write locked/x: locked/ is not writable")
+                                  ("locked/new/x" . "Cannot write locked/new/x: locked/new/ does not exist, \
+and cannot be made: locked/ is not writable")))))
+              (let ((file (expand-file-name (car case) project)))
+                ;; Not even while the call is proposed.
+                (let ((lispm-current-agent agent))
+                  (should-error (lispm-tool-would-change (lispm-get-tool "write_file")
+                                                         `((path . ,(car case)) (content . "x\n")))))
+                (should-not (get-buffer "x"))
+                (should (equal (lispm-test--call agent "write_file"
+                                                 `((path . ,(car case)) (content . "x\n")))
+                               (cons (cdr case) t)))
+                (should-not (find-buffer-visiting file))
+                (should-not (get-buffer "x"))))
+          (set-file-modes locked #o755))
+        (should-not (file-exists-p (expand-file-name "new" locked)))
+        (should-not (lispm-agent-journal agent))
+        ;; Outside the root too, named as they are.
+        (unless (file-writable-p "/")
+          (should (equal (lispm-test--call agent "write_file"
+                                           '((path . "/lispm-nonexistent-dir/x") (content . "x\n")))
+                         '("Cannot write /lispm-nonexistent-dir/x: /lispm-nonexistent-dir/ does not \
+exist, and cannot be made: / is not writable" . t)))
+          (should-not (get-buffer "x"))
+          (should-not (lispm-agent-journal agent)))
+        ;; A directory that can be made is, with its parents.
+        (should (equal (lispm-test--call agent "write_file"
+                                         '((path . "sub/deeper/x") (content . "x\n")))
+                       '("Created sub/deeper/x." . nil)))
+        (should (equal (lispm-test--disk (expand-file-name "sub/deeper/x" project)) "x\n"))))))
+
 (ert-deftest lispm-test-calls-revert-buffers ()
   "After a call, buffers show what it did to their files."
   (lispm-test-env
