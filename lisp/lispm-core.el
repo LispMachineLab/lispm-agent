@@ -125,16 +125,17 @@ over latency and cost."
   :type 'integer)
 
 (defcustom lispm-default-policy
-  '((read . auto) (memory . auto) (comm . auto) (write . ask) (exec . ask) (mcp . ask)
-    (web . ask))
+  '((read . auto) (memory . auto) (comm . auto) (lisp . auto) (write . ask) (exec . ask)
+    (mcp . ask) (web . ask))
   "Default approval policy: an alist from permission class to action.
 Classes are `read' (inspect files, buffers and Emacs state),
 `memory' (the agent's own memory and tasks), `comm' (talk to other
-agents), `write' (change files or buffers), `exec' (run shell
-commands or evaluate Lisp), `mcp' (tools of MCP servers, unless
-`lispm-mcp-servers' gives a server's tools another class) and `web'
-\(search the web and fetch pages).  Actions
-are `auto' (run at once), `ask' \(wait for the user's approval) and
+agents), `lisp' (run Lisp programs whose effects are tool calls, each
+under the policy: run_lisp), `write' (change files or buffers),
+`exec' (run shell commands or evaluate any Lisp), `mcp' (tools of MCP
+servers, unless `lispm-mcp-servers' gives a server's tools another
+class) and `web' \(search the web and fetch pages).  Actions are
+`auto' (run at once), `ask' \(wait for the user's approval) and
 `deny'.  An agent's :policy overrides entries here."
   :type '(alist :key-type symbol
                 :value-type (choice (const auto) (const ask) (const deny))))
@@ -478,14 +479,22 @@ An unknown action counts as the strictest, as `deny' does."
   (let ((rank (lambda (action) (or (cl-position action lispm--policy-actions) 0))))
     (if (<= (funcall rank a) (funcall rank b)) a b)))
 
+(defconst lispm--implied-permissions '((lisp read))
+  "Classes whose tools also do what tools of other classes do.
+Each entry is (CLASS . OTHERS): a Lisp program reads Emacs state
+itself, so an agent that may not read may not run one either.")
+
 (defun lispm-policy-action (agent permission)
   "Action AGENT's policy prescribes for tools of class PERMISSION.
 An agent with a ceiling gets the stricter of its own policy's action
-and the ceiling's."
+and the ceiling's.  A class that implies others (see
+`lispm--implied-permissions') gets the strictest of their actions."
   (let ((action (or (alist-get permission (lispm-agent-policy agent))
                     (alist-get permission lispm-default-policy)
                     'ask))
         (ceiling (lispm-agent-ceiling agent)))
+    (dolist (other (alist-get permission lispm--implied-permissions))
+      (setq action (lispm--stricter action (lispm-policy-action agent other))))
     (if ceiling
         (lispm--stricter action (alist-get permission ceiling 'ask))
       action)))

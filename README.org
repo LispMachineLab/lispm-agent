@@ -77,8 +77,9 @@ conversation per agent, and you can run several and come back to any of them.
 3. The reply streams in above the prompt: what the agent says (~⏺~), each tool call as
    ~⏺ Read(file)~ with a one-line result (~TAB~ on it shows it in full), edits as diffs. A
    call that needs approval opens a box with the command or diff and the model's reason;
-   answer ~1~ (yes), ~2~ (yes, and don't ask again for that tool) or ~3~ (no, and say what
-   to do instead), or pick with the arrow keys and ~RET~.
+   answer ~1~ (yes), ~2~ (yes, and don't ask again for that tool; for a shell command or
+   ~eval_elisp~, for that exact one) or ~3~ (no, and say what to do instead), or pick with
+   the arrow keys and ~RET~.
 4. A turn that stops early, because a request failed, the agent reached ~lispm-max-steps~
    requests, or a response was cut short or refused, does not end: a box says what happened
    and how it can go on (retry, use another model, ask again with a larger limit, compact,
@@ -177,8 +178,10 @@ from one that sends it whole, the change shows once it is complete.
   :tools '(read_file search_files list_directory read_buffer recall remember send_message))
 #+end_src
 
-Permission classes: ~read~, ~memory~ and ~comm~ run automatically by default; ~write~ and
-~exec~ need approval (see ~lispm-default-policy~).
+Permission classes: ~read~, ~memory~, ~comm~ and ~lisp~ run automatically by default;
+~write~ and ~exec~ need approval (see ~lispm-default-policy~). Writes outside the agent's
+root always ask. ~exec~ (~run_shell~, ~eval_elisp~) reaches all of Emacs and the system, the
+policy included, so approving such a call for good approves that exact call, not every one.
 
 * Standing agents
 
@@ -263,6 +266,24 @@ waits for something ends with ~(lispm-async (lambda (resolve) ...))~. An error i
 back with its backtrace, innermost call first; as that shows the arguments of the calls, set
 ~lispm-eval-backtrace~ to nil if they may hold what should not leave Emacs.
 
+~eval_elisp~ is outside the permission model: the Lisp it runs could change the policy
+itself, so it needs your approval every time (unless you allow ~exec~ outright). For Lisp
+that stays under the policy there is ~run_lisp~, in which the agent's tools are functions:
+
+#+begin_src emacs-lisp
+(dolist (file (directory-files "lisp" t "\\.el\\'"))
+  (when (string-search "Copyright (C) 2025" (read_file :path file))
+    (edit_file :path file :old-text "Copyright (C) 2025" :new-text "Copyright (C) 2026")))
+#+end_src
+
+Each call goes through the policy as if the model had made it: the reads run, each edit asks
+you as any edit does (in the chat, under the program's call), and a denial is an error the
+program can handle (~lispm-call-denied~). Otherwise a program only computes: it may call the
+functions Emacs declares free of side effects and pass around lambdas of its own, sets only
+its own variables and changes only buffers it made. Anything else is refused, with the
+reason. A program waiting for a call is run again once the call is decided; the calls it
+made before keep their results.
+
 A tool's failure goes to the model, which usually knows what to do about it. Set
 ~lispm-debug-tool-errors~ (t, or a list of tool names) and it stops the call instead, as
 ~debug-on-error~ would: you choose to tell the model, run the call again, give it a result of
@@ -343,6 +364,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-edits.el      | edits shown where they happen: streamed, proposed, typed in      |
 | lisp/lispm-memory.el     | memory.org and tasks.org, git audit trail                        |
 | lisp/lispm-runtime.el    | execution loop, approvals, inbox, triggers, rollback             |
+| lisp/lispm-lisp.el       | run_lisp: Lisp programs whose effects are calls under the policy |
 | lisp/lispm-collab.el     | multi-agent collaboration tools                                  |
 | lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
 | lisp/lispm-title.el      | sessions titled by the model                                     |

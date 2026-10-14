@@ -39,7 +39,9 @@
 ;;   interface      a chat laid out like Claude Code's, drawn from that
 ;;                  org buffer (lispm-chat.el);
 ;;   tools          Emacs Lisp functions over buffers, files, processes
-;;                  and Emacs itself (lispm-tools.el);
+;;                  and Emacs itself (lispm-tools.el), which agents
+;;                  compose in Lisp programs, each call under the
+;;                  policy (lispm-lisp.el);
 ;;   permissions    tool calls are org TODO entries: WAITING until the
 ;;                  user changes their state (lispm-runtime.el);
 ;;   memory, tasks  org files under git, per project and per role
@@ -70,6 +72,7 @@
 (require 'lispm-edits)
 (require 'lispm-memory)
 (require 'lispm-runtime)
+(require 'lispm-lisp)
 (require 'lispm-collab)
 (require 'lispm-mcp)
 (require 'lispm-title)

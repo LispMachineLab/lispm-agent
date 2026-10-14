@@ -1946,7 +1946,7 @@ started, after the session opened."
       ;; The retry sent what the failed request would have, and no condition.
       (should (= (length lispm-test--requests) 2))
       (should (equal (car lispm-test--requests) (cadr lispm-test--requests)))
-      (should-not (string-match-p "Condition" (format "%S" (car lispm-test--requests)))))))
+      (should-not (string-match-p "Condition: " (format "%S" (car lispm-test--requests)))))))
 
 (ert-deftest lispm-test-condition-abort ()
   "Stopping at a condition ends the turn as a failed turn always ended."
@@ -3507,7 +3507,7 @@ Its policy is the stricter of its role's and its caller's."
       (should-not (lispm-get-agent name t)))))
 
 (ert-deftest lispm-test-chat-approval-answers ()
-  "2 approves a tool for good, 3 denies with what to do instead."
+  "2 approves a command for good, 3 denies with what to do instead."
   (lispm-test-env
     (let* ((agent (lispm-defagent tester "Test agent." :root project))
            (chat (lispm-chat agent)))
@@ -3522,8 +3522,11 @@ Its policy is the stricter of its role's and its caller's."
       (lispm-test--chat-type chat "go")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
       (should (string-match-p "│ Bash command +│\n│ +│\n│   echo one" (lispm-test--chat-text chat)))
+      (should (string-match-p "2\\. Yes, and don't ask again for this exact command"
+                              (lispm-test--chat-text chat)))
       (lispm-test--chat-key chat "2")
-      (should (member "run_shell" (lispm-agent-allowed agent)))
+      ;; This command, not every command.
+      (should (equal (lispm-agent-allowed agent) '(("run_shell" (command . "echo one")))))
       (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
                                                 (equal (car (lispm--waiting-calls agent)) "t2")))))
       (should (string-match-p "Do you want to write b\\.txt\\?" (lispm-test--chat-text chat)))
@@ -3867,6 +3870,241 @@ Its policy is the stricter of its role's and its caller's."
       (should-not (lispm-edits--proposal "s1"))
       (should-not (lispm-test--edit-overlays buffer))
       (should (equal (lispm-test--file project "a.txt") "one\ntwo\nthree\n")))))
+
+;;;; Lisp under policy
+
+(defun lispm-test--lisp (agent code)
+  "Run the program CODE with run_lisp as AGENT, outside a turn; return (TEXT . ERRORP)."
+  (let ((lispm-current-agent agent) result)
+    (lispm-tool-invoke (lispm-get-tool "run_lisp") `((code . ,code))
+                       (lambda (text errorp &optional _images) (setq result (cons text errorp))))
+    (lispm-test--wait (lambda () result))
+    result))
+
+(ert-deftest lispm-test-lisp-computes ()
+  "A program computes as Lisp does, and calls tools as functions."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a.txt" project) "hello world\n")
+    (let ((agent (lispm-defagent tester :root project)))
+      (pcase-dolist (`(,code . ,expected)
+                     '(("(mapcar (lambda (x) (* x x)) '(1 2 3))" . "=> (1 4 9)")
+                       ("(cl-loop for i from 1 to 9 if (cl-oddp i) collect i)" . "=> (1 3 5 7 9)")
+                       ("(pcase '(1 2) (`(,a ,b) (+ a b)))" . "=> 3")
+                       ("(cl-block nil (dolist (x '(1 2 3)) (when (= x 2) (cl-return x))))" . "=> 2")
+                       ("(letrec ((f (lambda (n) (if (< n 2) n (+ (funcall f (- n 1)) (funcall f (- n 2)))))))
+                           (funcall f 10))"
+                        . "=> 55")
+                       ("(with-temp-buffer (insert \"abc\") (goto-char 1) (re-search-forward \"b\") (point))"
+                        . "=> 3")
+                       ;; Arguments that may be functions may be something else.
+                       ("(list (alist-get \"a\" '((\"a\" . 1)) nil nil #'equal) (assoc \"b\" '((\"b\" . 2)) nil)
+                               (sort (list 3 1 2) :lessp #'>) (locate-dominating-file \".\" \"no-such-file\"))"
+                        . "=> (1 (\"b\" . 2) (3 2 1) nil)")
+                       ;; Destructive functions work on a copy.
+                       ("(let ((x (list 3 1 2))) (list (sort x #'<) (nreverse x) x))"
+                        . "=> ((1 2 3) (2 1 3) (3 1 2))")
+                       ("(princ \"hi\") (seq-filter (lambda (f) (string-suffix-p \".txt\" f)) (directory-files \".\"))"
+                        . "hi\n=> (\"a.txt\")")))
+        (should (equal (lispm-test--lisp agent code) (cons expected nil))))
+      (should (equal (lispm-test--lisp agent "(string-trim (substring (read_file :path \"a.txt\") 7))")
+                     '("Tool calls:\n- read_file a.txt\n\n=> hello world")))
+      ;; A failed call signals an error the program may handle.
+      (should (equal (lispm-test--lisp agent "(condition-case e (read_file :path \"no.txt\")
+                                                (lispm-call-failed (car e)))")
+                     '("Tool calls:\n- read_file no.txt (failed)\n\n=> lispm-call-failed")))
+      (let ((result (lispm-test--lisp agent "(read_file :path \"no.txt\")")))
+        (should (cdr result))
+        (should (string-match-p "\\`Tool calls:\n- read_file no.txt (failed)\n\nTool call failed: read_file: No such file"
+                                (car result)))))))
+
+(ert-deftest lispm-test-lisp-refuses ()
+  "A program acts only through tools: anything else it would do is refused."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a" project) "keep me\n")
+    (let ((agent (lispm-defagent tester :root project))
+          (other (generate-new-buffer "other")))
+      (with-current-buffer other (insert "text") (goto-char 3))
+      (unwind-protect
+          (progn
+            (pcase-dolist (`(,code . ,why)
+                           '(("(delete-file \"a\")" . "delete-file: it is not known")
+                             ("(funcall (intern \"delete-file\") \"a\")" . "calling delete-file")
+                             ("(assoc \"a\" '((\"a\")) 'delete-file)" . "calling delete-file")
+                             ("(mapcar #'funcall (list #'delete-file))" . "calling delete-file")
+                             ("(setq lispm-default-policy nil)" . "setting lispm-default-policy")
+                             ("(let ((lispm-default-policy nil)) 1)" . "binding lispm-default-policy")
+                             ("(setcdr (assq 'write lispm-default-policy) 'auto)" . "setcdr")
+                             ("(eval-when-compile (delete-file \"a\"))" . "eval-when-compile")
+                             ("(cl-flet ((f () 1)) (eval-when-compile (delete-file \"a\")))"
+                              . "eval-when-compile")
+                             ("(rx (eval (delete-file \"a\")))" . "eval")
+                             ("(with-current-buffer \"other\" (insert \"x\"))" . "insert in other")
+                             ("(with-current-buffer \"other\" (goto-char 1))" . "goto-char in other")
+                             ("(condition-case nil (while t) (quit 1))" . "handling quit")
+                             ("(throw 'exit nil)" . "throwing to exit")
+                             ("(print 1 #'ignore)" . "print with argument 2")
+                             ("(match-data nil lispm-default-policy)" . "match-data with argument 2")
+                             ("(sort (list 2 1) :key #'delete-file)" . "calling delete-file")
+                             ("(read_file :path (propertize \"a\" 'face 'bold))" . "propertize")))
+              (let ((result (lispm-test--lisp agent code)))
+                (should (cdr result))
+                (should (string-prefix-p (concat "Not allowed in run_lisp: " why) (car result)))))
+            ;; Inside save-excursion point may move: it comes back.
+            (should (equal (lispm-test--lisp agent "(with-current-buffer \"other\"
+                                                      (save-excursion (goto-char 1) (looking-at \"te\")))")
+                           '("=> t")))
+            (should (= (with-current-buffer other (point)) 3))
+            (should (equal (lispm-test--file project "a") "keep me\n")))
+        (kill-buffer other)))))
+
+(ert-deftest lispm-test-lisp-under-policy ()
+  "A program's calls go through the policy: reads run, writes await approval.
+The program waits; once a call is decided, it runs again, the calls
+it made before keeping the results they had."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a.txt" project) "hello world\n")
+    (lispm-test--write (expand-file-name "b.txt" project) "bye world\n")
+    (let ((agent (lispm-defagent tester :root project :policy '((exec . auto))))
+          (code "(let (changed)
+                   (dolist (f '(\"a.txt\" \"b.txt\"))
+                     (when (string-search \"world\" (read_file :path f))
+                       (condition-case e
+                           (progn (edit_file :path f :old-text \"world\" :new-text \"lisp\")
+                                  (push f changed))
+                         (lispm-call-denied (princ (cadr e))))))
+                   (princ (car (split-string (run_shell :command \"echo shell\") \"\\n\")))
+                   changed)"))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_lisp" `((code . ,code))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (equal (lispm-agent-status agent) "1 call awaits approval"))
+      (should (equal (plist-get (lispm--asked (gethash "t1" (lispm-agent-pending agent))) :input)
+                     '((path . "a.txt") (old_text . "world") (new_text . "lisp"))))
+      (should (string-match-p "^\\*\\* WAITING run_lisp .*\n\\(?:.*\n\\)*\\*\\*\\* Asks: edit_file  a.txt\n\\(?:.*\n\\)*\\*\\*\\* Preview\n\\(?:.*\n\\)*\\+hello lisp"
+                              (lispm-test--transcript agent)))
+      (lispm-resolve agent "t1" 'approve)
+      (should (lispm-test--wait (lambda () (equal (plist-get (lispm--asked (gethash "t1" (lispm-agent-pending agent)))
+                                                             :input)
+                                                  '((path . "b.txt") (old_text . "world") (new_text . "lisp"))))))
+      (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+      (lispm-resolve agent "t1" 'deny "not b")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-test--file project "b.txt") "bye world\n"))
+      (let* ((messages (alist-get 'messages (car lispm-test--requests)))
+             (result (aref (alist-get 'content (aref messages 2)) 0)))
+        (should (equal (alist-get 'content result)
+                       (concat "Tool calls:\n- read_file a.txt\n- edit_file a.txt\n- read_file b.txt\n"
+                               "- edit_file b.txt (denied)\n- run_shell echo shell\n\n"
+                               "edit_file: The user denied this call. Their reason: not bshell\n"
+                               "=> (\"a.txt\")")))
+        (should-not (alist-get 'is_error result)))
+      (should (string-match-p "^\\*\\* DONE run_lisp" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-lisp-replay ()
+  "Run again after a call it waited for, a program gets the results its calls had.
+They do not run again, even if what they read has changed since."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a.txt" project) "hello world\n")
+    (let ((agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use"
+                                        (lispm-test--tool "t1" "run_lisp"
+                                                          '((code . "(write_file :path \"b.txt\"
+                                                                                 :content (read_file :path \"a.txt\"))"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Copied.")))))
+      (lispm-tell agent "copy")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (lispm-test--write (expand-file-name "a.txt" project) "changed\n")
+      (lispm-resolve agent "t1" 'approve)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-test--file project "b.txt") "     1\thello world\n"))
+      (should (string-match-p "Tool calls:\n- read_file a.txt\n- write_file b.txt\n\n=> Created b.txt."
+                              (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-lisp-policy ()
+  "A program may do no more than its agent: denied calls fail at once.
+Running one is of the class `lisp', which an agent that may not read
+is denied too, as programs read Emacs."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a.txt" project) "hello world\n")
+    (let ((agent (lispm-defagent tester :root project :policy '((write . deny)))))
+      (should (equal (lispm-test--lisp agent "(condition-case e
+                                                 (write_file :path \"b.txt\" :content \"x\")
+                                               (lispm-call-denied (cadr e)))")
+                     '("Tool calls:\n- write_file b.txt (denied)\n\n=> write_file: Denied by policy: tester may not use write tools.")))
+      (should-not (file-exists-p (expand-file-name "b.txt" project))))
+    (should (eq (lispm-policy-action (lispm-defagent t2 :root project :policy '((read . ask)))
+                                     'lisp)
+                'ask))
+    (should (eq (lispm-policy-action (lispm-defagent t3 :root project) 'lisp) 'auto))
+    (let ((agent (lispm-defagent t4 :root project :policy '((lisp . deny)))))
+      (setq lispm-test--scripts
+            `((t4 ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_lisp" '((code . "1"))))
+                  ,(lispm-test--msg "end_turn" (lispm-test--text "OK.")))))
+      (lispm-tell agent "go")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (string-match-p "^\\*\\* DENIED run_lisp" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-lisp-abort ()
+  "Stopping the turn stops the program: whatever it waited for, it goes no further."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((exec . auto) (write . auto)))))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use"
+                                        (lispm-test--tool "t1" "run_lisp"
+                                                          '((code . "(run_shell :command \"sleep 2\")
+                                                                     (write_file :path \"after.txt\" :content \"x\")")))))))
+      (lispm-tell agent "go")
+      (should (lispm-test--wait (lambda () (seq-some (lambda (p) (eq (process-get p 'lispm-agent) agent))
+                                                     (process-list)))))
+      (lispm-abort agent)
+      (should (eq (lispm-agent-state agent) 'idle))
+      (accept-process-output nil 0.3)
+      (should-not (file-exists-p (expand-file-name "after.txt" project)))
+      (should (string-match-p "^\\*\\* FAILED run_lisp" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-lisp-chat-approval ()
+  "The chat asks about a program's call as about any call; 2 allows its tool for good."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "a.txt" project) "one\ntwo\n")
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use"
+                                        (lispm-test--tool "t1" "run_lisp"
+                                                          '((code . "(edit_file :path \"a.txt\" :old-text \"one\" :new-text \"1\")
+                                                                     (edit_file :path \"a.txt\" :old-text \"two\" :new-text \"2\")"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "│ Edit file · in the program Lisp runs" text))
+        (should (string-match-p "│   \\+1 " text))
+        (should (string-match-p "Do you want to make this edit to a\\.txt\\?" text))
+        (should (string-match-p "2\\. Yes, and don't ask again for Update calls by this agent" text)))
+      (lispm-test--chat-key chat "2")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-agent-allowed agent) '("edit_file")))
+      (should (equal (lispm-test--file project "a.txt") "1\n2\n")))))
+
+(ert-deftest lispm-test-write-outside-root ()
+  "Writes outside an agent's root ask, whatever its policy: by path or by buffer."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+           (outside (expand-file-name "../outside.txt" project))
+           (buffer (progn (lispm-test--write outside "x\n") (find-file-noselect outside))))
+      (unwind-protect
+          (progn
+            (should (eq (lispm-tool-action agent (lispm-get-tool "edit_file") '((path . "in.txt"))) 'auto))
+            (should (eq (lispm-tool-action agent (lispm-get-tool "edit_file") `((path . ,outside))) 'ask))
+            (should (eq (lispm-tool-action agent (lispm-get-tool "edit_buffer")
+                                           `((buffer . ,(buffer-name buffer))))
+                        'ask))
+            (should (eq (lispm-tool-action agent (lispm-get-tool "edit_buffer") '((buffer . "*scratch*")))
+                        'auto)))
+        (kill-buffer buffer)))))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

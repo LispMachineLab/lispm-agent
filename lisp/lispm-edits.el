@@ -41,6 +41,8 @@
 (require 'lispm-core)
 (require 'lispm-tools)
 
+(declare-function lispm--asked "lispm-runtime" (call))
+
 (defgroup lispm-edits nil
   "Agents' edits, shown in the buffers they change."
   :group 'lispm
@@ -639,10 +641,9 @@ BAR, if non-nil, is a cursor at its end."
     (when (lispm-edits--live-p)
       (maphash (lambda (id call)
                  (when (eq (plist-get call :status) 'ask)
-                   (lispm-edits--propose agent id
-                                         (or (plist-get call :tool)
-                                             (lispm-get-tool (plist-get call :name)))
-                                         (plist-get call :input) nil)))
+                   (let ((asked (lispm--asked call)))
+                     (lispm-edits--propose agent id (plist-get asked :tool)
+                                           (plist-get asked :input) nil))))
                pending))))
 
 (defun lispm-edits--input (agent call)

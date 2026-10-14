@@ -41,6 +41,8 @@
 ;;   :TOOL_ID:  toolu_...           is just C-c C-t (or doing it from
 ;;   :END:                          the org agenda)
 ;;   #+begin_src json ... #+end_src the call's input
+;;   *** Asks: write_file  b.el     a call the call makes in turn, as a
+;;                                  Lisp program does, awaiting approval
 ;;   *** Preview                    diff shown while awaiting approval
 ;;   *** Result                     the tool's output (or *** Error)
 ;;   *** Stopped                    an error the call stopped at, awaiting a
@@ -292,6 +294,16 @@ The others become a line of text; see `lispm-context-images'."
 RESTART, once one is chosen, is named in its heading."
   (concat "*** Stopped" (if restart (format ": %s" restart) "") "\n"
           (lispm-transcript--body text)))
+
+(defun lispm-transcript-asks (name input)
+  "Subsection of a call awaiting approval of a call of NAME on INPUT it makes."
+  (let ((summary (lispm-transcript--summary input))
+        (why (and (consp input) (alist-get 'why input))))
+    (concat "*** Asks: " name (if summary (concat "  " summary) "") "\n"
+            (if (stringp why) (concat "- why :: " (lispm--oneline why 200) "\n") "")
+            "#+begin_src json\n"
+            (lispm-transcript--body (lispm--json-pretty input))
+            "#+end_src\n")))
 
 (defun lispm-transcript-preview (diff)
   "Section text showing DIFF while a call awaits approval."
