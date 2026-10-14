@@ -224,6 +224,9 @@ This is a `tab-bar-tab-post-select-functions' function."
               lme-platinum-box-functions (list :close #'lme-editor--close-box
                                                :zoom #'lme-editor--zoom-box)
               lme-platinum-active-function #'lme-editor--active-p)
+  ;; Its height is its title bar's and tabs': a frame growing, as on a tall
+  ;; screen, gives its height to the windows below, the strip fitted again.
+  (add-hook 'window-size-change-functions #'lme-editor--refit-strip nil t)
   (face-remap-add-relative 'default 'lme-platinum-toolbar)
   (when (fboundp 'display-line-numbers-mode)
     (display-line-numbers-mode -1)))
@@ -236,8 +239,17 @@ This is a `tab-bar-tab-post-select-functions' function."
         (current-buffer))))
 
 (defun lme-editor--fit-strip ()
-  "Fit the title strip to its title bar and tabs, in pixels."
+  "Fit the title strip to its title bar and tabs, in pixels, and keep it so:
+a frame growing, as on a tall screen, gives its height to the windows
+below, never to the strip."
   (when-let* ((window (get-buffer-window lme-editor-strip-buffer-name)))
+    (lme-editor--refit-strip window)))
+
+(defun lme-editor--refit-strip (window)
+  "Fit the strip's WINDOW to its title bar and tabs again once its size
+changed, unless it is alone in its frame, as in a rolled-up editor.
+This is a buffer-local `window-size-change-functions' function."
+  (unless (frame-root-window-p window)
     (let ((window-resize-pixelwise t)
           (fit-window-to-buffer-horizontally nil))
       (fit-window-to-buffer window nil nil nil nil t))))

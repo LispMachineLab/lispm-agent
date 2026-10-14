@@ -903,6 +903,9 @@ toolbar.
               lme-platinum-title lme-browser-workspace-name
               lme-platinum-icon (lme-platinum-icon "netscape")
               lme-platinum-box-functions (lme-browser--boxes))
+  ;; Its height is the toolbars': a frame growing, as on a tall screen,
+  ;; gives its height to the page, the toolbars fitted again at once.
+  (add-hook 'window-size-change-functions #'lme-browser--refit-address nil t)
   (face-remap-add-relative 'default 'lme-platinum-toolbar)
   (face-remap-add-relative 'header-line 'lme-platinum-header)
   ;; The personal toolbar is a toolbar, lit or not.
@@ -1197,10 +1200,20 @@ shows the page's address.  The timer stops once no address window is left."
 (defun lme-browser--fit-address ()
   "Fit the address window to its title bar, toolbar and address line.
 They are taller than text lines, so the window is fitted in pixels, then
-kept so."
+kept so: a frame growing, as on a tall screen, gives its height to the
+page, never to the toolbars."
   (when-let* ((address (lme-browser--address-window)))
     (let ((window-resize-pixelwise t))
       (fit-window-to-buffer address nil nil nil nil t))))
+
+(defun lme-browser--refit-address (window)
+  "Fit the address WINDOW to its toolbars again once its size changed, as
+a frame growing or shrinking changes it, unless it is alone in its frame,
+as in a rolled-up browser.  This is a buffer-local
+`window-size-change-functions' function."
+  (unless (frame-root-window-p window)
+    (let ((window-resize-pixelwise t))
+      (fit-window-to-buffer window nil nil nil nil t))))
 
 (defun lme-browser--ensure-layout ()
   "Put the address window above the browser window, once, and keep it synced.

@@ -449,6 +449,8 @@ toolbar."
   "Major mode of the browser's History and Bookmarks pane.
 \\{lme-browser-places-mode-map}"
   (setq-local tab-line-format '(:eval (lme-browser--places-tabs))
+              ;; A window growing gives its width to the page, not the pane.
+              window-size-fixed 'width
               header-line-format nil
               truncate-lines t
               cursor-type nil
@@ -481,7 +483,8 @@ window's left, the browser shown first when it is not."
         (set-window-buffer window (lme-browser--places-buffer))
         (set-window-dedicated-p window t)
         (set-window-parameter window 'lme-chrome t)
-        (set-window-parameter window 'no-other-window t)))))
+        (set-window-parameter window 'no-other-window t)
+))))
 
 (defun lme-browser-hide-places ()
   "Close the History and Bookmarks pane."
