@@ -329,11 +329,27 @@ shown, a blank stands in."
 
 (defvar lispm-directory)
 
+(defvar-local lme-platinum--icon-cache nil
+  "This buffer's icon as (KEY PALETTE . ICON): what it was chosen from.")
+
 (defun lme-platinum-buffer-icon (buffer)
   "Return the Finder icon of BUFFER.
 An agent shows its own mark; a terminal, a compact Macintosh; a
 directory, a folder; LispM's own records, LispM's diamond; a file, the
-document of its kind; any other buffer, a blank document."
+document of its kind; any other buffer, a blank document.  Title bars
+ask at every redisplay, so the icon is kept until what it was chosen
+from changes."
+  (with-current-buffer buffer
+    (let ((key (list major-mode buffer-file-name default-directory (buffer-name))))
+      (if (and (equal (car lme-platinum--icon-cache) key)
+               (eq (cadr lme-platinum--icon-cache) lme-platinum--palette))
+          (cddr lme-platinum--icon-cache)
+        (cddr (setq lme-platinum--icon-cache
+                    (cons key (cons lme-platinum--palette
+                                    (lme-platinum--choose-icon buffer)))))))))
+
+(defun lme-platinum--choose-icon (buffer)
+  "Return the Finder icon of BUFFER, see `lme-platinum-buffer-icon'."
   (with-current-buffer buffer
     (cond ((and (fboundp 'lme-agent--buffer-p) (lme-agent--buffer-p buffer))
            (lme-agent--icon (lme-agent--buffer-agent buffer)))
