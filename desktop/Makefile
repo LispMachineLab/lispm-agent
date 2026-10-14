@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test compile native
+.PHONY: test compile native native-test
 
 # Tests stub a few primitives; the code they test runs uncompiled, so the
 # native compiler need not build trampolines for them, which takes seconds.
@@ -19,3 +19,7 @@ compile:
 # at a start that finds its sources changed.
 native:
 	cd native/lispm-desktop-term && cargo build --release
+
+# The module's own tests, which need no Emacs.
+native-test:
+	cd native/lispm-desktop-term && cargo test --locked

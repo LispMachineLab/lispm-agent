@@ -9,6 +9,9 @@
 // overflows.  This PTY installs no handler.  A thread of its own waits for
 // the child with waitpid(), reaps it, and pokes a socket the event loop
 // polls, as alacritty's SIGCHLD pipe would.
+//
+// What the program writes is shown to a watcher as it is read, before
+// alacritty parses it, for what alacritty ignores.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -46,8 +49,25 @@ impl Exit {
     }
 }
 
-pub struct Pty {
+/// Shown each read of what the program wrote.
+pub type Watch = Box<dyn FnMut(&[u8]) + Send>;
+
+/// The PTY's master as alacritty reads it.
+pub struct Output {
     file: File,
+    watch: Watch,
+}
+
+impl Read for Output {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read(buf)?;
+        (self.watch)(&buf[..read]);
+        Ok(read)
+    }
+}
+
+pub struct Pty {
+    output: Output,
     child_events: UnixStream,
     exit: Arc<Exit>,
     pid: i32,
@@ -68,13 +88,15 @@ fn check(result: libc::c_int) -> io::Result<libc::c_int> {
 
 impl Pty {
     /// Run PROGRAM with ARGS in DIRECTORY with exactly ENVIRONMENT, pairs of
-    /// name and value, on a new pseudoterminal of SIZE.
+    /// name and value, on a new pseudoterminal of SIZE.  WATCH is shown what
+    /// the program writes, as it is read.
     pub fn spawn(
         program: &str,
         args: &[String],
         directory: &Path,
         environment: &[(String, String)],
         size: WindowSize,
+        watch: Watch,
     ) -> io::Result<Pty> {
         let (mut master, mut slave): (RawFd, RawFd) = (-1, -1);
         let mut ws = winsize(size);
@@ -157,7 +179,7 @@ impl Pty {
             let _ = poke.write_all(&[1]);
         })?;
 
-        Ok(Pty { file: File::from(master), child_events, exit, pid })
+        Ok(Pty { output: Output { file: File::from(master), watch }, child_events, exit, pid })
     }
 
     pub fn pid(&self) -> u32 {
@@ -179,34 +201,34 @@ impl Drop for Pty {
 }
 
 impl EventedReadWrite for Pty {
-    type Reader = File;
+    type Reader = Output;
     type Writer = File;
 
     unsafe fn register(&mut self, poll: &Arc<Poller>, mut interest: Event, mode: PollMode) -> io::Result<()> {
         interest.key = READ_WRITE_KEY;
         unsafe {
-            poll.add_with_mode(&self.file, interest, mode)?;
+            poll.add_with_mode(&self.output.file, interest, mode)?;
             poll.add_with_mode(&self.child_events, Event::readable(CHILD_EVENT_KEY), PollMode::Level)
         }
     }
 
     fn reregister(&mut self, poll: &Arc<Poller>, mut interest: Event, mode: PollMode) -> io::Result<()> {
         interest.key = READ_WRITE_KEY;
-        poll.modify_with_mode(&self.file, interest, mode)?;
+        poll.modify_with_mode(&self.output.file, interest, mode)?;
         poll.modify_with_mode(&self.child_events, Event::readable(CHILD_EVENT_KEY), PollMode::Level)
     }
 
     fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
-        poll.delete(&self.file)?;
+        poll.delete(&self.output.file)?;
         poll.delete(&self.child_events)
     }
 
-    fn reader(&mut self) -> &mut File {
-        &mut self.file
+    fn reader(&mut self) -> &mut Output {
+        &mut self.output
     }
 
     fn writer(&mut self) -> &mut File {
-        &mut self.file
+        &mut self.output.file
     }
 }
 
@@ -228,7 +250,7 @@ impl OnResize for Pty {
         // A failed resize leaves the old size; it never ends Emacs.
         let ws = winsize(size);
         unsafe {
-            libc::ioctl(self.file.as_raw_fd(), libc::TIOCSWINSZ, &ws as *const _);
+            libc::ioctl(self.output.file.as_raw_fd(), libc::TIOCSWINSZ, &ws as *const _);
         }
     }
 }

@@ -67,6 +67,8 @@
 (declare-function lispm-desktop-tab-bar--muted-color "lispm-desktop-interface" ())
 (declare-function lispm-desktop-main-area--windows "lispm-desktop-interface" ())
 (declare-function lispm-desktop-agent-buffer-label "lispm-desktop-ai" (buffer))
+(declare-function lispm-desktop-term-status "lispm-desktop-term" (&optional buffer))
+(declare-function lispm-desktop-term-status-label "lispm-desktop-term" (record &optional brief))
 (declare-function lispm-desktop-agent--buffer-agent "lispm-desktop-agent-list" (buffer))
 (declare-function lispm-desktop-agent--buffer-p "lispm-desktop-ai" (buffer))
 (declare-function lispm-desktop-agent--icon "lispm-desktop-agent-list" (agent))
@@ -612,26 +614,35 @@ another shares its column."
          (title (lispm-desktop-platinum--buffer-title buffer))
          (modified (and (buffer-file-name buffer) (buffer-modified-p buffer)))
          (controls (lispm-desktop-platinum--window-controls window))
+         ;; What a terminal's program says it is doing, see lispm-desktop-term.
+         (status (when-let* (((fboundp 'lispm-desktop-term-status))
+                             (record (lispm-desktop-term-status buffer)))
+                   (lispm-desktop-term-status-label record)))
          (key (list lispm-desktop-platinum--generation width active icon title modified controls
-                    pressed))
+                    pressed status))
          (cached (window-parameter window 'lispm-desktop-platinum-title-bar)))
     (if (equal (car cached) key)
         (cdr cached)
       (let ((bar (lispm-desktop-platinum--draw-title-bar width active icon title modified controls
-                                                         pressed)))
+                                                         pressed status)))
         (set-window-parameter window 'lispm-desktop-platinum-title-bar (cons key bar))
         bar))))
 
 (defun lispm-desktop-platinum--draw-title-bar (width active icon title modified controls
-                                                     &optional pressed)
+                                                     &optional pressed status)
   "Return a title bar WIDTH pixels wide for ICON and TITLE.
 ACTIVE draws the stripes and boxes; MODIFIED marks the close box; CONTROLS is
 a value of `lispm-desktop-platinum--window-controls'; PRESSED names the box
-held down, if any."
+held down, if any; STATUS, a coloured label, follows the title."
   (let* ((face (if active 'lispm-desktop-platinum-title 'lispm-desktop-platinum-title-inactive))
+         (status (when status
+                   (let ((status (concat "  " (string-replace "%" "%%" status))))
+                     (add-face-text-property 0 (length status) face t status)
+                     status)))
          ;; The bar is a mode line construct, where % starts a directive.
          (label (concat (when icon (concat icon " "))
-                        (propertize (string-replace "%" "%%" title) 'face face)))
+                        (propertize (string-replace "%" "%%" title) 'face face)
+                        status))
          (s lispm-desktop-platinum-box-size)
          (layout (lispm-desktop-platinum-title-layout width (string-pixel-width label)))
          (label (lispm-desktop-platinum--fit label (nth 1 layout))))

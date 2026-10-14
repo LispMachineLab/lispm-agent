@@ -46,6 +46,13 @@
 ;; Cargo at the first start (`lispm-desktop-term-build'), and again at a start that
 ;; finds its sources newer; until then, and where Rust is missing,
 ;; terminals run in Eat as before.
+;;
+;; Programs may say what they are doing, working, blocked on the user,
+;; done, with the Program Status Protocol (OSC 7501).  The module keeps
+;; their records; a terminal's buffer holds them in
+;; `lispm-desktop-term-status-records', `lispm-desktop-term-status' picks the
+;; one that matters most, and `lispm-desktop-term-waiting-buffers' finds the
+;; terminals waiting for the user.
 
 ;;; Code:
 
@@ -198,6 +205,18 @@ exits, as `eat-exit-hook' is for Eat.")
 (defvar lispm-desktop-term-title-functions nil
   "Functions called with a terminal's buffer when its program sets a title.")
 
+(defvar-local lispm-desktop-term-status-records nil
+  "What the terminal's programs say they are doing (OSC 7501).
+A list of plists (:id ID :state STATE :kind KIND :progress PROGRESS :app
+APP :title TITLE :msg MSG), the program's own record, whose ID is nil,
+first.  STATE is `idle', `working', `done', `blocked' or `error'; KIND,
+why it is blocked, `permission', `question' or `auth'; PROGRESS a
+percentage; the rest strings.  A value not reported is nil.  The texts
+come from the program: show them, never interpret them.")
+
+(defvar lispm-desktop-term-status-functions nil
+  "Functions called with a terminal's buffer when its program status changes.")
+
 (defun lispm-desktop-term-buffer-p (&optional buffer)
   "Return non-nil when BUFFER, by default the current one, is a terminal.
 That is a terminal of lispm-desktop-term, not of Eat."
@@ -243,6 +262,57 @@ brackets when the program asked for them."
   (when lispm-desktop-term--terminal
     (lispm-desktop-term-module-kill lispm-desktop-term--terminal)
     (remhash lispm-desktop-term--id lispm-desktop-term--buffers)))
+
+;;;; Program status
+
+(defconst lispm-desktop-term--status-order '(blocked error working done idle)
+  "Program states, the one that matters most to the user first.")
+
+(defun lispm-desktop-term-status (&optional buffer)
+  "Return the program status record of BUFFER's terminal that matters most.
+That is the first one blocked on the user, else failed, working, done or
+idle, see `lispm-desktop-term-status-records'; nil when none was reported."
+  (let ((records (and (buffer-live-p (or buffer (current-buffer)))
+                      (buffer-local-value 'lispm-desktop-term-status-records
+                                          (or buffer (current-buffer))))))
+    (seq-some (lambda (state)
+                (seq-find (lambda (record) (eq (plist-get record :state) state)) records))
+              lispm-desktop-term--status-order)))
+
+(defun lispm-desktop-term-status-label (record &optional brief)
+  "Return a short label of program status RECORD, coloured by its state.
+BRIEF leaves the progress out, so the label changes only with the state.
+The record's message, if any, is the label's `help-echo'."
+  (let ((state (plist-get record :state))
+        (progress (plist-get record :progress)))
+    (propertize
+     (pcase state
+       ('blocked (pcase (plist-get record :kind)
+                   ('permission "needs approval")
+                   ('question "has a question")
+                   ('auth "needs sign-in")
+                   (_ "blocked")))
+       ('error "failed")
+       ('working (if (and progress (not brief)) (format "working %d%%" progress) "working"))
+       (_ (symbol-name state)))
+     'face (pcase state
+             ('blocked 'warning)
+             ('error 'error)
+             ('done '(:inherit success :weight bold))
+             ('working 'success)
+             (_ 'shadow))
+     'help-echo (plist-get record :msg))))
+
+(defun lispm-desktop-term-waiting-buffers ()
+  "Return the terminals whose programs wait for the user, most urgent first:
+blocked on an answer, then failed, then done.  Terminals of a state are in
+`buffer-list' order."
+  (let ((buffers (seq-filter #'lispm-desktop-term-buffer-p (buffer-list))))
+    (seq-mapcat (lambda (state)
+                  (seq-filter (lambda (buffer)
+                                (eq (plist-get (lispm-desktop-term-status buffer) :state) state))
+                              buffers))
+                '(blocked error done))))
 
 ;;;; Colours
 
@@ -388,7 +458,8 @@ last screen and the notice under it."
       (restore-buffer-modified-p nil))))
 
 (defun lispm-desktop-term--happen (buffer)
-  "Take in what happened in BUFFER's terminal: titles, exits, clipboard."
+  "Take in what happened in BUFFER's terminal: titles, program status,
+exits, clipboard."
   (with-current-buffer buffer
     (seq-doseq (happening (lispm-desktop-term-module-happenings lispm-desktop-term--terminal))
       (pcase happening
@@ -397,6 +468,10 @@ last screen and the notice under it."
          (run-hook-with-args 'lispm-desktop-term-title-functions buffer)
          (force-mode-line-update t))
         (`(reset-title . ,_) (setq lispm-desktop-term-title nil))
+        (`(status . ,records)
+         (setq lispm-desktop-term-status-records (append records nil))
+         (run-hook-with-args 'lispm-desktop-term-status-functions buffer)
+         (force-mode-line-update t))
         (`(clipboard . ,text) (kill-new text))
         (`(exit . ,code)
          ;; Its last screen is drawn once, shown or not, and kept.

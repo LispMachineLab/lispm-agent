@@ -62,6 +62,7 @@
 (declare-function lispm-desktop-terminal-make "lispm-desktop-term" (name program &rest args))
 (declare-function lispm-desktop-terminal-live-p "lispm-desktop-term" (buffer))
 (declare-function lispm-desktop-terminal-paste "lispm-desktop-term" (buffer text))
+(declare-function lispm-desktop-term-waiting-buffers "lispm-desktop-term" ())
 (declare-function project-root "project" (project))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function lispm-desktop-sidebar-agents "lispm-desktop-sidebar" ())
@@ -735,6 +736,21 @@ sidebar is refreshed, so the terminal appears in its running list."
   (lispm-desktop-agent-list-refresh)
   buffer)
 
+(defun lispm-desktop-agent-next-waiting ()
+  "Show the next terminal whose program waits for you.
+Programs blocked on an answer come first, then those that failed, then
+those that finished, as they report themselves, see
+`lispm-desktop-term-waiting-buffers'; repeating the command goes on to
+the next one."
+  (interactive)
+  (let* ((waiting (lispm-desktop-term-waiting-buffers))
+         (next (or (cadr (memq (current-buffer) waiting)) (car waiting))))
+    (unless next
+      (user-error "No terminal is waiting for you"))
+    (if (lispm-desktop-agent--buffer-p next)
+        (lispm-desktop-agent--show next)
+      (lispm-desktop-sidebar-show-in-main next))))
+
 (defun lispm-desktop-agent--project-directory ()
   "Return the current project root, or `default-directory' outside projects."
   (if-let* ((project (project-current)))
@@ -1180,6 +1196,7 @@ It is drawn as Mac OS 9's contextual menus were, see `lispm-desktop-popup-menu'.
   "c" #'lispm-desktop-agent-claude-new
   "x" #'lispm-desktop-agent-codex-new
   "h" #'lispm-desktop-agent-hermes-new
+  "n" #'lispm-desktop-agent-next-waiting
   "r" #'lispm-desktop-agent-send-region)
 
 (defun lispm-desktop-setup-ai ()
@@ -1189,7 +1206,8 @@ It is drawn as Mac OS 9's contextual menus were, see `lispm-desktop-popup-menu'.
     (add-to-list 'embark-keymap-alist
                  '(lispm-desktop-agent-session . lispm-desktop-agent-session-embark-map)))
   (add-hook 'eat-exit-hook #'lispm-desktop-agent-list-refresh-on-exit)
-  (add-hook 'lispm-desktop-term-exit-functions #'lispm-desktop-agent-list-refresh-on-exit))
+  (add-hook 'lispm-desktop-term-exit-functions #'lispm-desktop-agent-list-refresh-on-exit)
+  (add-hook 'lispm-desktop-term-status-functions #'lispm-desktop-agent-list-refresh-on-status))
 
 
 (provide 'lispm-desktop-ai)

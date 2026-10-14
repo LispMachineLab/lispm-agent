@@ -16,9 +16,11 @@
 //            v
 //   Emacs (lispm-desktop-term.el): render the changed lines into the buffer
 //
-// Titles, exits and clipboard writes reach Emacs whether shown or not.
+// Titles, program status (status.rs), exits and clipboard writes reach
+// Emacs whether shown or not.
 
 mod pty;
+mod status;
 
 use std::borrow::Cow;
 use std::io::Write;
@@ -71,6 +73,8 @@ impl Dimensions for Size {
 enum Happening {
     Title(String),
     ResetTitle,
+    /// The program status records changed.
+    Status,
     Exit(i32),
     Clipboard(String),
     Bell,
@@ -93,6 +97,8 @@ struct Shared {
     /// default foreground and background.
     palette: Mutex<Vec<Rgb>>,
     size: Mutex<WindowSize>,
+    /// What the terminal's programs said of themselves.
+    status: Mutex<status::Records>,
 }
 
 impl Shared {
@@ -115,6 +121,31 @@ impl Shared {
         // Emacs must hear of it even while the terminal is hidden.
         self.woken.store(false, Ordering::Release);
         self.wake();
+    }
+
+    /// Change the program status records by CHANGE; tell Emacs if they changed.
+    fn change_status(&self, change: impl FnOnce(&mut status::Records) -> bool) {
+        let changed = self.status.lock().map(|mut records| change(&mut records)).unwrap_or(false);
+        if changed {
+            self.happen(Happening::Status);
+        }
+    }
+
+    /// Take in what the terminal's output was found to hold, see status.rs.
+    fn found(&self, found: status::Found) {
+        match found {
+            status::Found::Status(text, terminator) => match status::parse(text) {
+                Some(status::Report::Query) => {
+                    // Queued before alacritty parses this output, so the
+                    // answer precedes those of whatever follows the query.
+                    self.write([status::QUERY_REPLY, terminator.bytes()].concat());
+                }
+                Some(report) => self.change_status(|records| records.apply(report)),
+                None => {}
+            },
+            status::Found::Prompt => self.change_status(status::Records::end_command),
+            status::Found::Reset => self.change_status(status::Records::reset),
+        }
     }
 
     fn write(&self, bytes: Vec<u8>) {
@@ -256,6 +287,7 @@ fn spawn(
         sender: OnceLock::new(),
         palette: Mutex::new(Vec::new()),
         size: Mutex::new(size),
+        status: Mutex::new(status::Records::default()),
     });
     let listener = Listener(shared.clone());
     let config = Config { scrolling_history: 10_000, ..Default::default() };
@@ -264,7 +296,10 @@ fn spawn(
         &Size { columns: size.num_cols as usize, lines: size.num_lines as usize },
         listener.clone(),
     )));
-    let pty = pty::Pty::spawn(&program, &strings(args)?, Path::new(&directory), &environment, size)?;
+    let watched = shared.clone();
+    let mut scanner = status::Scanner::default();
+    let watch = Box::new(move |bytes: &[u8]| scanner.scan(bytes, &mut |found| watched.found(found)));
+    let pty = pty::Pty::spawn(&program, &strings(args)?, Path::new(&directory), &environment, size, watch)?;
     let pid = pty.pid();
     let exit = pty.exit();
     let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
@@ -279,6 +314,7 @@ fn spawn(
         let code = exit.wait(Duration::from_secs(10)).and_then(|s| s.code()).unwrap_or(-1);
         watched.exit_code.store(code, Ordering::Release);
         watched.alive.store(false, Ordering::Release);
+        watched.change_status(status::Records::end_command);
         watched.happen(Happening::Exit(code));
     })?;
     Ok(Terminal { shared, term, sender, pid })
@@ -303,11 +339,13 @@ fn alive_p(terminal: &Terminal) -> Result<bool> {
 }
 
 /// Send STRING to TERMINAL's program, as typed; show the newest output.
+/// The user took the terminal up, so what its programs finished was seen.
 #[defun]
 fn input(terminal: &Terminal, string: String) -> Result<()> {
     if string.is_empty() {
         return Ok(());
     }
+    terminal.shared.change_status(status::Records::dismiss);
     {
         let mut term = terminal.term.lock();
         if term.grid().display_offset() != 0 {
@@ -416,19 +454,24 @@ fn modes(terminal: &Terminal) -> Result<u32> {
 }
 
 /// Return what happened in TERMINAL since last asked, oldest first, as a
-/// vector of (KIND . VALUE): (title . STRING), (reset-title), (exit . CODE),
-/// (clipboard . STRING), (bell).
+/// vector of (KIND . VALUE): (title . STRING), (reset-title), (status .
+/// RECORDS), (exit . CODE), (clipboard . STRING), (bell).  RECORDS, the
+/// program status now, is a vector of plists, see `status_records'.
 #[defun]
 fn happenings<'e>(env: &'e Env, terminal: &Terminal) -> Result<Value<'e>> {
     let taken: Vec<Happening> = match terminal.shared.happenings.lock() {
         Ok(mut happenings) => std::mem::take(&mut *happenings),
         Err(_) => Vec::new(),
     };
+    // The records are read as they are now, so one report of them will do.
+    let last_status = taken.iter().rposition(|h| matches!(h, Happening::Status));
     let mut items = Vec::with_capacity(taken.len());
-    for happening in taken {
+    for (index, happening) in taken.into_iter().enumerate() {
         let (kind, value) = match happening {
             Happening::Title(title) => ("title", title.into_lisp(env)?),
             Happening::ResetTitle => ("reset-title", ().into_lisp(env)?),
+            Happening::Status if Some(index) == last_status => ("status", status_records(env, terminal)?),
+            Happening::Status => continue,
             Happening::Exit(code) => ("exit", code.into_lisp(env)?),
             Happening::Clipboard(text) => ("clipboard", text.into_lisp(env)?),
             Happening::Bell => ("bell", ().into_lisp(env)?),
@@ -436,6 +479,38 @@ fn happenings<'e>(env: &'e Env, terminal: &Terminal) -> Result<Value<'e>> {
         items.push(env.cons(env.intern(kind)?, value)?);
     }
     env.call("vector", &items[..])
+}
+
+/// TERMINAL's program status records as a vector of plists (:id ID :state
+/// STATE :kind KIND :progress PROGRESS :app APP :title TITLE :msg MSG), the
+/// program's own record, whose ID is nil, first.  STATE is idle, working,
+/// done, blocked or error, KIND permission, question or auth; the other
+/// values are strings, or PROGRESS a percentage; a value not reported is nil.
+fn status_records<'e>(env: &'e Env, terminal: &Terminal) -> Result<Value<'e>> {
+    let records = terminal.shared.status.lock().map(|records| records.list()).unwrap_or_default();
+    let nil = ().into_lisp(env)?;
+    let string = |s: Option<String>| -> Result<Value<'e>> { s.map_or(Ok(nil), |s| s.into_lisp(env)) };
+    let mut plists = Vec::with_capacity(records.len());
+    for record in records {
+        let plist = [
+            env.intern(":id")?,
+            string((!record.id.is_empty()).then_some(record.id))?,
+            env.intern(":state")?,
+            env.intern(record.state.name())?,
+            env.intern(":kind")?,
+            record.kind.map_or(Ok(nil), |kind| env.intern(kind.name()))?,
+            env.intern(":progress")?,
+            record.progress.map_or(Ok(nil), |progress| (progress as i64).into_lisp(env))?,
+            env.intern(":app")?,
+            string(record.app)?,
+            env.intern(":title")?,
+            string(record.title)?,
+            env.intern(":msg")?,
+            string(record.msg)?,
+        ];
+        plists.push(env.call("list", &plist[..])?);
+    }
+    env.call("vector", &plists[..])
 }
 
 /// A face code for a cell's colour: -1 for the default, 0 to 255 for the

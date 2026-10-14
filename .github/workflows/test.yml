@@ -51,3 +51,11 @@ jobs:
           version: ${{ matrix.emacs }}
       - name: Test
         run: make -C desktop test
+
+  terminal-module:
+    name: Desktop terminal module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test
+        run: make -C desktop native-test

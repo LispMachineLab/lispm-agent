@@ -39,6 +39,8 @@
 (defvar lispm-desktop-agent-emacs-agents)
 (declare-function lispm-desktop-agent--emacs-agent "lispm-desktop-ai" (agent))
 (declare-function lispm-desktop-agent--emacs-buffer-agent "lispm-desktop-ai" (buffer))
+(declare-function lispm-desktop-term-status "lispm-desktop-term" (&optional buffer))
+(declare-function lispm-desktop-term-status-label "lispm-desktop-term" (record &optional brief))
 (declare-function lispm-desktop-sidebar--insert-entry "lispm-desktop-sidebar"
                   (icon title meta action help &optional properties depth))
 (declare-function lispm-desktop-sidebar--insert-group "lispm-desktop-sidebar"
@@ -310,6 +312,15 @@ Groups without running terminals and idle for
           (cons directory lispm-desktop-agent-list--expanded)))
   (lispm-desktop-agent-list-refresh))
 
+(defun lispm-desktop-agent-list--running-label (buffer)
+  "Return the label of running agent terminal BUFFER in the sidebar: what
+its program says it is doing, see `lispm-desktop-term-status', else
+\"running\"."
+  (if-let* ((record (and buffer (fboundp 'lispm-desktop-term-status)
+                         (lispm-desktop-term-status buffer))))
+      (lispm-desktop-term-status-label record t)
+    (propertize "running" 'face 'success)))
+
 (defun lispm-desktop-agent-list--insert-project (group now running-ids)
   "Insert project GROUP, its running terminals and a preview of its sessions.
 NOW dates the sessions; RUNNING-IDS are the ids of sessions live terminals
@@ -339,7 +350,7 @@ Finder list; its sessions are rows one level in, newest first."
         (lispm-desktop-sidebar--insert-entry
          (lispm-desktop-agent--icon (lispm-desktop-agent--buffer-agent buffer))
          (lispm-desktop-agent-buffer-label buffer)
-         (propertize "running" 'face 'success)
+         (lispm-desktop-agent-list--running-label buffer)
          (apply-partially #'lispm-desktop-agent--show buffer)
          "Show this terminal"
          nil 1))
@@ -358,7 +369,7 @@ Finder list; its sessions are rows one level in, newest first."
                  (propertize (plist-get session :title) 'face '(:inherit (shadow lispm-desktop-platinum-list)))
                (plist-get session :title))
              (if (member id running-ids)
-                 (propertize "running" 'face 'success)
+                 (lispm-desktop-agent-list--running-label (lispm-desktop-agent--session-buffer id))
                (lispm-desktop-agent--age (plist-get session :time) now))
              (apply-partially #'lispm-desktop-agent-resume-session session)
              (format "Resume %s session %s%s%s (right-click for more)"
@@ -450,18 +461,38 @@ Archived sessions are left out unless `lispm-desktop-agent-list--show-archived'.
 (defvar lispm-desktop-agent-list--refresh-timer nil
   "The idle timer of a pending sidebar refresh, or nil.")
 
+(defun lispm-desktop-agent-list--refresh-when-idle ()
+  "Refresh the agent sidebar once Emacs is idle, unless that is pending.
+Reading transcripts can take seconds the first time, so the refresh never
+runs inside the code that asked for it."
+  (unless lispm-desktop-agent-list--refresh-timer
+    (setq lispm-desktop-agent-list--refresh-timer
+          (run-with-idle-timer
+           0.2 nil (lambda ()
+                     (setq lispm-desktop-agent-list--refresh-timer nil)
+                     (lispm-desktop-agent-list-refresh))))))
+
 (defun lispm-desktop-agent-list-refresh-on-exit (&optional terminal &rest _)
   "Refresh the agent sidebar once Emacs is idle after an agent exits.
 TERMINAL is the exited terminal's buffer or process; other terminals
-leave the sidebar alone.  Reading transcripts can take seconds the first
-time, so the refresh never runs inside the code that saw the exit."
+leave the sidebar alone."
   (let ((buffer (if (processp terminal) (process-buffer terminal) terminal)))
-    (when (and (lispm-desktop-agent--buffer-p buffer) (not lispm-desktop-agent-list--refresh-timer))
-      (setq lispm-desktop-agent-list--refresh-timer
-            (run-with-idle-timer
-             0.2 nil (lambda ()
-                       (setq lispm-desktop-agent-list--refresh-timer nil)
-                       (lispm-desktop-agent-list-refresh)))))))
+    (when (lispm-desktop-agent--buffer-p buffer)
+      (lispm-desktop-agent-list--refresh-when-idle))))
+
+(defvar-local lispm-desktop-agent-list--status-shown nil
+  "The sidebar label of this agent terminal when its status last changed.")
+
+(defun lispm-desktop-agent-list-refresh-on-status (buffer)
+  "Refresh the agent sidebar once Emacs is idle when agent terminal BUFFER's
+label there changed, see `lispm-desktop-agent-list--running-label'.
+Progress alone changes no label, so it never re-renders the sidebar."
+  (when (lispm-desktop-agent--buffer-p buffer)
+    (let ((label (lispm-desktop-agent-list--running-label buffer)))
+      (unless (equal label (buffer-local-value 'lispm-desktop-agent-list--status-shown buffer))
+        (with-current-buffer buffer
+          (setq lispm-desktop-agent-list--status-shown label))
+        (lispm-desktop-agent-list--refresh-when-idle)))))
 
 (defvar-keymap lispm-desktop-agent-list-mode-map
   :doc "Keymap for the agent sidebar."
