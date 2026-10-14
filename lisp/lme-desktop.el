@@ -644,6 +644,25 @@ Where images cannot be shown, its icons are listed by name."
   (when-let* ((xy (posn-object-x-y (event-start event))))
     (lme-desktop--key-at (car xy) (cdr xy))))
 
+(defvar lme-desktop--last-click nil
+  "The last icon clicked without being dragged: (KEY TIME (X . Y)).")
+
+(defconst lme-desktop-double-click-fuzz 8
+  "Pixels a double click's second press may stray from its first.")
+
+(defun lme-desktop--second-click-p (key press)
+  "Return non-nil when a press at PRESS on icon KEY is a double click's
+second: the same icon clicked, not dragged, close by and within
+`double-click-time'.  Emacs tells a double click itself, but not once a
+first click that moved a little was taken for a drag."
+  (pcase lme-desktop--last-click
+    (`(,last-key ,time (,x . ,y))
+     (and (eq last-key key)
+          (numberp double-click-time)
+          (< (- (float-time) time) (/ double-click-time 1000.0))
+          (<= (+ (abs (- (car press) x)) (abs (- (cdr press) y)))
+              lme-desktop-double-click-fuzz)))))
+
 (defun lme-desktop-mouse-select (event)
   "Select the desktop icon pressed by EVENT, as Mac OS 9 did on the press,
 or none on the desktop between them, and drag the icon while the button
@@ -653,14 +672,21 @@ desktop in front."
   (select-window (posn-window (event-start event)))
   (setq lme-finder--had-focus nil)
   (lme-apps-set-frontmost 'desktop)
-  (let ((key (lme-desktop--item-at event)))
+  (let ((key (lme-desktop--item-at event))
+        (press (posn-x-y (event-start event))))
     (lme-desktop--select key)
-    (when key
-      (lme-desktop--drag key (posn-window (event-start event))
-                         (posn-x-y (event-start event))))))
+    (cond ((null key) (setq lme-desktop--last-click nil))
+          ((lme-desktop--second-click-p key press)
+           ;; The second click of a double click: open, never drag.
+           (setq lme-desktop--last-click nil)
+           (lme-desktop-open))
+          ((lme-desktop--drag key (posn-window (event-start event)) press)
+           (setq lme-desktop--last-click nil))
+          (t (setq lme-desktop--last-click (list key (float-time) press))))))
 
-(defconst lme-desktop-drag-threshold 4
-  "Pixels the mouse moves, held down on an icon, before the icon is dragged.")
+(defconst lme-desktop-drag-threshold 6
+  "Pixels the mouse moves, held down on an icon, before the icon is dragged:
+far enough that a hand clicking, or double clicking, does not drag.")
 
 (defun lme-desktop--pointer (window)
   "Return the mouse's place in WINDOW's text area, in pixels: (X . Y), or
@@ -719,13 +745,18 @@ and the places are saved for the next start."
          (height (1- (window-body-height window t)))
          (layout (lme-desktop--layout width height))
          (others (seq-remove (lambda (entry) (eq (car (car entry)) key)) layout))
+         (here (cdr (seq-find (lambda (entry) (eq (car (car entry)) key)) layout)))
+         (place (lme-desktop--snap x y width height (mapcar #'cdr others)))
          (places (mapcar (pcase-lambda (`((,item . ,_) ,item-x ,item-y))
                            (cons item
                                  (if (eq item key)
-                                     (lme-desktop--snap x y width height (mapcar #'cdr others))
+                                     place
                                    (lme-desktop--xy-place item-x item-y width height))))
                          layout)))
-    (customize-save-variable 'lme-desktop-icon-places places)))
+    ;; Dropped back on its own cell, nothing moved: nothing is saved.
+    (unless (equal (lme-desktop--place-xy place width height)
+                   (cons (car here) (cadr here)))
+      (customize-save-variable 'lme-desktop-icon-places places))))
 
 (declare-function lme-popup--frame "lme-popup" (parent))
 (declare-function lme-popup--dispose "lme-popup" (frame))
@@ -783,6 +814,7 @@ mouse has no more moves queued, so drawing never holds the copy back."
 (defun lme-desktop--drag (key window press)
   "Drag icon KEY of the desktop in WINDOW while the mouse button is held,
 from PRESS, where it was pressed in WINDOW's text area: (X . Y).
+Return non-nil when the icon was dragged, nil for a click.
 Once the mouse has moved a few pixels a translucent copy of the icon
 follows it, as Mac OS 9's did, in a small frame of its own so that only
 the copy is drawn as it moves; let go, the icon stays there.  The move is
@@ -824,8 +856,8 @@ up, and a press let go where it was only selects."
                                        nil)))))
                 (pcase-let ((`(,x . ,y) (or (lme-desktop--pointer window)
                                             (cons start-x start-y))))
-                  (when (or to (> (+ (abs (- x start-x)) (abs (- y start-y)))
-                                  lme-desktop-drag-threshold))
+                  (when (or to (> (+ (expt (- x start-x) 2) (expt (- y start-y) 2))
+                                  (expt lme-desktop-drag-threshold 2)))
                     (setq to (lme-desktop--place-xy
                               (lme-desktop--xy-place (+ cell-x (- x start-x))
                                                      (+ cell-y (- y start-y))
@@ -840,7 +872,9 @@ up, and a press let go where it was only selects."
            (lme-desktop--drop key (car to) (cdr to) window)
            (lme-desktop--render window))
           ((not (memq (event-basic-type event) '(mouse-1 drag-mouse-1 escape)))
-           (setq unread-command-events (list event))))))
+           (setq unread-command-events (list event))))
+    ;; Dragged or not: a press let go where it was is a click.
+    (and to t)))
 
 (defun lme-desktop-arrange-icons ()
   "Arrange the desktop's icons as they stood at first: down the column at

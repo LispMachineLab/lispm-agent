@@ -361,6 +361,61 @@ icon, Open first."
         (should (member "Desktop Picture…"
                         (mapcar (lambda (item) (and (consp item) (plist-get item :label))) shown)))))))
 
+(ert-deftest lme-test-desktop-double-click-opens-not-drags ()
+  "A double click opens the icon, even when its first click strayed a few
+pixels; a press let go after a jitter is a click, and a drop back on the
+icon's own cell saves nothing."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore)
+            ((symbol-function 'lme-desktop--font) (lambda () '("Geneva" 12 10)))
+            ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+            ((symbol-function 'window-body-height) (lambda (&rest _) 601))
+            ((symbol-function 'window-inside-pixel-edges) (lambda (&rest _) '(0 0 800 601)))
+            ((symbol-function 'lme-desktop--copy-frame) #'ignore)
+            ((symbol-function 'lme-desktop--show-copy) #'ignore)
+            ((symbol-function 'lme-popup--dispose) #'ignore)
+            ((symbol-function 'lme-desktop--render) #'ignore))
+    (let* ((lme-desktop-icon-places nil)
+           (lme-desktop--last-click nil)
+           (saved nil)
+           (opened nil)
+           (cell (lme-desktop--cell-at 'home nil))
+           (press (cons (+ (car cell) 40) (+ (cadr cell) 16)))
+           (pointer press)
+           (moves nil)
+           (unread-command-events nil))
+      (cl-letf (((symbol-function 'customize-save-variable)
+                 (lambda (variable value) (setq saved t) (set variable value)))
+                ((symbol-function 'lme-desktop-open) (lambda () (setq opened t)))
+                ((symbol-function 'select-window) #'ignore)
+                ((symbol-function 'lme-apps-set-frontmost) #'ignore)
+                ((symbol-function 'lme-desktop--select) #'ignore)
+                ((symbol-function 'lme-desktop--item-at) (lambda (_) 'home))
+                ((symbol-function 'lme-desktop--pointer) (lambda (_) pointer))
+                ((symbol-function 'input-pending-p) #'ignore)
+                ((symbol-function 'read-event)
+                 (lambda (&rest _)
+                   (if moves
+                       (progn (setq pointer (pop moves)) '(mouse-movement (nil)))
+                     '(mouse-1 (nil))))))
+        (let ((event `(down-mouse-1 (nil 1 ,press 0))))
+          ;; A first click that jitters 3 and 4 pixels is a click.
+          (setq moves (list (cons (+ (car press) 3) (+ (cdr press) 4))))
+          (lme-desktop-mouse-select event)
+          (should-not saved)
+          (should (eq (car lme-desktop--last-click) 'home))
+          ;; The second press, quick and close by, opens without dragging.
+          (setq moves (list (cons (+ (car press) 40) (cdr press))))
+          (lme-desktop-mouse-select event)
+          (should opened)
+          (should-not saved)
+          (should moves)
+          ;; A drag that comes back to the icon's own cell saves nothing.
+          (setq moves (list (cons (+ (car press) 10) (+ (cdr press) 9)))
+                opened nil)
+          (lme-desktop-mouse-select event)
+          (should-not opened)
+          (should-not saved))))))
+
 (ert-deftest lme-test-desktop-draws-the-dragged-copy ()
   "The dragged copy is its cell's piece of the desktop, the icon translucent
 over it."
