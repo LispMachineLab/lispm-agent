@@ -245,14 +245,19 @@ Dragging an icon sets this."
   "<mouse-3>" #'ignore
   "<down>" #'lme-desktop-select-next
   "<right>" #'lme-desktop-select-next
+  "C-n" #'lme-desktop-select-next
+  "C-f" #'lme-desktop-select-next
   "TAB" #'lme-desktop-select-next
   "<up>" #'lme-desktop-select-previous
   "<left>" #'lme-desktop-select-previous
+  "C-p" #'lme-desktop-select-previous
+  "C-b" #'lme-desktop-select-previous
   "<backtab>" #'lme-desktop-select-previous
   "RET" #'lme-desktop-open
   "M-o" #'lme-desktop-open
   "M-<down>" #'lme-desktop-open
   "<escape>" #'lme-desktop-deselect
+  "C-g" #'lme-desktop-deselect
   "q" #'ignore)
 
 (defun lme-desktop--color ()

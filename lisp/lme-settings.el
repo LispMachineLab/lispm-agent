@@ -384,6 +384,8 @@ pushed in."
   :parent button-buffer-map
   "<right>" #'lme-settings-next-panel
   "<left>" #'lme-settings-previous-panel
+  "C-f" #'lme-settings-next-panel
+  "C-b" #'lme-settings-previous-panel
   "q" #'lme-settings-close
   "M-w" #'lme-settings-close)
 

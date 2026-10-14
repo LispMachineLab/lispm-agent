@@ -36,11 +36,11 @@
 ;;
 ;;   folder --items--> rows of icons --click--> selected --double click--> opened
 ;;
-;; Keys, as Finder's: the arrows select, Return or Command-O opens,
-;; Command-Up goes to the enclosing folder, Command-[ and Command-] back
-;; and forward, Command-Shift-N makes a folder, Command-Delete moves the
-;; selected item to the Trash, Command-W closes the window, and typing a
-;; name's first letters selects it.
+;; Keys, as Finder's: the arrows or C-f, C-b, C-n and C-p select, Return
+;; or Command-O opens, Command-Up or Delete goes to the enclosing folder,
+;; Command-[ and Command-] back and forward, Command-Shift-N makes a
+;; folder, Command-Delete moves the selected item to the Trash, Command-W
+;; closes the window, and typing a name's first letters selects it.
 
 ;;; Code:
 
@@ -525,12 +525,17 @@ after it is selected."
   "<left>" #'lme-finder-select-left
   "<down>" #'lme-finder-select-down
   "<up>" #'lme-finder-select-up
+  "C-f" #'lme-finder-select-right
+  "C-b" #'lme-finder-select-left
+  "C-n" #'lme-finder-select-down
+  "C-p" #'lme-finder-select-up
   "TAB" #'lme-finder-select-right
   "<backtab>" #'lme-finder-select-left
   "RET" #'lme-finder-open
   "M-o" #'lme-finder-open
   "M-<down>" #'lme-finder-open
   "M-<up>" #'lme-finder-up
+  "DEL" #'lme-finder-up
   "M-[" #'lme-finder-back
   "M-]" #'lme-finder-forward
   "M-N" #'lme-finder-new-folder
@@ -539,6 +544,7 @@ after it is selected."
   "M-r" #'lme-finder-refresh
   "M-w" #'lme-finder-close
   "<escape>" #'lme-finder-deselect
+  "C-g" #'lme-finder-deselect
   "<remap> <self-insert-command>" #'lme-finder-type-select)
 
 (defvar evil-emacs-state-cursor)
