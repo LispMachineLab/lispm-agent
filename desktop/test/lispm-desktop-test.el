@@ -1406,6 +1406,53 @@ once, and the browser lists only web pages' bookmarks, oldest first."
   (let ((lispm-desktop-browser--navigation '(:page t :back t :forward t)))
     (should (equal (plist-get (car (lispm-desktop-browser--go-items)) :key) "M-["))))
 
+(ert-deftest lispm-desktop-test-browser-address-typing-replaces ()
+  "Typing or pasting in the address field replaces the address Open
+Location marks, though `delete-selection-mode' stays off: elsewhere text
+typed still goes in beside the region, and other keys keep their ways."
+  (let ((transient-mark-mode t)
+        (delete-selection-mode nil)
+        (kill-ring '("lispm.org"))
+        (kill-ring-yank-pointer nil)
+        (interprogram-cut-function nil)
+        (interprogram-paste-function nil)
+        (global (current-global-map))
+        (buffer (lispm-desktop-browser--address-buffer)))
+    (cl-letf (((symbol-function 'lispm-desktop-browser--shown-buffer) #'ignore)
+              ((symbol-function 'lispm-desktop-browser--bookmarks-button) (lambda () "Bookmarks"))
+              ((symbol-function 'lispm-desktop-platinum-icon) (lambda (_) "*"))
+              ((symbol-function 'lispm-desktop-clipboard-text) (lambda () "example.com")))
+      (unwind-protect
+          (save-window-excursion
+            ;; Command-V pastes, as `lispm-desktop-setup-keys' binds it.
+            (use-global-map (define-keymap :parent global "M-v" #'lispm-desktop-paste))
+            (switch-to-buffer buffer)
+            (cl-flet ((type (keys)
+                        (lispm-desktop-browser--render-address "https://duckduckgo.com/")
+                        (lispm-desktop-browser-focus-address)
+                        (execute-kbd-macro (kbd keys))
+                        (lispm-desktop-browser--edited-address)))
+              (should (equal (lispm-desktop-browser--target (type "github.com/RyanKung/lispm"))
+                             "https://github.com/RyanKung/lispm"))
+              (should (equal (type "C-y") "lispm.org"))
+              (should (equal (type "M-v") "example.com"))
+              ;; Moving and copying leave the address as it was.
+              (should (equal (type "C-b M-w") "https://duckduckgo.com/"))
+              (should (equal (car kill-ring) "https://duckduckgo.com"))
+              ;; Once the mark is gone, text typed goes in at point.
+              (should (equal (type "C-SPC C-SPC ?q=1") "https://duckduckgo.com/?q=1")))
+            (with-temp-buffer
+              (switch-to-buffer (current-buffer))
+              (insert "abc")
+              (push-mark (point-min) t t)
+              (execute-kbd-macro "x")
+              (should (equal (buffer-string) "abcx"))
+              ;; Text pasted into a page leaves the buffer's region alone.
+              (setq-local lispm-desktop-paste-function #'ignore)
+              (should-not (lispm-desktop--paste-delete-selection))))
+        (use-global-map global)
+        (kill-buffer buffer)))))
+
 (ert-deftest lispm-desktop-test-throbber-turns-while-loading ()
   "The throbber turns while the shown page loads and rests once it is done."
   (let ((lispm-desktop-browser--throbber-frame nil)
