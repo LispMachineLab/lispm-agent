@@ -741,7 +741,10 @@ new file.  CONFLICTS is as for `lispm-tools--visiting'."
 (defun lispm-tools--existing (file)
   "A buffer holding FILE's text, for a change to it; an error if there is none.
 That is the buffer visiting FILE, up to date with it, which may hold a
-new file's text not saved yet; else FILE, visited now."
+new file's text not saved yet; else FILE, visited now.  A FILE that
+cannot be written is an error, before it is visited (see
+`lispm-tools--check-writable')."
+  (lispm-tools--check-writable file)
   (or (lispm-tools--visiting file)
       (and (file-exists-p file) (lispm-tools--find-file file))
       (error "No such file: %s" (abbreviate-file-name file))))
@@ -783,9 +786,12 @@ left out: checking them would mean a connection each."
 (defun lispm-tools--set-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved.
 Then tell `lispm-buffer-change-functions'.  A BUFFER in conflict with
-its file, or held as it is, is an error (see `lispm-tools--state')."
+its file, or held as it is, is an error (see `lispm-tools--state'), and
+so is a read-only one, before anything is journaled."
   (when (memq (lispm-tools--sync buffer) '(conflict held))
     (lispm-tools--conflict buffer))
+  (when (and (buffer-local-value 'buffer-read-only buffer) (not inhibit-read-only))
+    (error "Cannot change buffer %s: it is read-only" (buffer-name buffer)))
   (let ((old (lispm-tools--buffer-text buffer)))
     (lispm-tools--replace-text buffer text)
     ;; The change is made: whatever shows it must not undo the call.
@@ -819,13 +825,16 @@ its file, or held as it is, is an error (see `lispm-tools--state')."
 
 (defun lispm-tools--buffer-to-change (name)
   "The live buffer called NAME, up to date with its file if it visits one.
-An error if it is in conflict with its file, or its file was deleted."
+An error if it is in conflict with its file, or its file was deleted,
+or cannot be written (see `lispm-tools--check-writable')."
   (let ((buffer (lispm-tools--buffer name)))
     (pcase (lispm-tools--sync buffer)
       ((or 'conflict 'held) (lispm-tools--conflict buffer))
       ('gone (error "%s was deleted on disk; buffer %s holds its old text"
                     (abbreviate-file-name (buffer-file-name buffer)) name))
-      (_ buffer))))
+      (_ (when-let* ((file (buffer-file-name buffer)))
+           (lispm-tools--check-writable file))
+         buffer))))
 
 (defun lispm-tools--buffer-text (buffer)
   "All of BUFFER's text."
@@ -1217,6 +1226,23 @@ how this Emacs works before writing code for it."
 
 ;;;; Built-in tools: writing
 
+(defun lispm-tools--check-writable (file)
+  "Signal an error if FILE is there and cannot be written; change nothing.
+The error names FILE and the cause: it is a directory, or not writable.
+Emacs visits a file that is not writable in a read-only buffer, and
+asks before saving it once the user made that buffer writable, while
+tools never ask.  But with `lispm-save-edits' off, edits are left to
+the user to save: a buffer visiting FILE that is not read-only is no
+error then."
+  (let ((label (lispm-tools--label file)))
+    (cond ((file-directory-p file)
+           (error "Cannot write %s: it is a directory" label))
+          ((or (not (file-exists-p file)) (file-writable-p file)))
+          ((and (not lispm-save-edits)
+                (when-let* ((buffer (find-buffer-visiting file)))
+                  (not (buffer-local-value 'buffer-read-only buffer)))))
+          (t (error "Cannot write %s: it is not writable" label)))))
+
 (defun lispm-tools--edit-preview (path old-text new-text &optional replace-all)
   "Diff that edit_file would produce in the file at PATH.
 OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
@@ -1236,9 +1262,12 @@ current contents exactly, so read the file first."
   :permission write
   :preview #'lispm-tools--edit-preview
   :changes (lambda (path old-text new-text &optional replace-all)
-             (when-let* ((buffer (lispm-tools--to-show (lispm-tools--file path))))
-               (cons buffer (car (lispm-tools--replace (lispm-tools--buffer-text buffer)
-                                                       old-text new-text replace-all)))))
+             (let ((file (lispm-tools--file path)))
+               ;; No buffer is visited to show a file that cannot be written.
+               (lispm-tools--check-writable file)
+               (when-let* ((buffer (lispm-tools--to-show file)))
+                 (cons buffer (car (lispm-tools--replace (lispm-tools--buffer-text buffer)
+                                                         old-text new-text replace-all))))))
   (let* ((file (lispm-tools--file path))
          (buffer (lispm-tools--existing file))
          (edit (lispm-tools--replace (lispm-tools--buffer-text buffer)
@@ -1283,12 +1312,14 @@ for changes to existing files."
   :changes (lambda (path content)
              (let ((file (lispm-tools--file path)))
                ;; No buffer is visited to show a file that cannot be written.
+               (lispm-tools--check-writable file)
                (lispm-tools--check-new-file file)
                (when-let* ((buffer (lispm-tools--to-show file t)))
                  (cons buffer content))))
   (let* ((file (lispm-tools--file path))
          (directory (file-name-directory file))
          (existed (file-exists-p file)))
+    (lispm-tools--check-writable file)
     (lispm-tools--check-new-file file)
     ;; Made before FILE is visited: Emacs makes the buffer of a file it
     ;; cannot write read-only, in batch even for want of its directory.
@@ -1311,6 +1342,8 @@ For files use edit_file."
                             buffer)))
   :changes (lambda (buffer old-text new-text &optional replace-all)
              (let ((b (lispm-tools--buffer buffer)))
+               (when-let* ((file (buffer-file-name b)))
+                 (lispm-tools--check-writable file))
                (when (eq (lispm-tools--state b) 'current)
                  (cons b (car (lispm-tools--replace (lispm-tools--buffer-text b)
                                                     old-text new-text replace-all))))))

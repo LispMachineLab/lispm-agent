@@ -183,7 +183,11 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   shows the buffer and says so; ~lispm-revert-turn~ reverts nothing until the user settles
   it). A session transcript is never reverted, since the runtime holds positions in it; a
   buffer whose file was deleted becomes the buffer of a new file when a tool writes it; a file
-  too large to visit without Emacs asking is refused. After a call that may have changed
+  too large to visit without Emacs asking is refused. So is a directory, and a file that is
+  not writable, before it is visited or journaled: Emacs would visit it read-only, and a
+  buffer the user made writable (~C-x C-q~) would still ask before it is saved, so a tool
+  changes that buffer only while ~lispm-save-edits~ is off, which leaves saving to the user;
+  a read-only buffer is not changed at all. After a call that may have changed
   files (not one of class ~read~, ~memory~, ~comm~ or ~web~), the unmodified buffers of the
   files under the agent's root that changed on disk are reverted, so the user sees what a
   command, Lisp or an MCP server did there (~lispm-revert-after-calls~); proposals laid over
