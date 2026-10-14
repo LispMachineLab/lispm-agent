@@ -12,15 +12,24 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 
 - *A desktop*, where Emacs starts, in the theme's colours tinted with its accent (Mac OS 8's
   blue-violet under Platinum).  Its icons stand down the right edge as Mac OS 9's did: the home
-  disk (the file manager) and the applications, Emacs (with Emacs's own icon) and the browser,
-  at the top, the Trash in the bottom corner.  Click one to select it, double-click it (or press Return) to open it.
+  disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top, the
+  Trash in the bottom corner.  Click one to select it, double-click it (or press Return) to
+  open it.
+- *A Finder window*, opened by the home disk: a folder's items as large icons, floating over
+  the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
+  items and the room left counted at its bottom.  A folder opens in the window, a file in the
+  editor, which comes forward.  The arrows select, Return opens, Command-Up, Command-[ and
+  Command-] go up, back and forward, typing a name's first letters selects it, and a right
+  click offers Open, New Folder, Rename and Copy Path.  It belongs to the desktop: it shows
+  with it, and over the floating editor, and steps aside for the full-screen editor and the
+  browser.
 - *Applications*, one in front at a time, as on Mac OS 9: the desktop, Emacs the editor, and the
   browser.  The one in front fills the menu bar with its menus; the Application menu at the
   right end names it and lists the others.  Files, folders, terminals and agents opened while the
   desktop or the browser is in front open in the editor, which comes forward.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then the
-  menus of the application in front: the desktop's File and Special (Restart, Shut Down), the
+  menus of the application in front: the desktop's File, Go and Special (Restart, Shut Down), the
   editor's File, Edit, View, Project and Window, the browser's File, Go and Window.  At its right
   end, Emacs's own load average, mail flag, battery and time, each a title with a menu of its
   own (the Mail menu reads, composes and checks mail), then the Application menu.

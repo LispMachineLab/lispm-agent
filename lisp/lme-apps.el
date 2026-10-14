@@ -63,11 +63,17 @@ deciding whether it can run here.")
   "Return the application in front, a key of `lme-apps'."
   (or lme-apps--frontmost 'desktop))
 
+(defvar lme-apps-frontmost-functions nil
+  "Functions called with the application in front whenever it is set,
+changed or not, as windows follow it: the desktop's Finder window shows
+with the desktop and hides from the full-screen editor.")
+
 (defun lme-apps-set-frontmost (app)
   "Put APP, a key of `lme-apps', in front, and redraw the menu bar for it."
   (unless (eq app lme-apps--frontmost)
     (setq lme-apps--frontmost app)
-    (force-mode-line-update t)))
+    (force-mode-line-update t))
+  (run-hook-with-args 'lme-apps-frontmost-functions app))
 
 (defun lme-apps-screen ()
   "Return the frame the desktop and the applications are drawn in: the

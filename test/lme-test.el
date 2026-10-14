@@ -279,6 +279,58 @@ the last one uncovers the desktop."
     (lme-desktop--on-new-workspace)
     (should (lme-desktop-p))))
 
+(defmacro lme-test--with-folder (&rest body)
+  "Run BODY with `folder' bound to a fresh folder of a few items."
+  (declare (indent 0))
+  `(let ((folder (make-temp-file "lme-finder" t)))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name "zeta" folder))
+           (make-directory (expand-file-name "Alpha/.git" folder) t)
+           (dolist (name '("notes.org" "init.el" "beta.txt" ".hidden"))
+             (write-region "" nil (expand-file-name name folder)))
+           ,@body)
+       (delete-directory folder t))))
+
+(ert-deftest lme-test-finder-reads-folders ()
+  "A folder's items come by name, case aside, hidden ones left out, each
+with its large icon."
+  (lme-test--with-folder
+    (let ((items (lme-finder--read folder)))
+      (should (equal (mapcar #'car items) '("Alpha" "beta.txt" "init.el" "notes.org" "zeta")))
+      (should (cdr (assoc "zeta" items)))
+      (should-not (cdr (assoc "init.el" items)))
+      (should (equal (lme-finder--icon-name folder (assoc "Alpha" items)) "folder-git-32"))
+      (should (equal (lme-finder--icon-name folder (assoc "zeta" items)) "folder-32"))
+      (should (equal (lme-finder--icon-name folder (assoc "init.el" items)) "document-lisp-32"))
+      (should (equal (lme-finder--icon-name folder (assoc "notes.org" items)) "document-org-32"))
+      (should (equal (lme-finder--icon-name folder (assoc "beta.txt" items)) "document-32")))))
+
+(ert-deftest lme-test-finder-history ()
+  "Opening a folder records the one left: back, forward and up move through
+them, up selecting the folder it came from."
+  (lme-test--with-folder
+    (let ((root (file-name-as-directory folder)))
+      (with-current-buffer (lme-finder--buffer)
+        (setq lme-finder--directory nil lme-finder--back nil lme-finder--forward nil))
+      (lme-finder--go folder)
+      (lme-finder--go (expand-file-name "zeta" folder) t)
+      (lme-finder--in
+        (should (equal lme-finder--back (list root)))
+        (should (equal (lme-finder--title lme-finder--directory) "zeta")))
+      (lme-finder-back)
+      (lme-finder--in
+        (should (equal lme-finder--directory root))
+        (should (equal lme-finder--forward (list (file-name-as-directory
+                                                  (expand-file-name "zeta" folder))))))
+      (lme-finder-forward)
+      (lme-finder-up)
+      (lme-finder--in
+        (should (equal lme-finder--directory root))
+        (should (equal lme-finder--selected "zeta"))
+        (should (string-match-p "\\`5 items" (lme-finder--info)))))
+    (kill-buffer lme-finder-buffer-name)))
+
 (ert-deftest lme-test-views-ask-the-editor-first ()
   "A view is asked for through the editor, which comes forward first."
   (let ((asked nil))
@@ -297,7 +349,7 @@ the last one uncovers the desktop."
                                   lme-editor-project lme-editor-window))))
     (let ((lme-apps--frontmost 'desktop))
       (should (equal (lme-test--menu-bar-titles)
-                     '(lme-lambda lme-desktop-file lme-desktop-special))))
+                     '(lme-lambda lme-desktop-file lme-desktop-go lme-desktop-special))))
     (let ((lme-apps--frontmost 'browser))
       (should (equal (lme-test--menu-bar-titles)
                      '(lme-lambda lme-browser-file lme-browser-go lme-browser-window))))))

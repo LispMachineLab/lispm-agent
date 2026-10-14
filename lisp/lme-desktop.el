@@ -52,6 +52,12 @@
 (declare-function lme-browser-show "lme-browser" ())
 (declare-function lme-xwidget-available-p "lme-browser" ())
 (declare-function lme-editor-activate "lme-editor" ())
+(declare-function lme-finder-home "lme-finder" ())
+(declare-function lme-finder-open-directory "lme-finder" (directory))
+(declare-function lme-finder-shown-p "lme-finder" ())
+(declare-function lme-finder-open "lme-finder" ())
+(declare-function lme-finder-close "lme-finder" ())
+(defvar lme-finder--had-focus)
 (declare-function lme-main-area--windows "lme-interface" ())
 
 (defconst lme-desktop-buffer-name " *Desktop*"
@@ -69,8 +75,8 @@ A workspace's main area shows it where it holds nothing else.")
   (and (fboundp 'lme-xwidget-available-p) (lme-xwidget-available-p)))
 
 (defvar lme-desktop-items
-  '((home :label "Home" :icon "hard-disk-32" :command lme-desktop-open-home
-          :help "Your home folder, in the file manager")
+  '((home :label "Home" :icon "hard-disk-32" :command lme-finder-home
+          :help "Your home folder, in a Finder window")
     (editor :label "Emacs" :icon emacs :command lme-editor-activate
             :help "The editor: your projects, agents and shells")
     (browser :label "Browser" :icon "globe-32" :command lme-browser-show
@@ -98,11 +104,6 @@ kept the Trash there.")
 
 ;;;; Commands the icons run
 
-(defun lme-desktop-open-home ()
-  "Open the home folder in the file manager, as a disk opened in Finder."
-  (interactive)
-  (dired "~"))
-
 (defun lme-desktop--trash-directory ()
   "Return the directory holding the Trash's files."
   (if (lme-macos-p)
@@ -112,11 +113,12 @@ kept the Trash there.")
 (defun lme-desktop-open-trash ()
   "Open the Trash: in the file manager where Emacs may read it.
 macOS lets only programs with Full Disk Access read the Trash; without it,
-the system's own Trash window opens instead."
+the system's own Trash window opens instead.  Readable, it opens in a
+Finder window."
   (interactive)
   (let ((directory (lme-desktop--trash-directory)))
     (if (ignore-errors (directory-files directory))
-        (dired directory)
+        (lme-finder-open-directory directory)
       (if (lme-macos-p)
           (call-process "open" nil 0 nil directory)
         (user-error "The Trash cannot be read: %s" directory)))))
@@ -275,6 +277,7 @@ the bottom corner, a spacer filling the height between."
 A click on the desktop brings the desktop in front."
   (interactive "e")
   (select-window (posn-window (event-start event)))
+  (setq lme-finder--had-focus nil)
   (lme-apps-set-frontmost 'desktop)
   (lme-desktop--select (lme-desktop--item-at event)))
 
@@ -288,6 +291,7 @@ A click on the desktop brings the desktop in front."
   "Select no desktop icon: a click on the desktop itself, which brings the
 desktop in front."
   (interactive)
+  (setq lme-finder--had-focus nil)
   (lme-apps-set-frontmost 'desktop)
   (lme-desktop--select nil))
 
@@ -464,9 +468,15 @@ alone, filling the frame."
 ;;;; The desktop's menus
 
 (defun lme-desktop--file-items ()
-  "Return the items of the desktop's File menu."
-  (let ((selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer))))
-    `((:label "Open" :action lme-desktop-open :enabled ,(and selected t))
+  "Return the items of the desktop's File menu.  Open and Close Window act
+on the Finder window when it had the keyboard last, else on the desktop."
+  (let* ((finder (and (fboundp 'lme-finder-shown-p) (lme-finder-shown-p)))
+         (in-finder (and finder (bound-and-true-p lme-finder--had-focus)))
+         (selected (buffer-local-value 'lme-desktop--selected (lme-desktop-buffer))))
+    `((:label "New Folder…" :action lme-finder-new-folder :enabled ,(and finder t))
+      (:label "Open" :action ,(if in-finder 'lme-finder-open 'lme-desktop-open)
+              :enabled ,(and (or in-finder selected) t))
+      (:label "Close Window" :action lme-finder-close :enabled ,(and finder t))
       separator
       ,@(mapcar (lambda (item)
                   (list :label (plist-get (cdr item) :label)
@@ -482,6 +492,7 @@ alone, filling the frame."
 (defun lme-desktop-menus ()
   "Return the desktop's menus, for the menu bar while it is in front."
   '((lme-desktop-file "File" lme-desktop--file-items)
+    (lme-desktop-go "Go" lme-finder--go-items)
     (lme-desktop-special "Special" lme-desktop--special-items)))
 
 (defun lme-setup-desktop ()
