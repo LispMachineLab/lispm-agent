@@ -609,8 +609,11 @@ under it."
   (let ((buffer (lme-editor--in-editor (lambda () (window-buffer (selected-window))))))
     (list (lme-editor--item "New File…" #'find-file)
           (lme-editor--item "Open Project…" #'project-switch-project)
-          (lme-editor--item "Open Recent…" (if (fboundp 'recentf-open) #'recentf-open
-                                              #'find-file))
+          ;; What C-x C-r runs, so the menu shows that key.
+          (lme-editor--item "Open Recent…" (cond ((fboundp 'consult-recent-file)
+                                                  #'consult-recent-file)
+                                                 ((fboundp 'recentf-open) #'recentf-open)
+                                                 (t #'find-file)))
           'separator
           (lme-editor--item "Save" #'save-buffer
                             :enabled (and (buffer-file-name buffer) (buffer-modified-p buffer) t))

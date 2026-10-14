@@ -222,21 +222,22 @@ On macOS lispm-emacs makes Command Meta, which leaves Super to no key."
                 '(ns-command-modifier ns-right-command-modifier ns-alternate-modifier
                   ns-right-alternate-modifier ns-control-modifier ns-function-modifier))))
 
+(defconst lme-popup-typed-keys '(return tab escape backspace delete)
+  "The keys besides characters that a menu shows beside its items.
+lispm-emacs is used from an HHKB, which has keys for characters and
+these alone: arrows, function keys and the like are Fn chords there,
+or missing.")
+
 (defun lme-popup--keyboard-p (keys)
   "Return non-nil when KEYS is typed on the keyboard alone, as a menu
-shows it beside an item.  Mouse, wheel, touch and menu bar events do not
-count, nor function keys, which lispm-emacs leaves out, nor Super keys
-where no key is Super."
+shows it beside an item: characters, with modifiers or not, and the keys
+of `lme-popup-typed-keys'.  Mouse and menu bar events do not count, nor
+arrows or function keys, nor Super keys where no key is Super."
   (let ((super (lme-popup--super-key-p)))
     (seq-every-p (lambda (event)
-                   (let ((name (and (symbolp (event-basic-type event))
-                                    (symbol-name (event-basic-type event)))))
-                     (not (or (and name
-                                   (string-match-p
-                                    (concat "mouse\\|wheel\\|drag\\|touch\\|pinch\\|swipe"
-                                            "\\|menu-bar\\|tab-bar\\|tool-bar\\|\\`f[0-9]+\\'")
-                                    name))
-                              (and (not super) (memq 'super (event-modifiers event)))))))
+                   (let ((base (event-basic-type event)))
+                     (and (or (integerp base) (memq base lme-popup-typed-keys))
+                          (or super (not (memq 'super (event-modifiers event)))))))
                  keys)))
 
 (defun lme-popup--key (item)
