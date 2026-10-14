@@ -698,9 +698,15 @@ Forward are open to any page."
 
 ;;;;; Status bar
 
+(defvar-local lme-browser-status-note nil
+  "What the status bar of this page says instead of its state, or nil.
+Following a link from the keyboard and typing in a page tell their keys
+there.")
+
 (defun lme-browser--status ()
   "Return the status bar of the page being drawn: the padlock, then the
-progress bar and what is loading, or Netscape's \"Document: Done\"."
+progress bar and what is loading, or Netscape's \"Document: Done\", or
+the page's `lme-browser-status-note'."
   (let* ((xwidget (xwidget-at (point-min)))
          (uri (and xwidget (xwidget-webkit-uri xwidget)))
          (secure (and uri (string-prefix-p "https:" uri)))
@@ -719,7 +725,7 @@ progress bar and what is loading, or Netscape's \"Document: Done\"."
                           (if (and host (not (string-empty-p host)))
                               (format "Loading %s…" host)
                             "Loading…")))
-              "Document: Done"))))
+              (or lme-browser-status-note "Document: Done")))))
 
 ;;;;; Address window
 

@@ -106,7 +106,11 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   forgets.  Like the editor it is full screen, in a workspace of its own (the floating editor
   steps aside), or floating over the desktop beside the other windows; its zoom box, or View ›
   Full Screen and Floating Window, moves it, and it opens again as it was.  Closing its last
-  tab quits it, as File › Quit Browser does, and the desktop comes back.
+  tab quits it, as File › Quit Browser does, and the desktop comes back.  Pages are used from
+  the keyboard as Vimium uses them: =f= labels the links, buttons and fields in sight, and
+  typing a label follows it; in a field, characters go in and Emacs's keys move and delete,
+  Return submits, Tab goes on and Escape leaves.  Emacs on macOS cannot hand keys to a page,
+  so they reach it through JavaScript.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
@@ -285,6 +289,7 @@ Two things to know when both builds run:
 | =M-[=, =M-]=, =M-r=, =M-.= | in the browser: back, forward, reload, stop            |
 | =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history (=n=, =p=, =RET=, =q= in the pane) |
 | =M-t=, =M-}=, =M-{=, =M-w= | in the browser: a new tab, the next, the previous, close the tab |
+| =f=, =F=, =i=           | on a page: label links, buttons and fields and follow the one typed (=F= in a new tab); the first field |
 
 In the Mac OS build the Command key is Meta, so Command-C and Command-V copy and paste
 everywhere, terminals included.  With vim keys, =SPC= opens the leader: =SPC e= find a file,

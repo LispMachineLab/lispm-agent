@@ -1797,6 +1797,19 @@ no function keys, and no Super keys where no key is Super."
     (should-not (lme-popup--keyboard-p (kbd "s-a"))))
   (should (lme-popup--keyboard-p (kbd "M-c"))))
 
+(ert-deftest lme-test-browser-hint-labels ()
+  "Hint labels are distinct and all as long, so none begins another: one
+letter each while the letters suffice, two when they do not."
+  (require 'lme-browser-hints)
+  (let ((lme-browser-hint-characters "asd"))
+    (should (equal (lme-browser-hint-labels 3) '("a" "s" "d")))
+    (let ((labels (lme-browser-hint-labels 7)))
+      (should (= (length labels) 7))
+      (should (= (length (delete-dups (copy-sequence labels))) 7))
+      (should (seq-every-p (lambda (label) (= (length label) 2)) labels))
+      (should (equal (car labels) "aa")))
+    (should-not (lme-browser-hint-labels 0))))
+
 (ert-deftest lme-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."
