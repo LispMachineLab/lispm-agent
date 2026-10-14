@@ -45,8 +45,24 @@ or, with ~use-package~:
   :config (lispm-mode-line-mode 1))
 #+end_src
 
+Either way the package is =lisp/= alone; [[*LispM Desktop][LispM Desktop]], in =desktop/=, is not part of it.
+
 Then give it a model. With ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment,
 nothing more is needed; for any other server, local or hosted, see [[*Backends][Backends]].
+
+* LispM Desktop
+
+=desktop/= holds LispM Desktop, an Emacs distribution built around LispM: Emacs laid out as Mac OS
+9's desktop, with its applications (the editor, a browser, Control Panels), agents' terminals
+emulated off Emacs's thread, and every part of it reached from the keyboard too.  It runs the
+LispM beside it, from a clone of this repository:
+
+#+begin_src sh
+git clone https://github.com/RyanKung/lispm ~/lispm
+emacs --init-directory ~/lispm/desktop
+#+end_src
+
+See [[file:desktop/README.org][desktop/README.org]].
 
 * Getting started
 
@@ -306,7 +322,8 @@ make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers 
 make compile   # warnings are errors; make deps, which both run first, installs mcp.el into .deps/
 #+end_src
 
-CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request.
+CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request,
+and LispM Desktop's tests, =make -C desktop test=, with 30.1 and 31.1.
 
 ~make demo~ records the demo above again (~assets/demo/~) in your own Emacs, with your
 configuration but none of its state, a real model through the backend it chooses, and ffmpeg
@@ -336,6 +353,7 @@ configuration but none of its state, a real model through the backend it chooses
 | test/                    | ERT suite, fake model, SSE and MCP servers                       |
 | demo/                    | the demo: its script, recorder and sample project                |
 | assets/                  | logo, social card, the demo's video                              |
+| desktop/                 | LispM Desktop, the Emacs distribution built around LispM         |
 
 * License
 

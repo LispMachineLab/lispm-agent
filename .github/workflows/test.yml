@@ -33,3 +33,20 @@ jobs:
         run: make compile
       - name: Test
         run: make test
+
+  desktop:
+    name: Desktop, Emacs ${{ matrix.emacs }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # LispM Desktop needs what LispM does; its terminals' Rust module
+        # is not built here, so the tests needing it are skipped.
+        emacs: ['30.1', '31.1']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: purcell/setup-emacs@v8.0
+        with:
+          version: ${{ matrix.emacs }}
+      - name: Test
+        run: make -C desktop test
