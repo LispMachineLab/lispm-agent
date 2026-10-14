@@ -77,7 +77,7 @@ conversation per agent, and you can run several and come back to any of them.
 6. Killing the chat ends the agent; its session stays on disk, and ~M-x lispm-resume~ brings
    back any recorded session (those of the current project first). Sessions are listed under
    a title the model gives them after their first turn, in your language
-   (~lispm-auto-title~), until you rename them.
+   (~lispm-auto-title~; ~lispm-title-language~ picks another), until you rename them.
 
 | Key                 | In the chat                                                      |
 |---------------------+------------------------------------------------------------------|

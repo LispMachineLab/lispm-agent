@@ -23,8 +23,8 @@
 ;; `lispm-rename-session', or, until then, the first line of its first
 ;; prompt.  Once a turn has ended, an untitled session asks the model,
 ;; in a small request of its own, for a title summing it up, in the
-;; user's language, and records it as its #+lispm_title.  A title the
-;; user gave is never replaced.
+;; user's language or in `lispm-title-language', and records it as its
+;; #+lispm_title.  A title the user gave is never replaced.
 
 ;;; Code:
 
@@ -43,14 +43,23 @@
   :type '(choice (const :tag "The agent's model" nil) string)
   :group 'lispm)
 
+(defcustom lispm-title-language nil
+  "Language sessions are titled in, such as \"English\"; nil for the user's."
+  :type '(choice (const :tag "The language the user writes in" nil) string)
+  :group 'lispm)
+
 (defvar lispm-title-change-functions nil
   "Abnormal hook run with an agent whose session got a new title.")
 
 (defconst lispm-title--prompt
   "You title conversations between a user and an AI agent. Reply with the title only: \
 a few words (at most 6, or 15 characters of Chinese or Japanese) naming the task or \
-topic, in the language the user writes in. No quotes, no final punctuation."
-  "System prompt of the request for a title.")
+topic, in %s. No quotes, no final punctuation."
+  "System prompt of the request for a title; %s is the language.")
+
+(defun lispm-title--system ()
+  "The system prompt asking for a title in `lispm-title-language'."
+  (format lispm-title--prompt (or lispm-title-language "the language the user writes in")))
 
 (defvar lispm-title--asked (make-hash-table :test #'equal)
   "Ids of the sessions a title was asked for in this Emacs session.")
@@ -83,7 +92,7 @@ topic, in the language the user writes in. No quotes, no final punctuation."
          (backend (lispm-agent-backend* agent))
          (request (lispm-api-request
                    backend (or lispm-title-model (lispm-agent-model* agent)) "low"
-                   lispm-title--prompt nil
+                   (lispm-title--system) nil
                    `(((role . "user")
                       (content . [((type . "text")
                                    (text . ,(format "The user wrote:\n%s\n\nThe agent replied:\n%s"
