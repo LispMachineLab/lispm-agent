@@ -828,6 +828,18 @@ routing while the old workspace is still in front."
                                                (plist-get palette :shade) 0.5)
                            down))))
 
+(ert-deftest lme-test-toolbar-buttons-with-image-icons-are-apart ()
+  "Two toolbar buttons whose icons are images read alike, \" +\", but are
+different buttons: pressing one draws only it pushed in."
+  (let* ((icon (lambda (file) (propertize " " 'display (list 'image :type 'png :file file))))
+         (hermes (lme-sidebar--toolbar-button (concat (funcall icon "hermes.png") "+")
+                                              #'lme-agent-hermes-new "Hermes" 'header-line))
+         (lispm (lme-sidebar--toolbar-button (concat (funcall icon "lispm.png") "+")
+                                             #'lme-agent-lispm-new "LispM" 'header-line)))
+    (should (equal hermes lispm))
+    (should-not (equal (get-text-property 0 'lme-platinum-target hermes)
+                       (get-text-property 0 'lme-platinum-target lispm)))))
+
 (ert-deftest lme-test-press-runs-on-release-over-button ()
   "A pressed button runs only when let go over it, and is drawn pushed in
 while held."

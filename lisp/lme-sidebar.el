@@ -95,7 +95,10 @@ run on release over it, see `lme-platinum-press'.  Built while its line
 is drawn, as toolbars are, it shows itself pushed in from the window's
 `lme-platinum-pressed'."
   (let ((styled (copy-sequence label))
-        (target (cons row label)))
+        ;; The command tells buttons apart: `equal' ignores text
+        ;; properties, and icons drawn as images all read " ", so the new
+        ;; session buttons of two agents with image icons had one label.
+        (target (list row command label)))
     (add-face-text-property 0 (length styled)
                             (if (lme-platinum--pressed-p target)
                                 'lme-platinum-button-pressed
