@@ -26,8 +26,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   Command-] go up, back and forward, Command-Delete moves the selected item to the Trash (the
   system's own, from where it can be put back), typing a name's first letters selects it, and
   a right click offers Open, New Folder, Rename, Move to Trash and Copy Path.  It belongs to the desktop: it shows
-  with it, and over the floating editor, and steps aside for the full-screen editor and the
-  browser.
+  with it, and with the floating editor and browser, and steps aside for the full-screen editor
+  and browser.
 - *Applications*, one in front at a time, as on Mac OS 9: the desktop, Emacs the editor, and the
   browser.  The one in front fills the menu bar with its menus; the Application menu at the
   right end names it and lists the others.  Files, folders, terminals and agents opened while the
@@ -35,7 +35,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then the
   menus of the application in front: the desktop's File, Go and Special (Restart, Shut Down), the
-  editor's File, Edit, View, Project and Window, the browser's File, Go and Window.  At its right
+  editor's File, Edit, View, Project and Window, the browser's File, View, Go and Window.  At its right
   end, Emacs's own load average, mail flag, battery and time, each a title with a menu of its
   own (the Mail menu reads, composes and checks mail), then the Application menu.
 - *The editor*, an application of its own: a title strip across its top, the editor's title bar
@@ -79,9 +79,11 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   running or recorded, grouped by project: LispM's, and those of Claude Code, Codex and Hermes
   when their CLI is on ~PATH~.  Click one to resume it where it ran.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
-  desktop or the λ menu and brought forward from the Application menu; the floating editor
-  steps aside while it is in front.  Its window is a Mac OS 9 browser window: a title bar naming
-  the page, a toolbar of bevel buttons, the address in an edit field and a row of tabs.
+  desktop or the λ menu and brought forward from the Application menu.  Its window is a Mac OS 9
+  browser window: a title bar naming the page, a toolbar of bevel buttons, the address in an
+  edit field and a row of tabs.  Like the editor it is full screen, in a workspace of its own
+  (the floating editor steps aside), or floating over the desktop beside the other windows; its
+  zoom box, or View › Full Screen and Floating Window, moves it, and it opens again as it was.
   Closing its last tab quits it, as File › Quit Browser does, and the desktop comes back.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a

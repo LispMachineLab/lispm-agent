@@ -71,8 +71,7 @@
 
 ;;;; Browser
 ;;
-;; The embedded WebKit browser runs in the main area of a workspace of its
-;; own, laid out as a Mac OS 9 browser window:
+;; The embedded WebKit browser is laid out as a Mac OS 9 browser window:
 ;;
 ;;   address window  title bar     the shown page's icon and title
 ;;                   header line   toolbar: back, forward, reload, home
@@ -82,6 +81,16 @@
 ;;
 ;; The address window is a real buffer, so the address is edited in place.
 ;; A timer keeps it in step with the page while it is not being edited.
+;;
+;; The window is drawn in one of two ways, as the editor's is, and its zoom
+;; box moves it from one to the other:
+;;
+;;   full screen   in the main area of a workspace of its own, under the
+;;                 menu bar
+;;   floating      in a child frame over the desktop, moved by its title
+;;                 bar and resized from its grow box or its edges
+;;
+;; Its pages are buffers, so moving the window only shows them elsewhere.
 
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-webkit-uri "xwidget" (xwidget))
@@ -123,16 +132,37 @@ Buffer names follow page titles, so they cannot order the tabs.")
   (and (bound-and-true-p tabspaces-mode)
        (equal (tabspaces--current-tab-name) lme-browser-workspace-name)))
 
+(defvar lme-browser--frame nil
+  "The floating browser's child frame, or nil while the browser is full screen.")
+
+(defvar lme-browser-floating nil
+  "Non-nil when the browser opens floating over the desktop rather than full
+screen.  Its zoom box, and the View menu, switch it.")
+
+(defvar lme-browser--geometry nil
+  "Where the floating browser was last: (LEFT TOP WIDTH HEIGHT) in pixels.")
+
+(defvar lme-browser--shade nil
+  "While the floating browser is rolled up: its windows and text height.")
+
+(defun lme-browser-floating-p ()
+  "Return non-nil while the browser floats in a window of its own."
+  (frame-live-p lme-browser--frame))
+
 (defun lme-browser--window ()
-  "Return the main window showing a browser tab, if any."
+  "Return the window showing a browser tab, if any: in the floating browser,
+or else in the main area."
   (seq-find (lambda (window)
               (eq (buffer-local-value 'major-mode (window-buffer window))
                   'xwidget-webkit-mode))
-            (lme-main-area--windows)))
+            (if (lme-browser-floating-p)
+                (window-list lme-browser--frame 'no-mini)
+              (lme-main-area--windows))))
 
 (defun lme-browser--address-window ()
-  "Return the address window of this frame, if any."
-  (get-buffer-window lme-browser-address-buffer-name))
+  "Return the address window: the floating browser's, or this frame's."
+  (get-buffer-window lme-browser-address-buffer-name
+                     (and (lme-browser-floating-p) lme-browser--frame)))
 
 (defun lme-browser--uri (&optional buffer)
   "Return the address of the page in browser BUFFER, by default the shown tab."
@@ -249,6 +279,13 @@ does: the address window shows the page's real address again at once."
       separator
       (:label "Home" :action lme-browser-home :enabled ,page))))
 
+(defun lme-browser--view-items ()
+  "Return the items of the browser's View menu: full screen or floating."
+  `((:label "Full Screen" :action lme-browser-full-screen
+            :checked ,(not (lme-browser-floating-p)))
+    (:label "Floating Window" :action lme-browser-float
+            :checked ,(lme-browser-floating-p))))
+
 (defun lme-browser--window-items ()
   "Return the items of the browser's Window menu: a tab each, the shown one
 checked, as Mac OS 9's Window menus listed an application's windows."
@@ -262,6 +299,7 @@ checked, as Mac OS 9's Window menus listed an application's windows."
 (defun lme-browser-menus ()
   "Return the browser's menus, for the menu bar while it is in front."
   '((lme-browser-file "File" lme-browser--file-items)
+    (lme-browser-view "View" lme-browser--view-items)
     (lme-browser-go "Go" lme-browser--go-items)
     (lme-browser-window "Window" lme-browser--window-items)))
 
@@ -343,6 +381,8 @@ The field grows as the address is typed at its end."
   "Select the address window with the whole address marked for replacement."
   (interactive)
   (when-let* ((window (lme-browser--address-window)))
+    (unless (eq (window-frame window) (selected-frame))
+      (select-frame-set-input-focus (window-frame window)))
     (select-window window)
     (goto-char (point-max))
     (push-mark lme-browser--address-start t t)))
@@ -375,6 +415,20 @@ opens the page in the default browser."
   "Close the browser window's shown tab, from its title bar's close box."
   (lme-browser-close-shown-tab))
 
+(defun lme-browser--zoom-box (_window)
+  "Move the browser between full screen and floating, from its zoom box."
+  (lme-browser-toggle-floating))
+
+(defun lme-browser--collapse-box (_window)
+  "Roll the floating browser up to its toolbar, or down again."
+  (lme-browser-shade))
+
+(defun lme-browser--boxes ()
+  "Return the browser window's title bar boxes, see
+`lme-platinum-box-functions': only a floating window rolls up."
+  `(:close lme-browser--close-window :zoom lme-browser--zoom-box
+    ,@(when (lme-browser-floating-p) '(:collapse lme-browser--collapse-box))))
+
 (define-derived-mode lme-browser-address-mode fundamental-mode "Address"
   "Major mode of the browser's address window.
 Its title bar names the shown page, its header line is the toolbar and
@@ -386,7 +440,7 @@ its one line the address.
               cursor-type 'bar
               lme-platinum-title lme-browser-workspace-name
               lme-platinum-icon (lme-platinum-icon "globe")
-              lme-platinum-box-functions (list :close #'lme-browser--close-window))
+              lme-platinum-box-functions (lme-browser--boxes))
   (face-remap-add-relative 'default 'lme-platinum-toolbar)
   (face-remap-add-relative 'header-line 'lme-platinum-header)
   (display-line-numbers-mode -1)
@@ -588,7 +642,12 @@ globe until the icon is known and when the page has none."
   (lme-browser--sync t))
 
 (declare-function lme-desktop-show "lme-desktop" (&optional window))
+(declare-function lme-desktop-empty-buffer "lme-desktop" ())
+(declare-function lme-desktop--select-tab "lme-desktop" (&optional frame))
 (declare-function lme-editor-hide "lme-editor" ())
+(declare-function lme-editor-floating-p "lme-editor" ())
+(defvar lme-desktop-activate-hook)
+(defvar lme-editor--frame)
 
 (defun lme-browser-close-tab (buffer)
   "Close browser tab BUFFER without asking, then show another tab.
@@ -608,16 +667,16 @@ Closing the last tab quits the browser, see `lme-browser-quit'."
 (declare-function lme-desktop-activate "lme-desktop" ())
 
 (defun lme-browser-quit ()
-  "Quit the browser: close its tabs and its workspace, and bring the desktop
-in front."
+  "Quit the browser: close its tabs, its window and its workspace, and bring
+the desktop in front.  It opens again full screen or floating, as it was."
   (interactive)
+  (lme-browser--delete-frame)
   (let ((kill-buffer-query-functions nil))
     (mapc #'kill-buffer (lme-browser--buffers))
     (when-let* ((address (get-buffer lme-browser-address-buffer-name)))
       (kill-buffer address)))
   (lme-desktop-activate)
-  (when-let* ((index (tab-bar--tab-index-by-name lme-browser-workspace-name)))
-    (tab-bar-close-tab (1+ index))))
+  (lme-browser--close-workspace))
 
 ;;;;; Layout and synchronisation
 
@@ -676,6 +735,8 @@ kept so."
   "Put the address window above the browser window, once, and keep it synced.
 The address window is fitted to its lines, see `lme-browser--fit-address'."
   (when-let* ((window (lme-browser--window)))
+    (with-current-buffer (lme-browser--address-buffer)
+      (setq lme-platinum-box-functions (lme-browser--boxes)))
     (unless (lme-browser--address-window)
       (let* ((window-min-height 1)
              (address (split-window window -2 'above)))
@@ -694,16 +755,27 @@ The address window is fitted to its lines, see `lme-browser--fit-address'."
       (setq lme-browser--sync-timer (run-with-timer 0.7 0.7 #'lme-browser--sync)))))
 
 (defun lme-browser-show ()
-  "Show the browser: its workspace, with the most recent tab in the main area
-under the address window, opening `lme-browser-home-url' when there is no
-tab.  The desktop's Browser icon runs this.  The browser comes in front,
-and the floating editor, whose window would cover the page, is hidden."
+  "Show the browser, full screen or floating as it was last, with the most
+recent tab, opening `lme-browser-home-url' when there is no tab.  The
+desktop's Browser icon runs this, and the browser comes in front."
   (interactive)
+  (if lme-browser-floating
+      (lme-browser--show-floating)
+    (lme-browser--show-full-screen))
+  (force-mode-line-update t))
+
+(defun lme-browser--show-full-screen (&optional shown)
+  "Show the browser in its workspace, SHOWN or its first tab in the main area
+under the address window.  The floating editor, whose window would cover
+the page, is hidden.  The workspace starts on the desktop's bare colour,
+not the editor's start page: a document there would take it for the
+editor's own."
   (when (fboundp 'lme-editor-hide)
     (lme-editor-hide))
   (lme-apps-set-frontmost 'browser)
-  (let ((fresh (lme-workspace-enter lme-browser-workspace-name))
-        (browser (car (lme-browser--buffers))))
+  (let* ((fresh (let ((tab-bar-new-tab-choice #'lme-desktop-empty-buffer))
+                  (lme-workspace-enter lme-browser-workspace-name)))
+         (browser (or shown (car (lme-browser--buffers)))))
     (cond ((and browser fresh) (lme-workspace-show-alone browser))
           (browser (unless (get-buffer-window browser)
                      (select-window (lme-agent--main-window))
@@ -711,12 +783,164 @@ and the floating editor, whose window would cover the page, is hidden."
           (t (select-window (lme-agent--main-window))
              (xwidget-webkit-browse-url lme-browser-home-url t)
              (when fresh (tabspaces-reset-buffer-list))))
-    (lme-browser--ensure-layout))
-  (force-mode-line-update t))
+    (lme-browser--ensure-layout)))
+
+(defun lme-browser--default-geometry (screen)
+  "Return where the browser floats first: most of SCREEN, under its menu bar."
+  (let* ((width (frame-inner-width screen))
+         (height (frame-inner-height screen))
+         (top (+ (tab-bar-height screen t) 30))
+         (left (round (* width 0.1))))
+    (list left top (- width (* 2 left)) (- height top 50))))
+
+(defun lme-browser--make-frame (screen)
+  "Return the floating browser's child frame of SCREEN, not yet shown."
+  (pcase-let* ((`(,left ,top ,width ,height)
+                (or lme-browser--geometry (lme-browser--default-geometry screen)))
+               (frame (let ((after-make-frame-functions nil)
+                            (before-make-frame-hook nil))
+                        (with-current-buffer (lme-desktop-empty-buffer)
+                          (make-frame
+                           `((parent-frame . ,screen)
+                             (minibuffer . ,(minibuffer-window screen))
+                             (name . "Browser") (lme-browser . t) (lme-app . browser)
+                             (lme-window . t) (top-visible . 30)
+                             (undecorated . t) (visibility . nil)
+                             (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
+                             (menu-bar-lines . 0) (tool-bar-lines . 0)
+                             (internal-border-width . 2) (child-frame-border-width . 1)
+                             (drag-internal-border . t)
+                             (no-other-frame . t) (skip-taskbar . t) (desktop-dont-save . t)
+                             (user-position . t)
+                             (left . ,left) (top . ,top)
+                             (width . (text-pixels . ,width))
+                             (height . (text-pixels . ,height))))))))
+    (set-face-attribute 'internal-border frame :background (lme-platinum--color :chrome))
+    frame))
+
+(defun lme-browser--show-floating (&optional shown)
+  "Show the browser floating over the desktop, SHOWN or its first tab in its
+window, the window made when missing.  The floating windows left over the
+desktop show with it."
+  (let ((screen (lme-apps-screen))
+        (browser (or shown (car (lme-browser--buffers)))))
+    (with-selected-frame screen
+      (lme-desktop--select-tab))
+    (run-hooks 'lme-desktop-activate-hook)
+    (unless (lme-browser-floating-p)
+      (setq lme-browser--frame (lme-browser--make-frame screen)))
+    (with-selected-frame lme-browser--frame
+      (cond ((lme-browser--window)
+             (when shown (set-window-buffer (lme-browser--window) shown)))
+            (browser (set-window-buffer (frame-first-window) browser))
+            (t (select-window (frame-first-window))
+               (xwidget-webkit-browse-url lme-browser-home-url t)))
+      (lme-browser--ensure-layout))
+    (make-frame-visible lme-browser--frame)
+    (lme-apps-keep-on-desktop lme-browser--frame)
+    (select-frame-set-input-focus lme-browser--frame)
+    (select-window (or (lme-browser--window) (frame-first-window lme-browser--frame)))
+    (lme-apps-set-frontmost 'browser)))
+
+(defun lme-browser--delete-frame ()
+  "Delete the floating browser's window, remembering where it was."
+  (when (lme-browser-floating-p)
+    (let ((frame lme-browser--frame))
+      (lme-browser--unshade)
+      (setq lme-browser--geometry (lme-apps--geometry frame)
+            lme-browser--frame nil)
+      (when (eq (selected-frame) frame)
+        (select-frame-set-input-focus (frame-parent frame)))
+      (delete-frame frame))))
+
+(defun lme-browser--close-workspace ()
+  "Close the full-screen browser's workspace, the desktop's in front instead."
+  (when-let* ((screen (lme-apps-screen))
+              ((with-selected-frame screen
+                 (tab-bar--tab-index-by-name lme-browser-workspace-name))))
+    (with-selected-frame screen
+      (when (lme-browser-workspace-p)
+        (lme-desktop--select-tab))
+      (tab-bar-close-tab (1+ (tab-bar--tab-index-by-name lme-browser-workspace-name))))))
+
+(defun lme-browser-float ()
+  "Float the browser in a window of its own over the desktop."
+  (interactive)
+  (setq lme-browser-floating t)
+  (unless (lme-browser-floating-p)
+    (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+      (lme-browser--close-workspace)
+      (lme-browser--show-floating shown))))
+
+(defun lme-browser-full-screen ()
+  "Bring the floating browser back to full screen, under the menu bar."
+  (interactive)
+  (setq lme-browser-floating nil)
+  (when (lme-browser-floating-p)
+    (let ((shown (and (lme-browser--window) (window-buffer (lme-browser--window)))))
+      (lme-browser--delete-frame)
+      (lme-browser--show-full-screen shown))))
+
+(defun lme-browser-toggle-floating ()
+  "Move the browser between full screen and a floating window, as its zoom
+box does."
+  (interactive)
+  (if (lme-browser-floating-p) (lme-browser-full-screen) (lme-browser-float)))
+
+(defun lme-browser--unshade ()
+  "Roll the floating browser down again, when it is rolled up."
+  (when lme-browser--shade
+    (pcase-let ((`(,config . ,height) lme-browser--shade))
+      (setq lme-browser--shade nil)
+      (when (lme-browser-floating-p)
+        (set-frame-height lme-browser--frame height nil t)
+        (with-selected-frame lme-browser--frame
+          (set-window-configuration config))))))
+
+(defun lme-browser-shade ()
+  "Roll the floating browser up to its title bar and toolbar, or down
+again, as Mac OS 9 rolled a window up into its title bar."
+  (interactive)
+  (when (lme-browser-floating-p)
+    (if lme-browser--shade
+        (lme-browser--unshade)
+      (when-let* ((address (lme-browser--address-window)))
+        (with-selected-frame lme-browser--frame
+          (let ((height (window-pixel-height address))
+                (ignore-window-parameters t))
+            (setq lme-browser--shade (cons (current-window-configuration)
+                                           (frame-text-height lme-browser--frame)))
+            (delete-other-windows address)
+            (set-frame-height lme-browser--frame height nil t)))))))
+
+(defun lme-browser--follow-frontmost (app)
+  "Show the floating browser with the desktop and alongside the floating
+editor; hide it from the full-screen editor, whose workspace it would
+cover.  This is one of `lme-apps-frontmost-functions'."
+  (when (lme-browser-floating-p)
+    (let ((shown (or (memq app '(desktop browser))
+                     (and (eq app 'editor) (fboundp 'lme-editor-floating-p)
+                          (lme-editor-floating-p)))))
+      (cond ((and shown (not (frame-visible-p lme-browser--frame)))
+             (make-frame-visible lme-browser--frame)
+             ;; The editor in front stays over it.
+             (when (and (eq app 'editor) (frame-live-p (bound-and-true-p lme-editor--frame)))
+               (raise-frame lme-editor--frame)))
+            ((and (not shown) (frame-visible-p lme-browser--frame))
+             (make-frame-invisible lme-browser--frame))))))
+
+(defun lme-browser--refocus ()
+  "Give the floating browser the keyboard back after a menu bar menu closes.
+A click on the menu bar focuses the frame under it; the browser stays in
+front, so it takes the focus again."
+  (when (and (eq (lme-apps-frontmost) 'browser) (lme-browser-floating-p)
+             (frame-visible-p lme-browser--frame)
+             (not (eq (selected-frame) lme-browser--frame)))
+    (select-frame-set-input-focus lme-browser--frame)))
 
 (defun lme-browser ()
-  "Switch to the browser workspace, or back to the previous one when there.
-The menu bar's Web title runs this; see `lme-browser-show'."
+  "Switch to the browser, or back to the previous workspace when its
+full-screen workspace is in front; see `lme-browser-show'."
   (interactive)
   (if (lme-browser-workspace-p)
       (progn (tab-bar-switch-to-recent-tab)

@@ -415,6 +415,10 @@ cells and split-pane dividers drawn with box characters stay straight."
         switch-to-buffer-in-dedicated-window 'pop)
   (add-hook 'xwidget-webkit-mode-hook #'lme-browser--setup)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-browser--on-workspace-select)
+  ;; The floating browser follows the application in front, as the Finder
+  ;; window does, and takes the keyboard back after a menu bar menu.
+  (add-hook 'lme-apps-frontmost-functions #'lme-browser--follow-frontmost)
+  (add-hook 'lme-platinum-menu-closed-hook #'lme-browser--refocus)
   (with-eval-after-load 'xwidget
     (keymap-set xwidget-webkit-mode-map "C-l" #'lme-browser-focus-address))
   ;; Emacs opens on the desktop, as Mac OS did: no splash screen.

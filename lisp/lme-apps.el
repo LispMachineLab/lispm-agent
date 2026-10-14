@@ -205,12 +205,24 @@ any workspace of the floating editor, is the editor's.  This is a
              ((equal name (bound-and-true-p lme-browser-workspace-name)) 'browser)
              (t 'editor))))))
 
+(defun lme-apps--follow-window (&rest _)
+  "Put in front the application whose floating window was just selected,
+as the frame's `lme-app' parameter names it.  A click in a window selects
+its frame; the focus cannot tell, as macOS reports every child frame
+focused along with its parent.  The screen names no application: a click
+on the menu bar selects it, and the application in front stays so.
+This is a `window-selection-change-functions' function."
+  (when-let* ((app (frame-parameter (selected-frame) 'lme-app)))
+    (unless (eq app lme-apps--frontmost)
+      (lme-apps-set-frontmost app))))
+
 (defun lme-setup-apps ()
   "Draw the menu bar and the Application menu from the application in front."
   (setq lme-platinum-menus-function #'lme-apps-menus
         lme-platinum-application-function #'lme-apps-application
         lme-platinum-applications-function #'lme-apps-application-items)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-apps--follow-workspace)
+  (add-hook 'window-selection-change-functions #'lme-apps--follow-window)
   (add-hook 'window-size-change-functions #'lme-apps--screen-resized)
   (add-hook 'lme-platinum-frame-moved-functions #'lme-apps-keep-on-desktop))
 

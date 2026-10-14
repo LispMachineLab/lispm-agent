@@ -59,6 +59,8 @@
 (declare-function lme-popup--frame-xy "lme-popup" (position))
 (declare-function lme-popup-alert "lme-popup" (icon message buttons &optional detail))
 (defvar lme-editor--frame)
+(defvar lme-browser--frame)
+(defvar lme-browser-floating)
 
 (defconst lme-finder-buffer-name " *Finder*"
   "Name of the Finder window's buffer.")
@@ -522,7 +524,7 @@ after it is selected."
                         (make-frame
                          `((parent-frame . ,screen)
                            (minibuffer . ,(minibuffer-window screen))
-                           (name . "Finder") (lme-finder . t)
+                           (name . "Finder") (lme-finder . t) (lme-app . desktop)
                            (lme-window . t) (top-visible . 30)
                            (undecorated . t) (visibility . nil)
                            (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
@@ -617,27 +619,31 @@ after it is selected."
 ;;;; With the desktop
 
 (defun lme-finder--follow-frontmost (app)
-  "Show the Finder window with the desktop, and over the floating editor;
-hide it from the full-screen editor and the browser.
+  "Show the Finder window with the desktop, and with the floating editor or
+browser; hide it from the full-screen editor and browser.
 This is one of `lme-apps-frontmost-functions'."
   (when (frame-live-p lme-finder--frame)
     (let ((shown (or (eq app 'desktop)
                      (and (eq app 'editor) (fboundp 'lme-editor-floating-p)
-                          (lme-editor-floating-p)))))
+                          (lme-editor-floating-p))
+                     (and (eq app 'browser) (bound-and-true-p lme-browser-floating)))))
       (cond ((and shown (not (frame-visible-p lme-finder--frame)))
              (make-frame-visible lme-finder--frame)
-             ;; The editor in front stays over it.
-             (when (and (eq app 'editor) (frame-live-p (bound-and-true-p lme-editor--frame)))
-               (raise-frame lme-editor--frame)))
+             ;; The application in front stays over it.
+             (when-let* ((front (pcase app
+                                  ('editor (bound-and-true-p lme-editor--frame))
+                                  ('browser (bound-and-true-p lme-browser--frame))))
+                         ((frame-live-p front)))
+               (raise-frame front)))
             ((and (not shown) (frame-visible-p lme-finder--frame))
              (make-frame-invisible lme-finder--frame))))))
 
-(defun lme-finder--focus-changed ()
-  "Put the desktop in front when the Finder window takes the focus."
-  (when (frame-live-p lme-finder--frame)
-    (when (eq (frame-focus-state lme-finder--frame) t)
-      (setq lme-finder--had-focus t)
-      (lme-apps-set-frontmost 'desktop))))
+(defun lme-finder--note-selected (&rest _)
+  "Note that the Finder window has the keyboard once it is selected; its
+`lme-app' parameter puts the desktop in front, see `lme-apps--follow-window'.
+This is a `window-selection-change-functions' function."
+  (when (and (frame-live-p lme-finder--frame) (eq (selected-frame) lme-finder--frame))
+    (setq lme-finder--had-focus t)))
 
 (defun lme-finder--refocus ()
   "Give the Finder window the keyboard back after a menu bar menu closes,
@@ -668,7 +674,7 @@ when it had it before."
   (add-hook 'lme-platinum-menu-closed-hook #'lme-finder--refocus)
   (add-hook 'enable-theme-functions #'lme-finder--paint 90)
   (lme-finder--paint)
-  (add-function :after after-focus-change-function #'lme-finder--focus-changed))
+  (add-hook 'window-selection-change-functions #'lme-finder--note-selected))
 
 (provide 'lme-finder)
 ;;; lme-finder.el ends here

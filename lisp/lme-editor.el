@@ -117,6 +117,14 @@ workspace."
           (seq-filter #'lme-editor--workspace-tab-p
                       (funcall tab-bar-tabs-function (lme-editor-frame)))))
 
+(defun lme-editor--frame-p (frame)
+  "Return non-nil when FRAME draws the editor: its floating window, or the
+screen while one of its workspaces is in front.  Popups, child frames that
+are no application's window, go with the editor."
+  (cond ((eq frame lme-editor--frame) t)
+        ((frame-parent frame) (not (frame-parameter frame 'lme-window)))
+        (t (lme-editor--in-workspace-p frame))))
+
 (defun lme-editor--current-workspace ()
   "Return the name of the editor's workspace in front, or nil."
   (let ((frame (lme-editor-frame)))
@@ -356,12 +364,6 @@ front, so it takes the focus again."
              (not (eq (selected-frame) lme-editor--frame)))
     (select-frame-set-input-focus lme-editor--frame)))
 
-(defun lme-editor--focus-changed ()
-  "Put the editor in front when its floating window takes the focus."
-  (when (and (lme-editor-floating-p)
-             (eq (frame-focus-state lme-editor--frame) t))
-    (lme-apps-set-frontmost 'editor)))
-
 ;;;; Documents opened from elsewhere
 
 (defun lme-editor--document-p (buffer)
@@ -379,15 +381,15 @@ desktop, the browser's pages and Emacs's own internal buffers."
 
 (defun lme-editor--astray-p (buffer-or-name _action)
   "Return non-nil when a document is about to show outside the editor.
-That is any of `lme-editor--document-p' while the desktop's or the
-browser's workspace is in front, outside the minibuffer.  This is the
-`display-buffer-alist' condition sending documents to the editor."
+That is any of `lme-editor--document-p' while another application is in
+front: the desktop, the Finder window or the browser, outside the
+minibuffer.  This is the `display-buffer-alist' condition sending
+documents to the editor."
   (when-let* ((buffer (get-buffer buffer-or-name)))
     (and (not lme-editor--moving)
          (not lme-editor--displaying)
          (not (active-minibuffer-window))
-         (not (frame-parent (selected-frame)))
-         (not (lme-editor--in-workspace-p))
+         (not (lme-editor--frame-p (selected-frame)))
          (lme-editor--document-p buffer))))
 
 (defun lme-editor-display (buffer alist)
@@ -458,7 +460,7 @@ without the window configuration that ties it to FROM."
                         (make-frame
                          `((parent-frame . ,screen)
                            (minibuffer . ,(minibuffer-window screen))
-                           (name . "Emacs") (lme-editor . t)
+                           (name . "Emacs") (lme-editor . t) (lme-app . editor)
                            (lme-window . t) (top-visible . 30)
                            (undecorated . t) (visibility . nil)
                            (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
@@ -555,12 +557,16 @@ rolled a window up into its title bar."
       (with-selected-frame lme-editor--frame
         (setq lme-editor--shade (cons (current-window-configuration)
                                       (frame-text-height lme-editor--frame)))
-        (let ((window (car (lme-main-area--windows)))
-              (ignore-window-parameters t))
+        ;; The strip's height is measured before its window goes: the one
+        ;; window left fills the frame until the frame shrinks to it.
+        (let* ((strip (get-buffer-window lme-editor-strip-buffer-name))
+               (height (if strip (window-pixel-height strip) 60))
+               (window (car (lme-main-area--windows)))
+               (ignore-window-parameters t))
           (delete-other-windows window)
           (set-window-dedicated-p window nil)
           (set-window-buffer window (lme-editor--strip-buffer))
-          (set-frame-height lme-editor--frame (window-pixel-height window) nil t))))))
+          (set-frame-height lme-editor--frame height nil t))))))
 
 ;;;; Menus
 
@@ -669,6 +675,17 @@ links to start with, made when missing without being shown."
         (display-startup-screen)
         (get-buffer lme-editor-splash-buffer-name))))
 
+(defun lme-editor--new-workspace-buffer ()
+  "Show Emacs's startup screen in a new workspace's window; return nil.
+This is the editor's `tab-bar-new-tab-choice'.  The screen is put in the
+window rather than returned: a returned buffer is shown by
+`switch-to-buffer', which obeys `display-buffer-alist', and while the new
+workspace is made the old one is still in front, so a workspace made from
+the desktop would send its first buffer to the editor's last workspace."
+  (set-window-buffer (selected-window) (lme-editor-splash-buffer))
+  (set-window-start (selected-window) 1)
+  nil)
+
 (defun lme-editor--show-splash (window)
   "Show Emacs's startup screen in WINDOW when it is in an editor workspace
 holding nothing else, and return non-nil; else return nil.
@@ -680,7 +697,7 @@ This is the editor's `lme-desktop-empty-function'."
 
 (defun lme-editor--prepare-view ()
   "Bring the editor in front before a sidebar view is shown outside it."
-  (unless (or (frame-parent (selected-frame)) (lme-editor--in-workspace-p))
+  (unless (lme-editor--frame-p (selected-frame))
     (lme-editor-activate)
     (select-frame (lme-editor-frame))))
 
@@ -694,7 +711,7 @@ This is the editor's `lme-desktop-empty-function'."
         ;; The editor opens on Emacs's own startup screen: Emacs starts in
         ;; its first workspace, and a new workspace starts there too.
         initial-buffer-choice #'lme-editor-splash-buffer
-        tab-bar-new-tab-choice #'lme-editor-splash-buffer)
+        tab-bar-new-tab-choice #'lme-editor--new-workspace-buffer)
   (add-hook 'lme-sidebar-change-hook #'lme-editor--render-strip)
   (add-hook 'post-command-hook #'lme-editor--keep-chrome)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-editor--remember-workspace)
@@ -702,7 +719,6 @@ This is the editor's `lme-desktop-empty-function'."
             (lambda (&rest _) (lme-editor--render-strip)) 90)
   (add-hook 'lme-platinum-menu-closed-hook #'lme-editor--refocus)
   (add-hook 'lme-desktop-activate-hook #'lme-editor--show-with-desktop)
-  (add-function :after after-focus-change-function #'lme-editor--focus-changed)
   (add-to-list 'display-buffer-alist '(lme-editor--astray-p lme-editor-display)))
 
 (provide 'lme-editor)

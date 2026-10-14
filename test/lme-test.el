@@ -406,7 +406,31 @@ them, up selecting the folder it came from."
                      '(lme-lambda lme-desktop-file lme-desktop-go lme-desktop-special))))
     (let ((lme-apps--frontmost 'browser))
       (should (equal (lme-test--menu-bar-titles)
-                     '(lme-lambda lme-browser-file lme-browser-go lme-browser-window))))))
+                     '(lme-lambda lme-browser-file lme-browser-view lme-browser-go
+                                  lme-browser-window))))))
+
+(ert-deftest lme-test-application-follows-its-selected-window ()
+  "Selecting a floating window puts its application in front; the screen,
+selected by a click on the menu bar, leaves the one in front."
+  (let ((lme-apps--frontmost 'editor)
+        (lme-apps-frontmost-functions nil)
+        (app 'browser))
+    (cl-letf (((symbol-function 'frame-parameter)
+               (lambda (_frame parameter) (and (eq parameter 'lme-app) app))))
+      (lme-apps--follow-window)
+      (should (eq (lme-apps-frontmost) 'browser))
+      (setq app nil)
+      (lme-apps--follow-window)
+      (should (eq (lme-apps-frontmost) 'browser)))))
+
+(ert-deftest lme-test-browser-boxes ()
+  "The browser's zoom box moves it between full screen and floating; only
+the floating browser rolls up."
+  (cl-letf (((symbol-function 'lme-browser-floating-p) #'ignore))
+    (should (equal (lme-browser--boxes)
+                   '(:close lme-browser--close-window :zoom lme-browser--zoom-box))))
+  (cl-letf (((symbol-function 'lme-browser-floating-p) #'always))
+    (should (eq (plist-get (lme-browser--boxes) :collapse) 'lme-browser--collapse-box))))
 
 (ert-deftest lme-test-application-menu-lists-applications ()
   "The Application menu lists the applications, the one in front checked;
@@ -436,6 +460,30 @@ desktop and internal buffers are not."
         (should-not (lme-editor--astray-p document nil))))
     (setq buffer-file-name nil)
     (kill-buffer)))
+
+(ert-deftest lme-test-documents-leave-the-floating-browser ()
+  "A document opened from the floating browser, an application's window
+of its own, goes to the editor; popups are left be."
+  (with-current-buffer (get-buffer-create "lme-test-document.txt")
+    (setq buffer-file-name "/tmp/lme-test-document.txt")
+    (let ((document (current-buffer))
+          (parameters '((lme-window . t))))
+      (cl-letf (((symbol-function 'frame-parent) #'always)
+                ((symbol-function 'frame-parameter)
+                 (lambda (_frame parameter) (alist-get parameter parameters))))
+        (should (lme-editor--astray-p document nil))
+        (setq parameters nil)
+        (should-not (lme-editor--astray-p document nil))))
+    (setq buffer-file-name nil)
+    (kill-buffer)))
+
+(ert-deftest lme-test-new-workspace-starts-on-startup-screen ()
+  "A new workspace shows Emacs's startup screen itself, handing tab-bar no
+buffer: one shown through `switch-to-buffer' would obey the editor's
+routing while the old workspace is still in front."
+  (save-window-excursion
+    (should-not (lme-editor--new-workspace-buffer))
+    (should (equal (buffer-name (window-buffer)) lme-editor-splash-buffer-name))))
 
 (ert-deftest lme-test-editor-workspaces-leave-out-desktop-and-browser ()
   "The desktop's and the browser's workspaces are not the editor's."
