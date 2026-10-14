@@ -16,7 +16,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   home disk and the applications, Emacs (with Emacs's own icon), the browser and the Control
   Panels folder, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
-  double-click it (or press Return) to open it.  Drag one anywhere, a translucent copy following
+  double-click it (or press Return) to open it; C-n, C-p, C-f and C-b select from the keyboard
+  and C-M-n, C-M-p, C-M-f and C-M-b move the icon selected a cell.  Drag one anywhere, a translucent copy following
   the mouse, and it is dropped on the grid the column lies on, in the free cell nearest, and stays
   there at the next start too, kept by the edges nearest it so that it follows them as the
   desktop changes size.  Arrange Icons, in the desktop's right-click menu and its View menu,

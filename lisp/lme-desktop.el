@@ -258,6 +258,12 @@ Dragging an icon sets this."
   "M-<down>" #'lme-desktop-open
   "<escape>" #'lme-desktop-deselect
   "C-g" #'lme-desktop-deselect
+  ;; The icon selected moves with Meta added to the keys moving the
+  ;; selection, as dragging it would.
+  "C-M-f" #'lme-desktop-move-icon-right
+  "C-M-b" #'lme-desktop-move-icon-left
+  "C-M-n" #'lme-desktop-move-icon-down
+  "C-M-p" #'lme-desktop-move-icon-up
   "q" #'ignore)
 
 (defun lme-desktop--color ()
@@ -767,6 +773,48 @@ and the places are saved for the next start."
     (unless (equal (lme-desktop--place-xy place width height)
                    (cons (car here) (cadr here)))
       (customize-save-variable 'lme-desktop-icon-places places))))
+
+(defun lme-desktop--move-selected (columns rows)
+  "Move the icon selected COLUMNS cells right and ROWS down, as dropping it
+there would: onto the nearest free cell of the grid, see
+`lme-desktop--snap'.  An icon in the way is passed, as a drop beside it
+would land back on the icon's own cell."
+  (let* ((buffer (lme-desktop-buffer))
+         (key (or (buffer-local-value 'lme-desktop--selected buffer)
+                  (user-error "No icon is selected")))
+         (window (or (get-buffer-window buffer) (user-error "The desktop is not shown")))
+         (here (lme-desktop--cell-at key window)))
+    (pcase-let ((`(,cell-width . ,cell-height) (lme-desktop--cell-size)))
+      (let ((pitch (+ cell-height lme-desktop-gap))
+            (step 1))
+        (while (and (<= step 8) (equal (lme-desktop--cell-at key window) here))
+          (lme-desktop--drop key
+                             (+ (car here) (* step columns cell-width))
+                             (+ (cadr here) (* step rows pitch))
+                             window)
+          (setq step (1+ step)))))
+    (with-current-buffer buffer
+      (lme-desktop--render))))
+
+(defun lme-desktop-move-icon-right ()
+  "Move the icon selected a cell right."
+  (interactive)
+  (lme-desktop--move-selected 1 0))
+
+(defun lme-desktop-move-icon-left ()
+  "Move the icon selected a cell left."
+  (interactive)
+  (lme-desktop--move-selected -1 0))
+
+(defun lme-desktop-move-icon-down ()
+  "Move the icon selected a cell down."
+  (interactive)
+  (lme-desktop--move-selected 0 1))
+
+(defun lme-desktop-move-icon-up ()
+  "Move the icon selected a cell up."
+  (interactive)
+  (lme-desktop--move-selected 0 -1))
 
 (declare-function lme-popup--frame "lme-popup" (parent))
 (declare-function lme-popup--dispose "lme-popup" (frame))
