@@ -46,6 +46,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   under the menu bar, or floating in a window over the desktop, moved by its title bar, resized
   from its grow box and rolled up by its collapse box; its zoom box moves it between the two,
   workspaces and all.  Its close box puts it away, leaving the desktop; it opens again as it was.
+  A workspace with nothing open shows Emacs's own startup screen, its big logo over the links
+  to begin with.
 - *A buffer manager*, from the editor's Window menu: every open buffer with what it costs, as
   Mac OS 9's About This Computer barred each application's memory: its kind and the size of its
   text, and for one running a process (a terminal, an agent's CLI) the CPU and memory of that

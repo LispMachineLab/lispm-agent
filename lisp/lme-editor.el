@@ -658,6 +658,26 @@ listed an application's windows."
 
 ;;;; Setup
 
+(defconst lme-editor-splash-buffer-name "*GNU Emacs*"
+  "Name of the buffer of Emacs's own startup screen.")
+
+(defun lme-editor-splash-buffer ()
+  "Return the buffer of Emacs's own startup screen, its big logo over the
+links to start with, made when missing without being shown."
+  (or (get-buffer lme-editor-splash-buffer-name)
+      (save-window-excursion
+        (display-startup-screen)
+        (get-buffer lme-editor-splash-buffer-name))))
+
+(defun lme-editor--show-splash (window)
+  "Show Emacs's startup screen in WINDOW when it is in an editor workspace
+holding nothing else, and return non-nil; else return nil.
+This is the editor's `lme-desktop-empty-function'."
+  (when (lme-editor--in-workspace-p (window-frame window))
+    (set-window-buffer window (lme-editor-splash-buffer))
+    (set-window-start window 1)
+    t))
+
 (defun lme-editor--prepare-view ()
   "Bring the editor in front before a sidebar view is shown outside it."
   (unless (or (frame-parent (selected-frame)) (lme-editor--in-workspace-p))
@@ -669,7 +689,12 @@ listed an application's windows."
 
 (defun lme-setup-editor ()
   "Make Emacs the editor an application on the desktop."
-  (setq lme-sidebar-prepare-function #'lme-editor--prepare-view)
+  (setq lme-sidebar-prepare-function #'lme-editor--prepare-view
+        lme-desktop-empty-function #'lme-editor--show-splash
+        ;; The editor opens on Emacs's own startup screen: Emacs starts in
+        ;; its first workspace, and a new workspace starts there too.
+        initial-buffer-choice #'lme-editor-splash-buffer
+        tab-bar-new-tab-choice #'lme-editor-splash-buffer)
   (add-hook 'lme-sidebar-change-hook #'lme-editor--render-strip)
   (add-hook 'post-command-hook #'lme-editor--keep-chrome)
   (add-hook 'tab-bar-tab-post-select-functions #'lme-editor--remember-workspace)

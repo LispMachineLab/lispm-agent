@@ -587,16 +587,23 @@ a workspace whose main area holds nothing else."
 desktop's workspace."
   (equal (alist-get 'name (tab-bar--current-tab nil frame)) lme-desktop-tab-name))
 
+(defvar lme-desktop-empty-function nil
+  "Function filling WINDOW, its one argument, of a workspace whose main area
+holds nothing; it returns nil to leave WINDOW to the desktop's colour.
+The editor shows Emacs's own startup screen there.")
+
 (defun lme-desktop-show (&optional window)
   "Show the desktop in WINDOW, by default the selected window.
 In the desktop's workspace it shows with its icons; in any other, where
-the main area holds nothing else, as its bare colour."
+the main area holds nothing else, what `lme-desktop-empty-function' shows,
+or the desktop's bare colour."
   (let ((window (or window (selected-window))))
     (set-window-dedicated-p window nil)
-    (if (lme-desktop--tab-p (window-frame window))
-        (progn (set-window-buffer window (lme-desktop-buffer))
-               (lme-desktop--render window))
-      (set-window-buffer window (lme-desktop-empty-buffer)))))
+    (cond ((lme-desktop--tab-p (window-frame window))
+           (set-window-buffer window (lme-desktop-buffer))
+           (lme-desktop--render window))
+          ((and lme-desktop-empty-function (funcall lme-desktop-empty-function window)))
+          (t (set-window-buffer window (lme-desktop-empty-buffer))))))
 
 (defun lme-desktop-p (&optional window)
   "Return non-nil when WINDOW, by default the selected one, shows the desktop."

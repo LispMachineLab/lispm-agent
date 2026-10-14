@@ -300,6 +300,16 @@ the last one uncovers the desktop."
         (should-not (buffer-live-p first))
         (should (lme-desktop-p (selected-window)))))))
 
+(ert-deftest lme-test-editor-opens-on-the-startup-screen ()
+  "In the editor, the last window closed shows Emacs's own startup screen."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((lme-desktop-empty-function #'lme-editor--show-splash)
+          (buffer (generate-new-buffer " lme-test-last")))
+      (set-window-buffer (selected-window) buffer)
+      (lme-platinum-close-window (selected-window))
+      (should (equal (buffer-name (window-buffer)) lme-editor-splash-buffer-name)))))
+
 (ert-deftest lme-test-new-workspace-opens-on-the-desktop ()
   "A workspace opened onto *scratch* shows the desktop instead."
   (save-window-excursion
