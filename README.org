@@ -283,7 +283,8 @@ Two things to know when both builds run:
 | =C-x b=, =M-s l=       | switch to any buffer, go to a line by its text (Consult)   |
 | =C-.=                  | act on the thing at point (Embark)                         |
 | =M-[=, =M-]=, =M-r=, =M-.= | in the browser: back, forward, reload, stop            |
-| =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history |
+| =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history (=n=, =p=, =RET=, =q= in the pane) |
+| =M-t=, =M-}=, =M-{=, =M-w= | in the browser: a new tab, the next, the previous, close the tab |
 
 In the Mac OS build the Command key is Meta, so Command-C and Command-V copy and paste
 everywhere, terminals included.  With vim keys, =SPC= opens the leader: =SPC e= find a file,

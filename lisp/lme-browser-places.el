@@ -443,6 +443,8 @@ toolbar."
   "r" #'lme-browser-places-rename
   "g" #'lme-browser--render-places
   "TAB" #'lme-browser-places-switch
+  "n" #'next-line
+  "p" #'previous-line
   "q" #'lme-browser-hide-places)
 
 (define-derived-mode lme-browser-places-mode special-mode "Places"
@@ -471,7 +473,8 @@ toolbar."
 
 (defun lme-browser--show-places (view)
   "Show the pane listing VIEW, `bookmarks' or `history', at the browser
-window's left, the browser shown first when it is not."
+window's left, the browser shown first when it is not.  Asked for from
+the keyboard, the pane takes the keyboard, so its keys work at once."
   (unless (lme-browser--window)
     (lme-browser-show))
   (with-current-buffer (lme-browser--places-buffer)
@@ -483,14 +486,18 @@ window's left, the browser shown first when it is not."
         (set-window-buffer window (lme-browser--places-buffer))
         (set-window-dedicated-p window t)
         (set-window-parameter window 'lme-chrome t)
-        (set-window-parameter window 'no-other-window t)
-))))
+        (set-window-parameter window 'no-other-window t))))
+  (when (and (lme-typed-event-p last-input-event) (lme-browser--places-window))
+    (select-window (lme-browser--places-window))))
 
 (defun lme-browser-hide-places ()
-  "Close the History and Bookmarks pane."
+  "Close the History and Bookmarks pane; the page takes the keyboard back."
   (interactive)
   (when-let* ((window (lme-browser--places-window)))
-    (delete-window window)))
+    (let ((selected (eq window (selected-window))))
+      (delete-window window)
+      (when (and selected (lme-browser--window))
+        (select-window (lme-browser--window))))))
 
 (defun lme-browser-show-history ()
   "Show the pages visited in the pane, or close the pane when it shows them."
@@ -500,9 +507,12 @@ window's left, the browser shown first when it is not."
     (lme-browser--show-places 'history)))
 
 (defun lme-browser-edit-bookmarks ()
-  "Show the bookmarks in the pane, where they are opened, renamed and deleted."
+  "Show the bookmarks in the pane, where they are opened, renamed and
+deleted, or close the pane when it shows them."
   (interactive)
-  (lme-browser--show-places 'bookmarks))
+  (if (eq (lme-browser--places-shown) 'bookmarks)
+      (lme-browser-hide-places)
+    (lme-browser--show-places 'bookmarks)))
 
 (defun lme-setup-browser-places ()
   "Keep the browser's history as pages load, and write it when Emacs quits."

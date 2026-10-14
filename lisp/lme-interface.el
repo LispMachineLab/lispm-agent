@@ -389,8 +389,11 @@ cells and split-pane dividers drawn with box characters stay straight."
   (add-hook 'lme-platinum-menu-closed-hook #'lme-browser--refocus)
   (with-eval-after-load 'xwidget
     (lme-browser-bind-keys xwidget-webkit-mode-map)
-    ;; C-y pastes into the page, which the buffer's text is not.
-    (keymap-set xwidget-webkit-mode-map "C-y" #'lme-paste))
+    ;; C-y pastes into the page, which the buffer's text is not, and
+    ;; Command-W closes the tab, as in the Finder's and Control Panels'
+    ;; windows; in the location field M-w copies, as in Emacs.
+    (keymap-set xwidget-webkit-mode-map "C-y" #'lme-paste)
+    (keymap-set xwidget-webkit-mode-map "M-w" #'lme-browser-close-shown-tab))
   ;; Emacs opens on the desktop, as Mac OS did: no splash screen.
   (setq inhibit-startup-screen t
         ring-bell-function 'ignore

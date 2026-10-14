@@ -850,11 +850,16 @@ The field grows as the address is typed at its end."
     ("M-." . lme-browser-stop)
     ("M-d" . lme-browser-add-bookmark)
     ("M-b" . lme-browser-edit-bookmarks)
-    ("M-y" . lme-browser-show-history))
+    ("M-y" . lme-browser-show-history)
+    ("M-t" . lme-browser-new-tab)
+    ("M-}" . lme-browser-next-tab)
+    ("M-{" . lme-browser-previous-tab))
   "The browser's keys, Command keys as Netscape's were where Command is
 Meta: Command-[ and ] go back and forward, Command-D bookmarks the page,
 Command-B edits the bookmarks.  History is Command-Y, as macOS keeps
-Command-H for hiding.")
+Command-H for hiding.  Command-T opens a tab and Command-} and Command-{
+go to the next and the previous, as browsers with tabs do; on the page,
+Command-W closes the tab, see `lme-setup-interface'.")
 
 (defun lme-browser-bind-keys (map)
   "Bind `lme-browser-keys' in keymap MAP."
@@ -1101,6 +1106,24 @@ globe until the icon is known and when the page has none."
   (when-let* ((window (lme-browser--window)))
     (set-window-buffer window buffer)
     (lme-browser--sync t)))
+
+(defun lme-browser--step-tab (step)
+  "Show the browser tab STEP places from the one shown, wrapping around."
+  (let* ((tabs (lme-browser--buffers))
+         (shown (and (lme-browser--window) (window-buffer (lme-browser--window))))
+         (index (or (seq-position tabs shown) 0)))
+    (when (cdr tabs)
+      (lme-browser-select-tab (nth (mod (+ index step) (length tabs)) tabs)))))
+
+(defun lme-browser-next-tab ()
+  "Show the browser's next tab."
+  (interactive)
+  (lme-browser--step-tab 1))
+
+(defun lme-browser-previous-tab ()
+  "Show the browser's previous tab."
+  (interactive)
+  (lme-browser--step-tab -1))
 
 (defun lme-browser-new-tab (&optional url)
   "Open URL, by default `lme-browser-home-url', in a new browser tab and
