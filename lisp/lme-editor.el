@@ -459,6 +459,7 @@ without the window configuration that ties it to FROM."
                          `((parent-frame . ,screen)
                            (minibuffer . ,(minibuffer-window screen))
                            (name . "Emacs") (lme-editor . t)
+                           (lme-window . t) (top-visible . 30)
                            (undecorated . t) (visibility . nil)
                            (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
                            (menu-bar-lines . 0) (tool-bar-lines . 0)
@@ -503,6 +504,7 @@ without the window configuration that ties it to FROM."
             (tab-bar-select-tab (+ 2 (or (seq-position names workspace) 0)))
             (tab-bar-tabs-set (cdr (funcall tab-bar-tabs-function frame)) frame))))
       (make-frame-visible frame)
+      (lme-apps-keep-on-desktop frame)
       (select-frame-set-input-focus frame)
       (let ((lme-editor--moving nil))
         (with-selected-frame frame

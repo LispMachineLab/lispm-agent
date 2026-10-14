@@ -83,6 +83,52 @@ selected frame's outermost parent."
       (setq frame (frame-parent frame)))
     frame))
 
+(defconst lme-apps-window-reach 80
+  "Pixels of a floating window that stay on the desktop however it is moved,
+so its title bar can always be caught again.")
+
+(defun lme-apps-windows (&optional screen)
+  "Return the floating windows over SCREEN: child frames marked `lme-window'."
+  (let ((screen (or screen (lme-apps-screen))))
+    (seq-filter (lambda (frame)
+                  (and (eq (frame-parent frame) screen)
+                       (frame-parameter frame 'lme-window)))
+                (frame-list))))
+
+(defun lme-apps-keep-on-desktop (frame)
+  "Keep floating FRAME on its screen's desktop, as Mac OS 9 kept a window's
+title bar on the screen: under the menu bar, never wider or taller than
+the desktop, and at least `lme-apps-window-reach' pixels of it in sight.
+Placing it again also mends a position the window system left stale."
+  (when-let* (((frame-live-p frame))
+              (screen (frame-parent frame)))
+    (let* ((top-min (tab-bar-height screen t))
+           (screen-width (frame-native-width screen))
+           (screen-height (frame-native-height screen))
+           (width (frame-pixel-width frame))
+           (height (frame-pixel-height frame))
+           (fit-width (min width screen-width))
+           (fit-height (min height (- screen-height top-min))))
+      (unless (and (= fit-width width) (= fit-height height))
+        (set-frame-size frame
+                        (max 200 (- (frame-text-width frame) (- width fit-width)))
+                        (max 100 (- (frame-text-height frame) (- height fit-height)))
+                        t)
+        (setq width (frame-pixel-width frame)))
+      (pcase-let ((`(,left . ,top) (frame-position frame)))
+        (set-frame-position
+         frame
+         (max (- lme-apps-window-reach width)
+              (min left (- screen-width lme-apps-window-reach)))
+         (max top-min (min top (- screen-height lme-platinum-title-height))))))))
+
+(defun lme-apps--screen-resized (frame)
+  "Place the floating windows of FRAME again when it changed size, as going
+full screen and back does.  This is a `window-size-change-functions'
+function."
+  (unless (frame-parent frame)
+    (mapc #'lme-apps-keep-on-desktop (lme-apps-windows frame))))
+
 (defun lme-apps--available ()
   "Return the applications that can run here."
   (seq-filter (lambda (app)
@@ -135,7 +181,9 @@ any workspace of the floating editor, is the editor's.  This is a
   (setq lme-platinum-menus-function #'lme-apps-menus
         lme-platinum-application-function #'lme-apps-application
         lme-platinum-applications-function #'lme-apps-application-items)
-  (add-hook 'tab-bar-tab-post-select-functions #'lme-apps--follow-workspace))
+  (add-hook 'tab-bar-tab-post-select-functions #'lme-apps--follow-workspace)
+  (add-hook 'window-size-change-functions #'lme-apps--screen-resized)
+  (add-hook 'lme-platinum-frame-moved-functions #'lme-apps-keep-on-desktop))
 
 (provide 'lme-apps)
 ;;; lme-apps.el ends here

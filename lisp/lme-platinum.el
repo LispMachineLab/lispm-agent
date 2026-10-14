@@ -446,6 +446,10 @@ HELP describes it.  It is pressed rather than clicked, see
                         (keymap-set map "<tab-line> <mouse-1>" #'ignore)
                         map)))
 
+(defvar lme-platinum-frame-moved-functions nil
+  "Functions called with a child frame its title bar or grow box moved or
+resized, so it can be kept in place.")
+
 (defun lme-platinum--title-press (event)
   "Drag the child frame whose top title bar EVENT pressed, as a window.
 A window at the top of a child frame, such as the floating editor's
@@ -455,7 +459,8 @@ elsewhere the press does nothing and the release selects the window."
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
     (when (and frame (frame-parent frame) (window-at-side-p window 'top))
-      (mouse-drag-frame-move event))))
+      (mouse-drag-frame-move event)
+      (run-hook-with-args 'lme-platinum-frame-moved-functions frame))))
 
 (defvar lme-platinum--title-map
   (let ((map (make-sparse-keymap)))
@@ -998,7 +1003,8 @@ only marks the corner."
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
     (when (and frame (frame-parent frame))
-      (mouse-drag-frame-resize event 'bottom-right))))
+      (mouse-drag-frame-resize event 'bottom-right)
+      (run-hook-with-args 'lme-platinum-frame-moved-functions frame))))
 
 (defvar lme-platinum--grow-map
   (let ((map (make-sparse-keymap)))
