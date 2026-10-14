@@ -523,16 +523,19 @@ desktop in front."
 
 (defun lme-desktop--bare ()
   "Strip the current buffer's windows to the desktop: no title bar, no
-bottom edge, no cursor, fringes or line numbers."
+bottom edge, no cursor, fringes or line numbers, and its one line never
+wrapped, which would hold a column for the wrapping mark.  Visual line
+mode is turned off first: turned off, it restores the lines it found."
+  (visual-line-mode -1)
   (setq-local mode-line-format nil
               header-line-format nil
               tab-line-format nil
               cursor-type nil
               truncate-lines t
-              left-fringe-width 0
-              ;; A fringe, however thin, keeps Emacs from holding the last
-              ;; column of the text area for its truncation mark, which a
-              ;; picture as wide as the window would stop short of.
+              ;; Fringes on both sides, however thin, keep Emacs from holding
+              ;; the last column of the text area for its truncation mark,
+              ;; which a picture as wide as the window would stop short of.
+              left-fringe-width 1
               right-fringe-width 1
               show-trailing-whitespace nil
               evil-emacs-state-cursor '(nil)
