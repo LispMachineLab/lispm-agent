@@ -2,8 +2,11 @@ EMACS ?= emacs
 
 .PHONY: test compile
 
+# Tests stub a few primitives; the code they test runs uncompiled, so the
+# native compiler need not build trampolines for them, which takes seconds.
 test:
-	$(EMACS) -Q --batch -L lisp -l test/lme-test.el -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch --eval '(setq native-comp-enable-subr-trampolines nil)' \
+	  -L lisp -l test/lme-test.el -f ert-run-tests-batch-and-exit
 
 # A check: the .elc files are removed again, as they would shadow the
 # sources of a checkout Emacs loads from.
