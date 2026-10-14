@@ -52,6 +52,8 @@
     ("xu" . lme-xwidget-open-current-url))
   "Key suffixes bound under the evil leader key, paired with their commands.")
 
+(declare-function lme-sidebar-focus "lme-sidebar" ())
+
 (defun lme-setup-keymapping ()
   "Set up basic keybindings."
   (with-eval-after-load 'evil
@@ -69,6 +71,8 @@
   ;; Emacs's own kill and yank, which share the system clipboard.
   (global-set-key (kbd "M-c") #'lme-copy-region)
   (global-set-key (kbd "M-v") #'lme-paste)
+  ;; Into the sidebar and back: C-x o leaves side windows out.
+  (global-set-key (kbd "C-c s") #'lme-sidebar-focus)
   (lme-setup-meta-key-issue))
 
 

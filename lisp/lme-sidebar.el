@@ -560,6 +560,24 @@ Every other view is hidden first, so at most one is ever visible; see
   (interactive)
   (lme-sidebar-select 'agents))
 
+(defun lme-sidebar--window ()
+  "Return the window of the left sidebar in the selected frame, or nil."
+  (window-with-parameter 'window-side 'left))
+
+(defun lme-sidebar-focus ()
+  "Move the keyboard into the left sidebar, or out of it to the main area.
+The sidebar is left out of `other-window', as Emacs leaves side windows
+out, so its list keys are reached this way; a hidden sidebar shows the
+Agents view first."
+  (interactive)
+  (let ((window (lme-sidebar--window)))
+    (cond ((and window (eq window (selected-window)))
+           (select-window (lme-agent--main-window)))
+          (window (select-window window))
+          (t (lme-sidebar-select 'agents)
+             (when-let* ((window (lme-sidebar--window)))
+               (select-window window))))))
+
 
 
 (provide 'lme-sidebar)
