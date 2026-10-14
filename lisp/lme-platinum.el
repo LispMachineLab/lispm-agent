@@ -104,6 +104,14 @@ does; users rarely need to."
 (defconst lme-platinum-title-height 22
   "Height in pixels of a title bar, and of a window's bottom edge.")
 
+(defconst lme-platinum-menu-bar-height 20
+  "Height in pixels of the menu bar, Mac OS 9's.")
+
+(defconst lme-platinum-menu-icon-height 16
+  "Height in pixels of the icons drawn in the menu bar: the load meter,
+the battery.  With a title's text line, 16 pixels for its 12, they
+leave the bar `lme-platinum-menu-bar-height' tall.")
+
 (defconst lme-platinum-box-size 13
   "Side in pixels of a title bar box.")
 
@@ -1485,8 +1493,8 @@ Run from `display-time-hook', inside `display-time-update'."
 (defun lme-platinum-draw-battery (palette percent charging)
   "Return an SVG of a battery filled to PERCENT in PALETTE.
 CHARGING draws a bolt across it; a nearly empty one is filled in red."
-  (let* ((svg (svg-create 24 lme-platinum-title-height))
-         (y (/ (- lme-platinum-title-height 11) 2))
+  (let* ((svg (svg-create 24 lme-platinum-menu-icon-height))
+         (y (/ (- lme-platinum-menu-icon-height 11) 2))
          (ink (plist-get palette :text))
          (level (round (* 17 (/ (max 0 (min 100 percent)) 100.0)))))
     (lme-platinum--fill svg 0 y 21 11 ink)
@@ -1502,8 +1510,8 @@ CHARGING draws a bolt across it; a nearly empty one is filled in red."
 
 (defun lme-platinum-draw-meter (palette fraction)
   "Return an SVG of a load meter in PALETTE: three bars, filled to FRACTION."
-  (let* ((svg (svg-create 14 lme-platinum-title-height))
-         (bottom (+ (/ lme-platinum-title-height 2) 6))
+  (let* ((svg (svg-create 14 lme-platinum-menu-icon-height))
+         (bottom (+ (/ lme-platinum-menu-icon-height 2) 6))
          (ink (plist-get palette :text))
          (dim (plist-get palette :muted)))
     (dotimes (i 3)
@@ -1865,13 +1873,14 @@ it, as on every theme change, is idempotent."
                             :foreground (lme-platinum--color :muted) :inherit 'unspecified)
         ;; A box in each title's own fill pads it vertically, so the bar is
         ;; as tall as Mac OS 9's and a highlight fills its height.
-        (set-face-attribute 'lme-platinum-menu-title nil
-                            :foreground text :background chrome :inverse-video nil
-                            :box `(:line-width (1 . 5) :color ,chrome))
-        (set-face-attribute 'lme-platinum-menu-title-active nil
-                            :foreground (lme-platinum--color :content) :background accent
-                            :inverse-video nil
-                            :box `(:line-width (1 . 5) :color ,accent))
+        (let ((pad (max 0 (/ (- lme-platinum-menu-bar-height lme-platinum-menu-icon-height) 2))))
+          (set-face-attribute 'lme-platinum-menu-title nil
+                              :foreground text :background chrome :inverse-video nil
+                              :box `(:line-width (1 . ,pad) :color ,chrome))
+          (set-face-attribute 'lme-platinum-menu-title-active nil
+                              :foreground (lme-platinum--color :content) :background accent
+                              :inverse-video nil
+                              :box `(:line-width (1 . ,pad) :color ,accent)))
         (set-face-attribute 'lme-platinum-list nil :family (or list-family 'unspecified))
         (set-face-attribute 'lme-platinum-header nil
                             :inherit 'lme-platinum-list :background header :foreground dim
