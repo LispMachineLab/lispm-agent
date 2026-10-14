@@ -226,6 +226,104 @@ front; without xwidgets it is left out."
   (cl-letf (((symbol-function 'lme-xwidget-available-p) #'always))
     (should (equal (mapcar #'car (lme-desktop--items)) '(home editor browser trash)))))
 
+(ert-deftest lme-test-desktop-icons-stand-where-put ()
+  "Icons with no place stand in the column at the right edge, the Trash in
+the bottom corner; one put elsewhere stands there, measured from the edges
+nearest it, kept whole on the desktop; the others keep to free cells."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore)
+            ((symbol-function 'lme-desktop--font) (lambda () '("Geneva" 12 10))))
+    (pcase-let ((`(,cell-width . ,cell-height) (lme-desktop--cell-size)))
+      (let ((lme-desktop-icon-places nil))
+        (let ((layout (lme-desktop--layout 800 600)))
+          (should (equal (mapcar #'cdr layout)
+                         `((,(- 800 lme-desktop-margin cell-width) ,lme-desktop-margin)
+                           (,(- 800 lme-desktop-margin cell-width)
+                            ,(+ lme-desktop-margin cell-height lme-desktop-gap))
+                           (,(- 800 lme-desktop-margin cell-width)
+                            ,(- 600 lme-desktop-margin cell-height)))))))
+      ;; Home put at the top left; Emacs keeps its cell, the second.
+      (let ((lme-desktop-icon-places '((home :left 20 :top 30))))
+        (let ((layout (lme-desktop--layout 800 600)))
+          (should (equal (cdr (seq-find (lambda (entry) (eq (car (car entry)) 'home)) layout))
+                         '(20 30)))
+          (should (equal (nth 2 (seq-find (lambda (entry) (eq (car (car entry)) 'editor)) layout))
+                         lme-desktop-margin))))
+      ;; An icon put on Emacs's cell pushes it down the column.
+      (let ((lme-desktop-icon-places `((home :right ,lme-desktop-margin :top ,lme-desktop-margin)
+                                       (trash :right ,lme-desktop-margin :top ,lme-desktop-margin))))
+        (should (> (nth 2 (seq-find (lambda (entry) (eq (car (car entry)) 'editor))
+                                    (lme-desktop--layout 800 600)))
+                   lme-desktop-margin)))
+      ;; A place past the edge is kept whole on the desktop.
+      (should (equal (lme-desktop--place-xy '(:left 2000 :top -5) 800 600)
+                     (cons (- 800 cell-width) 0)))
+      ;; Measured from the nearest edges, so it follows them.
+      (should (equal (lme-desktop--xy-place 700 500 800 600)
+                     (list :right (- 800 700 cell-width) :bottom (- 600 500 cell-height))))
+      (should (equal (lme-desktop--xy-place 10 20 800 600) '(:left 10 :top 20)))
+      (should (equal (lme-desktop--place-xy (lme-desktop--xy-place 700 20 800 600) 1000 600)
+                     '(900 . 20))))))
+
+(ert-deftest lme-test-desktop-drop-keeps-the-others ()
+  "Dropping an icon keeps every other where it stands and saves them all."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore)
+            ((symbol-function 'lme-desktop--font) (lambda () '("Geneva" 12 10)))
+            ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+            ((symbol-function 'window-body-height) (lambda (&rest _) 601))
+            ((symbol-function 'customize-save-variable)
+             (lambda (variable value) (set variable value))))
+    (let ((lme-desktop-icon-places nil))
+      (lme-desktop--drop 'home 100 120 nil)
+      (should (equal (alist-get 'home lme-desktop-icon-places) '(:left 100 :top 120)))
+      (should (equal (alist-get 'editor lme-desktop-icon-places)
+                     (lme-desktop--xy-place (- 800 lme-desktop-margin lme-desktop-column)
+                                            (+ lme-desktop-margin
+                                               (cdr (lme-desktop--cell-size)) lme-desktop-gap)
+                                            800 600)))
+      (lme-desktop-clean-up)
+      (should-not lme-desktop-icon-places))))
+
+(ert-deftest lme-test-desktop-draws-the-dragged-copy ()
+  "The dragged copy is its cell's piece of the desktop, the icon translucent
+over it."
+  (cl-letf (((symbol-function 'lme-xwidget-available-p) #'ignore))
+    (let* ((lme-desktop-picture nil)
+           (svg (lme-desktop--copy-svg 'home 50 60 800 600)))
+      (should (string-match-p "viewBox=\"[0-9-]+ 60 " svg))
+      (should (string-match-p (format "<rect width=\"800\" height=\"600\" fill=\"%s\"/>"
+                                      (lme-desktop--color))
+                              svg))
+      (should (string-suffix-p "Home</text></g></svg>" svg))
+      (should (string-match-p "<g opacity=\"0.5\">" svg)))))
+
+(ert-deftest lme-test-desktop-picture-scaled-copy ()
+  "A picture filling the desktop is drawn from a copy scaled to it once one
+is made; until then, and for a picture at its own size, from itself."
+  (let* ((lme-desktop-picture (expand-file-name "icons/os9/globe-32.svg" lme-directory))
+         (file lme-desktop-picture)
+         (time (file-attribute-modification-time (file-attributes file)))
+         (started nil))
+    (cl-letf (((symbol-function 'lme-desktop--picture-size) (lambda (_) '(4000 . 3000)))
+              ((symbol-function 'frame-scale-factor) (lambda (&rest _) 2.0))
+              ((symbol-function 'lme-desktop--scale-picture)
+               (lambda (&rest args) (setq started args))))
+      (let ((lme-desktop-picture-position 'fill)
+            (lme-desktop--scaled nil))
+        (should (equal (lme-desktop--picture-file 800 600) file))
+        (should (equal started (list file time 1600 1200)))
+        (setq lme-desktop--scaled (list file time 1600 1200 file))
+        (setq started nil)
+        (should (equal (lme-desktop--picture-file 800 600) file))
+        (should-not started)
+        ;; Grown past the copy, the copy is made again.
+        (lme-desktop--picture-file 1000 600)
+        (should started))
+      (let ((lme-desktop-picture-position 'center)
+            (lme-desktop--scaled nil))
+        (setq started nil)
+        (should (equal (lme-desktop--picture-file 800 600) file))
+        (should-not started)))))
+
 (ert-deftest lme-test-desktop-selects-and-names ()
   "The arrow keys step through the icons, wrapping; the selected one's name
 is inverted, and a click finds the icon drawn under it, the Trash in the
@@ -403,7 +501,8 @@ them, up selecting the folder it came from."
                                   lme-editor-project lme-editor-window))))
     (let ((lme-apps--frontmost 'desktop))
       (should (equal (lme-test--menu-bar-titles)
-                     '(lme-lambda lme-desktop-file lme-desktop-go lme-desktop-special))))
+                     '(lme-lambda lme-desktop-file lme-desktop-view lme-desktop-go
+                                  lme-desktop-special))))
     (let ((lme-apps--frontmost 'browser))
       (should (equal (lme-test--menu-bar-titles)
                      '(lme-lambda lme-browser-file lme-browser-view lme-browser-go

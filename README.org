@@ -15,7 +15,11 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   settings][Your own settings]]).  Its icons stand down the right edge as Mac OS 9's did: the
   home disk and the applications, Emacs (with Emacs's own icon) and the browser, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
-  double-click it (or press Return) to open it.  Floating windows (the Finder's, the floating
+  double-click it (or press Return) to open it.  Drag one anywhere, a translucent copy following
+  the mouse, and it stays where it is dropped, at the next start too, kept by the edges nearest
+  it so that it follows them as the desktop changes size; View › Clean Up puts the icons back in
+  their column.  A desktop picture is drawn from a copy scaled to the desktop, made once by the
+  system's =sips= (or ImageMagick), so clicks and drags stay quick.  Floating windows (the Finder's, the floating
   editor) stay whole on the desktop, which on macOS does not clip them: dragged past its edge
   they come back onto it, and when Emacs's frame changes size, as going full screen and back
   does, each returns to the place it was given, shrunk only while it does not fit.
@@ -34,9 +38,9 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   desktop or the browser is in front open in the editor, which comes forward.
 - *A menu bar* along the top: LispM's rainbow λ at its left end, as Mac OS 9 had its rainbow
   Apple, opening the λ menu (new agents, sessions, shells, the browser, the appearance), then the
-  menus of the application in front: the desktop's File, Go and Special (Restart, Shut Down), the
-  editor's File, Edit, View, Project and Window, the browser's File, View, Go, Bookmarks and
-  Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
+  menus of the application in front: the desktop's File, View, Go and Special (Restart, Shut
+  Down), the editor's File, Edit, View, Project and Window, the browser's File, View, Go,
+  Bookmarks and Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
   title with a menu of its own (the Mail menu reads, composes and checks mail), then the
   Application menu.
 - *The editor*, an application of its own: a title strip across its top, the editor's title bar
@@ -278,7 +282,7 @@ set up, so it can change anything, and the appearance takes a new value at once:
 #+end_src
 
 The λ menu sets the theme and the desktop picture too (Desktop Picture…), and keeps them for
-the next start; so do =M-x lme-set-theme= and =M-x lme-desktop-choose-picture=.  To pick the
+the next start, as dragging the desktop's icons keeps their places (~lme-desktop-icon-places~); so do =M-x lme-set-theme= and =M-x lme-desktop-choose-picture=.  To pick the
 other editing style later, customize ~lme-editing-style~.
 
 An existing configuration can use lispm-emacs as a library instead:
