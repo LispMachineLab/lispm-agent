@@ -72,9 +72,10 @@ this says, a tool brings a buffer it uses up to date first."
   :type 'boolean
   :group 'lispm)
 
-(defconst lispm-tools--still-permissions '(read memory comm web)
+(defconst lispm-tools--still-permissions '(read memory comm web lisp)
   "Permission classes whose tools change no file of the agent's.
-No buffers are reverted after their calls.")
+No buffers are reverted after their calls.  A Lisp program changes
+files only through the tools it calls, which revert them.")
 
 (cl-defstruct (lispm-tool (:constructor lispm-tool--create) (:copier nil))
   "A tool callable by agents.
@@ -564,17 +565,51 @@ waiting for them if a server has to start."
   (file-in-directory-p (expand-file-name file (lispm-agent-root agent))
                        (lispm-agent-root agent)))
 
+(defun lispm-tools--call-key (input)
+  "INPUT as an approval for this exact call remembers it: without `why'."
+  (if (listp input)
+      (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input)
+    input))
+
+(defun lispm-tools-allowance (tool input)
+  "What approving a call of TOOL on INPUT for good adds to an agent's allowed.
+The tool's name: every later call of it runs at once.  For a tool of
+class `exec', which reaches all of Emacs or the system, this exact
+call: (NAME . INPUT), INPUT without `why'.  Allowing every later call
+would put the agent past its policy, which such a call can change."
+  (if (eq (lispm-tool-permission tool) 'exec)
+      (cons (lispm-tool-name tool) (lispm-tools--call-key input))
+    (lispm-tool-name tool)))
+
+(defun lispm-tools--allowed-p (agent tool input)
+  "Non-nil if the user allowed AGENT this call of TOOL on INPUT for good."
+  (let ((allowed (lispm-agent-allowed agent))
+        (name (lispm-tool-name tool)))
+    (or (member name allowed)
+        (member (cons name (lispm-tools--call-key input)) allowed))))
+
+(defun lispm-tools--targets (input)
+  "Files a call with INPUT changes, as far as its arguments tell.
+Those its `path' names, and the file of the buffer its `buffer' names."
+  (when (listp input)
+    (let ((path (alist-get 'path input))
+          (buffer (alist-get 'buffer input)))
+      (delq nil (list (and (stringp path) path)
+                      (and (stringp buffer) (get-buffer buffer)
+                           (buffer-file-name (get-buffer buffer))))))))
+
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
-Tools the user allowed for this Emacs session run at once.  Writes
-outside the agent's root always ask, whatever the policy says."
-  (let ((action (lispm-policy-action agent (lispm-tool-permission tool)))
-        (path (and (listp input) (alist-get 'path input))))
-    (cond ((member (lispm-tool-name tool) (lispm-agent-allowed agent)) 'auto)
+Calls the user allowed for this Emacs session run at once (see
+`lispm-tools-allowance').  Writes outside the agent's root always ask,
+whatever the policy says: to files named by a `path' argument, or
+visited by a buffer a `buffer' argument names."
+  (let ((action (lispm-policy-action agent (lispm-tool-permission tool))))
+    (cond ((lispm-tools--allowed-p agent tool input) 'auto)
           ((and (eq action 'auto)
                 (eq (lispm-tool-permission tool) 'write)
-                (stringp path)
-                (not (lispm-tools--in-root-p agent path)))
+                (seq-some (lambda (file) (not (lispm-tools--in-root-p agent file)))
+                          (lispm-tools--targets input)))
            'ask)
           (t action))))
 

@@ -97,6 +97,7 @@ agent's context*. Before every model request the runtime parses the whole buffer
 ** Reply                     a text block
 ** Thinking: ...             thinking and other blocks, kept as raw JSON (folded)
 ** DONE edit_file  a.el      a tool call; its TODO state is its approval/execution state
+*** Asks: write_file  b.el   a call a Lisp program in this one makes, awaiting approval
 *** Preview                  the diff shown while the call awaits approval
 *** Result                   the tool's output (or *** Error)
 *** Stopped                  an error the call stopped at, awaiting a restart (section 5)
@@ -204,8 +205,8 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
 - Built-in tools, the core layer every agent carries (section 10 explains the deferred others
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
   ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
-  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ (exec); memory, task and collaboration tools
-  are described below.
+  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ (exec); ~run_lisp~ (lisp); memory, task and
+  collaboration tools are described below.
 - *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
   ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
   what an agent lacks is knowing what there is. It finds out as a person would: ~apropos~
@@ -221,6 +222,35 @@ document for the edits above; ~lispm-interface~ set to ~org~ makes it the interf
   collects the frames; they are printed once an error reaches eval_elisp. They show the
   arguments of those calls, values the model may not have seen otherwise (a password read with
   ~auth-source~): ~lispm-eval-backtrace~ turns them off.
+- *Lisp under policy* (lispm-lisp.el). Between a tool call and ~eval_elisp~ there is
+  ~run_lisp~: a program in which the agent's tools are functions,
+  ~(edit_file :path f :old-text a :new-text b)~, so that reading ten files, filtering them and
+  editing three is one step rather than a dozen, as on a Lisp Machine the user's language and
+  the system's were one. Each call goes through the agent's policy as the model's own would:
+  reads run, a write awaits approval, asked in the chat as any is and recorded under the
+  program's call (a ~*** Asks:~ subsection, with its preview), and a denial signals
+  ~lispm-call-denied~, which the program may handle. Otherwise a program only computes. It is
+  checked before it runs, against an allowlist: the special forms, common macros (~let~
+  ~dolist~ ~pcase~ ~cl-loop~ ~when-let*~ ~with-temp-buffer~ ...), the functions Emacs declares
+  free of side effects (the ~side-effect-free~ and ~pure~ declarations the byte compiler
+  relies on) and a few more of the kind; it binds no variable of Emacs's but a handful such as
+  ~case-fold-search~, and sets only its own. What can be checked only as it runs is checked
+  then: a function it hands to ~mapcar~ or ~funcall~ must be a lambda of its own or an
+  allowed function; it changes only buffers and hash tables it made, moves point in others
+  only inside ~save-excursion~, throws only to its own catches, and cannot handle ~quit~, so
+  C-g stops it; destructive list functions (~nreverse~ ~nconc~ ~sort~) work on a copy. File
+  name handlers are off while it runs, so no TRAMP connection opens, and the text it gives
+  tools or returns loses its properties, which could hold code run on display. A macro that
+  expands its body while it is expanded (~cl-flet~, ~rx~) has the body searched first for
+  macros a program may not use: ~eval-when-compile~ would run there unchecked.
+
+  An Emacs Lisp evaluation cannot pause to wait for an approval or an asynchronous tool, so a
+  program is run again instead. The call that must wait ends the run; once its result is
+  in, the program runs from the start, and the calls it made before get the results recorded
+  for them, without running again. Its computations being free of side effects, a run
+  replays the one before; if what it reads has changed and it makes other calls, those are
+  new calls, under the policy like the first. Its result lists the calls it made (those
+  denied or failed marked), then what it printed and its value.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
 - *C-g interrupts a call* while Emacs runs it. Calls run from the process sentinels and timers
@@ -259,16 +289,29 @@ the audit log of what each agent learned and did, and a wrong memory is one ~git
 
 * 5. Permissions, approval, restarts and explainability
 
-*Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~write~ ~exec~); a policy
-maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval. One
-extra rule: *writes outside the agent's root always ask*, whatever the policy says.
+*Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~lisp~ ~write~ ~exec~); a
+policy maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval.
+~lisp~, the class of ~run_lisp~, implies ~read~: a program reads Emacs as it computes, so an
+agent that may not read may not run one either. One extra rule: *writes outside the agent's
+root always ask*, whatever the policy says, whether a ~path~ argument names the file or a
+~buffer~ argument a buffer visiting it.
+
+*Unrestricted code is outside the permission model.* ~eval_elisp~ and ~run_shell~ (~exec~)
+reach all of Emacs and the system: what they run can change the policy of the agent running
+it, lift a helper's ceiling, or call a tool's function past its checks. The policy cannot
+mediate what such a call does, only whether it runs: it runs if the user approves it, or if
+the policy lets ~exec~ run unasked, which gives the agent everything. So approving one "for
+good" (~2~ in the chat, ~a~ in the review) allows that exact call again, with the same input,
+never every later one (~lispm-tools-allowance~). Lisp the policy should mediate is what
+~run_lisp~ is for.
 
 *Approval is an org TODO state.* A call that needs approval is recorded as
 ~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
 
 - in the chat, a box shows the command or diff and the ~why~ and asks as Claude Code does:
-  ~1~ yes, ~2~ yes and don't ask again for this tool, ~3~ no and say what to do instead (the
-  answer is passed on to the model);
+  ~1~ yes, ~2~ yes and don't ask again for this tool (for an ~exec~ call, this exact call),
+  ~3~ no and say what to do instead (the answer is passed on to the model); a call a Lisp
+  program makes is asked about the same way, the box saying so;
 - in the org transcript, ~C-c C-y~ (~lispm-review~): y to approve, n to deny (optionally with
   a reason), a to allow that tool for the rest of the Emacs session;
 - or change the TODO state directly with ~C-c C-t a~ or ~C-c C-t n~;
@@ -606,6 +649,11 @@ removed at once.
 - *Session-level backend switches lose reasoning*: thinking blocks only go back to the
   Messages shape, and reasoning text from Chat Completions servers is never sent back, so a
   session that changes backend mid-way continues without the earlier reasoning.
+- *A program's check is an allowlist, not a proof*: ~run_lisp~ trusts Emacs's declarations
+  of what is free of side effects, and generic functions (~seq-*~) dispatch on their
+  arguments, so an object already in the image may run methods of its own. A program can
+  still hold Emacs up, say with a huge ~make-list~; C-g stops loops. What the allowlist does
+  not know, it refuses.
 - *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
   are not journaled. Next step: snapshot the project's git repository with ~git stash create~
   at the start of each turn, extending rollback to any file change.

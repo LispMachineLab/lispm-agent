@@ -39,8 +39,9 @@
 ;; The chat is drawn from the org buffer, the single source of truth,
 ;; whenever the session changes, from the first item that changed; the
 ;; org buffer itself stays out of sight.  Calls awaiting approval are
-;; asked about as Claude Code asks: 1 yes, 2 yes and don't ask again,
-;; 3 no and say what to do instead.  /transcript shows the org document.
+;; asked about as Claude Code asks: 1 yes, 2 yes and don't ask again
+;; (for a command or any Lisp: again for that exact one), 3 no and say
+;; what to do instead.  /transcript shows the org document.
 
 ;;; Code:
 
@@ -388,8 +389,8 @@ Code blocks lose their fences and keep their lines as they are."
 (defconst lispm-chat--tool-names
   '(("read_file" . "Read") ("read_buffer" . "Read") ("edit_file" . "Update")
     ("edit_buffer" . "Update") ("write_file" . "Write") ("run_shell" . "Bash")
-    ("eval_elisp" . "Eval") ("search_files" . "Search") ("list_directory" . "List")
-    ("list_buffers" . "Buffers") ("describe_symbol" . "Describe")
+    ("eval_elisp" . "Eval") ("run_lisp" . "Lisp") ("search_files" . "Search")
+    ("list_directory" . "List") ("list_buffers" . "Buffers") ("describe_symbol" . "Describe")
     ("remember" . "Remember") ("recall" . "Recall") ("forget" . "Forget")
     ("task_add" . "Task") ("task_update" . "Task") ("task_list" . "Tasks")
     ("ask_agent" . "Ask") ("send_message" . "Message") ("list_agents" . "Agents")
@@ -684,14 +685,11 @@ See `lispm--asked-condition'."
   (goto-char (point-max)))
 
 (defun lispm-chat-yes-always ()
-  "Approve the call, and every later call of its tool by this agent."
+  "Approve the call, and every later call of its tool by this agent.
+For a tool that runs commands or any Lisp, only this exact call (see
+`lispm-tools-allowance')."
   (interactive)
-  (let* ((agent lispm-chat-agent)
-         (name (plist-get (gethash (lispm-chat--waiting) (lispm-agent-pending agent)) :name)))
-    (push name (lispm-agent-allowed agent))
-    (dolist (id (lispm--waiting-calls agent))
-      (when (equal (plist-get (gethash id (lispm-agent-pending agent)) :name) name)
-        (lispm-resolve agent id 'approve))))
+  (lispm-allow lispm-chat-agent (lispm-chat--waiting))
   (goto-char (point-max)))
 
 (defun lispm-chat-no ()
@@ -753,8 +751,9 @@ ITEMS are the session's items, where the call's preview is."
               ((not (lispm--asked-condition agent)))
               (id (car (lispm--waiting-calls agent)))
               (call (gethash id (lispm-agent-pending agent))))
-    (let* ((name (plist-get call :name))
-           (input (and (consp (plist-get call :input)) (plist-get call :input)))
+    (let* ((asked (lispm--asked call))
+           (name (plist-get asked :name))
+           (input (and (consp (plist-get asked :input)) (plist-get asked :input)))
            (shown (lispm-chat--tool-name name))
            (path (or (alist-get 'path input) (alist-get 'buffer input)))
            (why (alist-get 'why input))
@@ -764,22 +763,33 @@ ITEMS are the session's items, where the call's preview is."
                     (lispm-chat--diff-lines (or (plist-get item :preview)
                                                 (lispm-chat--input-diff input))))
                    ("run_shell" (split-string (or (alist-get 'command input) "") "\n"))
-                   ("eval_elisp" (split-string (or (alist-get 'code input) "") "\n"))
+                   ((or "eval_elisp" "run_lisp") (split-string (or (alist-get 'code input) "") "\n"))
                    (_ (split-string (lispm--json-pretty input) "\n"))))
-           (title (pcase name
-                    ((or "edit_file" "edit_buffer") "Edit file")
-                    ("write_file" "Write file")
-                    ("run_shell" "Bash command")
-                    ("eval_elisp" "Evaluate Emacs Lisp")
-                    (_ (format "Use %s" shown))))
+           (title (concat (pcase name
+                            ((or "edit_file" "edit_buffer") "Edit file")
+                            ("write_file" "Write file")
+                            ("run_shell" "Bash command")
+                            ("eval_elisp" "Evaluate Emacs Lisp")
+                            ("run_lisp" "Run a Lisp program")
+                            (_ (format "Use %s" shown)))
+                          (if (plist-get call :asking)
+                              (format " · in the program %s runs" (lispm-chat--tool-name
+                                                                   (plist-get call :name)))
+                            "")))
            (question (pcase name
                        ((or "edit_file" "edit_buffer")
                         (format "Do you want to make this edit to %s?" path))
                        ("write_file" (format "Do you want to write %s?" path))
                        ("eval_elisp" "Do you want to evaluate this?")
+                       ("run_lisp" "Do you want to run this?")
                        (_ "Do you want to proceed?")))
            (options (list "Yes"
-                          (format "Yes, and don't ask again for %s calls by this agent" shown)
+                          (if (and (plist-get asked :tool)
+                                   (consp (lispm-tools-allowance (plist-get asked :tool) input)))
+                              (format "Yes, and don't ask again for this exact %s"
+                                      (pcase name ("run_shell" "command") ("eval_elisp" "code")
+                                             (_ "call")))
+                            (format "Yes, and don't ask again for %s calls by this agent" shown))
                           "No, and tell it what to do differently")))
       (propertize
        (concat
