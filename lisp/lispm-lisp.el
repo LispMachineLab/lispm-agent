@@ -127,8 +127,13 @@ may not use, which would run then, unchecked.")
     string-match split-string string-trim string-trim-left string-remove-prefix
     string-remove-suffix string-greaterp truncate-string-to-width looking-at looking-back
     intern
-    ;; Numbers, sequences: not declared in every Emacs.
-    cl-oddp cl-evenp seqp seq-elt seq-length seq-first seq-rest seq-empty-p seq-take seq-drop seq-subseq
+    ;; Lists and JSON: Emacs declares these only from 31 on.
+    caar cadr cdar cddr caaar caadr cadar caddr cdaar cdadr cddar cdddr
+    caaaar caaadr caadar caaddr cadaar cadadr caddar cadddr
+    cdaaar cdaadr cdadar cdaddr cddaar cddadr cdddar cddddr
+    cl-oddp cl-evenp json-parse-string json-serialize
+    ;; Sequences.
+    seqp seq-elt seq-length seq-first seq-rest seq-empty-p seq-take seq-drop seq-subseq
     seq-reverse seq-concatenate seq-into seq-partition seq-split seq-min seq-max
     seq-random-elt seq--elt-safe
     ;; File names, and reading directories: name handlers are off.
