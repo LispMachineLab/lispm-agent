@@ -124,8 +124,11 @@ workspace."
 screen while one of its workspaces is in front.  Popups, child frames that
 are no application's window, go with the editor."
   (cond ((eq frame lispm-desktop-editor--frame) t)
-        ((frame-parent frame) (not (frame-parameter frame 'lispm-desktop-window)))
-        (t (lispm-desktop-editor--in-workspace-p frame))))
+        ;; Another application's window, over the desktop or out on the
+        ;; computer's screen.
+        ((frame-parameter frame 'lispm-desktop-window) nil)
+        ((frame-parent frame) t)
+        ((lispm-desktop-apps-screen-p frame) (lispm-desktop-editor--in-workspace-p frame))))
 
 (defun lispm-desktop-editor--current-workspace ()
   "Return the name of the editor's workspace in front, or nil."
@@ -295,8 +298,10 @@ Run after every command, so a workspace made or switched to by any means
 gets it; the check is cheap.  Popups, child frames other than the
 floating editor, are left alone."
   (let ((frame (selected-frame)))
+    ;; Another application's window, out on the computer's screen too,
+    ;; is no screen, whose workspaces the strip goes on.
     (unless (or lispm-desktop-editor--moving (minibufferp) lispm-desktop-editor--shade
-                (and (frame-parent frame) (not (eq frame lispm-desktop-editor--frame))))
+                (and (not (lispm-desktop-apps-screen-p frame)) (not (eq frame lispm-desktop-editor--frame))))
       (let ((strip (get-buffer-window lispm-desktop-editor-strip-buffer-name)))
         (cond ((lispm-desktop-editor--in-workspace-p)
                (unless strip (lispm-desktop-editor--restore-chrome)))

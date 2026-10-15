@@ -93,6 +93,13 @@ so does the minibuffer they share."
   (let ((screen (frame-parameter frame 'lispm-desktop-out)))
     (and (frame-live-p screen) screen)))
 
+(defun lispm-desktop-apps-screen-p (frame)
+  "Return non-nil when FRAME is a screen, the frame the desktop is drawn
+in: one of its own that is neither a floating window out on the
+computer's screen nor the minibuffer they share."
+  (not (or (frame-parent frame) (frame-parameter frame 'lispm-desktop-window)
+           (lispm-desktop-apps-out-p frame))))
+
 (defun lispm-desktop-apps-window-screen (frame)
   "Return the screen FRAME, a floating window, belongs to: its parent, or
 the screen it left, when it is out."
