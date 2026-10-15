@@ -3052,6 +3052,24 @@ its bottom two pixels into the strip, as Mac OS 9's did."
         (should (equal (lispm-desktop-strip--menu-place 'desktop items)
                        (cons (+ 15 14 28 -1) (- 501 32))))))))
 
+(ert-deftest lispm-desktop-test-strip-place-split ()
+  "The strip goes in its screen's bottom-left corner when the screen is
+split in windows too, whose root window is no live window."
+  (lispm-desktop-test--with-strip
+    (save-window-excursion
+      (delete-other-windows)
+      (split-window-right)
+      (split-window-below)
+      (let ((frame (selected-frame)) placed)
+        (cl-letf (((symbol-function 'lispm-desktop-strip--live-p) #'always)
+                  ((symbol-function 'frame-parent) (lambda (&rest _) frame))
+                  ((symbol-function 'set-frame-position)
+                   (lambda (_frame x y) (setq placed (cons x y)))))
+          (lispm-desktop-strip--place)
+          (should (equal placed
+                         (cons 0 (- (nth 3 (window-pixel-edges (frame-root-window frame)))
+                                    lispm-desktop-platinum-strip-height)))))))))
+
 (ert-deftest lispm-desktop-test-strip-keyboard ()
   "C-c b goes to the strip: C-f and C-b move between the modules, Return or
 Space opens the ringed one's menu, and C-g leaves; a collapsed strip shows
