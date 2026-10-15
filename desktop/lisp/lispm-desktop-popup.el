@@ -40,8 +40,9 @@
 ;; text terminal, batch), menus fall back to `completing-read' and alerts
 ;; to `read-multiple-choice'.
 ;;
-;; Drawing (`lispm-desktop-popup-draw-button', the text of menus and alerts) is
-;; separate from the modal loops, which only read events and redraw.
+;; Drawing (the text of menus and alerts; push buttons are
+;; `lispm-desktop-platinum-draw-push-button') is separate from the modal
+;; loops, which only read events and redraw.
 
 ;;; Code:
 
@@ -774,57 +775,55 @@ command of the place clicked."
 (defconst lispm-desktop-popup-alert-width 420
   "Width in pixels of an alert.")
 
-(defun lispm-desktop-popup-draw-button (palette label width &optional default pressed focused)
-  "Return an SVG of a push button WIDTH pixels wide reading LABEL in PALETTE.
-A DEFAULT button is ringed, as the one Return presses; a PRESSED one is
-drawn pushed in; a FOCUSED one, the one Space presses, is outlined in the
-accent colour, as Mac OS outlined the control the keyboard was on."
-  (let* ((ring (if default 4 0))
-         (height (+ 22 (* 2 ring)))
-         (svg (svg-create (+ width (* 2 ring)) height))
-         (chrome (plist-get palette :chrome))
-         (fill (if pressed (lispm-desktop-tab-bar--blend chrome (plist-get palette :shade) 0.5) chrome)))
-    (when default
-      (svg-rectangle svg 1.5 1.5 (+ width (* 2 ring) -3) (- height 3) :rx 6
-                     :fill "none" :stroke (plist-get palette :frame) :stroke-width 3))
-    (svg-rectangle svg (+ ring 0.5) (+ ring 0.5) (1- width) 21 :rx 4
-                   :fill fill :stroke (plist-get palette :frame) :stroke-width 1)
-    (svg-line svg (+ ring 4) (+ ring 1.5) (+ ring width -4) (+ ring 1.5)
-              :stroke (plist-get palette (if pressed :shade :light)) :stroke-width 1)
-    (svg-line svg (+ ring 4) (+ ring 20.5) (+ ring width -4) (+ ring 20.5)
-              :stroke (plist-get palette (if pressed :light :shade)) :stroke-width 1)
-    (when focused
-      (svg-rectangle svg (+ ring 2.5) (+ ring 2.5) (- width 5) 17 :rx 3
-                     :fill "none" :stroke (plist-get palette :accent) :stroke-width 2))
-    (svg-text svg label
-              :x (+ ring (/ width 2.0)) :y (+ ring 15.5) :text-anchor "middle"
-              :font-family (or (face-attribute 'lispm-desktop-platinum-title :family nil t) "Geneva")
-              :font-size 12 :font-weight "bold"
-              :fill (plist-get palette :text))
-    svg))
+(defconst lispm-desktop-popup-button-pad 5
+  "Pixels left clear about an alert's push button: room for the default
+ring, three pixels, and the focus ring outside it, two more.  Every
+button takes as much, so none moves as the focus does.")
 
-(defun lispm-desktop-popup--button-width (label)
-  "Return the width of the push button reading LABEL: room for it, at least 70."
-  (max 70 (+ 28 (string-pixel-width (propertize label 'face 'lispm-desktop-platinum-title)))))
+(defconst lispm-desktop-popup-button-gap 10
+  "Pixels between neighbouring buttons of an alert, ring to outline.")
+
+(defun lispm-desktop-popup--button (label value role pressed focused)
+  "Return the push button of an alert reading LABEL, answering VALUE.
+ROLE `default' rings it; PRESSED and FOCUSED are the values of the
+buttons held down and under the keyboard.  The value is (STRING . WIDTH):
+the button as a string displaying it, and its width."
+  (let* ((width (lispm-desktop-platinum-push-button-width label))
+         (pad lispm-desktop-popup-button-pad))
+    (cons (propertize " " 'display
+                      (svg-image (lispm-desktop-platinum-draw-push-button
+                                  lispm-desktop-platinum--palette label width
+                                  :state (and (equal pressed value) 'pressed)
+                                  :default (eq role 'default)
+                                  :focused (and focused (equal focused value))
+                                  :pad pad)
+                                 :ascent 'center :scale 1)
+                      'lispm-desktop-popup-button value)
+          (+ width (* 2 pad)))))
 
 (defun lispm-desktop-popup-alert-text (icon message detail buttons pressed &optional focused)
   "Return the text of an alert: ICON, MESSAGE, DETAIL and its BUTTONS.
 BUTTONS is a list of (LABEL VALUE ROLE), ROLE `default' or `cancel' or
 nil, laid left to right ending at the alert's right; PRESSED is the
-VALUE of the one held down, FOCUSED that of the one the keyboard is on."
-  (let* ((images (mapcar (pcase-lambda (`(,label ,value ,role))
-                           (let ((width (lispm-desktop-popup--button-width label)))
-                             (cons (propertize
-                                    " " 'display
-                                    (svg-image (lispm-desktop-popup-draw-button
-                                                lispm-desktop-platinum--palette label width
-                                                (eq role 'default) (equal pressed value)
-                                                (and focused (equal focused value)))
-                                               :ascent 'center :scale 1)
-                                    'lispm-desktop-popup-button value)
-                                   (+ width (if (eq role 'default) 8 0)))))
-                         buttons))
-         (row (+ (apply #'+ (mapcar #'cdr images)) (* 10 (1- (length images))))))
+VALUE of the one held down, FOCUSED that of the one the keyboard is on.
+Neighbours stand `lispm-desktop-popup-button-gap' apart, the clear room
+each image leaves about its button and its default ring counted in."
+  (let* ((pad lispm-desktop-popup-button-pad)
+         (clear (lambda (role) (- pad (if (eq role 'default) 3 0))))
+         (images (let ((previous nil))
+                   (mapcar (pcase-lambda (`(,label ,value ,role))
+                             (let ((button (lispm-desktop-popup--button label value role pressed focused))
+                                   (gap (and previous
+                                             (max 0 (- lispm-desktop-popup-button-gap
+                                                       (funcall clear (car previous))
+                                                       (funcall clear role))))))
+                               (setq previous (list role))
+                               (cons (concat (when gap
+                                               (propertize " " 'display `(space :width (,gap))))
+                                             (car button))
+                                     (+ (cdr button) (or gap 0)))))
+                           buttons)))
+         (row (apply #'+ (mapcar #'cdr images))))
     (concat (propertize " " 'display '(space :height (10))) "\n"
             ;; The icon stands in the left margin, inset from the frame by
             ;; its own margin.
@@ -839,8 +838,8 @@ VALUE of the one held down, FOCUSED that of the one the keyboard is on."
               (concat (propertize " " 'display '(space :height (6))) "\n"
                       (propertize detail 'face 'lispm-desktop-platinum-list) "\n"))
             (propertize " " 'display '(space :height (16))) "\n"
-            (propertize " " 'display `(space :align-to (- right (,(+ row 4)))))
-            (mapconcat #'car images (propertize " " 'display '(space :width (10))))
+            (propertize " " 'display `(space :align-to (- right (,(+ row 2)))))
+            (mapconcat #'car images)
             "\n"
             (propertize " " 'display '(space :height (12))))))
 
