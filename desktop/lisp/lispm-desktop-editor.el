@@ -57,6 +57,8 @@
 (require 'lispm-desktop-apps)
 (require 'lispm-desktop-surface)
 
+(declare-function lispm-desktop-show-desktop "lispm-desktop-coherence" (&optional screen))
+(declare-function lispm-desktop-coherence-bring-in "lispm-desktop-coherence" (frame))
 (declare-function lispm-desktop-sidebar-current-view "lispm-desktop-sidebar" ())
 (declare-function lispm-desktop-sidebar-select "lispm-desktop-sidebar" (view))
 (declare-function lispm-desktop-terminal-buffer-p "lispm-desktop-interface" (buffer))
@@ -122,8 +124,11 @@ workspace."
 screen while one of its workspaces is in front.  Popups, child frames that
 are no application's window, go with the editor."
   (cond ((eq frame lispm-desktop-editor--frame) t)
-        ((frame-parent frame) (not (frame-parameter frame 'lispm-desktop-window)))
-        (t (lispm-desktop-editor--in-workspace-p frame))))
+        ;; Another application's window, over the desktop or out on the
+        ;; computer's screen.
+        ((frame-parameter frame 'lispm-desktop-window) nil)
+        ((frame-parent frame) t)
+        ((lispm-desktop-apps-screen-p frame) (lispm-desktop-editor--in-workspace-p frame))))
 
 (defun lispm-desktop-editor--current-workspace ()
   "Return the name of the editor's workspace in front, or nil."
@@ -316,8 +321,10 @@ Run after every command, so a workspace made or switched to by any means
 gets it; the check is cheap.  Popups, child frames other than the
 floating editor, are left alone."
   (let ((frame (selected-frame)))
+    ;; Another application's window, out on the computer's screen too,
+    ;; is no screen, whose workspaces the strip goes on.
     (unless (or lispm-desktop-editor--moving (minibufferp) lispm-desktop-editor--shade
-                (and (frame-parent frame) (not (eq frame lispm-desktop-editor--frame))))
+                (and (not (lispm-desktop-apps-screen-p frame)) (not (eq frame lispm-desktop-editor--frame))))
       (let ((strip (get-buffer-window lispm-desktop-editor-strip-buffer-name)))
         (cond ((lispm-desktop-editor--in-workspace-p)
                (unless strip (lispm-desktop-editor--restore-chrome)))
@@ -338,11 +345,15 @@ the workspace it showed last."
   (interactive)
   (lispm-desktop-apps-set-frontmost 'editor)
   (setq lispm-desktop-editor--closed nil)
+  ;; With the desktop hidden, the editor floats out on the computer's screen.
+  (when (and (lispm-desktop-apps-hidden-p) (not (lispm-desktop-editor-floating-p)))
+    (lispm-desktop-editor-float))
   (let ((screen (lispm-desktop-apps-screen)))
     (if (lispm-desktop-editor-floating-p)
         (progn
-          (with-selected-frame screen
-            (lispm-desktop--select-tab))
+          (unless (lispm-desktop-apps-hidden-p screen)
+            (with-selected-frame screen
+              (lispm-desktop--select-tab)))
           (make-frame-visible lispm-desktop-editor--frame)
           (select-frame-set-input-focus lispm-desktop-editor--frame)
           (lispm-desktop-editor--keep-floating-chrome))
@@ -359,7 +370,9 @@ the workspace it showed last."
 
 (defun lispm-desktop-editor-hide ()
   "Hide the floating editor, out of the way of the application in front."
-  (when (lispm-desktop-editor-floating-p)
+  (when (and (lispm-desktop-editor-floating-p)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-editor--frame)))
     (make-frame-invisible lispm-desktop-editor--frame)
     (select-frame-set-input-focus (frame-parent lispm-desktop-editor--frame))))
 
@@ -374,11 +387,13 @@ it opens again as it was."
   (interactive)
   (setq lispm-desktop-editor--closed t)
   (if (lispm-desktop-editor-floating-p)
-      (progn (make-frame-invisible lispm-desktop-editor--frame)
-             (select-frame-set-input-focus (frame-parent lispm-desktop-editor--frame)))
+      (progn (lispm-desktop-apps-focus-after lispm-desktop-editor--frame)
+             (make-frame-invisible lispm-desktop-editor--frame))
     (when-let* ((workspace (lispm-desktop-editor--current-workspace)))
       (setq lispm-desktop-editor--last-workspace workspace)))
-  (lispm-desktop-activate))
+  ;; With the desktop hidden, the windows left out keep the screen.
+  (unless (lispm-desktop-apps-hidden-p)
+    (lispm-desktop-activate)))
 
 (defun lispm-desktop-editor--focus ()
   "Bring the editor in front unless it is, and select its frame."
@@ -513,9 +528,9 @@ without the window configuration that ties it to FROM."
     frame))
 
 (defun lispm-desktop-editor--geometry-of (frame)
-  "Return where floating FRAME is: (LEFT TOP WIDTH HEIGHT) in pixels."
-  (pcase-let ((`(,left . ,top) (frame-position frame)))
-    (list left top (frame-text-width frame) (frame-text-height frame))))
+  "Return where floating FRAME is: (LEFT TOP WIDTH HEIGHT) in pixels, over
+its screen."
+  (lispm-desktop-apps--geometry frame))
 
 (defun lispm-desktop-editor-float ()
   "Float the editor in a window of its own over the desktop."
@@ -551,8 +566,12 @@ without the window configuration that ties it to FROM."
 (defun lispm-desktop-editor-full-screen ()
   "Bring the floating editor back to full screen, under the menu bar."
   (interactive)
+  ;; Full screen is the desktop's: it shows first.
+  (when (and (lispm-desktop-apps-hidden-p) (fboundp 'lispm-desktop-show-desktop))
+    (lispm-desktop-show-desktop))
   (when (lispm-desktop-editor-floating-p)
     (let* ((frame lispm-desktop-editor--frame)
+           (_ (when (lispm-desktop-apps-out-p frame) (lispm-desktop-coherence-bring-in frame)))
            (screen (frame-parent frame))
            (lispm-desktop-editor--moving t)
            (_ (lispm-desktop-editor--take-off-chrome frame))

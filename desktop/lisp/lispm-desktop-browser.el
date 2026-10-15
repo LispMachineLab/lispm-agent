@@ -108,6 +108,7 @@ address, %s standing for the words searched."
 ;;
 ;; Its pages are buffers, so moving the window only shows them elsewhere.
 
+(declare-function lispm-desktop-show-desktop "lispm-desktop-coherence" (&optional screen))
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-webkit-uri "xwidget" (xwidget))
 (declare-function xwidget-webkit-goto-uri "xwidget" (xwidget uri))
@@ -1308,7 +1309,8 @@ The address window is fitted to its lines, see
 recent tab, opening `lispm-desktop-browser-home-url' when there is no tab.  The
 desktop's Browser icon runs this, and the browser comes in front."
   (interactive)
-  (if lispm-desktop-browser-floating
+  ;; With the desktop hidden, the browser floats out on the computer's screen.
+  (if (or lispm-desktop-browser-floating (lispm-desktop-apps-hidden-p))
       (lispm-desktop-browser--show-floating)
     (lispm-desktop-browser--show-full-screen))
   (force-mode-line-update t))
@@ -1374,9 +1376,10 @@ window, the window made when missing.  The floating windows left over the
 desktop show with it."
   (let ((screen (lispm-desktop-apps-screen))
         (browser (or shown (car (lispm-desktop-browser--buffers)))))
-    (with-selected-frame screen
-      (lispm-desktop--select-tab))
-    (run-hooks 'lispm-desktop-activate-hook)
+    (unless (lispm-desktop-apps-hidden-p screen)
+      (with-selected-frame screen
+        (lispm-desktop--select-tab))
+      (run-hooks 'lispm-desktop-activate-hook))
     (unless (lispm-desktop-browser-floating-p)
       (setq lispm-desktop-browser--frame (lispm-desktop-browser--make-frame screen)))
     (with-selected-frame lispm-desktop-browser--frame
@@ -1400,7 +1403,7 @@ desktop show with it."
       (setq lispm-desktop-browser--geometry (lispm-desktop-apps--geometry frame)
             lispm-desktop-browser--frame nil)
       (when (eq (selected-frame) frame)
-        (select-frame-set-input-focus (frame-parent frame)))
+        (lispm-desktop-apps-focus-after frame))
       (delete-frame frame))))
 
 (defun lispm-desktop-browser--close-workspace ()
@@ -1426,6 +1429,9 @@ desktop show with it."
   "Bring the floating browser back to full screen, under the menu bar."
   (interactive)
   (setq lispm-desktop-browser-floating nil)
+  ;; Full screen is the desktop's: it shows first.
+  (when (and (lispm-desktop-apps-hidden-p) (fboundp 'lispm-desktop-show-desktop))
+    (lispm-desktop-show-desktop))
   (when (lispm-desktop-browser-floating-p)
     (let ((shown (and (lispm-desktop-browser--window) (window-buffer (lispm-desktop-browser--window)))))
       (lispm-desktop-browser--delete-frame)
@@ -1467,7 +1473,9 @@ again, as Mac OS 9 rolled a window up into its title bar."
   "Show the floating browser with the desktop and alongside the floating
 editor; hide it from the full-screen editor, whose workspace it would
 cover.  This is one of `lispm-desktop-apps-frontmost-functions'."
-  (when (lispm-desktop-browser-floating-p)
+  (when (and (lispm-desktop-browser-floating-p)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-browser--frame)))
     (let ((shown (or (memq app '(desktop browser settings))
                      (and (eq app 'editor) (fboundp 'lispm-desktop-editor-floating-p)
                           (lispm-desktop-editor-floating-p)))))

@@ -114,6 +114,16 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   typing a label follows it; in a field, characters go in and Emacs's keys move and delete,
   Return submits, Tab goes on and Escape leaves.  Emacs on macOS cannot hand keys to a page,
   so they reach it through JavaScript.
+- *Windows out on the screen*, on macOS (see [[*Mac OS and X][Mac OS and X]]), as a virtual machine's in Parallels' Coherence or
+  VMware's Unity: drop a floating window, the Finder's, the editor's, the browser's or a control
+  panel's, mostly past the desktop's edge, and it goes out among the computer's own windows,
+  where it was dropped; dropped back over the desktop, it goes in again.  Hide Desktop, at the
+  top of the Application menu or =C-c h=, takes every window out, the full-screen editor and
+  browser floated first, and puts the desktop in the Dock; Show Desktop, =C-c h= again or a
+  click on its tile in the Dock brings it back, the windows over it going in and the
+  applications full screen as they were.  A window out keeps its title bar and boxes; what it
+  asks, and the messages it echoes, show in a small window over the top of the screen, titled
+  with its name, since the desktop's own minibuffer is in the Dock with it.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
@@ -211,6 +221,12 @@ what it was built with.
 - *The default font*: Monaco, else Menlo, else DejaVu Sans Mono, at 12 points.  The Mac build
   falls back to Monaco and an X build to fontconfig's =monospace= (Andale Mono on a Mac);
   naming the family makes them alike.  A default face set with Customize is kept.
+- *Windows out on the screen* go out on macOS only, for now.  On X, under a window manager or
+  with Emacs as one, Hide Desktop is not in the Application menu, =C-c h= says why, and a window
+  dropped past the desktop's edge is kept on it, as everywhere before.  On macOS a desktop full
+  screen leaves full screen to go to the Dock, and takes it back when it shows again; while it
+  is full screen, dropping a window moves none out.  =(setq lispm-desktop-coherence-drag-out nil)=
+  keeps dropped windows on the desktop, Hide Desktop still taking them out.
 - *The browser* needs an Emacs built with xwidgets (on X, with GTK and WebKitGTK); without, its
   icon and menu items are not shown.
 - *Tree-sitter modes* are used when Emacs is built with tree-sitter.
@@ -289,6 +305,7 @@ Two things to know when both builds run:
 | =C-c s=                | into the sidebar's list and back out (=n=, =p=, =RET= in it) |
 | =C-c c=                | the right-click menu of what point is on, or of the icon selected |
 | =C-c o=                | the next application: the desktop, Emacs, the browser, Control Panels |
+| =C-c h=                | hide the desktop in the Dock, its windows out on the screen, or show it again |
 | =C-c m=                | the menu bar from the keyboard: =C-f=, =C-b= to the menu beside, =C-n=, =C-p= or a letter to an item, =RET= chooses |
 | =C-c a l=              | start a LispM agent in this project (=C-u= to pick a role) |
 | =C-c a c=, =x=, =h=    | start Claude Code, Codex or Hermes in this project         |

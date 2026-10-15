@@ -463,7 +463,9 @@ The panels are `lispm-desktop-settings-panels'."
   "Open the control panel's window over the desktop, showing PANEL, a key of
 `lispm-desktop-settings-panels', or the panel it showed last."
   (interactive)
-  (lispm-desktop-activate)
+  ;; With the desktop hidden, the window opens out on the computer's screen.
+  (unless (lispm-desktop-apps-hidden-p)
+    (lispm-desktop-activate))
   (unless (lispm-desktop-settings-open-p)
     (setq lispm-desktop-settings--frame (lispm-desktop-settings--make-frame (lispm-desktop-apps-screen))))
   (if panel
@@ -479,20 +481,21 @@ The panels are `lispm-desktop-settings-panels'."
   "Close the control panel's window; the desktop comes in front."
   (interactive)
   (when (lispm-desktop-settings-open-p)
-    (pcase-let ((`(,left . ,top) (frame-position lispm-desktop-settings--frame)))
-      (setq lispm-desktop-settings--geometry (list left top (frame-text-width lispm-desktop-settings--frame)
-                                                   (frame-text-height lispm-desktop-settings--frame))))
-    (let ((screen (frame-parent lispm-desktop-settings--frame)))
-      (delete-frame lispm-desktop-settings--frame)
-      (setq lispm-desktop-settings--frame nil)
-      (select-frame-set-input-focus screen)))
-  (lispm-desktop-apps-set-frontmost 'desktop))
+    (setq lispm-desktop-settings--geometry (lispm-desktop-apps--geometry lispm-desktop-settings--frame))
+    (let ((frame lispm-desktop-settings--frame))
+      (lispm-desktop-apps-focus-after frame)
+      (delete-frame frame)
+      (setq lispm-desktop-settings--frame nil)))
+  (unless (lispm-desktop-apps-hidden-p)
+    (lispm-desktop-apps-set-frontmost 'desktop)))
 
 (defun lispm-desktop-settings--follow-frontmost (app)
   "Show the control panel's window with the desktop and the floating applications;
 hide it from the full-screen editor and browser, as the Finder window.
 This is one of `lispm-desktop-apps-frontmost-functions'."
-  (when (lispm-desktop-settings-open-p)
+  (when (and (lispm-desktop-settings-open-p)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-settings--frame)))
     (let ((shown (or (memq app '(desktop settings))
                      (and (eq app 'editor) (fboundp 'lispm-desktop-editor-floating-p)
                           (lispm-desktop-editor-floating-p))

@@ -363,8 +363,9 @@ COMMAND), or nil."
 The value is (workspace . NAME) or (action . COMMAND).  The workspace
 STEP places from the one in front is chosen first.  The panel drops at
 X, Y of the screen frame, or stands over its upper middle."
-  (let* ((screen (lispm-desktop-apps-screen))
-         (frame (lispm-desktop-editor-frame))
+  (let* ((frame (lispm-desktop-editor-frame))
+         ;; Over the screen, or with the desktop hidden, over the window out.
+         (screen (if (lispm-desktop-apps-hidden-p) frame (lispm-desktop-apps-screen)))
          (tabs (seq-filter #'lispm-desktop-editor--workspace-tab-p (funcall tab-bar-tabs-function frame)))
          (names (mapcar (lambda (tab) (alist-get 'name tab)) tabs))
          (layouts (mapcar (lambda (tab) (or (lispm-desktop-workspaces--layout tab frame) '(1 1)))
