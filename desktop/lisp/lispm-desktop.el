@@ -161,6 +161,7 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lispm-desktop-setup-editor)
     (lispm-desktop-setup-workspaces)
     (lispm-desktop-setup-finder)
+    (lispm-desktop-setup-browser)
     (lispm-desktop-setup-browser-places)
     (lispm-desktop-setup-browser-hints)
     (lispm-desktop-setup-settings)
