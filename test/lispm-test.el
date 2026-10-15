@@ -1078,6 +1078,61 @@ starts is, so its schema is made outside the call that loaded it."
         (remhash "web_search" lispm-tools--registry)
         (remhash "web_fetch" lispm-tools--registry)))))
 
+(ert-deftest lispm-test-web-skill-holds-callbacks ()
+  "WebKit's script callback and page are held until a while after the page closes.
+On macOS nothing else keeps them from the garbage collector (see
+skills/web.org).  Batch Emacs makes no xwidgets: stubs stand in."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (page (make-symbol "xwidget"))
+           (html "<html><head><title>Example</title></head><body><p>Hello</p></body></html>")
+           (held-p (lambda (object) (seq-some (lambda (held) (memq object held)) lispm-web--held)))
+           ;; The skill's code, evaluated, calls the stubbed primitives by
+           ;; name: native trampolines for them would only cost seconds.
+           (native-comp-enable-subr-trampolines nil)
+           scripts results)
+      (unwind-protect
+          (progn
+            (lispm-test--call agent "skill" '((name . "web")))
+            (cl-letf (((symbol-function 'lispm-web--webkit-p) #'always)
+                      ((symbol-function 'make-xwidget) (lambda (&rest _) page))
+                      ((symbol-function 'xwidget-put) #'ignore)
+                      ((symbol-function 'xwidget-webkit-goto-uri) #'ignore)
+                      ((symbol-function 'xwidget-webkit-uri) (lambda (_) "https://example.org/"))
+                      ((symbol-function 'xwidget-webkit-estimated-load-progress) (lambda (_) 1.0))
+                      ((symbol-function 'xwidget-webkit-title) (lambda (_) "Example"))
+                      ((symbol-function 'kill-xwidget) #'ignore)
+                      ((symbol-function 'xwidget-webkit-execute-script)
+                       (lambda (_xwidget _script fun) (push fun scripts))))
+              (let ((lispm-web-settle 0)
+                    (lispm-web--hold-seconds 0.5))
+                ;; The page answers: it is read, and still held once closed.
+                (lispm-web-dom "https://example.org/" (lambda (&rest args) (push args results)))
+                (should (lispm-test--wait (lambda () scripts)))
+                (should (funcall held-p (car scripts)))
+                (funcall (car scripts) html)
+                (should (equal (cdar results) '("https://example.org/" "Example" nil)))
+                (should (funcall held-p (car scripts)))
+                (should (funcall held-p page))
+                (should (lispm-test--wait (lambda () (not (funcall held-p (car scripts))))))
+                (should-not (funcall held-p page))
+                ;; The deadline passes first: the page fails, and its answer,
+                ;; coming late, is still held and changes nothing.
+                (setq scripts nil results nil)
+                (lispm-web-dom "https://example.org/" (lambda (&rest args) (push args results)))
+                (should (lispm-test--wait (lambda () scripts)))
+                (let ((now (symbol-function 'float-time)))
+                  (cl-letf (((symbol-function 'float-time)
+                             (lambda (&optional time) (if time (funcall now time) (+ (funcall now) 11)))))
+                    (should (lispm-test--wait (lambda () results)))))
+                (should (equal (car results) '(nil "https://example.org/" nil "The page did not give its HTML.")))
+                (should (funcall held-p (car scripts)))
+                (funcall (car scripts) html)
+                (should (= (length results) 1))
+                (should (lispm-test--wait (lambda () (not (funcall held-p (car scripts)))))))))
+        (remhash "web_search" lispm-tools--registry)
+        (remhash "web_fetch" lispm-tools--registry)))))
+
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env
     (let ((agent (lispm-defagent tester :root project)) result)

@@ -82,16 +82,48 @@ For instance, the tables of a page:
   "The title of DOM."
   (string-trim (dom-texts (car (dom-by-tag dom 'title)) "")))
 
+;; The function given to `xwidget-webkit-execute-script' could crash
+;; Emacs on macOS (Emacs 31.1, NS build).  The bug is Emacs's.  Only GTK
+;; builds keep the function from the garbage collector, saved with the
+;; xwidget (save_script_callback in src/xwidget.c); on macOS it is held
+;; only by the completion handler WebKit runs when the script returns
+;; (src/nsxwidget.m), which the collector does not see.  A closure
+;; nothing else holds, such as a lambda written at the call, may then be
+;; collected while the script runs.  The handler tests the freed object
+;; with FUNCTIONP and posts an `xwidget-event' holding it, and the
+;; collector, marking the event while it waits to be read, may fault on
+;; it.  The handler, and WebKit's navigation delegate, hold the page's
+;; xwidget the same way, by a pointer the collector does not see, and
+;; WebKit may call back after the xwidget is killed: `kill-xwidget'
+;; itself loads about:blank in it.
+;;
+;; So the page's script callback and its xwidget are held in
+;; `lispm-web--held' from when the script is sent until a while after
+;; the page is closed.  Not only until the callback is called: the
+;; deadline may close the page before WebKit answers, WebKit may still
+;; answer then, and on macOS it never calls back when a script returns
+;; null or undefined, fails, or is blocked by the page's policy.
+
+(defvar lispm-web--held nil
+  "Pages' xwidgets and script callbacks, kept from the garbage collector.
+Each is (XWIDGET CALLBACK), held until `lispm-web--hold-seconds' after
+its page is closed, as WebKit may still call back.")
+
+(defvar lispm-web--hold-seconds 60
+  "Seconds a page's xwidget and script callback are held after it is closed.")
+
 (defun lispm-web--webkit-dom (url callback)
   "Load URL in a WebKit widget out of sight; call CALLBACK as `lispm-web-dom' does.
 A timer watches the page load.  It also keeps Emacs's event loop
 turning: the widget's events, the results of its scripts among them,
-wait in the queue until something wakes the loop."
+wait in the queue until something wakes the loop.  The widget, and the
+callback of the script that reads its HTML, are held in
+`lispm-web--held' until a while after the page is closed."
   (let* ((buffer (generate-new-buffer " *lispm-web*" t))
          (xwidget (make-xwidget 'webkit "lispm-web" 1280 1600 nil buffer))
          (deadline (+ (float-time) lispm-web-timeout))
          (state 'loading)
-         loaded-at pump)
+         loaded-at pump held)
     (cl-labels
         ((finish (dom final title problem)
            (unless (eq state 'done)
@@ -99,6 +131,9 @@ wait in the queue until something wakes the loop."
              (cancel-timer pump)
              (ignore-errors (kill-xwidget xwidget))
              (when (buffer-live-p buffer) (kill-buffer buffer))
+             (when held
+               (run-at-time lispm-web--hold-seconds nil
+                            (lambda () (setq lispm-web--held (delq held lispm-web--held)))))
              (funcall callback dom final title problem)))
          (loaded-p ()
            (let ((uri (xwidget-webkit-uri xwidget)))
@@ -107,15 +142,19 @@ wait in the queue until something wakes the loop."
          (grab ()
            (setq state 'grabbing
                  deadline (+ (float-time) 10))
-           (xwidget-webkit-execute-script
-            xwidget "document.documentElement.outerHTML"
-            (lambda (html)
-              (if (stringp html)
-                  (let ((dom (lispm-web--parse html)))
-                    (finish dom (or (xwidget-webkit-uri xwidget) url)
-                            (or (xwidget-webkit-title xwidget) (lispm-web--title dom))
-                            nil))
-                (finish nil url nil "The page did not give its HTML.")))))
+           (let ((answer (lambda (html)
+                           ;; An answer after the deadline finds the page closed.
+                           (unless (eq state 'done)
+                             (if (stringp html)
+                                 (let ((dom (lispm-web--parse html)))
+                                   (finish dom (or (xwidget-webkit-uri xwidget) url)
+                                           (or (xwidget-webkit-title xwidget) (lispm-web--title dom))
+                                           nil))
+                               (finish nil url nil "The page did not give its HTML."))))))
+             (setq held (list xwidget answer))
+             (push held lispm-web--held)
+             (xwidget-webkit-execute-script
+              xwidget "document.documentElement.outerHTML" answer)))
          (tick ()
            (pcase state
              ('loading
