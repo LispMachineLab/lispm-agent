@@ -48,7 +48,7 @@
 (declare-function xwidget-webkit-uri "xwidget.c" (xwidget))
 (declare-function xwidget-webkit-title "xwidget.c" (xwidget))
 (declare-function lispm-desktop-popup-menu "lispm-desktop-popup" (items &optional x y align))
-(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional face))
+(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional state))
 
 ;;;; History
 
@@ -246,7 +246,7 @@ per bookmark, as Netscape's personal toolbar held them."
                        (concat " " (lispm-desktop-browser--ribbon) " "
                                (truncate-string-to-width name 22 nil nil "…") " ")
                        (lambda () (interactive) (lispm-desktop-browser-open-url url))
-                       url 'mode-line))
+                       url 'mode-line 'lispm-desktop-platinum-button))
                     bookmarks " ")
        (propertize "Bookmarks you add show here." 'face 'lispm-desktop-platinum-toolbar-label)))))
 
@@ -287,25 +287,22 @@ per bookmark, as Netscape's personal toolbar held them."
         (lispm-desktop-browser--render-places)))))
 
 (defun lispm-desktop-browser--places-tab (view label)
-  "Return the pane's tab for VIEW named LABEL, pushed in when shown."
-  (let ((tab (concat " " label " ")))
-    (add-face-text-property 0 (length tab)
-                            (if (eq view lispm-desktop-browser--places-view)
-                                'lispm-desktop-platinum-tab-selected
-                              'lispm-desktop-platinum-tab)
-                            t tab)
-    (propertize tab 'lispm-desktop-browser-view view 'keymap lispm-desktop-browser-places-tab-map
-                'pointer 'arrow 'help-echo (format "Show the %s" label))))
+  "Return the pane's tab for VIEW named LABEL, in front when shown, as
+`lispm-desktop-platinum-tabs' takes it."
+  (list label (eq view lispm-desktop-browser--places-view)
+        'lispm-desktop-browser-view view 'keymap lispm-desktop-browser-places-tab-map
+        'pointer 'arrow 'help-echo (format "Show the %s" label)))
 
 (defun lispm-desktop-browser--places-tabs ()
   "Return the pane's tab line: a tab each for Bookmarks and History, and a
 button closing the pane."
-  (let ((close (lispm-desktop-sidebar--toolbar-button " ✕ " #'lispm-desktop-browser-hide-places
+  (let ((close (lispm-desktop-sidebar--toolbar-button "✕" #'lispm-desktop-browser-hide-places
                                                       "Close the pane" 'tab-line)))
-    (concat (propertize " " 'display '(space :width (6) :height (28) :ascent 65))
-            (lispm-desktop-browser--places-tab 'bookmarks "Bookmarks") " "
-            (lispm-desktop-browser--places-tab 'history "History")
-            (propertize " " 'display `(space :align-to (- right (,(+ (string-pixel-width close) 6)))))
+    (concat (lispm-desktop-platinum-tabs
+             (list (lispm-desktop-browser--places-tab 'bookmarks "Bookmarks")
+                   (lispm-desktop-browser--places-tab 'history "History"))
+             (- (window-pixel-width) (window-right-divider-width) (string-pixel-width close) 6))
+            (propertize " " 'display '(space :width (3)))
             close)))
 
 (defun lispm-desktop-browser--place-line (url text &rest properties)

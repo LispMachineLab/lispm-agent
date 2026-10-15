@@ -54,7 +54,7 @@
 
 (declare-function lispm-desktop-editor-activate "lispm-desktop-editor" ())
 (declare-function lispm-desktop-editor-floating-p "lispm-desktop-editor" ())
-(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional face))
+(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional state))
 (declare-function lispm-desktop-popup-menu "lispm-desktop-popup" (items &optional x y align))
 (declare-function lispm-desktop-popup--frame-xy "lispm-desktop-popup" (position))
 (declare-function lispm-desktop-popup-alert "lispm-desktop-popup" (icon message buttons &optional detail))
@@ -182,22 +182,11 @@ The virtual folders are `lispm-desktop-finder-folders'."
   "Face of an item's name in the Finder window."
   :group 'lispm-desktop-platinum)
 
-(defface lispm-desktop-finder-button-disabled '((t :inherit lispm-desktop-platinum-button))
-  "Face of a toolbar button that cannot be pressed: dimmed."
-  :group 'lispm-desktop-platinum)
-
-(defun lispm-desktop-finder--paint (&rest _)
-  "Fit the Finder's faces to the theme."
-  (when lispm-desktop-platinum--palette
-    (set-face-attribute 'lispm-desktop-finder-button-disabled nil
-                        :foreground (lispm-desktop-platinum--color :muted))))
-
 (defun lispm-desktop-finder--button (label command help enabled)
   "Return a toolbar button LABEL running COMMAND, described by HELP.
-When not ENABLED it is drawn dimmed and does nothing."
-  (if enabled
-      (lispm-desktop-sidebar--toolbar-button (concat " " label " ") command help 'header-line)
-    (propertize (concat " " label " ") 'face 'lispm-desktop-finder-button-disabled)))
+When not ENABLED it is drawn disabled and does nothing."
+  (lispm-desktop-sidebar--toolbar-button label command help 'header-line
+                                         (unless enabled 'disabled)))
 
 (defun lispm-desktop-finder--toolbar ()
   "Return the window's toolbar: back, forward, enclosing folder, New Folder."
@@ -754,8 +743,6 @@ when it had it before."
   "Let the desktop's Finder window follow the application in front."
   (add-hook 'lispm-desktop-apps-frontmost-functions #'lispm-desktop-finder--follow-frontmost)
   (add-hook 'lispm-desktop-platinum-menu-closed-hook #'lispm-desktop-finder--refocus)
-  (add-hook 'enable-theme-functions #'lispm-desktop-finder--paint 90)
-  (lispm-desktop-finder--paint)
   (add-hook 'window-selection-change-functions #'lispm-desktop-finder--note-selected))
 
 (provide 'lispm-desktop-finder)

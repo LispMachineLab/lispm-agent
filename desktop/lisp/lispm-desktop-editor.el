@@ -168,32 +168,43 @@ This is a `tab-bar-tab-post-select-functions' function."
         (lispm-desktop-sidebar-select view)))))
 
 (defun lispm-desktop-editor--tab (view selected)
-  "Return the strip's tab for sidebar VIEW, pushed in when SELECTED."
-  (let* ((spec (cdr view))
-         (label (concat " " (lispm-desktop-platinum-icon (plist-get spec :icon)) " "
-                        (plist-get spec :title) " ")))
-    (add-face-text-property 0 (length label)
-                            (if selected 'lispm-desktop-platinum-tab-selected 'lispm-desktop-platinum-tab)
-                            t label)
-    (propertize label 'lispm-desktop-editor-view (car view) 'keymap lispm-desktop-editor-tab-map
-                'help-echo (plist-get spec :help) 'pointer 'arrow)))
+  "Return the strip's tab for sidebar VIEW, in front when SELECTED, as
+`lispm-desktop-platinum-tabs' takes it."
+  (let ((spec (cdr view)))
+    (list (concat (lispm-desktop-platinum-icon (plist-get spec :icon)) " " (plist-get spec :title))
+          selected
+          'lispm-desktop-editor-view (car view) 'keymap lispm-desktop-editor-tab-map
+          'help-echo (plist-get spec :help) 'pointer 'arrow)))
+
+(defvar-local lispm-desktop-editor--strip-width nil
+  "The width in pixels the title strip's tabs were last drawn for.")
 
 (defun lispm-desktop-editor--render-strip ()
-  "Draw the title strip: its title, and a tab per sidebar view."
+  "Draw the title strip: its title, and a tab per sidebar view, standing on
+the edge of the windows below, which runs across the strip."
   (when-let* ((buffer (get-buffer lispm-desktop-editor-strip-buffer-name)))
     (with-current-buffer buffer
-      (let ((inhibit-read-only t)
-            (shown (with-selected-frame (lispm-desktop-editor-frame) (lispm-desktop-sidebar-current-view))))
+      (let* ((inhibit-read-only t)
+             (frame (lispm-desktop-editor-frame))
+             (shown (with-selected-frame frame (lispm-desktop-sidebar-current-view)))
+             (window (get-buffer-window buffer frame))
+             ;; A line as wide as its window would wrap.
+             (width (1- (if window (window-body-width window t) (frame-inner-width frame)))))
+        (setq lispm-desktop-editor--strip-width width)
         (erase-buffer)
-        (insert (propertize " " 'display '(space :width (8) :height (30) :ascent 65))
-                (mapconcat (lambda (view) (lispm-desktop-editor--tab view (eq (car view) shown)))
-                           lispm-desktop-sidebar-views " "))
+        (insert (lispm-desktop-platinum-tabs
+                 (mapcar (lambda (view) (lispm-desktop-editor--tab view (eq (car view) shown)))
+                         lispm-desktop-sidebar-views)
+                 width))
         (setq lispm-desktop-platinum-title (lispm-desktop-editor--title)
               ;; Only a floating window rolls up into its title bar.
               lispm-desktop-platinum-box-functions
               `(:close lispm-desktop-editor--close-box :zoom lispm-desktop-editor--zoom-box
                 ,@(when (lispm-desktop-editor-floating-p) '(:collapse lispm-desktop-editor--collapse-box))))
-        (force-mode-line-update)))))
+        (force-mode-line-update)
+        ;; The tabs may have changed the strip's height.
+        (when window
+          (lispm-desktop-editor--refit-strip window))))))
 
 (defun lispm-desktop-editor--close-box (_window)
   "Close the editor, from its title bar's close box."
@@ -228,6 +239,10 @@ This is a `tab-bar-tab-post-select-functions' function."
   ;; screen, gives its height to the windows below, the strip fitted again.
   (add-hook 'window-size-change-functions #'lispm-desktop-editor--refit-strip nil t)
   (face-remap-add-relative 'default 'lispm-desktop-platinum-toolbar)
+  ;; The tabs' row is one line, never wrapped, whatever visual line mode
+  ;; is on globally.
+  (visual-line-mode -1)
+  (setq-local truncate-lines t)
   (when (fboundp 'display-line-numbers-mode)
     (display-line-numbers-mode -1)))
 
@@ -247,11 +262,19 @@ below, never to the strip."
 
 (defun lispm-desktop-editor--refit-strip (window)
   "Fit the strip's WINDOW to its title bar and tabs again once its size
-changed, unless it is alone in its frame, as in a rolled-up editor.
-This is a buffer-local `window-size-change-functions' function."
+changed, unless it is alone in its frame, as in a rolled-up editor; its
+tabs are drawn again when its width changed.  This is a buffer-local
+`window-size-change-functions' function."
+  (unless (eql (1- (window-body-width window t)) lispm-desktop-editor--strip-width)
+    (lispm-desktop-editor--render-strip))
   (unless (frame-root-window-p window)
     (let ((window-resize-pixelwise t)
-          (fit-window-to-buffer-horizontally nil))
+          (fit-window-to-buffer-horizontally nil)
+          ;; The strip is its title bar over one line of tabs, shorter
+          ;; than the four lines a window keeps at the least.
+          (window-min-height 1))
+      ;; The height kept from the last fit would hold the window at it.
+      (window-preserve-size window nil nil)
       (fit-window-to-buffer window nil nil nil nil t))))
 
 (defun lispm-desktop-editor--show-strip ()
