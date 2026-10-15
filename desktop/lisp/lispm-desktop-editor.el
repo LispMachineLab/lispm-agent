@@ -57,6 +57,8 @@
 (require 'lispm-desktop-apps)
 (require 'lispm-desktop-surface)
 
+(declare-function lispm-desktop-show-desktop "lispm-desktop-coherence" (&optional screen))
+(declare-function lispm-desktop-coherence-bring-in "lispm-desktop-coherence" (frame))
 (declare-function lispm-desktop-sidebar-current-view "lispm-desktop-sidebar" ())
 (declare-function lispm-desktop-sidebar-select "lispm-desktop-sidebar" (view))
 (declare-function lispm-desktop-terminal-buffer-p "lispm-desktop-interface" (buffer))
@@ -122,8 +124,11 @@ workspace."
 screen while one of its workspaces is in front.  Popups, child frames that
 are no application's window, go with the editor."
   (cond ((eq frame lispm-desktop-editor--frame) t)
-        ((frame-parent frame) (not (frame-parameter frame 'lispm-desktop-window)))
-        (t (lispm-desktop-editor--in-workspace-p frame))))
+        ;; Another application's window, over the desktop or out on the
+        ;; computer's screen.
+        ((frame-parameter frame 'lispm-desktop-window) nil)
+        ((frame-parent frame) t)
+        ((lispm-desktop-apps-screen-p frame) (lispm-desktop-editor--in-workspace-p frame))))
 
 (defun lispm-desktop-editor--current-workspace ()
   "Return the name of the editor's workspace in front, or nil."
@@ -168,32 +173,43 @@ This is a `tab-bar-tab-post-select-functions' function."
         (lispm-desktop-sidebar-select view)))))
 
 (defun lispm-desktop-editor--tab (view selected)
-  "Return the strip's tab for sidebar VIEW, pushed in when SELECTED."
-  (let* ((spec (cdr view))
-         (label (concat " " (lispm-desktop-platinum-icon (plist-get spec :icon)) " "
-                        (plist-get spec :title) " ")))
-    (add-face-text-property 0 (length label)
-                            (if selected 'lispm-desktop-platinum-tab-selected 'lispm-desktop-platinum-tab)
-                            t label)
-    (propertize label 'lispm-desktop-editor-view (car view) 'keymap lispm-desktop-editor-tab-map
-                'help-echo (plist-get spec :help) 'pointer 'arrow)))
+  "Return the strip's tab for sidebar VIEW, in front when SELECTED, as
+`lispm-desktop-platinum-tabs' takes it."
+  (let ((spec (cdr view)))
+    (list (concat (lispm-desktop-platinum-icon (plist-get spec :icon)) " " (plist-get spec :title))
+          selected
+          'lispm-desktop-editor-view (car view) 'keymap lispm-desktop-editor-tab-map
+          'help-echo (plist-get spec :help) 'pointer 'arrow)))
+
+(defvar-local lispm-desktop-editor--strip-width nil
+  "The width in pixels the title strip's tabs were last drawn for.")
 
 (defun lispm-desktop-editor--render-strip ()
-  "Draw the title strip: its title, and a tab per sidebar view."
+  "Draw the title strip: its title, and a tab per sidebar view, standing on
+the edge of the windows below, which runs across the strip."
   (when-let* ((buffer (get-buffer lispm-desktop-editor-strip-buffer-name)))
     (with-current-buffer buffer
-      (let ((inhibit-read-only t)
-            (shown (with-selected-frame (lispm-desktop-editor-frame) (lispm-desktop-sidebar-current-view))))
+      (let* ((inhibit-read-only t)
+             (frame (lispm-desktop-editor-frame))
+             (shown (with-selected-frame frame (lispm-desktop-sidebar-current-view)))
+             (window (get-buffer-window buffer frame))
+             ;; A line as wide as its window would wrap.
+             (width (1- (if window (window-body-width window t) (frame-inner-width frame)))))
+        (setq lispm-desktop-editor--strip-width width)
         (erase-buffer)
-        (insert (propertize " " 'display '(space :width (8) :height (30) :ascent 65))
-                (mapconcat (lambda (view) (lispm-desktop-editor--tab view (eq (car view) shown)))
-                           lispm-desktop-sidebar-views " "))
+        (insert (lispm-desktop-platinum-tabs
+                 (mapcar (lambda (view) (lispm-desktop-editor--tab view (eq (car view) shown)))
+                         lispm-desktop-sidebar-views)
+                 width))
         (setq lispm-desktop-platinum-title (lispm-desktop-editor--title)
               ;; Only a floating window rolls up into its title bar.
               lispm-desktop-platinum-box-functions
               `(:close lispm-desktop-editor--close-box :zoom lispm-desktop-editor--zoom-box
                 ,@(when (lispm-desktop-editor-floating-p) '(:collapse lispm-desktop-editor--collapse-box))))
-        (force-mode-line-update)))))
+        (force-mode-line-update)
+        ;; The tabs may have changed the strip's height.
+        (when window
+          (lispm-desktop-editor--refit-strip window))))))
 
 (defun lispm-desktop-editor--close-box (_window)
   "Close the editor, from its title bar's close box."
@@ -228,6 +244,10 @@ This is a `tab-bar-tab-post-select-functions' function."
   ;; screen, gives its height to the windows below, the strip fitted again.
   (add-hook 'window-size-change-functions #'lispm-desktop-editor--refit-strip nil t)
   (face-remap-add-relative 'default 'lispm-desktop-platinum-toolbar)
+  ;; The tabs' row is one line, never wrapped, whatever visual line mode
+  ;; is on globally.
+  (visual-line-mode -1)
+  (setq-local truncate-lines t)
   (when (fboundp 'display-line-numbers-mode)
     (display-line-numbers-mode -1)))
 
@@ -247,11 +267,19 @@ below, never to the strip."
 
 (defun lispm-desktop-editor--refit-strip (window)
   "Fit the strip's WINDOW to its title bar and tabs again once its size
-changed, unless it is alone in its frame, as in a rolled-up editor.
-This is a buffer-local `window-size-change-functions' function."
+changed, unless it is alone in its frame, as in a rolled-up editor; its
+tabs are drawn again when its width changed.  This is a buffer-local
+`window-size-change-functions' function."
+  (unless (eql (1- (window-body-width window t)) lispm-desktop-editor--strip-width)
+    (lispm-desktop-editor--render-strip))
   (unless (frame-root-window-p window)
     (let ((window-resize-pixelwise t)
-          (fit-window-to-buffer-horizontally nil))
+          (fit-window-to-buffer-horizontally nil)
+          ;; The strip is its title bar over one line of tabs, shorter
+          ;; than the four lines a window keeps at the least.
+          (window-min-height 1))
+      ;; The height kept from the last fit would hold the window at it.
+      (window-preserve-size window nil nil)
       (fit-window-to-buffer window nil nil nil nil t))))
 
 (defun lispm-desktop-editor--show-strip ()
@@ -293,8 +321,10 @@ Run after every command, so a workspace made or switched to by any means
 gets it; the check is cheap.  Popups, child frames other than the
 floating editor, are left alone."
   (let ((frame (selected-frame)))
+    ;; Another application's window, out on the computer's screen too,
+    ;; is no screen, whose workspaces the strip goes on.
     (unless (or lispm-desktop-editor--moving (minibufferp) lispm-desktop-editor--shade
-                (and (frame-parent frame) (not (eq frame lispm-desktop-editor--frame))))
+                (and (not (lispm-desktop-apps-screen-p frame)) (not (eq frame lispm-desktop-editor--frame))))
       (let ((strip (get-buffer-window lispm-desktop-editor-strip-buffer-name)))
         (cond ((lispm-desktop-editor--in-workspace-p)
                (unless strip (lispm-desktop-editor--restore-chrome)))
@@ -315,11 +345,15 @@ the workspace it showed last."
   (interactive)
   (lispm-desktop-apps-set-frontmost 'editor)
   (setq lispm-desktop-editor--closed nil)
+  ;; With the desktop hidden, the editor floats out on the computer's screen.
+  (when (and (lispm-desktop-apps-hidden-p) (not (lispm-desktop-editor-floating-p)))
+    (lispm-desktop-editor-float))
   (let ((screen (lispm-desktop-apps-screen)))
     (if (lispm-desktop-editor-floating-p)
         (progn
-          (with-selected-frame screen
-            (lispm-desktop--select-tab))
+          (unless (lispm-desktop-apps-hidden-p screen)
+            (with-selected-frame screen
+              (lispm-desktop--select-tab)))
           (make-frame-visible lispm-desktop-editor--frame)
           (select-frame-set-input-focus lispm-desktop-editor--frame)
           (lispm-desktop-editor--keep-floating-chrome))
@@ -336,7 +370,9 @@ the workspace it showed last."
 
 (defun lispm-desktop-editor-hide ()
   "Hide the floating editor, out of the way of the application in front."
-  (when (lispm-desktop-editor-floating-p)
+  (when (and (lispm-desktop-editor-floating-p)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-editor--frame)))
     (make-frame-invisible lispm-desktop-editor--frame)
     (select-frame-set-input-focus (frame-parent lispm-desktop-editor--frame))))
 
@@ -351,11 +387,13 @@ it opens again as it was."
   (interactive)
   (setq lispm-desktop-editor--closed t)
   (if (lispm-desktop-editor-floating-p)
-      (progn (make-frame-invisible lispm-desktop-editor--frame)
-             (select-frame-set-input-focus (frame-parent lispm-desktop-editor--frame)))
+      (progn (lispm-desktop-apps-focus-after lispm-desktop-editor--frame)
+             (make-frame-invisible lispm-desktop-editor--frame))
     (when-let* ((workspace (lispm-desktop-editor--current-workspace)))
       (setq lispm-desktop-editor--last-workspace workspace)))
-  (lispm-desktop-activate))
+  ;; With the desktop hidden, the windows left out keep the screen.
+  (unless (lispm-desktop-apps-hidden-p)
+    (lispm-desktop-activate)))
 
 (defun lispm-desktop-editor--focus ()
   "Bring the editor in front unless it is, and select its frame."
@@ -477,8 +515,8 @@ without the window configuration that ties it to FROM."
                            (undecorated . t) (visibility . nil)
                            (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
                            (menu-bar-lines . 0) (tool-bar-lines . 0)
-                           (internal-border-width . 2) (child-frame-border-width . 1)
-                           (drag-internal-border . t)
+                           (internal-border-width . 0)
+                           (child-frame-border-width . ,(lispm-desktop-platinum-window-border))
                            (no-other-frame . t) (skip-taskbar . t) (desktop-dont-save . t)
                            (user-position . t)
                            (left . ,left) (top . ,top)
@@ -490,9 +528,9 @@ without the window configuration that ties it to FROM."
     frame))
 
 (defun lispm-desktop-editor--geometry-of (frame)
-  "Return where floating FRAME is: (LEFT TOP WIDTH HEIGHT) in pixels."
-  (pcase-let ((`(,left . ,top) (frame-position frame)))
-    (list left top (frame-text-width frame) (frame-text-height frame))))
+  "Return where floating FRAME is: (LEFT TOP WIDTH HEIGHT) in pixels, over
+its screen."
+  (lispm-desktop-apps--geometry frame))
 
 (defun lispm-desktop-editor-float ()
   "Float the editor in a window of its own over the desktop."
@@ -528,8 +566,12 @@ without the window configuration that ties it to FROM."
 (defun lispm-desktop-editor-full-screen ()
   "Bring the floating editor back to full screen, under the menu bar."
   (interactive)
+  ;; Full screen is the desktop's: it shows first.
+  (when (and (lispm-desktop-apps-hidden-p) (fboundp 'lispm-desktop-show-desktop))
+    (lispm-desktop-show-desktop))
   (when (lispm-desktop-editor-floating-p)
     (let* ((frame lispm-desktop-editor--frame)
+           (_ (when (lispm-desktop-apps-out-p frame) (lispm-desktop-coherence-bring-in frame)))
            (screen (frame-parent frame))
            (lispm-desktop-editor--moving t)
            (_ (lispm-desktop-editor--take-off-chrome frame))

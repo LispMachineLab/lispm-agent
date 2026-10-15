@@ -29,8 +29,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   they come back onto it, and when Emacs's frame changes size, as going full screen and back
   does, each returns to the place it was given, shrunk only while it does not fit.
 - *A Finder window*, opened by the home disk: a folder's items as large icons, floating over
-  the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
-  items and the room left counted at its bottom.  A folder opens in the window, a file in the
+  the desktop, the items and the room left counted in a header under its title bar, as Mac OS
+  9's was; Command-click its title for the folder's path.  A folder opens in the window, a file in the
   editor, which comes forward.  The arrows select, Return opens, Command-Up, Command-[ and
   Command-] go up, back and forward, Command-Delete moves the selected item to the Trash (the
   system's own, from where it can be put back), typing a name's first letters selects it, and
@@ -45,9 +45,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   Apple, opening the λ menu (new agents, sessions, shells, the browser, Control Panels), then the
   menus of the application in front: the desktop's File, View, Go and Special (Restart, Shut
   Down), the editor's File, Edit, View, Project and Window, the browser's File, View, Go,
-  Bookmarks and Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
-  title with a menu of its own (the Mail menu reads, composes and checks mail), then the
-  Application menu.
+  Bookmarks and Window.  At its right end, as Mac OS 9 held its clock there alone, Emacs's own
+  time, with a menu of the date, the calendar and the world clock, then the Application menu.
 - *The editor*, an application of its own: a title strip across its top, the editor's title bar
   over a row of tabs choosing the sidebar's view (Files, Agents, Shells), then the sidebar and
   the windows.  Its workspaces, one per project, drop from its Project menu as a panel of
@@ -91,11 +90,19 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *Control Panels*, as Mac OS 9's: the desktop's Control Panels folder opens a Finder window
   holding a panel each, and the λ menu's Control Panels lists them too.  A panel opens in a
   window floating over the desktop, titled with its name, its tabs choosing among the panels as
-  the Appearance control panel's did.  Appearance chooses the colour theme (Dracula, Platinum,
+  the Appearance control panel's did, each group of settings framed in a group box.  Appearance chooses the colour theme (Dracula, Platinum,
   or any other installed); Desktop the desktop's colour, its picture and how the picture covers
   it (fill, fit, center, tile), and arranges its icons; Keyboard Vim or Emacs keys; Internet the
   browser's home page and search address, its history and its bookmarks.  Each choice takes
   effect at once where it can and is kept for the next start.
+- *The Control Strip*, as Mac OS 9's, floating in the desktop's bottom-left corner over the
+  windows: a collapse box, scroll arrows, a module each for Appearance, Desktop, Keyboard and
+  Internet, and Emacs's own battery, load average and mail flag, then a tab.  Pressing a module
+  pops its menu up in the small system font: its panel's quick choices (the theme, the desktop's
+  colour and picture, Vim or Emacs keys, the home page) and the panel itself, or the battery's
+  charge, the load averages and the processes, reading, composing and checking mail.  The
+  collapse box leaves the tab, the tab brings the strip back, and dragging the tab sets how many
+  modules show; both are kept for the next start.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
   desktop or the λ menu and brought forward from the Application menu.  Its window is laid out
   as Netscape Communicator's was, in the theme's colours: the navigation toolbar (Back,
@@ -114,6 +121,16 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   typing a label follows it; in a field, characters go in and Emacs's keys move and delete,
   Return submits, Tab goes on and Escape leaves.  Emacs on macOS cannot hand keys to a page,
   so they reach it through JavaScript.
+- *Windows out on the screen*, on macOS (see [[*Mac OS and X][Mac OS and X]]), as a virtual machine's in Parallels' Coherence or
+  VMware's Unity: drop a floating window, the Finder's, the editor's, the browser's or a control
+  panel's, mostly past the desktop's edge, and it goes out among the computer's own windows,
+  where it was dropped; dropped back over the desktop, it goes in again.  Hide Desktop, at the
+  top of the Application menu or =C-c h=, takes every window out, the full-screen editor and
+  browser floated first, and puts the desktop in the Dock; Show Desktop, =C-c h= again or a
+  click on its tile in the Dock brings it back, the windows over it going in and the
+  applications full screen as they were.  A window out keeps its title bar and boxes; what it
+  asks, and the messages it echoes, show in a small window over the top of the screen, titled
+  with its name, since the desktop's own minibuffer is in the Dock with it.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
   right-click menu (Emacs's context menu, the sidebar's, the project tree's) and every menu a
   package pops up drop as Mac OS 9's menus did, with check marks, separators, key equivalents
@@ -211,6 +228,12 @@ what it was built with.
 - *The default font*: Monaco, else Menlo, else DejaVu Sans Mono, at 12 points.  The Mac build
   falls back to Monaco and an X build to fontconfig's =monospace= (Andale Mono on a Mac);
   naming the family makes them alike.  A default face set with Customize is kept.
+- *Windows out on the screen* go out on macOS only, for now.  On X, under a window manager or
+  with Emacs as one, Hide Desktop is not in the Application menu, =C-c h= says why, and a window
+  dropped past the desktop's edge is kept on it, as everywhere before.  On macOS a desktop full
+  screen leaves full screen to go to the Dock, and takes it back when it shows again; while it
+  is full screen, dropping a window moves none out.  =(setq lispm-desktop-coherence-drag-out nil)=
+  keeps dropped windows on the desktop, Hide Desktop still taking them out.
 - *The browser* needs an Emacs built with xwidgets (on X, with GTK and WebKitGTK); without, its
   icon and menu items are not shown.
 - *Tree-sitter modes* are used when Emacs is built with tree-sitter.
@@ -289,7 +312,9 @@ Two things to know when both builds run:
 | =C-c s=                | into the sidebar's list and back out (=n=, =p=, =RET= in it) |
 | =C-c c=                | the right-click menu of what point is on, or of the icon selected |
 | =C-c o=                | the next application: the desktop, Emacs, the browser, Control Panels |
+| =C-c h=                | hide the desktop in the Dock, its windows out on the screen, or show it again |
 | =C-c m=                | the menu bar from the keyboard: =C-f=, =C-b= to the menu beside, =C-n=, =C-p= or a letter to an item, =RET= chooses |
+| =C-c b=                | the Control Strip from the keyboard: =C-f=, =C-b= to a module, =RET= or =SPC= opens its menu, =C-g= leaves |
 | =C-c a l=              | start a LispM agent in this project (=C-u= to pick a role) |
 | =C-c a c=, =x=, =h=    | start Claude Code, Codex or Hermes in this project         |
 | =C-c a s=              | resume any recorded session                                |

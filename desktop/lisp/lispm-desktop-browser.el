@@ -108,6 +108,7 @@ address, %s standing for the words searched."
 ;;
 ;; Its pages are buffers, so moving the window only shows them elsewhere.
 
+(declare-function lispm-desktop-show-desktop "lispm-desktop-coherence" (&optional screen))
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-webkit-uri "xwidget" (xwidget))
 (declare-function xwidget-webkit-goto-uri "xwidget" (xwidget uri))
@@ -121,8 +122,6 @@ address, %s standing for the words searched."
 (declare-function xwidget-webkit-estimated-load-progress "xwidget.c" (xwidget))
 (defvar xwidget-webkit-mode-map)
 (defvar xwidget-webkit--loading-p)
-(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional face))
-(declare-function lispm-desktop-sidebar--toolbar-buttons "lispm-desktop-sidebar" (actions row))
 (declare-function lispm-desktop-platinum-icon "lispm-desktop-platinum" (name))
 (defvar lispm-desktop-platinum-title)
 (defvar lispm-desktop-platinum-icon)
@@ -808,19 +807,30 @@ inhibited and the edit mark cleared."
         (set-window-point window (point-max))))))
 
 (defun lispm-desktop-browser--draw-field ()
-  "Draw the address as Mac OS 9's edit text field: inset, in the list colour,
-reaching across the toolbar to a few pixels short of its right edge.
-The field grows as the address is typed at its end."
-  (unless lispm-desktop-browser--field
-    (setq lispm-desktop-browser--field (make-overlay 1 1 nil nil t))
-    (overlay-put lispm-desktop-browser--field 'face 'lispm-desktop-platinum-field)
+  "Draw the address as Mac OS 9's edit text field: framed in black, in the
+list colour, reaching across the toolbar to a few pixels short of its
+right edge; ringed in the focus colour while it has the keyboard.  The
+field grows as the address is typed at its end."
+  (let ((face (if (eq (selected-window) (get-buffer-window (current-buffer)))
+                  'lispm-desktop-platinum-field-focused
+                'lispm-desktop-platinum-field)))
+    (unless lispm-desktop-browser--field
+      (setq lispm-desktop-browser--field (make-overlay 1 1 nil nil t)))
+    (overlay-put lispm-desktop-browser--field 'face face)
     (overlay-put lispm-desktop-browser--field 'before-string
-                 (propertize " " 'face 'lispm-desktop-platinum-field 'display '(space :width (4))))
+                 (propertize " " 'face face 'display '(space :width (4))))
     ;; The cursor at the address's end stands on the field's blank rest.
     (overlay-put lispm-desktop-browser--field 'after-string
-                 (propertize " " 'face 'lispm-desktop-platinum-field 'cursor t
-                             'display '(space :align-to (- right (12))))))
-  (move-overlay lispm-desktop-browser--field lispm-desktop-browser--address-start (point-max)))
+                 (propertize " " 'face face 'cursor t
+                             'display '(space :align-to (- right (12)))))
+    (when lispm-desktop-browser--address-start
+      (move-overlay lispm-desktop-browser--field lispm-desktop-browser--address-start (point-max)))))
+
+(defun lispm-desktop-browser--field-focus (_window)
+  "Ring the address field while its window has the keyboard, and not after.
+This is a buffer-local `window-selection-change-functions' function."
+  (with-current-buffer (lispm-desktop-browser--address-buffer)
+    (lispm-desktop-browser--draw-field)))
 
 (defun lispm-desktop-browser--edited-address ()
   "Return the address typed in the address buffer, or nil before its first render."
@@ -940,7 +950,8 @@ toolbar.
   (display-line-numbers-mode -1)
   (visual-line-mode -1)
   (add-hook 'pre-command-hook #'lispm-desktop-browser--replace-marked-address nil t)
-  (add-hook 'after-change-functions #'lispm-desktop-browser--note-address-edit nil t))
+  (add-hook 'after-change-functions #'lispm-desktop-browser--note-address-edit nil t)
+  (add-hook 'window-selection-change-functions #'lispm-desktop-browser--field-focus nil t))
 
 (defun lispm-desktop-browser--address-buffer ()
   "Return the address buffer, creating it in `lispm-desktop-browser-address-mode'."
@@ -1100,28 +1111,35 @@ was not looked up yet has its lookup started."
   "Return an interactive command applying FUNCTION to ARGS."
   (lambda () (interactive) (apply function args)))
 
+(defun lispm-desktop-browser--tab-keymap (command)
+  "Return the keymap of a tab atop the page, running COMMAND when clicked."
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "<tab-line> <down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> <mouse-1>" command)
+    map))
+
 (defun lispm-desktop-browser--tab-line ()
-  "Return the row of tabs atop the page: a bevel button per tab, then +.
-The shown tab's button is pushed in, as a Mac OS 9 group of bevel buttons
-showed its choice.  Each shows its page's icon before its title, or the
-globe until the icon is known and when the page has none."
+  "Return the row of tabs atop the page: a tab per page, then + for a new one.
+The tabs are Mac OS 9's, the shown page's in front.  Each shows its
+page's icon before its title, or the globe until the icon is known and
+when the page has none."
   (let ((shown (and (lispm-desktop-browser--window) (window-buffer (lispm-desktop-browser--window)))))
-    (concat
-     (propertize " " 'display '(space :width (6) :height (28) :ascent 65))
-     (mapconcat
-      (lambda (buffer)
-        (lispm-desktop-sidebar--toolbar-button
-         (concat " " (or (lispm-desktop-browser--favicon buffer) (lispm-desktop-platinum-icon "globe")) " "
-                 (truncate-string-to-width (lispm-desktop-browser--title buffer)
-                                           lispm-desktop-browser-tab-width nil nil "…")
-                 " ")
-         (lispm-desktop-browser--tab-command #'lispm-desktop-browser-select-tab buffer)
-         (or (lispm-desktop-browser--uri buffer) "Show this tab")
-         'tab-line
-         (if (eq buffer shown) 'lispm-desktop-platinum-tab-selected 'lispm-desktop-platinum-tab)))
-      (lispm-desktop-browser--buffers) " ")
-     " "
-     (lispm-desktop-sidebar--toolbar-button " + " #'lispm-desktop-browser-new-tab "New tab" 'tab-line))))
+    (lispm-desktop-platinum-tabs
+     (append
+      (mapcar (lambda (buffer)
+                (list (concat (or (lispm-desktop-browser--favicon buffer) (lispm-desktop-platinum-icon "globe"))
+                              " "
+                              (truncate-string-to-width (lispm-desktop-browser--title buffer)
+                                                        lispm-desktop-browser-tab-width nil nil "…"))
+                      (eq buffer shown)
+                      'keymap (lispm-desktop-browser--tab-keymap
+                               (lispm-desktop-browser--tab-command #'lispm-desktop-browser-select-tab buffer))
+                      'help-echo (or (lispm-desktop-browser--uri buffer) "Show this tab")
+                      'pointer 'arrow))
+              (lispm-desktop-browser--buffers))
+      (list (list "+" nil 'keymap (lispm-desktop-browser--tab-keymap #'lispm-desktop-browser-new-tab)
+                  'help-echo "New tab" 'pointer 'arrow)))
+     (- (window-pixel-width) (window-right-divider-width) (window-scroll-bar-width)))))
 
 (defun lispm-desktop-browser-select-tab (buffer)
   "Show browser tab BUFFER in the browser window."
@@ -1291,7 +1309,8 @@ The address window is fitted to its lines, see
 recent tab, opening `lispm-desktop-browser-home-url' when there is no tab.  The
 desktop's Browser icon runs this, and the browser comes in front."
   (interactive)
-  (if lispm-desktop-browser-floating
+  ;; With the desktop hidden, the browser floats out on the computer's screen.
+  (if (or lispm-desktop-browser-floating (lispm-desktop-apps-hidden-p))
       (lispm-desktop-browser--show-floating)
     (lispm-desktop-browser--show-full-screen))
   (force-mode-line-update t))
@@ -1341,8 +1360,8 @@ no session of the workspace left comes along."
                              (undecorated . t) (visibility . nil)
                              (tab-bar-lines . 0) (tab-bar-lines-keep-state . t)
                              (menu-bar-lines . 0) (tool-bar-lines . 0)
-                             (internal-border-width . 2) (child-frame-border-width . 1)
-                             (drag-internal-border . t)
+                             (internal-border-width . 0)
+                             (child-frame-border-width . ,(lispm-desktop-platinum-window-border))
                              (no-other-frame . t) (skip-taskbar . t) (desktop-dont-save . t)
                              (user-position . t)
                              (left . ,left) (top . ,top)
@@ -1357,9 +1376,10 @@ window, the window made when missing.  The floating windows left over the
 desktop show with it."
   (let ((screen (lispm-desktop-apps-screen))
         (browser (or shown (car (lispm-desktop-browser--buffers)))))
-    (with-selected-frame screen
-      (lispm-desktop--select-tab))
-    (run-hooks 'lispm-desktop-activate-hook)
+    (unless (lispm-desktop-apps-hidden-p screen)
+      (with-selected-frame screen
+        (lispm-desktop--select-tab))
+      (run-hooks 'lispm-desktop-activate-hook))
     (unless (lispm-desktop-browser-floating-p)
       (setq lispm-desktop-browser--frame (lispm-desktop-browser--make-frame screen)))
     (with-selected-frame lispm-desktop-browser--frame
@@ -1383,7 +1403,7 @@ desktop show with it."
       (setq lispm-desktop-browser--geometry (lispm-desktop-apps--geometry frame)
             lispm-desktop-browser--frame nil)
       (when (eq (selected-frame) frame)
-        (select-frame-set-input-focus (frame-parent frame)))
+        (lispm-desktop-apps-focus-after frame))
       (delete-frame frame))))
 
 (defun lispm-desktop-browser--close-workspace ()
@@ -1409,6 +1429,9 @@ desktop show with it."
   "Bring the floating browser back to full screen, under the menu bar."
   (interactive)
   (setq lispm-desktop-browser-floating nil)
+  ;; Full screen is the desktop's: it shows first.
+  (when (and (lispm-desktop-apps-hidden-p) (fboundp 'lispm-desktop-show-desktop))
+    (lispm-desktop-show-desktop))
   (when (lispm-desktop-browser-floating-p)
     (let ((shown (and (lispm-desktop-browser--window) (window-buffer (lispm-desktop-browser--window)))))
       (lispm-desktop-browser--delete-frame)
@@ -1450,7 +1473,9 @@ again, as Mac OS 9 rolled a window up into its title bar."
   "Show the floating browser with the desktop and alongside the floating
 editor; hide it from the full-screen editor, whose workspace it would
 cover.  This is one of `lispm-desktop-apps-frontmost-functions'."
-  (when (lispm-desktop-browser-floating-p)
+  (when (and (lispm-desktop-browser-floating-p)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-browser--frame)))
     (let ((shown (or (memq app '(desktop browser settings))
                      (and (eq app 'editor) (fboundp 'lispm-desktop-editor-floating-p)
                           (lispm-desktop-editor-floating-p)))))
@@ -1520,6 +1545,67 @@ so the arrow pointer is applied once the current command finishes."
   (when (lispm-desktop-browser-workspace-p)
     (lispm-desktop-browser--ensure-layout)))
 
+;;;;; Late events of closed pages
+;;
+;; Closing a page could crash Emacs on macOS (Emacs 31.1, NS build): a
+;; segmentation fault in print_object, under `xwidget-log', under
+;; `xwidget-event-handler'.  The bug is Emacs's.  A page's WebKit view
+;; keeps a plain C pointer to its xwidget, in its navigation delegate and
+;; in the completion handler of each script it runs, and the garbage
+;; collector does not see it.  Killing the page's buffer kills its xwidget,
+;; which itself loads about:blank to silence the page, yet WebKit may still
+;; call back: a load or a script finishing after the kill posts an
+;; `xwidget-event' naming the xwidget, by then perhaps collected.  The
+;; handler first logs the event with %S, printing the freed object; the
+;; collector, marking the event while it waits to be read, may fault on it
+;; even before.  It is a race, lost now and then; stopping the page before
+;; killing it would not win it, as the kill loads a page of its own.
+;;
+;; So the xwidgets of a killed buffer are kept from the collector a minute,
+;; which keeps WebKit's pointer valid: its navigation callbacks then find
+;; the buffer dead and post nothing, and a finished script's event names a
+;; killed but valid xwidget.  And an event whose xwidget is no longer in
+;; `xwidget-list' is dropped before the handler runs.  `memq' finds the
+;; xwidget there or not without reading it; `xwidget-live-p' would read it,
+;; and on macOS a killed xwidget keeps its buffer, which it checks.
+
+(defvar xwidget-list)
+(declare-function get-buffer-xwidgets "xwidget.c" (buffer))
+
+(defvar lispm-desktop-browser--killed-xwidgets nil
+  "Xwidgets of killed buffers, kept from the garbage collector a minute.")
+
+(defun lispm-desktop-browser--keep-killed-xwidgets ()
+  "Keep the xwidgets of the buffer being killed from the garbage collector.
+They are let go a minute later, when WebKit has long called back for the
+last time.  This is on `kill-buffer-hook', which runs before the buffer's
+xwidgets are killed."
+  (when-let* (((fboundp 'get-buffer-xwidgets))
+              (xwidgets (get-buffer-xwidgets (current-buffer))))
+    (setq lispm-desktop-browser--killed-xwidgets
+          (append xwidgets lispm-desktop-browser--killed-xwidgets))
+    (run-at-time 60 nil #'lispm-desktop-browser--let-go-xwidgets xwidgets)))
+
+(defun lispm-desktop-browser--let-go-xwidgets (xwidgets)
+  "Let the garbage collector have XWIDGETS, of a buffer killed a minute ago."
+  (dolist (xwidget xwidgets)
+    (setq lispm-desktop-browser--killed-xwidgets
+          (delq xwidget lispm-desktop-browser--killed-xwidgets))))
+
+(defun lispm-desktop-browser--xwidget-event-live-p (&optional event)
+  "Return non-nil unless EVENT is an `xwidget-event' of a killed xwidget.
+EVENT defaults to `last-input-event'.  As an advice of
+`xwidget-event-handler', this drops the events of killed xwidgets, which
+the handler would print although they may have been freed."
+  (let ((event (or event last-input-event)))
+    (or (not (eq (car-safe event) 'xwidget-event))
+        (memq (nth 2 event) (bound-and-true-p xwidget-list)))))
+
+(defun lispm-desktop-setup-browser ()
+  "Keep the late events of closed pages from crashing Emacs."
+  (add-hook 'kill-buffer-hook #'lispm-desktop-browser--keep-killed-xwidgets)
+  (advice-add 'xwidget-event-handler :before-while #'lispm-desktop-browser--xwidget-event-live-p))
+
 ;;;;; Callbacks of page scripts
 ;;
 ;; A function given to `xwidget-webkit-execute-script' could crash Emacs on
@@ -1546,7 +1632,6 @@ so the arrow pointer is applied once the current command finishes."
 ;; kept.  A page just closed may still answer, so its callbacks are not
 ;; let go at once.
 
-(defvar xwidget-list)
 (declare-function xwidget-webkit-execute-script "xwidget.c" (xwidget script &optional fun))
 
 (defconst lispm-desktop-browser--script-callback-age 60

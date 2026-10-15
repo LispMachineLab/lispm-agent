@@ -32,6 +32,8 @@
 ;;   left sidebar   files, agents, shells, open buffers, as Finder lists
 ;;   main area      agent chats and terminals on the left, files on the right
 ;;   workspaces     one per project, owning that project's buffers
+;;   coherence      windows out on the computer's screen, the desktop in
+;;                  the Dock (C-c h)
 ;;   agents         LispM's, running inside Emacs, and Claude Code, Codex
 ;;                  and Hermes, each when its CLI is on PATH (C-c a)
 ;;
@@ -56,6 +58,7 @@
 (require 'lispm-desktop-popup)
 (require 'lispm-desktop-sidebar)
 (require 'lispm-desktop-apps)
+(require 'lispm-desktop-coherence)
 (require 'lispm-desktop-browser)
 (require 'lispm-desktop-browser-places)
 (require 'lispm-desktop-browser-hints)
@@ -65,6 +68,7 @@
 (require 'lispm-desktop-workspaces)
 (require 'lispm-desktop-finder)
 (require 'lispm-desktop-settings)
+(require 'lispm-desktop-strip)
 (require 'lispm-desktop-exwm)
 (require 'lispm-desktop-languages)
 (require 'lispm-desktop-ai)
@@ -157,13 +161,16 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lispm-desktop-setup-platinum)
     (lispm-desktop-popup-enable)
     (lispm-desktop-setup-apps)
+    (lispm-desktop-setup-coherence)
     (lispm-desktop-setup-desktop)
     (lispm-desktop-setup-editor)
     (lispm-desktop-setup-workspaces)
     (lispm-desktop-setup-finder)
+    (lispm-desktop-setup-browser)
     (lispm-desktop-setup-browser-places)
     (lispm-desktop-setup-browser-hints)
     (lispm-desktop-setup-settings)
+    (lispm-desktop-setup-strip)
     (setq lispm-desktop--set-up t)
     (add-variable-watcher 'lispm-desktop-theme #'lispm-desktop--theme-changed)
     (lispm-desktop-setup-langs)

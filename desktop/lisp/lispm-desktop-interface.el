@@ -231,12 +231,13 @@ show; any other name is resolved by the display."
 
 (defun lispm-desktop-tab-bar--blend (from to ratio)
   "Return the colour RATIO of the way from colour FROM to colour TO.
-Return nil when either colour cannot be resolved, as on a text terminal."
+Each component is rounded to the nearest of its 256 values, so a blend
+falling on one of them comes back exactly.  Return nil when either
+colour cannot be resolved, as on a text terminal."
   (when-let* ((a (lispm-desktop-tab-bar--rgb from))
               (b (lispm-desktop-tab-bar--rgb to)))
-    (apply #'color-rgb-to-hex
-           (append (cl-mapcar (lambda (x y) (+ x (* ratio (- y x)))) a b)
-                   '(2)))))
+    (apply #'format "#%02x%02x%02x"
+           (cl-mapcar (lambda (x y) (round (* 255 (+ x (* ratio (- y x)))))) a b))))
 
 (defun lispm-desktop-tab-bar--bar-color ()
   "Return the colour of the bars above the windows: the editor a shade darker.

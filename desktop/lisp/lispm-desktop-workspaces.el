@@ -325,12 +325,11 @@ in front, SELECTED the index chosen, WIDTH the panel's in pixels."
      (propertize " " 'display '(space :height (12))))))
 
 (defun lispm-desktop-workspaces--buttons ()
-  "Return the panel's row of buttons."
+  "Return the panel's row of push buttons."
   (mapconcat (pcase-lambda (`(,label ,command))
-               (propertize (concat " " label " ")
-                           'face 'lispm-desktop-platinum-button 'lispm-desktop-workspace-action command
-                           'pointer 'hand))
-             lispm-desktop-workspaces--actions " "))
+               (propertize (lispm-desktop-platinum-push-button label)
+                           'lispm-desktop-workspace-action command 'pointer 'hand))
+             lispm-desktop-workspaces--actions (propertize " " 'display '(space :width (6)))))
 
 (defun lispm-desktop-workspaces--hint ()
   "Return the line telling the panel's keys."
@@ -364,8 +363,9 @@ COMMAND), or nil."
 The value is (workspace . NAME) or (action . COMMAND).  The workspace
 STEP places from the one in front is chosen first.  The panel drops at
 X, Y of the screen frame, or stands over its upper middle."
-  (let* ((screen (lispm-desktop-apps-screen))
-         (frame (lispm-desktop-editor-frame))
+  (let* ((frame (lispm-desktop-editor-frame))
+         ;; Over the screen, or with the desktop hidden, over the window out.
+         (screen (if (lispm-desktop-apps-hidden-p) frame (lispm-desktop-apps-screen)))
          (tabs (seq-filter #'lispm-desktop-editor--workspace-tab-p (funcall tab-bar-tabs-function frame)))
          (names (mapcar (lambda (tab) (alist-get 'name tab)) tabs))
          (layouts (mapcar (lambda (tab) (or (lispm-desktop-workspaces--layout tab frame) '(1 1)))

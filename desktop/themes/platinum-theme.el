@@ -180,7 +180,18 @@
    'platinum
    `(lispm-desktop-platinum-colors '(:chrome ,platinum :header ,platinum-light
                                      :light ,white :shade ,shadow :frame ,frame
-                                     :muted ,muted :accent ,lavender
+                                     :muted ,muted :accent ,lavender :outline ,black
+                                     ;; Lavender, the variation colour, as a ramp:
+                                     ;; menus highlighted, scroll thumbs, the focus.
+                                     :highlight "#333399" :highlight-dark "#000088"
+                                     :highlight-text ,white
+                                     :thumb "#9999FF" :thumb-light "#CCCCFF"
+                                     :thumb-dark "#6666CC" :focus "#6666CC"
+                                     ;; Alerts' frames.
+                                     :alert "#FF9999" :alert-dark "#FF6666"
+                                     ;; The Control Strip's own greys.
+                                     :strip "#C0C0C0" :strip-light ,white
+                                     :strip-shade "#A0A0A0" :strip-dark "#808080"
                                      ;; Mac OS 8's default desktop, its blue-violet.
                                      :desktop "#6666AA"))))
 
