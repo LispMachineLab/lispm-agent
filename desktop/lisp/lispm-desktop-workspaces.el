@@ -325,12 +325,11 @@ in front, SELECTED the index chosen, WIDTH the panel's in pixels."
      (propertize " " 'display '(space :height (12))))))
 
 (defun lispm-desktop-workspaces--buttons ()
-  "Return the panel's row of buttons."
+  "Return the panel's row of push buttons."
   (mapconcat (pcase-lambda (`(,label ,command))
-               (propertize (concat " " label " ")
-                           'face 'lispm-desktop-platinum-button 'lispm-desktop-workspace-action command
-                           'pointer 'hand))
-             lispm-desktop-workspaces--actions " "))
+               (propertize (lispm-desktop-platinum-push-button label)
+                           'lispm-desktop-workspace-action command 'pointer 'hand))
+             lispm-desktop-workspaces--actions (propertize " " 'display '(space :width (6)))))
 
 (defun lispm-desktop-workspaces--hint ()
   "Return the line telling the panel's keys."

@@ -121,8 +121,6 @@ address, %s standing for the words searched."
 (declare-function xwidget-webkit-estimated-load-progress "xwidget.c" (xwidget))
 (defvar xwidget-webkit-mode-map)
 (defvar xwidget-webkit--loading-p)
-(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional face))
-(declare-function lispm-desktop-sidebar--toolbar-buttons "lispm-desktop-sidebar" (actions row))
 (declare-function lispm-desktop-platinum-icon "lispm-desktop-platinum" (name))
 (defvar lispm-desktop-platinum-title)
 (defvar lispm-desktop-platinum-icon)
@@ -808,19 +806,30 @@ inhibited and the edit mark cleared."
         (set-window-point window (point-max))))))
 
 (defun lispm-desktop-browser--draw-field ()
-  "Draw the address as Mac OS 9's edit text field: inset, in the list colour,
-reaching across the toolbar to a few pixels short of its right edge.
-The field grows as the address is typed at its end."
-  (unless lispm-desktop-browser--field
-    (setq lispm-desktop-browser--field (make-overlay 1 1 nil nil t))
-    (overlay-put lispm-desktop-browser--field 'face 'lispm-desktop-platinum-field)
+  "Draw the address as Mac OS 9's edit text field: framed in black, in the
+list colour, reaching across the toolbar to a few pixels short of its
+right edge; ringed in the focus colour while it has the keyboard.  The
+field grows as the address is typed at its end."
+  (let ((face (if (eq (selected-window) (get-buffer-window (current-buffer)))
+                  'lispm-desktop-platinum-field-focused
+                'lispm-desktop-platinum-field)))
+    (unless lispm-desktop-browser--field
+      (setq lispm-desktop-browser--field (make-overlay 1 1 nil nil t)))
+    (overlay-put lispm-desktop-browser--field 'face face)
     (overlay-put lispm-desktop-browser--field 'before-string
-                 (propertize " " 'face 'lispm-desktop-platinum-field 'display '(space :width (4))))
+                 (propertize " " 'face face 'display '(space :width (4))))
     ;; The cursor at the address's end stands on the field's blank rest.
     (overlay-put lispm-desktop-browser--field 'after-string
-                 (propertize " " 'face 'lispm-desktop-platinum-field 'cursor t
-                             'display '(space :align-to (- right (12))))))
-  (move-overlay lispm-desktop-browser--field lispm-desktop-browser--address-start (point-max)))
+                 (propertize " " 'face face 'cursor t
+                             'display '(space :align-to (- right (12)))))
+    (when lispm-desktop-browser--address-start
+      (move-overlay lispm-desktop-browser--field lispm-desktop-browser--address-start (point-max)))))
+
+(defun lispm-desktop-browser--field-focus (_window)
+  "Ring the address field while its window has the keyboard, and not after.
+This is a buffer-local `window-selection-change-functions' function."
+  (with-current-buffer (lispm-desktop-browser--address-buffer)
+    (lispm-desktop-browser--draw-field)))
 
 (defun lispm-desktop-browser--edited-address ()
   "Return the address typed in the address buffer, or nil before its first render."
@@ -940,7 +949,8 @@ toolbar.
   (display-line-numbers-mode -1)
   (visual-line-mode -1)
   (add-hook 'pre-command-hook #'lispm-desktop-browser--replace-marked-address nil t)
-  (add-hook 'after-change-functions #'lispm-desktop-browser--note-address-edit nil t))
+  (add-hook 'after-change-functions #'lispm-desktop-browser--note-address-edit nil t)
+  (add-hook 'window-selection-change-functions #'lispm-desktop-browser--field-focus nil t))
 
 (defun lispm-desktop-browser--address-buffer ()
   "Return the address buffer, creating it in `lispm-desktop-browser-address-mode'."
@@ -1100,28 +1110,35 @@ was not looked up yet has its lookup started."
   "Return an interactive command applying FUNCTION to ARGS."
   (lambda () (interactive) (apply function args)))
 
+(defun lispm-desktop-browser--tab-keymap (command)
+  "Return the keymap of a tab atop the page, running COMMAND when clicked."
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "<tab-line> <down-mouse-1>" #'ignore)
+    (keymap-set map "<tab-line> <mouse-1>" command)
+    map))
+
 (defun lispm-desktop-browser--tab-line ()
-  "Return the row of tabs atop the page: a bevel button per tab, then +.
-The shown tab's button is pushed in, as a Mac OS 9 group of bevel buttons
-showed its choice.  Each shows its page's icon before its title, or the
-globe until the icon is known and when the page has none."
+  "Return the row of tabs atop the page: a tab per page, then + for a new one.
+The tabs are Mac OS 9's, the shown page's in front.  Each shows its
+page's icon before its title, or the globe until the icon is known and
+when the page has none."
   (let ((shown (and (lispm-desktop-browser--window) (window-buffer (lispm-desktop-browser--window)))))
-    (concat
-     (propertize " " 'display '(space :width (6) :height (28) :ascent 65))
-     (mapconcat
-      (lambda (buffer)
-        (lispm-desktop-sidebar--toolbar-button
-         (concat " " (or (lispm-desktop-browser--favicon buffer) (lispm-desktop-platinum-icon "globe")) " "
-                 (truncate-string-to-width (lispm-desktop-browser--title buffer)
-                                           lispm-desktop-browser-tab-width nil nil "…")
-                 " ")
-         (lispm-desktop-browser--tab-command #'lispm-desktop-browser-select-tab buffer)
-         (or (lispm-desktop-browser--uri buffer) "Show this tab")
-         'tab-line
-         (if (eq buffer shown) 'lispm-desktop-platinum-tab-selected 'lispm-desktop-platinum-tab)))
-      (lispm-desktop-browser--buffers) " ")
-     " "
-     (lispm-desktop-sidebar--toolbar-button " + " #'lispm-desktop-browser-new-tab "New tab" 'tab-line))))
+    (lispm-desktop-platinum-tabs
+     (append
+      (mapcar (lambda (buffer)
+                (list (concat (or (lispm-desktop-browser--favicon buffer) (lispm-desktop-platinum-icon "globe"))
+                              " "
+                              (truncate-string-to-width (lispm-desktop-browser--title buffer)
+                                                        lispm-desktop-browser-tab-width nil nil "…"))
+                      (eq buffer shown)
+                      'keymap (lispm-desktop-browser--tab-keymap
+                               (lispm-desktop-browser--tab-command #'lispm-desktop-browser-select-tab buffer))
+                      'help-echo (or (lispm-desktop-browser--uri buffer) "Show this tab")
+                      'pointer 'arrow))
+              (lispm-desktop-browser--buffers))
+      (list (list "+" nil 'keymap (lispm-desktop-browser--tab-keymap #'lispm-desktop-browser-new-tab)
+                  'help-echo "New tab" 'pointer 'arrow)))
+     (- (window-pixel-width) (window-right-divider-width) (window-scroll-bar-width)))))
 
 (defun lispm-desktop-browser-select-tab (buffer)
   "Show browser tab BUFFER in the browser window."

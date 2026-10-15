@@ -85,49 +85,69 @@ function never sets, so re-running it is idempotent."
     (set-face-attribute 'ansi-color-bright-black nil :foreground dim :background dim)
     (set-face-attribute 'ansi-color-black nil :foreground black :background black)))
 
-(defun lispm-desktop-sidebar--toolbar-button (label command help row &optional face)
-  "Return LABEL as a button calling COMMAND, described by HELP, on toolbar ROW.
-ROW is `tab-line' or `header-line', the window line the button sits in.  FACE,
-by default `lispm-desktop-platinum-button', styles the label and is layered
-under LABEL's own faces, so icons keep their Nerd Font family.  The button is
-pressed rather than clicked: drawn pushed in while held, and run on release
-over it, see `lispm-desktop-platinum-press'.  Built while its line is drawn,
-as toolbars are, it shows itself pushed in from the window's
+(defun lispm-desktop-sidebar--trim (label)
+  "Return LABEL without the plain spaces at its ends.
+A space showing an icon, as an image or a stretch, stays."
+  (let ((start 0) (end (length label)))
+    (while (and (< start end) (eq (aref label start) ?\s)
+                (not (get-text-property start 'display label)))
+      (setq start (1+ start)))
+    (while (and (> end start) (eq (aref label (1- end)) ?\s)
+                (not (get-text-property (1- end) 'display label)))
+      (setq end (1- end)))
+    (substring label start end)))
+
+(defun lispm-desktop-sidebar--toolbar-button (label command help row &optional state)
+  "Return LABEL as a bevel button calling COMMAND, described by HELP.
+It sits on toolbar ROW, the window line holding it: `tab-line',
+`header-line' or `mode-line'.  LABEL is shown in the list's face, its
+icons keeping their own faces.  STATE is nil, `pressed' for a toggle
+that is on, or `disabled', when the button does nothing.  STATE may be
+a face instead: LABEL is then text in that face, as the browser's
+Netscape toolbars draw theirs.  The button is pressed rather than
+clicked: drawn pushed in while held, and run on release over it, see
+`lispm-desktop-platinum-press'.  Built while its line is drawn, as
+toolbars are, it shows itself pushed in from the window's
 `lispm-desktop-platinum-pressed'."
-  (let ((styled (copy-sequence label))
-        ;; The command tells buttons apart: `equal' ignores text
-        ;; properties, and icons drawn as images all read " ", so the new
-        ;; session buttons of two agents with image icons had one label.
-        (target (list row command label)))
-    (add-face-text-property 0 (length styled)
-                            (if (lispm-desktop-platinum--pressed-p target)
-                                'lispm-desktop-platinum-button-pressed
-                              (or face 'lispm-desktop-platinum-button))
-                            t styled)
-    (propertize styled
-                'help-echo help
-                'lispm-desktop-platinum-target target
-                'keymap (let ((map (make-sparse-keymap)))
-                          (keymap-set map (format "<%s> <down-mouse-1>" row)
-                                      (lambda (event)
-                                        (interactive "e")
-                                        (let ((start (event-start event)))
-                                          (lispm-desktop-platinum-press
-                                           start (lispm-desktop-platinum--same-target-p start)
-                                           (lambda ()
-                                             (with-selected-window (posn-window start)
-                                               (call-interactively command)))))))
-                          (keymap-set map (format "<%s> <mouse-1>" row) #'ignore)
-                          map))))
+  (let* ((face (and (facep state) state))
+         (label (if face label (lispm-desktop-sidebar--trim label)))
+         ;; The command tells buttons apart: `equal' ignores text
+         ;; properties, and icons drawn as images all read " ", so the new
+         ;; session buttons of two agents with image icons had one label.
+         (target (list row command label))
+         (pressed (lispm-desktop-platinum--pressed-p target))
+         (button (if face
+                     (let ((styled (copy-sequence label)))
+                       (add-face-text-property 0 (length styled)
+                                               (if pressed 'lispm-desktop-platinum-button-pressed face)
+                                               t styled)
+                       styled)
+                   (lispm-desktop-platinum-bevel-button label (if pressed 'pressed state)))))
+    (if (eq state 'disabled)
+        button
+      (propertize button
+                  'help-echo help
+                  'lispm-desktop-platinum-target target
+                  'keymap (let ((map (make-sparse-keymap)))
+                            (keymap-set map (format "<%s> <down-mouse-1>" row)
+                                        (lambda (event)
+                                          (interactive "e")
+                                          (let ((start (event-start event)))
+                                            (lispm-desktop-platinum-press
+                                             start (lispm-desktop-platinum--same-target-p start)
+                                             (lambda ()
+                                               (with-selected-window (posn-window start)
+                                                 (call-interactively command)))))))
+                            (keymap-set map (format "<%s> <mouse-1>" row) #'ignore)
+                            map)))))
 
 (defun lispm-desktop-sidebar--toolbar-buttons (actions row)
   "Return ACTIONS as bevel buttons on ROW.
 Each action is (LABEL COMMAND HELP [PRESSED]); PRESSED draws its button
 pushed in, as a toggle that is on."
   (mapconcat (pcase-lambda (`(,label ,command ,help ,pressed))
-               (lispm-desktop-sidebar--toolbar-button (concat " " label " ") command help row
-                                                      (when pressed 'lispm-desktop-platinum-button-pressed)))
-             actions " "))
+               (lispm-desktop-sidebar--toolbar-button label command help row (and pressed 'pressed)))
+             actions (propertize " " 'display '(space :width (4)))))
 
 (defvar-local lispm-desktop-sidebar--faces nil
   "Face remapping cookies drawing this buffer as a list view.")
@@ -145,7 +165,7 @@ are not whole columns."
                                    (concat (lispm-desktop-sidebar--toolbar-buttons title-actions
                                                                                    'header-line)
                                            " "))
-                                 (lispm-desktop-sidebar--toolbar-button " ⟳ " refresh "Refresh"
+                                 (lispm-desktop-sidebar--toolbar-button "⟳" refresh "Refresh"
                                                                         'header-line))))
     (concat " " (lispm-desktop-sidebar--toolbar-buttons actions 'header-line)
             (propertize " " 'display

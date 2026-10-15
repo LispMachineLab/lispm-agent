@@ -114,9 +114,9 @@ the panel shows.")
 
 ;;;; Controls
 ;;
-;; Radio buttons are drawn as Mac OS 9's, in the theme's colours; push
-;; buttons are bevel buttons.  Both are text buttons: Tab moves between
-;; them and Return presses the one at point.
+;; Radio buttons and push buttons are drawn as Mac OS 9's, in the theme's
+;; colours.  Both are text buttons: Tab moves between them, ringing the one
+;; reached in the focus colour, and Return or Space presses it.
 
 (defconst lispm-desktop-settings--heading-indent (propertize " " 'display '(space :width (12)))
   "The blank before a heading.")
@@ -124,37 +124,34 @@ the panel shows.")
 (defconst lispm-desktop-settings--indent (propertize " " 'display '(space :width (24)))
   "The blank before a row of settings.")
 
-(defun lispm-desktop-settings--draw-radio (on)
-  "Return an SVG of a radio button, ON or off."
-  (let ((svg (svg-create 14 14)))
-    (svg-circle svg 7 7 5.5 :fill (lispm-desktop-platinum--color :content)
-                :stroke (lispm-desktop-platinum--color :text) :stroke-width 1)
-    (when on
-      (svg-circle svg 7 7 2.5 :fill (lispm-desktop-platinum--color :accent)))
-    svg))
+(defun lispm-desktop-settings--radio-button (label on action help)
+  "Insert a radio button named LABEL, ON or off, calling ACTION when pressed.
+HELP describes it."
+  (let ((radio (lambda (focused)
+                 (lispm-desktop-platinum--image-of (lispm-desktop-platinum-radio on nil focused)))))
+    (insert-text-button
+     (concat (propertize " " 'display (funcall radio nil)
+                         'lispm-desktop-platinum-plain (funcall radio nil)
+                         'lispm-desktop-platinum-focused (funcall radio t))
+             " " label)
+     'action (lambda (_) (funcall action) (lispm-desktop-settings--render))
+     'face 'default 'follow-link t 'help-echo help)))
 
 (defun lispm-desktop-settings--radio (label on action &optional note)
   "Insert a radio button named LABEL, ON or off, running ACTION when pressed,
 NOTE after it in the dimmed text."
   (insert lispm-desktop-settings--indent)
-  (insert-text-button
-   (concat (propertize " " 'display (lispm-desktop-platinum--image (list 'radio on)
-                                                                   (lambda () (lispm-desktop-settings--draw-radio on))))
-           " " label)
-   'action (lambda (_) (funcall action) (lispm-desktop-settings--render))
-   'face 'default 'mouse-face 'highlight 'follow-link t
-   'help-echo (format "Choose %s" label))
+  (lispm-desktop-settings--radio-button label on action (format "Choose %s" label))
   (when note
     (insert "  " (propertize note 'face 'shadow)))
   (insert "\n"))
 
 (defun lispm-desktop-settings--button (label action &optional help)
-  "Insert a bevel button named LABEL running ACTION when pressed; HELP
+  "Insert a push button named LABEL running ACTION when pressed; HELP
 describes it."
-  (insert-text-button (concat " " label " ")
-                      'action (lambda (_) (funcall action) (lispm-desktop-settings--render))
-                      'face 'lispm-desktop-platinum-button 'mouse-face 'lispm-desktop-platinum-button-pressed
-                      'follow-link t 'help-echo (or help label)))
+  (lispm-desktop-platinum-insert-push-button
+   label (lambda () (funcall action) (lispm-desktop-settings--render))
+   :help (or help label)))
 
 (defun lispm-desktop-settings--heading (title)
   "Insert the heading TITLE of a group of settings."
@@ -226,15 +223,9 @@ desktop's SVG cannot read."
   (lispm-desktop-settings--radio "From the theme" (null lispm-desktop-color)
                                  (lambda () (lispm-desktop-settings--save 'lispm-desktop-color nil)))
   (insert lispm-desktop-settings--indent)
-  (insert-text-button
-   (concat (propertize " " 'display (lispm-desktop-platinum--image
-                                     (list 'radio (and lispm-desktop-color t))
-                                     (lambda () (lispm-desktop-settings--draw-radio
-                                                 (and lispm-desktop-color t)))))
-           " Your own ")
-   'action (lambda (_) (lispm-desktop-settings--choose-color) (lispm-desktop-settings--render))
-   'face 'default 'mouse-face 'highlight 'follow-link t 'help-echo "Choose a colour")
-  (insert (lispm-desktop-settings--swatch (lispm-desktop--color)) " ")
+  (lispm-desktop-settings--radio-button "Your own" (and lispm-desktop-color t)
+                                        #'lispm-desktop-settings--choose-color "Choose a colour")
+  (insert " " (lispm-desktop-settings--swatch (lispm-desktop--color)) " ")
   (lispm-desktop-settings--button "Choose…" #'lispm-desktop-settings--choose-color "Choose the desktop's colour")
   (insert "\n")
   (lispm-desktop-settings--heading "Picture")
@@ -328,20 +319,22 @@ desktop's SVG cannot read."
     (lispm-desktop-settings-select panel)))
 
 (defun lispm-desktop-settings--tabs ()
-  "Return the window's header line: a bevel tab per panel, the shown one
-pushed in."
-  (concat
-   (propertize " " 'display '(space :width (8) :height (28) :ascent 65))
-   (mapconcat (pcase-lambda (`(,key ,label . ,_))
-                (let ((tab (concat " " label " ")))
-                  (add-face-text-property 0 (length tab)
-                                          (if (eq key lispm-desktop-settings--panel)
-                                              'lispm-desktop-platinum-tab-selected
-                                            'lispm-desktop-platinum-tab)
-                                          t tab)
-                  (propertize tab 'lispm-desktop-settings-panel key 'keymap lispm-desktop-settings-tab-map
-                              'pointer 'arrow 'help-echo (format "Show %s" label))))
-              (lispm-desktop-settings--panels) " ")))
+  "Return the window's header line: a tab per panel, the shown one in front."
+  (lispm-desktop-platinum-tabs
+   (mapcar (pcase-lambda (`(,key ,label . ,_))
+             (list label (eq key lispm-desktop-settings--panel)
+                   'lispm-desktop-settings-panel key 'keymap lispm-desktop-settings-tab-map
+                   'pointer 'arrow 'help-echo (format "Show %s" label)))
+           (lispm-desktop-settings--panels))
+   (- (window-pixel-width) (window-right-divider-width))))
+
+(defun lispm-desktop-settings--control-index ()
+  "Return how many buttons come before point's, when point is on one."
+  (when (button-at (point))
+    (let ((count 0) (position (point-min)))
+      (while (and (setq position (next-button position)) (< (button-start position) (point)))
+        (setq count (1+ count)))
+      count)))
 
 (defun lispm-desktop-settings--render ()
   "Fill the control panel's window with the panel it shows, point kept."
@@ -352,11 +345,17 @@ pushed in."
             (panel (or (assq lispm-desktop-settings--panel (lispm-desktop-settings--panels))
                        (car (lispm-desktop-settings--panels)))))
         (setq lispm-desktop-settings--panel (car panel))
-        (erase-buffer)
-        (funcall (nth 2 panel))
-        (goto-char (point-min))
-        (forward-line (1- line))
-        (setq lispm-desktop-platinum-title (nth 1 panel))
+        (let ((control (lispm-desktop-settings--control-index)))
+          (erase-buffer)
+          (funcall (nth 2 panel))
+          (goto-char (point-min))
+          (if control
+              ;; The keyboard stays on the control it was on.
+              (dotimes (_ (1+ control)) (forward-button 1 nil nil t))
+            (forward-line (1- line))))
+        (setq lispm-desktop-platinum--focus nil
+              lispm-desktop-platinum-title (nth 1 panel))
+        (lispm-desktop-platinum-show-focus)
         (force-mode-line-update)))))
 
 (defun lispm-desktop-settings-select (panel)
@@ -390,6 +389,7 @@ The panels are `lispm-desktop-settings-panels'."
   "<left>" #'lispm-desktop-settings-previous-panel
   "C-f" #'lispm-desktop-settings-next-panel
   "C-b" #'lispm-desktop-settings-previous-panel
+  "SPC" #'lispm-desktop-platinum-push
   "q" #'lispm-desktop-settings-close
   "M-w" #'lispm-desktop-settings-close)
 
@@ -410,7 +410,9 @@ The panels are `lispm-desktop-settings-panels'."
               lispm-desktop-platinum-icon (lispm-desktop-platinum-icon "control-panels")
               lispm-desktop-platinum-box-functions (list :close #'lispm-desktop-settings--close-box))
   (face-remap-add-relative 'default 'lispm-desktop-platinum-list)
-  (face-remap-add-relative 'header-line 'lispm-desktop-platinum-header)
+  ;; The tabs fill the header line, their pane's edge under them.
+  (face-remap-add-relative 'header-line '(:box nil :underline nil :overline nil))
+  (add-hook 'post-command-hook #'lispm-desktop-platinum-show-focus nil t)
   (hl-line-mode -1)
   (when (fboundp 'display-line-numbers-mode)
     (display-line-numbers-mode -1)))

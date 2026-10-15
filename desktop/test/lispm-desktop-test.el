@@ -1000,6 +1000,17 @@ drawing functions draw their pixels as rectangles."
   "Return the width and height of SVG as a cons."
   (cons (dom-attr svg 'width) (dom-attr svg 'height)))
 
+(ert-deftest lispm-desktop-test-images-without-svg ()
+  "An Emacs built without SVG gets the chrome's images all the same, rather
+than an error: the text under them shows instead."
+  (cl-letf* ((available (symbol-function 'image-type-available-p))
+             ((symbol-function 'image-type-available-p)
+              (lambda (type) (and (not (eq type 'svg)) (funcall available type)))))
+    (let ((image (lispm-desktop-platinum--svg-image (svg-create 4 4))))
+      (should (eq (car image) 'image))
+      (should (eq (image-property image :type) 'svg))
+      (should (string-prefix-p "<svg" (image-property image :data))))))
+
 (ert-deftest lispm-desktop-test-grey-ramp ()
   "Platinum's greys come back as themselves; another theme's keep their order."
   (let ((platinum (lispm-desktop-test--platinum-palette))
@@ -1111,8 +1122,8 @@ button keeps its size whichever rings it wears."
 its colour, those behind are darker with the pane's outline under them."
   (let* ((palette (lispm-desktop-test--platinum-palette))
          (font '(:family "Geneva" :size 12 :weight "normal" :synthetic nil))
-         (front (lispm-desktop-platinum-draw-tab palette "Desktop" 70 :front t :font font))
-         (back (lispm-desktop-platinum-draw-tab palette "Fonts" 50 :font font))
+         (front (lispm-desktop-platinum-draw-tab palette "Desktop" 70 :front t))
+         (back (lispm-desktop-platinum-draw-tab palette "Fonts" 50))
          (edge (lispm-desktop-platinum-draw-tab-edge palette 8)))
     (should (equal (lispm-desktop-test--size front) '(70 . 24)))
     (should (equal (lispm-desktop-test--size edge) '(8 . 24)))
@@ -1250,6 +1261,90 @@ parted from the next by a black line; a pressed module is darkened."
         (should (equal (at disabled 0 12) "#808080")))
       (when (fboundp 'libxml-parse-xml-region)
         (should (dom-by-tag module 'svg))))))
+
+;;;; Controls on lines
+
+(defun lispm-desktop-test--image-width (string position)
+  "Return the width of the SVG image STRING displays at POSITION."
+  (let* ((spec (get-text-property position 'display string))
+         (data (plist-get (cdr spec) :data)))
+    (and (string-match "width=\"\\([0-9]+\\)\"" data)
+         (string-to-number (match-string 1 data)))))
+
+(ert-deftest lispm-desktop-test-tab-row ()
+  "A row of tabs is as wide as asked, the pane's edge running on after the
+tabs, which carry their properties."
+  (let* ((lispm-desktop-platinum--palette (lispm-desktop-test--platinum-palette))
+         (map (make-sparse-keymap))
+         (row (lispm-desktop-platinum-tabs `(("One" t keymap ,map help-echo "First") ("Two" nil)) 400)))
+    (should (= (length row) 6))
+    (should (= (apply #'+ (mapcar (lambda (i) (lispm-desktop-test--image-width row i))
+                                  (number-sequence 0 5)))
+               400))
+    (should (eq (get-text-property 1 'keymap row) map))
+    (should (equal (get-text-property 1 'help-echo row) "First"))
+    ;; The tab in front and the one behind are drawn apart.
+    (should-not (equal (get-text-property 1 'display row) (get-text-property 3 'display row)))))
+
+(ert-deftest lispm-desktop-test-content-runs ()
+  "A label drawn into a control keeps its runs: words in the system face,
+icon glyphs in their own family and colour, images as images."
+  (let* ((svg (svg-create 100 20))
+         (icon (propertize "x" 'face '((:family "Symbols Nerd Font Mono") (:foreground "#D97757"))
+                           'display '(raise 0.0)))
+         (image (propertize " " 'display (list 'image :type 'svg :width 16 :height 16
+                                               :file (expand-file-name "icons/os9/folder.svg"
+                                                                       lispm-desktop-directory)))))
+    (lispm-desktop-platinum--draw-content svg (concat icon " New" image) 0 0 20 "#000000"
+                                          'lispm-desktop-platinum-list)
+    (let ((texts (dom-by-tag svg 'text)))
+      (should (seq-find (lambda (text) (string-prefix-p "Symbols Nerd Font Mono"
+                                                        (dom-attr text 'font-family)))
+                        texts))
+      (should (seq-find (lambda (text) (equal (dom-attr text 'fill) "#D97757")) texts))
+      (should (seq-find (lambda (text) (string-search "New" (dom-text text))) texts)))
+    (when (fboundp 'libxml-parse-xml-region)
+      (should (dom-by-tag svg 'svg)))))
+
+(ert-deftest lispm-desktop-test-toolbar-label-keeps-image-icons ()
+  "Trimming a toolbar label drops plain spaces but keeps a space showing an icon."
+  (let ((icon (propertize " " 'display '(image :type png :file "x.png"))))
+    (should (equal (lispm-desktop-sidebar--trim (concat " " icon "+ ")) (concat icon "+")))
+    (should (get-text-property 0 'display (lispm-desktop-sidebar--trim (concat " " icon "+ "))))))
+
+(ert-deftest lispm-desktop-test-focus-ring-follows-point ()
+  "The control point is on is drawn focused; leaving it draws it plain again."
+  (let ((lispm-desktop-platinum--palette (lispm-desktop-test--platinum-palette)))
+    (with-temp-buffer
+      (lispm-desktop-platinum-insert-push-button "OK" #'ignore)
+      (insert " ")
+      (lispm-desktop-platinum-insert-push-button "Cancel" #'ignore)
+      (let ((plain (get-text-property 1 'lispm-desktop-platinum-plain))
+            (focused (get-text-property 1 'lispm-desktop-platinum-focused)))
+        (should-not (equal plain focused))
+        (goto-char 1)
+        (lispm-desktop-platinum-show-focus)
+        (should (equal (get-text-property 1 'display) focused))
+        (goto-char 3)
+        (lispm-desktop-platinum-show-focus)
+        (should (equal (get-text-property 1 'display) plain))
+        (should (equal (get-text-property 3 'display) (get-text-property 3 'lispm-desktop-platinum-focused)))))))
+
+(ert-deftest lispm-desktop-test-push-button-pushes ()
+  "Return on a push button runs its action, drawn pushed in meanwhile."
+  (let ((lispm-desktop-platinum--palette (lispm-desktop-test--platinum-palette))
+        (ran 0)
+        (shown nil))
+    (with-temp-buffer
+      (lispm-desktop-platinum-insert-push-button "OK" (lambda () (cl-incf ran)))
+      (cl-letf (((symbol-function 'sit-for)
+                 (lambda (&rest _) (setq shown (get-text-property 1 'display)) t))
+                ((symbol-function 'redisplay) #'ignore))
+        (let ((last-input-event ?\r))
+          (lispm-desktop-platinum-push 1)))
+      (should (= ran 1))
+      (should (equal shown (get-text-property 1 'lispm-desktop-platinum-pressed)))
+      (should-not (equal (get-text-property 1 'display) shown)))))
 
 (ert-deftest lispm-desktop-test-scroll-bar-windows ()
   "Files get scroll bars; sessions and side windows other than lists do not."
@@ -1809,8 +1904,15 @@ positions, the keys, the browser's pages."
                        (keyboard "Vim keys" "Emacs keys" "next start")
                        (browser "Home Page" "Clear History" "Edit Bookmarks")))
         (lispm-desktop-settings-select panel)
-        (dolist (label labels)
-          (should (string-search label (buffer-string))))
+        (let ((text (concat (buffer-string)
+                            ;; Push buttons draw their labels in their images.
+                            (mapconcat #'identity
+                                       (delq nil (mapcar (lambda (position)
+                                                           (get-text-property position 'lispm-desktop-platinum-label))
+                                                         (number-sequence (point-min) (1- (point-max)))))
+                                       " "))))
+          (dolist (label labels)
+            (should (string-search label text))))
         (should (equal (nth 1 (assq panel lispm-desktop-settings-panels)) lispm-desktop-platinum-title))))))
 
 (ert-deftest lispm-desktop-test-settings-radio-saves ()
