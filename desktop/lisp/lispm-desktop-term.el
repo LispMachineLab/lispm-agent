@@ -63,6 +63,7 @@
 (require 'lispm-desktop-core)
 
 (declare-function lispm-desktop-term-module-init-channel "lispm-desktop-term-module" (process))
+(declare-function lispm-desktop-term-module-close-channel "lispm-desktop-term-module" ())
 (declare-function lispm-desktop-term-module-spawn "lispm-desktop-term-module"
                   (program args directory environment columns lines))
 (declare-function lispm-desktop-term-module-id "lispm-desktop-term-module" (terminal))
@@ -512,7 +513,15 @@ exits, clipboard."
         (let ((process (make-pipe-process :name "lispm-desktop-term" :noquery t
                                           :coding 'binary :filter #'lispm-desktop-term--wake)))
           (lispm-desktop-term-module-init-channel process)
+          (add-hook 'kill-emacs-hook #'lispm-desktop-term--close-channel)
           (setq lispm-desktop-term--channel process)))))
+
+(defun lispm-desktop-term--close-channel ()
+  "Stop the module waking Emacs before Emacs exits and closes the pipe.
+Writing to a closed pipe raises SIGPIPE, which ends a batch Emacs.
+A module built before it could close its channel is left as it is."
+  (when (fboundp 'lispm-desktop-term-module-close-channel)
+    (lispm-desktop-term-module-close-channel)))
 
 (defun lispm-desktop-term--wake (_process string)
   "Mark the terminals named in STRING, lines of ids, and schedule a frame."

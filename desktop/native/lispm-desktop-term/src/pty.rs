@@ -10,6 +10,9 @@
 // the child with waitpid(), reaps it, and pokes a socket the event loop
 // polls, as alacritty's SIGCHLD pipe would.
 //
+// The poke never raises SIGPIPE, whose disposition here is Emacs's: batch
+// Emacs leaves it fatal, see `Pty::spawn'.
+//
 // What the program writes is shown to a watcher as it is read, before
 // alacritty parses it, for what alacritty ignores.
 
@@ -158,6 +161,13 @@ impl Pty {
 
         let (child_events, mut poke) = UnixStream::pair()?;
         child_events.set_nonblocking(true)?;
+        // A killed terminal drops the PTY, and its end of the socket, before
+        // the program it hung up exits, and a write to a socket whose reader
+        // is gone raises SIGPIPE.  Interactive Emacs ignores SIGPIPE, but
+        // batch Emacs leaves it as it found it, fatal, and the poke would
+        // end Emacs.  So the waiter holds the reading end open itself until
+        // it poked.
+        let reader = child_events.try_clone()?;
         let exit = Arc::new(Exit::default());
         let waiter_exit = exit.clone();
         std::thread::Builder::new().name(format!("lispm-desktop-term wait {pid}")).spawn(move || {
@@ -177,6 +187,7 @@ impl Pty {
             }
             waiter_exit.known.notify_all();
             let _ = poke.write_all(&[1]);
+            drop(reader);
         })?;
 
         Ok(Pty { output: Output { file: File::from(master), watch }, child_events, exit, pid })
@@ -252,5 +263,29 @@ impl OnResize for Pty {
         unsafe {
             libc::ioctl(self.output.file.as_raw_fd(), libc::TIOCSWINSZ, &ws as *const _);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_a_running_program_raises_no_sigpipe() {
+        // Test binaries ignore SIGPIPE, batch Emacs does not: a SIGPIPE
+        // ends this test binary as it would end Emacs.
+        let before = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 1, cell_height: 1 };
+        let args = ["-c".to_string(), "exec sleep 30".to_string()];
+        let environment = [("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
+        let pty = Pty::spawn("/bin/sh", &args, Path::new("/"), &environment, size, Box::new(|_| {}))
+            .expect("spawn");
+        let exit = pty.exit();
+        drop(pty);
+        let status = exit.wait(Duration::from_secs(5));
+        // The waiter pokes as soon as it knows the exit status.
+        std::thread::sleep(Duration::from_millis(200));
+        unsafe { libc::signal(libc::SIGPIPE, before) };
+        assert_eq!(status.and_then(|s| s.signal()), Some(libc::SIGHUP));
     }
 }

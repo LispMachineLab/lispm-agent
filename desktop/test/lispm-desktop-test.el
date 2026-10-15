@@ -1689,6 +1689,40 @@ so the program sees no resize when the terminal is shown there."
         (should (string-match-p (format "%d %d" (cdr size) (car size))
                                 (lispm-desktop-term-module-text lispm-desktop-term--terminal nil)))))))
 
+(ert-deftest lispm-desktop-test-term-kill-running-program ()
+  "Killing a terminal whose program still runs hangs the program up, and
+Emacs keeps running when it exits.  Its exit once raised SIGPIPE, which
+ends a batch Emacs such as the one running these tests."
+  (lispm-desktop-test--with-term ((term "lispm-desktop-test-kill" "sleep" '("30")))
+    (let ((pid (with-current-buffer term (lispm-desktop-term-module-pid lispm-desktop-term--terminal)))
+          (deadline (+ (float-time) 5)))
+      (accept-process-output nil 0.2)
+      (should (zerop (signal-process pid 0)))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer term))
+      ;; Once the program is reaped, the module hears of its exit.
+      (while (and (zerop (signal-process pid 0)) (< (float-time) deadline))
+        (accept-process-output nil 0.02)
+        (lispm-desktop-term--tick))
+      (should-not (zerop (signal-process pid 0)))
+      (dotimes (_ 10)
+        (accept-process-output nil 0.02)
+        (lispm-desktop-term--tick)))))
+
+(ert-deftest lispm-desktop-test-term-channel-closes-and-reopens ()
+  "The module stops writing to its channel before Emacs exits and closes
+it, as a write to a closed pipe raises SIGPIPE; a channel made after that
+wakes Emacs instead."
+  (skip-unless (lispm-desktop-term-ready-p))
+  (should (memq #'lispm-desktop-term--close-channel kill-emacs-hook))
+  (let ((old lispm-desktop-term--channel))
+    (lispm-desktop-term--close-channel)
+    (delete-process old)
+    (lispm-desktop-test--with-term ((term "lispm-desktop-test-channel" "/bin/sh" '("-c" "exit 4")))
+      (should-not (eq lispm-desktop-term--channel old))
+      (lispm-desktop-test--term-wait term)
+      (should (eql (buffer-local-value 'lispm-desktop-term--exit-code term) 4)))))
+
 (ert-deftest lispm-desktop-test-agent-list-refreshes-after-agents-only ()
   "Only an agent terminal's exit refreshes the agent sidebar, and only once
 Emacs is idle: reading transcripts must not stall the terminal scheduler."
