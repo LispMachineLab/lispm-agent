@@ -1545,6 +1545,67 @@ so the arrow pointer is applied once the current command finishes."
   (when (lispm-desktop-browser-workspace-p)
     (lispm-desktop-browser--ensure-layout)))
 
+;;;;; Late events of closed pages
+;;
+;; Closing a page could crash Emacs on macOS (Emacs 31.1, NS build): a
+;; segmentation fault in print_object, under `xwidget-log', under
+;; `xwidget-event-handler'.  The bug is Emacs's.  A page's WebKit view
+;; keeps a plain C pointer to its xwidget, in its navigation delegate and
+;; in the completion handler of each script it runs, and the garbage
+;; collector does not see it.  Killing the page's buffer kills its xwidget,
+;; which itself loads about:blank to silence the page, yet WebKit may still
+;; call back: a load or a script finishing after the kill posts an
+;; `xwidget-event' naming the xwidget, by then perhaps collected.  The
+;; handler first logs the event with %S, printing the freed object; the
+;; collector, marking the event while it waits to be read, may fault on it
+;; even before.  It is a race, lost now and then; stopping the page before
+;; killing it would not win it, as the kill loads a page of its own.
+;;
+;; So the xwidgets of a killed buffer are kept from the collector a minute,
+;; which keeps WebKit's pointer valid: its navigation callbacks then find
+;; the buffer dead and post nothing, and a finished script's event names a
+;; killed but valid xwidget.  And an event whose xwidget is no longer in
+;; `xwidget-list' is dropped before the handler runs.  `memq' finds the
+;; xwidget there or not without reading it; `xwidget-live-p' would read it,
+;; and on macOS a killed xwidget keeps its buffer, which it checks.
+
+(defvar xwidget-list)
+(declare-function get-buffer-xwidgets "xwidget.c" (buffer))
+
+(defvar lispm-desktop-browser--killed-xwidgets nil
+  "Xwidgets of killed buffers, kept from the garbage collector a minute.")
+
+(defun lispm-desktop-browser--keep-killed-xwidgets ()
+  "Keep the xwidgets of the buffer being killed from the garbage collector.
+They are let go a minute later, when WebKit has long called back for the
+last time.  This is on `kill-buffer-hook', which runs before the buffer's
+xwidgets are killed."
+  (when-let* (((fboundp 'get-buffer-xwidgets))
+              (xwidgets (get-buffer-xwidgets (current-buffer))))
+    (setq lispm-desktop-browser--killed-xwidgets
+          (append xwidgets lispm-desktop-browser--killed-xwidgets))
+    (run-at-time 60 nil #'lispm-desktop-browser--let-go-xwidgets xwidgets)))
+
+(defun lispm-desktop-browser--let-go-xwidgets (xwidgets)
+  "Let the garbage collector have XWIDGETS, of a buffer killed a minute ago."
+  (dolist (xwidget xwidgets)
+    (setq lispm-desktop-browser--killed-xwidgets
+          (delq xwidget lispm-desktop-browser--killed-xwidgets))))
+
+(defun lispm-desktop-browser--xwidget-event-live-p (&optional event)
+  "Return non-nil unless EVENT is an `xwidget-event' of a killed xwidget.
+EVENT defaults to `last-input-event'.  As an advice of
+`xwidget-event-handler', this drops the events of killed xwidgets, which
+the handler would print although they may have been freed."
+  (let ((event (or event last-input-event)))
+    (or (not (eq (car-safe event) 'xwidget-event))
+        (memq (nth 2 event) (bound-and-true-p xwidget-list)))))
+
+(defun lispm-desktop-setup-browser ()
+  "Keep the late events of closed pages from crashing Emacs."
+  (add-hook 'kill-buffer-hook #'lispm-desktop-browser--keep-killed-xwidgets)
+  (advice-add 'xwidget-event-handler :before-while #'lispm-desktop-browser--xwidget-event-live-p))
+
 
 (provide 'lispm-desktop-browser)
 ;;; lispm-desktop-browser.el ends here

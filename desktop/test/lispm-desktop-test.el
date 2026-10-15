@@ -2824,6 +2824,45 @@ letter each while the letters suffice, two when they do not."
       (should (equal (car labels) "aa")))
     (should-not (lispm-desktop-browser-hint-labels 0))))
 
+(defvar xwidget-list)
+
+(ert-deftest lispm-desktop-test-browser-drops-events-of-killed-xwidgets ()
+  "An xwidget event reaches `xwidget-event-handler' only while its xwidget
+is in `xwidget-list'; other events pass.  Symbols stand in for xwidgets,
+which batch Emacs cannot make: the guard only compares them."
+  (let* ((live (make-symbol "live"))
+         (killed (make-symbol "killed"))
+         (xwidget-list (list live)))
+    (should (lispm-desktop-browser--xwidget-event-live-p
+             `(xwidget-event load-changed ,live "load-finished")))
+    (should-not (lispm-desktop-browser--xwidget-event-live-p
+                 `(xwidget-event load-changed ,killed "load-finished")))
+    (should-not (lispm-desktop-browser--xwidget-event-live-p
+                 `(xwidget-event javascript-callback ,killed ignore "answer")))
+    (let ((last-input-event `(xwidget-event load-changed ,killed "load-started")))
+      (should-not (lispm-desktop-browser--xwidget-event-live-p)))
+    (should (lispm-desktop-browser--xwidget-event-live-p ?a))))
+
+(ert-deftest lispm-desktop-test-browser-keeps-killed-xwidgets ()
+  "A killed buffer's xwidgets are kept from the garbage collector until a
+timer lets them go, and a buffer without xwidgets keeps nothing."
+  (let ((lispm-desktop-browser--killed-xwidgets nil)
+        (xwidget (make-symbol "xwidget"))
+        (xwidgets nil)
+        (timers nil))
+    (cl-letf (((symbol-function 'get-buffer-xwidgets) (lambda (_) xwidgets))
+              ((symbol-function 'run-at-time)
+               (lambda (_time _repeat function &rest args) (push (cons function args) timers))))
+      (with-temp-buffer (lispm-desktop-browser--keep-killed-xwidgets))
+      (should-not lispm-desktop-browser--killed-xwidgets)
+      (should-not timers)
+      (setq xwidgets (list xwidget))
+      (with-temp-buffer (lispm-desktop-browser--keep-killed-xwidgets))
+      (should (equal lispm-desktop-browser--killed-xwidgets (list xwidget)))
+      (should (= (length timers) 1))
+      (apply (caar timers) (cdar timers))
+      (should-not lispm-desktop-browser--killed-xwidgets))))
+
 (ert-deftest lispm-desktop-test-term-keys ()
   "Keys send the bytes terminals expect: cursor keys follow the program's
 mode, C-c C-c sends C-c, and Escape reaches the program."
