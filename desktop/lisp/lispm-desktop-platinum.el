@@ -472,7 +472,9 @@ drawn as SVG is as heavy as the titles and menus Emacs draws beside it."
 FONT is a value of `lispm-desktop-platinum-svg-font'; ANCHOR is SVG's
 text anchor, by default the middle."
   (dolist (dx (if (plist-get font :synthetic) '(0 0.5) '(0)))
+    ;; Spaces are kept, as Emacs shows them, at a run's ends too.
     (svg-text svg (substring-no-properties text) :x (+ x dx) :y y :text-anchor (or anchor "middle")
+              :xml:space "preserve"
               :font-family (plist-get font :family) :font-size (plist-get font :size)
               :font-weight (plist-get font :weight) :fill color)))
 
@@ -499,15 +501,44 @@ left clear."
 (defvar lispm-desktop-platinum--icon-doms (make-hash-table :test #'equal)
   "SVG documents read from files or data, by file or data.")
 
+(defun lispm-desktop-platinum--escape-xml (string)
+  "Return STRING with the characters XML reserves written as references."
+  (replace-regexp-in-string "[&<>\"]"
+                            (lambda (char)
+                              (pcase char ("&" "&amp;") ("<" "&lt;") (">" "&gt;") (_ "&quot;")))
+                            string t t))
+
+(defun lispm-desktop-platinum--clean-dom (node)
+  "Return NODE, parsed XML, ready to be printed again by `svg-print':
+comments dropped, text and attribute values escaped, which `svg-print'
+writes as they are."
+  (cond ((stringp node) (lispm-desktop-platinum--escape-xml node))
+        ((memq (car-safe node) '(comment top)) nil)
+        ((consp node)
+         `(,(car node)
+           ,(mapcar (lambda (attribute)
+                      (cons (car attribute)
+                            (if (stringp (cdr attribute))
+                                (lispm-desktop-platinum--escape-xml (cdr attribute))
+                              (cdr attribute))))
+                    (nth 1 node))
+           ,@(delq nil (mapcar #'lispm-desktop-platinum--clean-dom (nthcdr 2 node)))))))
+
 (defun lispm-desktop-platinum--svg-dom (file &optional data)
   "Return the SVG document of FILE, or of the string DATA, or nil.
-Nil too where Emacs cannot parse XML."
+Nil too where Emacs cannot parse XML.  The document is cleaned to be
+printed again, see `lispm-desktop-platinum--clean-dom'."
   (when (fboundp 'libxml-parse-xml-region)
     (with-memoization (gethash (or data file) lispm-desktop-platinum--icon-doms)
       (when (or data (file-readable-p file))
         (with-temp-buffer
           (if data (insert data) (insert-file-contents file))
-          (libxml-parse-xml-region (point-min) (point-max)))))))
+          (let ((dom (libxml-parse-xml-region (point-min) (point-max))))
+            ;; A document with a declaration or comments around its root
+            ;; comes back as a `top' node holding them.
+            (when (eq (car-safe dom) 'top)
+              (setq dom (seq-find (lambda (node) (eq (car-safe node) 'svg)) (nthcdr 2 dom))))
+            (and dom (lispm-desktop-platinum--clean-dom dom))))))))
 
 (defun lispm-desktop-platinum--embed-svg (svg dom x y width height)
   "Draw the SVG document DOM on SVG at X, Y, WIDTH by HEIGHT pixels."
@@ -574,9 +605,12 @@ Return the x where CONTENT ends."
              (image (and (eq (car-safe display) 'image) display)))
         (cond
          (image
-          (pcase-let ((`(,w . ,h) (lispm-desktop-platinum--image-size image)))
-            (lispm-desktop-platinum--draw-image svg image (+ x (/ (- width w) 2))
-                                                (+ top (/ (- height h) 2)) w h)))
+          ;; As wide as Emacs lays it out, which `image-size' can exceed
+          ;; on a display that scales images up.
+          (pcase-let* ((`(,iw . ,ih) (lispm-desktop-platinum--image-size image))
+                       (w (if (> width 0) width iw))
+                       (h (round (* ih (/ (float w) (max 1 iw))))))
+            (lispm-desktop-platinum--draw-image svg image x (+ top (/ (- height h) 2)) w h)))
          ;; A stretch of space, or text shown as something else.
          ((or (eq (car-safe display) 'space) (stringp display)))
          ((not (string-blank-p run))
@@ -2191,8 +2225,9 @@ Where images cannot be shown, a plain λ stands in."
 (defvar lispm-desktop-theme)
 
 (defun lispm-desktop-platinum--menu-y ()
-  "Return where a menu dropped from the menu bar starts: its bottom edge."
-  (tab-bar-height nil t))
+  "Return where a menu dropped from the menu bar starts: on the bar's black
+bottom line, which the menu's outline then draws, as on Mac OS 9."
+  (1- (tab-bar-height nil t)))
 
 (defun lispm-desktop-platinum-lambda-items ()
   "Return the items of the λ menu, as `lispm-desktop-popup-menu' takes them."
@@ -3273,17 +3308,17 @@ set already."
 
 (defun lispm-desktop-platinum-draw-list-header (palette columns &optional label-x)
   "Return an SVG of a list's row of column headings, in PALETTE.
-COLUMNS lists (LABEL WIDTH SORTED) from left to right; a sixteen-pixel
-sort-direction button ends the row.  Each heading is a bevelled cell,
-its label in the list's font LABEL-X pixels in, by default eight; the
-heading of the SORTED column is drawn pushed in and darker, as Mac OS 9
-drew the column a list was sorted by."
+COLUMNS lists (LABEL WIDTH SORTED [X]) from left to right; a
+sixteen-pixel sort-direction button ends the row.  Each heading is a
+bevelled cell, its label in the list's font X pixels in, by default
+LABEL-X or eight; the heading of the SORTED column is drawn pushed in
+and darker, as Mac OS 9 drew the column a list was sorted by."
   (let* ((h lispm-desktop-platinum-list-header-height)
          (width (+ 16 (apply #'+ (mapcar #'cadr columns))))
          (svg (svg-create width h))
          (grey (lambda (level) (lispm-desktop-platinum-grey palette level)))
          (x 0))
-    (pcase-dolist (`(,label ,w ,sorted) (append columns '((nil 16 nil))))
+    (pcase-dolist (`(,label ,w ,sorted ,x-in) (append columns '((nil 16 nil))))
       (cl-flet ((row (y level) (lispm-desktop-platinum--row svg x (+ x w -1) y (funcall grey level)))
                 (column (cx level) (lispm-desktop-platinum--column svg (+ x cx) 0 (1- h) (funcall grey level))))
         (if sorted
@@ -3298,7 +3333,7 @@ drew the column a list was sorted by."
           (row 1 #xFF) (column 1 #xFF)
           (row 0 #x66) (column 0 #x66)))
       (when label
-        (lispm-desktop-platinum--draw-content svg label (+ x (or label-x 8)) 1 (- h 3)
+        (lispm-desktop-platinum--draw-content svg label (+ x (or x-in label-x 8)) 1 (- h 3)
                                               (plist-get palette :text) 'lispm-desktop-platinum-list))
       (setq x (+ x w)))
     (lispm-desktop-platinum--draw-map svg (- width 12) 7 lispm-desktop-platinum--sort-glyph
@@ -3317,7 +3352,7 @@ LABEL-X pixels in.  See `lispm-desktop-platinum-draw-list-header'."
                          (lambda ()
                            (lispm-desktop-platinum-draw-list-header
                             lispm-desktop-platinum--palette
-                            (list (list name name-width nil) (list meta (- meta-width 16) t))
+                            (list (list name name-width nil) (list meta (- meta-width 16) t 4))
                             label-x))))
             "\n")))
 

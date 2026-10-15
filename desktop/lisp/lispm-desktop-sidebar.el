@@ -283,12 +283,27 @@ The button sets no face, so icon fonts and colours inside LABEL survive."
 (defconst lispm-desktop-sidebar-indent 18
   "Pixels each level of a list is indented by, the width of a triangle and gap.")
 
+(defvar-local lispm-desktop-sidebar--columns-width nil
+  "The width in pixels the list's column headings were drawn for.")
+
 (defun lispm-desktop-sidebar--insert-columns (name meta)
   "Insert the column headings NAME and META, the list being sorted by META.
-NAME stands over the rows' names, past their indentation and icon."
-  (insert (lispm-desktop-platinum-columns name meta (lispm-desktop-sidebar--row-width)
+NAME stands over the rows' names, past their indentation and icon.  The
+headings are drawn as wide as the list; the list is drawn again when its
+window's width changes, as when its scroll bar comes."
+  (setq lispm-desktop-sidebar--columns-width (lispm-desktop-sidebar--row-width))
+  (add-hook 'window-size-change-functions #'lispm-desktop-sidebar--refit-columns nil t)
+  (insert (lispm-desktop-platinum-columns name meta lispm-desktop-sidebar--columns-width
                                           (lispm-desktop-sidebar--column-pixels)
                                           (+ 8 lispm-desktop-sidebar-indent))))
+
+(defun lispm-desktop-sidebar--refit-columns (window)
+  "Draw WINDOW's list again when it is no longer as wide as its headings.
+This is a buffer-local `window-size-change-functions' function."
+  (with-current-buffer (window-buffer window)
+    (when (and lispm-desktop-sidebar--columns-width lispm-desktop-sidebar--header
+               (/= (window-body-width window t) lispm-desktop-sidebar--columns-width))
+      (funcall (nth 1 lispm-desktop-sidebar--header)))))
 
 (defun lispm-desktop-sidebar--row-width ()
   "Return the pixel width rows have to fill: the sidebar's text area."
