@@ -280,6 +280,16 @@ A buffer's `lispm-desktop-paste-function', when set, receives the text instead."
            (eat-term-send-string-as-yank eat-terminal (list text)))
           (t (insert-for-yank text)))))
 
+(defun lispm-desktop--paste-delete-selection ()
+  "Return the `delete-selection' type of `lispm-desktop-paste': `yank'
+where it inserts buffer text, so that, where `delete-selection-mode' is on,
+pasted text replaces the selection as yanked text does.  Text sent to a
+page or a terminal leaves the buffer's selection alone."
+  (unless (or lispm-desktop-paste-function (lispm-desktop-eat-buffer-p))
+    'yank))
+
+(put 'lispm-desktop-paste 'delete-selection #'lispm-desktop--paste-delete-selection)
+
 (defconst lispm-desktop-area-prefixes
   '(tab-bar tab-line header-line mode-line menu-bar tool-bar vertical-line
     vertical-scroll-bar horizontal-scroll-bar left-fringe right-fringe

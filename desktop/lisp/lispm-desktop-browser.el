@@ -32,6 +32,7 @@
 
 (require 'browse-url)
 (require 'cl-lib)
+(require 'delsel)
 (require 'lispm-desktop-apps)
 (require 'format-spec)
 (require 'thingatpt)
@@ -840,7 +841,9 @@ The field grows as the address is typed at its end."
     (select-window window)))
 
 (defun lispm-desktop-browser-focus-address ()
-  "Select the address window with the whole address marked for replacement."
+  "Select the address window with the whole address marked for replacement:
+typing or pasting replaces it, see
+`lispm-desktop-browser--replace-marked-address'."
   (interactive)
   (when-let* ((window (lispm-desktop-browser--address-window)))
     (unless (eq (window-frame window) (selected-frame))
@@ -848,6 +851,16 @@ The field grows as the address is typed at its end."
     (select-window window)
     (goto-char (point-max))
     (push-mark lispm-desktop-browser--address-start t t)))
+
+(defun lispm-desktop-browser--replace-marked-address ()
+  "Delete the marked address before a command that types or pastes, as
+`delete-selection-mode' does, from the address buffer's `pre-command-hook':
+the desktop leaves that mode off, and the field behaves so all the same.
+Only commands with a `delete-selection' property act on the mark; the
+others, moving, selecting, killing, do as they always do."
+  (unless delete-selection-mode
+    (let ((delete-selection-mode t))
+      (delete-selection-pre-hook))))
 
 (defconst lispm-desktop-browser-keys
   '(("C-l" . lispm-desktop-browser-focus-address)
@@ -926,6 +939,7 @@ toolbar.
   (face-remap-add-relative 'mode-line-inactive 'lispm-desktop-platinum-toolbar)
   (display-line-numbers-mode -1)
   (visual-line-mode -1)
+  (add-hook 'pre-command-hook #'lispm-desktop-browser--replace-marked-address nil t)
   (add-hook 'after-change-functions #'lispm-desktop-browser--note-address-edit nil t))
 
 (defun lispm-desktop-browser--address-buffer ()
