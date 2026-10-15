@@ -110,11 +110,6 @@ faces.  Themes set it, as the platinum theme does; users rarely need to."
 (defconst lispm-desktop-platinum-menu-bar-height 20
   "Height in pixels of the menu bar, Mac OS 9's.")
 
-(defconst lispm-desktop-platinum-menu-icon-height 16
-  "Height in pixels of the icons drawn in the menu bar: the load meter,
-the battery.  With a title's text line, 16 pixels for its 12, they
-leave the bar `lispm-desktop-platinum-menu-bar-height' tall.")
-
 (defconst lispm-desktop-platinum-box-size 13
   "Side in pixels of a title bar box.")
 
@@ -1282,15 +1277,17 @@ handle.")
     ('module 28)
     ('tab 17)))
 
-(cl-defun lispm-desktop-platinum-draw-strip-segment (palette kind &key state icon menu)
+(cl-defun lispm-desktop-platinum-draw-strip-segment (palette kind &key state icon menu focused behind)
   "Return an SVG of a segment of the Control Strip of KIND, in PALETTE.
 KIND is `collapse', the box at the strip's left end, which also draws the
 strip's left outline; `left' or `right', the arrows scrolling the
-modules; `module', a module showing ICON, a sixteen-pixel SVG file, and
-a small triangle when it has a MENU; or `tab', the strip's right end.
-Every segment but the tab ends in the black line parting it from the
-next.  STATE is nil, `pressed' (darkened, lit from below) or `disabled'
-\(sunk, its arrow greyed).  The segment is
+modules; `module', a module showing ICON, a sixteen-pixel SVG file or
+SVG drawing, and a small triangle when it has a MENU; or `tab', the
+strip's right end.  Every segment but the tab ends in the black line
+parting it from the next.  STATE is nil, `pressed' (darkened, lit from
+below) or `disabled' (sunk, its arrow greyed); FOCUSED rings a module
+in the focus colour, as the keyboard reaches it.  BEHIND is the colour
+round the tab's pointed end, what the strip lies on.  The segment is
 `lispm-desktop-platinum-strip-height' tall, its outline included, and
 drawn in the strip's own greys, :strip and its light and shades."
   (let* ((h lispm-desktop-platinum-strip-height)
@@ -1301,12 +1298,18 @@ drawn in the strip's own greys, :strip and its light and shades."
          (face (plist-get palette :strip))
          (light (plist-get palette :strip-light))
          (shade (plist-get palette :strip-shade))
-         (dark (plist-get palette :strip-dark)))
+         (dark (plist-get palette :strip-dark))
+         ;; Arrows and triangles black on Platinum's greys; on a dark
+         ;; theme's, its text colour.
+         (ink (lispm-desktop-platinum--legible face outline (plist-get palette :text))))
     (if (eq kind 'tab)
-        (lispm-desktop-platinum--draw-map
-         svg 0 0 lispm-desktop-platinum--strip-tab
+        (progn
+          (when behind
+            (lispm-desktop-platinum--fill svg 0 0 w h behind))
+          (lispm-desktop-platinum--draw-map
+           svg 0 0 lispm-desktop-platinum--strip-tab
          `((?# . ,outline) (?f . ,(funcall grey #xCC)) (?w . ,light)
-           (?g . ,(funcall grey #x55)) (?8 . ,(funcall grey #x88)) (?4 . ,(funcall grey #x44))))
+           (?g . ,(funcall grey #x55)) (?8 . ,(funcall grey #x88)) (?4 . ,(funcall grey #x44)))))
       (let* ((left (if (eq kind 'collapse) 1 0))
              (right (- w 2))
              (pressed (eq state 'pressed))
@@ -1335,18 +1338,24 @@ drawn in the strip's own greys, :strip and its light and shades."
           ((or 'left 'right)
            (let ((colors (if (eq state 'disabled)
                              `((?l . ,(funcall grey #x55)) (?j . ,(funcall grey #xDD)))
-                           `((?l . ,outline) (?j . ,outline)))))
+                           `((?l . ,ink) (?j . ,ink)))))
              (lispm-desktop-platinum--draw-map
               svg 2 7 (if (eq kind 'left) lispm-desktop-platinum--strip-arrow
                         (mapcar #'reverse lispm-desktop-platinum--strip-arrow))
               colors)))
           ('module
-           (when icon
-             (lispm-desktop-platinum--embed-icon svg icon 2 3 16))
+           (when focused
+             (dotimes (i 2)
+               (lispm-desktop-platinum--row svg (+ left i) (- right i) (+ 1 i) (plist-get palette :focus))
+               (lispm-desktop-platinum--row svg (+ left i) (- right i) (- h 2 i) (plist-get palette :focus))
+               (lispm-desktop-platinum--column svg (+ left i) (+ 1 i) (- h 2 i) (plist-get palette :focus))
+               (lispm-desktop-platinum--column svg (- right i) (+ 1 i) (- h 2 i) (plist-get palette :focus))))
+           (cond ((stringp icon) (lispm-desktop-platinum--embed-icon svg icon 2 3 16))
+                 (icon (lispm-desktop-platinum--embed-svg svg icon 2 3 16 16)))
            (when menu
              (lispm-desktop-platinum--draw-map
               svg 21 8 '("#" "##" "###" "####" "####" "###" "##" "#")
-              `((?# . ,outline))))))))
+              `((?# . ,ink))))))))
     svg))
 
 ;;;; Controls as text
@@ -3207,25 +3216,25 @@ drags the window's text along."
 ;;;; Status: Emacs's own time, load, mail and battery
 
 ;; Emacs keeps the time, the load average and the mail flag up to date
-;; (`display-time-mode') and the battery (`display-battery-mode'); the
-;; menu bar shows each as a title of its own at its right end, as Mac OS 9
-;; showed its clock there, each opening a menu:
+;; (`display-time-mode') and the battery (`display-battery-mode').  As
+;; Mac OS 9's menu bar held its clock alone at its right end, the time is
+;; a title of its own there, its menu giving the date, the calendar and
+;; the world clock; the load, the mail and the battery are modules of
+;; the Control Strip (lispm-desktop-strip.el), drawn and filled here:
 ;;
-;;   load      a meter and the load average; the menu picks the 1, 5 or
-;;             15 minute average and opens the process list
-;;   mail      an envelope, flagged when mail has come; the Mail menu
-;;             reads, composes and checks mail
+;;   load      a meter; the menu picks the 1, 5 or 15 minute average and
+;;             opens the process list
+;;   mail      an envelope, flagged when mail has come; the menu reads,
+;;             composes and checks mail
 ;;   battery   a PowerBook's battery filled to its charge; the menu tells
 ;;             the charge, the power source and the time left
-;;   time      the time as `display-time-format' has it; the menu gives
-;;             the date, the calendar and the world clock
 ;;
 ;; Emacs computes everything; `display-time-hook' and
 ;; `battery-update-functions' only note what it found.  Whatever else is
-;; in `global-mode-string', such as LispM's agent count, stays before.
+;; in `global-mode-string', such as LispM's agent count, stays on the menu
+;; bar, before the time.
 
 (defvar battery-status-function)
-(defvar battery-echo-area-format)
 (defvar display-time-string)
 (defvar battery-mode-line-string)
 (defvar display-time-load-average)
@@ -3259,34 +3268,87 @@ Run from `display-time-hook', inside `display-time-update'."
   (setq lispm-desktop-platinum--battery data))
 
 (defun lispm-desktop-platinum-draw-battery (palette percent charging)
-  "Return an SVG of a battery filled to PERCENT in PALETTE.
-CHARGING draws a bolt across it; a nearly empty one is filled in red."
-  (let* ((svg (svg-create 24 lispm-desktop-platinum-menu-icon-height))
-         (y (/ (- lispm-desktop-platinum-menu-icon-height 11) 2))
+  "Return an SVG of a battery sixteen pixels square, filled to PERCENT in
+PALETTE, as the Control Strip's battery module shows it.  CHARGING draws
+a bolt across it; a nearly empty one is filled in red."
+  (let* ((svg (svg-create 16 16))
          (ink (plist-get palette :text))
-         (level (round (* 17 (/ (max 0 (min 100 percent)) 100.0)))))
-    (lispm-desktop-platinum--fill svg 0 y 21 11 ink)
-    (lispm-desktop-platinum--fill svg 1 (1+ y) 19 9 (plist-get palette :chrome))
-    (lispm-desktop-platinum--fill svg 21 (+ y 3) 2 5 ink)
-    (lispm-desktop-platinum--fill svg 2 (+ y 2) level 7 (if (< percent 10) "#CE3131" ink))
+         (level (round (* 10 (/ (max 0 (min 100 percent)) 100.0)))))
+    (lispm-desktop-platinum--fill svg 0 4 14 8 ink)
+    (lispm-desktop-platinum--fill svg 1 5 12 6 (plist-get palette :strip))
+    (lispm-desktop-platinum--fill svg 14 6 2 4 ink)
+    (lispm-desktop-platinum--fill svg 2 6 level 4 (if (< percent 10) "#CE3131" ink))
     (when charging
-      (svg-polygon svg `((12 . ,(+ y 1)) (7 . ,(+ y 6)) (10.5 . ,(+ y 6))
-                         (9 . ,(+ y 10)) (14 . ,(+ y 5)) (10.5 . ,(+ y 5)))
-                   :fill (plist-get palette :accent) :stroke (plist-get palette :chrome)
+      (svg-polygon svg '((8 . 3) (4 . 8) (6.5 . 8) (5 . 13) (10 . 7) (7.5 . 7) (9 . 3))
+                   :fill (plist-get palette :accent) :stroke (plist-get palette :strip)
                    :stroke-width 0.75))
     svg))
 
 (defun lispm-desktop-platinum-draw-meter (palette fraction)
-  "Return an SVG of a load meter in PALETTE: three bars, filled to FRACTION."
-  (let* ((svg (svg-create 14 lispm-desktop-platinum-menu-icon-height))
-         (bottom (+ (/ lispm-desktop-platinum-menu-icon-height 2) 6))
-         (ink (plist-get palette :text))
-         (dim (plist-get palette :muted)))
+  "Return an SVG of a load meter sixteen pixels square in PALETTE: three
+bars rising left to right, filled to FRACTION."
+  (let ((svg (svg-create 16 16)))
     (dotimes (i 3)
       (let ((height (* 4 (1+ i))))
-        (lispm-desktop-platinum--fill svg (* i 5) (- bottom height) 4 height
-                                      (if (> fraction (/ i 3.0)) ink dim))))
+        (lispm-desktop-platinum--fill svg (1+ (* i 5)) (- 14 height) 4 height
+                                      (if (> fraction (/ i 3.0))
+                                          (plist-get palette :text)
+                                        (plist-get palette :strip-dark)))))
     svg))
+
+(defun lispm-desktop-platinum-load-fraction ()
+  "Return the load average `display-time-mode' shows, over the processors."
+  (/ (string-to-number lispm-desktop-platinum--load) (float (max 1 (num-processors)))))
+
+(defun lispm-desktop-platinum-load-items ()
+  "Return the load menu: which average to show, and the processes."
+  (let ((averages (ignore-errors (load-average t))))
+    `((:label "Load Average" :enabled nil)
+      ,@(seq-map-indexed
+         (lambda (span index)
+           (list :label (format "%s: %.2f" span (or (nth index averages) 0))
+                 :checked (eql display-time-load-average index)
+                 :action (lambda ()
+                           (setq display-time-load-average index)
+                           (display-time-update))))
+         '("1 minute" "5 minutes" "15 minutes"))
+      separator
+      (:label "Processes" :action proced))))
+
+(defun lispm-desktop-platinum-mail-items ()
+  "Return the Mail menu: read, compose and check mail."
+  `((:label ,(if lispm-desktop-platinum--mail "You have new mail" "No new mail")
+            :enabled nil)
+    separator
+    (:label "Read Mail" :action ,(lambda () (call-interactively read-mail-command)))
+    (:label "Compose Mail…" :action compose-mail)
+    separator
+    (:label "Check for Mail" :action display-time-update)))
+
+(defun lispm-desktop-platinum-battery-percent ()
+  "Return the battery's charge in percent, or nil without a battery shown."
+  (and (bound-and-true-p display-battery-mode) lispm-desktop-platinum--battery
+       (ignore-errors (string-to-number (alist-get ?p lispm-desktop-platinum--battery)))))
+
+(defun lispm-desktop-platinum-battery-charging-p ()
+  "Return non-nil when the battery is on the power adapter."
+  (member (alist-get ?L lispm-desktop-platinum--battery) '("AC" "on-line")))
+
+(defun lispm-desktop-platinum-battery-items ()
+  "Return the battery menu: its charge, its power source and the time left."
+  (let* ((data lispm-desktop-platinum--battery)
+         (line (lambda (format) (battery-format format data))))
+    `((:label ,(funcall line "Charge: %p%%") :enabled nil)
+      (:label ,(concat "Power: "
+                       (pcase (alist-get ?L data)
+                         ((or "AC" "on-line") "Power Adapter")
+                         ((or "Battery" "Battery Power" "off-line") "Battery")
+                         (source (or source "unknown"))))
+              :enabled nil)
+      ,@(unless (member (alist-get ?t data) '(nil "N/A" "0:00"))
+          `((:label ,(funcall line "Time left: %t") :enabled nil)))
+      separator
+      (:label "Battery Status" :action battery))))
 
 (defun lispm-desktop-platinum--status-title (key image label command help)
   "Return the menu bar status item KEY: IMAGE (an SVG or nil) and LABEL.
@@ -3306,56 +3368,6 @@ It runs COMMAND, described by HELP, and is highlighted while its menu is open."
     (lispm-desktop-platinum--with-open-menu key
       (lispm-desktop-popup-menu items (max 0 (- x 12)) (lispm-desktop-platinum--menu-y)))))
 
-(defun lispm-desktop-platinum-load-menu ()
-  "Pop up the load menu: which average to show, and the processes."
-  (interactive)
-  (let ((averages (ignore-errors (load-average t))))
-    (lispm-desktop-platinum--status-menu
-     'lispm-desktop-load
-     `((:label "Load Average" :enabled nil)
-       ,@(seq-map-indexed
-          (lambda (span index)
-            (list :label (format "%s: %.2f" span (or (nth index averages) 0))
-                  :checked (eql display-time-load-average index)
-                  :action (lambda ()
-                            (setq display-time-load-average index)
-                            (display-time-update))))
-          '("1 minute" "5 minutes" "15 minutes"))
-       separator
-       (:label "Processes" :action proced)))))
-
-(defun lispm-desktop-platinum-mail-menu ()
-  "Pop up the Mail menu: read, compose and check mail."
-  (interactive)
-  (lispm-desktop-platinum--status-menu
-   'lispm-desktop-mail
-   `((:label ,(if lispm-desktop-platinum--mail "You have new mail" "No new mail")
-             :enabled nil)
-     separator
-     (:label "Read Mail" :action ,(lambda () (call-interactively read-mail-command)))
-     (:label "Compose Mail…" :action compose-mail)
-     separator
-     (:label "Check for Mail" :action display-time-update))))
-
-(defun lispm-desktop-platinum-battery-menu ()
-  "Pop up the battery menu: its charge, its power source and the time left."
-  (interactive)
-  (let* ((data lispm-desktop-platinum--battery)
-         (line (lambda (format) (battery-format format data))))
-    (lispm-desktop-platinum--status-menu
-     'lispm-desktop-battery
-     `((:label ,(funcall line "Charge: %p%%") :enabled nil)
-       (:label ,(concat "Power: "
-                        (pcase (alist-get ?L data)
-                          ((or "AC" "on-line") "Power Adapter")
-                          ((or "Battery" "Battery Power" "off-line") "Battery")
-                          (source (or source "unknown"))))
-               :enabled nil)
-       ,@(unless (member (alist-get ?t data) '(nil "N/A" "0:00"))
-           `((:label ,(funcall line "Time left: %t") :enabled nil)))
-       separator
-       (:label "Battery Status" :action battery)))))
-
 (defun lispm-desktop-platinum-time-menu ()
   "Pop up the clock's menu: the date, the calendar, the world clock."
   (interactive)
@@ -3369,46 +3381,19 @@ It runs COMMAND, described by HELP, and is highlighted while its menu is open."
      (:label "Time Format…" :action ,(lambda () (customize-variable 'display-time-format))))))
 
 (defun lispm-desktop-platinum-menu-status ()
-  "Return the status titles at the menu bar's right end.
-Whatever `global-mode-string' holds besides the time and the battery,
-then the load, the mail, the battery and the time."
-  (let* ((others (string-trim
-                  (format-mode-line
-                   (seq-remove (lambda (part)
-                                 (memq part '(display-time-string battery-mode-line-string)))
-                               (ensure-list global-mode-string)))))
-         (time-on (bound-and-true-p display-time-mode))
-         (percent (and (bound-and-true-p display-battery-mode) lispm-desktop-platinum--battery
-                       (ignore-errors (string-to-number (alist-get ?p lispm-desktop-platinum--battery))))))
+  "Return the status titles at the menu bar's right end: whatever
+`global-mode-string' holds besides the time and the battery, then the
+time.  The load, the mail and the battery are in the Control Strip."
+  (let ((others (string-trim
+                 (format-mode-line
+                  (seq-remove (lambda (part)
+                                (memq part '(display-time-string battery-mode-line-string)))
+                              (ensure-list global-mode-string))))))
     (delq nil
           (list
            (unless (string-empty-p others)
              (lispm-desktop-platinum--menu-title 'lispm-desktop-status others #'ignore nil))
-           (when (and time-on (not (string-empty-p lispm-desktop-platinum--load)))
-             (lispm-desktop-platinum--status-title
-              'lispm-desktop-load
-              (lispm-desktop-platinum--image
-               (list 'meter (min 3 (floor (* 3 (/ (string-to-number lispm-desktop-platinum--load)
-                                                 (max 1 (num-processors)))))))
-               (lambda ()
-                 (lispm-desktop-platinum-draw-meter lispm-desktop-platinum--palette
-                                                    (/ (string-to-number lispm-desktop-platinum--load)
-                                                       (float (max 1 (num-processors)))))))
-              lispm-desktop-platinum--load #'lispm-desktop-platinum-load-menu "Load average"))
-           (when time-on
-             (lispm-desktop-platinum--status-title 'lispm-desktop-mail (if lispm-desktop-platinum--mail "mail-new" "mail")
-                                                   nil #'lispm-desktop-platinum-mail-menu
-                                                   (if lispm-desktop-platinum--mail "You have new mail" "Mail")))
-           (when percent
-             (let ((charging (member (alist-get ?L lispm-desktop-platinum--battery) '("AC" "on-line"))))
-               (lispm-desktop-platinum--status-title
-                'lispm-desktop-battery
-                (lispm-desktop-platinum--image (list 'battery (round percent) charging)
-                                               (lambda () (lispm-desktop-platinum-draw-battery lispm-desktop-platinum--palette
-                                                                                               percent charging)))
-                (format "%d%%" (round percent)) #'lispm-desktop-platinum-battery-menu
-                (battery-format battery-echo-area-format lispm-desktop-platinum--battery))))
-           (when time-on
+           (when (bound-and-true-p display-time-mode)
              (lispm-desktop-platinum--status-title
               'lispm-desktop-time nil (format-time-string (or display-time-format "%-I:%M %p"))
               #'lispm-desktop-platinum-time-menu (format-time-string "%A, %B %-e, %Y")))))))

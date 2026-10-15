@@ -1507,7 +1507,30 @@ variation colour, disabled items greyed."
     (should-not (lispm-desktop-popup--index-at items 25))
     ;; Moving down from One skips the separator and the disabled Two.
     (should (= (lispm-desktop-popup--step items 0 1) 3))
-    (should (= (lispm-desktop-popup--step items 3 1) 4))))
+    (should (= (lispm-desktop-popup--step items 3 1) 4))
+    ;; A dark theme greys disabled items in its own dim colour.
+    (let* ((dracula (lispm-desktop-test--dracula-palette))
+           (dark (lispm-desktop-popup-draw-menu dracula items 200 nil)))
+      (should (equal (dom-attr (seq-find (lambda (text) (string-search "Two" (dom-text text)))
+                                         (dom-by-tag dark 'text))
+                               'fill)
+                     (plist-get dracula :dim))))))
+
+(ert-deftest lispm-desktop-test-small-menu ()
+  "A small menu, as the Control Strip's, has items 13 pixels tall in the
+small system font, labels 15 pixels in."
+  (let* ((palette (lispm-desktop-test--platinum-palette))
+         (lispm-desktop-platinum--palette palette)
+         (lispm-desktop-popup-small t)
+         (items '((:label "One" :action ignore) (:label "Two" :action ignore)))
+         (svg (lispm-desktop-popup-draw-menu palette items 100 1)))
+    (should (equal (lispm-desktop-test--size svg) '(100 . 26)))
+    (should (equal (lispm-desktop-test--pixel svg 50 20) "#333399"))
+    (should (= (lispm-desktop-popup--menu-width items)
+               (+ 15 (lispm-desktop-platinum--content-width "Two" 'lispm-desktop-platinum-small) 11)))
+    (should (seq-every-p (lambda (text) (= (dom-attr text 'x) 15))
+                         (seq-remove (lambda (text) (string-search "&#" (dom-text text)))
+                                     (dom-by-tag svg 'text))))))
 
 (ert-deftest lispm-desktop-test-menu-keys ()
   "Key equivalents are keyboard sequences only."
@@ -1676,13 +1699,24 @@ pops up its buffers on a Meta click."
         (should (and shaded (not zoomed)))))))
 
 (ert-deftest lispm-desktop-test-status-drawings ()
-  "The battery and the load meter draw at any level."
-  (let ((palette (lispm-desktop-platinum--derive-palette "#FFFFFF" "#000000" "#777777" "#6363CE")))
+  "The battery and the load meter, the Control Strip's module icons, are
+sixteen pixels square and draw at any level."
+  (let ((palette (lispm-desktop-test--platinum-palette)))
     (dolist (percent '(0 5 50 100))
-      (should (eq (dom-tag (lispm-desktop-platinum-draw-battery palette percent t)) 'svg))
+      (should (equal (lispm-desktop-test--size (lispm-desktop-platinum-draw-battery palette percent t))
+                     '(16 . 16)))
       (should (eq (dom-tag (lispm-desktop-platinum-draw-battery palette percent nil)) 'svg)))
+    (should (equal (lispm-desktop-test--pixel (lispm-desktop-platinum-draw-battery palette 100 nil) 5 7)
+                   "#000000"))
+    (should (equal (lispm-desktop-test--pixel (lispm-desktop-platinum-draw-battery palette 0 nil) 5 7)
+                   "#C0C0C0"))
     (dolist (fraction '(0.0 0.5 1.5))
-      (should (eq (dom-tag (lispm-desktop-platinum-draw-meter palette fraction)) 'svg)))))
+      (should (equal (lispm-desktop-test--size (lispm-desktop-platinum-draw-meter palette fraction))
+                     '(16 . 16))))
+    (cl-flet ((bar (fraction x) (lispm-desktop-test--pixel (lispm-desktop-platinum-draw-meter palette fraction)
+                                                           x 13)))
+      (should (equal (bar 0.5 2) "#000000"))
+      (should (equal (bar 0.5 12) "#808080")))))
 
 (require 'time)
 (defvar load)
@@ -1726,7 +1760,9 @@ in the variation colour; the bar runs from edge to edge."
                                              others)))))))))
 
 (ert-deftest lispm-desktop-test-menu-status ()
-  "The menu bar keeps other status text, and adds the time and mail when on."
+  "The menu bar keeps other status text and the time, as Mac OS 9's held
+its clock alone; the load, the mail and the battery are in the Control
+Strip."
   (let ((labels nil)
         (lispm-desktop-platinum--palette (lispm-desktop-platinum--derive-palette "#FFFFFF" "#000000"
                                                                                  "#777777" "#6363CE"))
@@ -1747,7 +1783,7 @@ in the variation colour; the bar runs from edge to edge."
     (progn
       (should (string-search "λ 2" (nth 0 labels)))
       (should-not (seq-some (lambda (label) (string-search "9:41AM" label)) labels))
-      (should (= (length labels) 3))))
+      (should (= (length labels) 2))))
   (let ((global-mode-string nil) (display-time-mode nil))
     (should-not (lispm-desktop-platinum-menu-status))))
 
@@ -2800,6 +2836,157 @@ mode, C-c C-c sends C-c, and Escape reaches the program."
     (should (equal (lispm-desktop-term--cursor-key "A") "\e[A")))
   (should (eq (lookup-key lispm-desktop-term-keys-mode-map (kbd "C-c C-c")) #'lispm-desktop-term-send-key))
   (should (eq (lookup-key lispm-desktop-term-keys-mode-map (kbd "M-x")) #'execute-extended-command)))
+
+;;;; Control Strip
+
+(defmacro lispm-desktop-test--with-strip (&rest body)
+  "Run BODY with the Control Strip's state fresh, every module shown, and
+nothing saved or drawn."
+  (declare (indent 0))
+  `(let ((lispm-desktop-strip-modules '(appearance desktop keyboard internet battery load mail))
+         (lispm-desktop-strip-collapsed nil)
+         (lispm-desktop-strip-width nil)
+         (lispm-desktop-strip--first 0)
+         (lispm-desktop-strip--pressed nil)
+         (lispm-desktop-strip--focus nil)
+         (saved nil))
+     (ignore saved)
+     (cl-letf (((symbol-function 'lispm-desktop-settings--browser-p) #'always)
+               ((symbol-function 'lispm-desktop-platinum-battery-percent) (lambda () 80))
+               ((symbol-function 'lispm-desktop-strip--time-p) #'always)
+               ((symbol-function 'lispm-desktop-strip--render) #'ignore)
+               ((symbol-function 'lispm-desktop-settings--save)
+                (lambda (variable value) (push (cons variable value) saved) (set variable value))))
+       ,@body)))
+
+(ert-deftest lispm-desktop-test-strip-parts ()
+  "The strip runs collapse box, left arrow, modules, right arrow and tab; the
+tab drags how many modules show, the arrows scroll to the rest; collapsed,
+the tab alone is left."
+  (lispm-desktop-test--with-strip
+    (should (equal (lispm-desktop-strip--parts)
+                   '(collapse left (module . appearance) (module . desktop) (module . keyboard)
+                              (module . internet) (module . battery) (module . load) (module . mail)
+                              right tab)))
+    (should (= (lispm-desktop-strip--width) (+ 15 14 (* 7 28) 14 17)))
+    (should (eq (lispm-desktop-strip--state 'left) 'disabled))
+    (should (eq (lispm-desktop-strip--state 'right) 'disabled))
+    (setq lispm-desktop-strip-width 3)
+    (lispm-desktop-strip-scroll 1)
+    (should (equal (seq-filter #'consp (lispm-desktop-strip--parts))
+                   '((module . desktop) (module . keyboard) (module . internet))))
+    (should-not (lispm-desktop-strip--state 'left))
+    (should-not (lispm-desktop-strip--state 'right))
+    (should (= (lispm-desktop-strip--x '(module . keyboard)) (+ 15 14 28)))
+    (lispm-desktop-strip-scroll 10)
+    (should (equal (car (seq-filter #'consp (lispm-desktop-strip--parts))) '(module . battery)))
+    (should (eq (lispm-desktop-strip--state 'right) 'disabled))
+    (lispm-desktop-strip-collapse)
+    (should (equal saved '((lispm-desktop-strip-collapsed . t))))
+    (should (equal (lispm-desktop-strip--parts) '(tab)))
+    (lispm-desktop-strip-collapse t)
+    (should-not lispm-desktop-strip-collapsed)))
+
+(ert-deftest lispm-desktop-test-strip-modules ()
+  "Each module has a sixteen-pixel icon, its help, and a menu ending in its
+panel where it has one; modules that cannot work are left out."
+  (require 'battery)
+  (lispm-desktop-test--with-strip
+    (let ((lispm-desktop-platinum--palette (lispm-desktop-test--platinum-palette))
+          (lispm-desktop-theme 'platinum)
+          (lispm-desktop-platinum--battery '((?p . "80") (?L . "AC") (?t . "N/A")))
+          (lispm-desktop-platinum--load "1.25")
+          (battery-echo-area-format "Power %L, battery %p%%"))
+      (dolist (key (lispm-desktop-strip--modules))
+        (let ((icon (lispm-desktop-strip--icon key)))
+          (should (if (stringp icon) (file-readable-p icon) (equal (lispm-desktop-test--size icon) '(16 . 16)))))
+        (should (stringp (lispm-desktop-strip--help (cons 'module key))))
+        (should (lispm-desktop-strip--items key)))
+      (pcase-dolist (`(,key . ,panel) '((appearance . "Open Appearance…") (desktop . "Open Desktop…")
+                                        (keyboard . "Open Keyboard…") (internet . "Open Internet…")))
+        (should (equal (plist-get (car (last (lispm-desktop-strip--items key))) :label) panel)))
+      (should (plist-get (seq-find (lambda (item) (equal (plist-get item :label) "Platinum"))
+                                   (lispm-desktop-strip--items 'appearance))
+                         :checked)))
+    (cl-letf (((symbol-function 'lispm-desktop-settings--browser-p) #'ignore)
+              ((symbol-function 'lispm-desktop-platinum-battery-percent) #'ignore))
+      (should (equal (lispm-desktop-strip--modules) '(appearance desktop keyboard load mail))))))
+
+(ert-deftest lispm-desktop-test-strip-segment-focus ()
+  "A module the keyboard is on is ringed in the focus colour; a drawn icon
+is embedded as it is; the tab's end and the triangles stand out on any
+theme."
+  (let* ((palette (lispm-desktop-test--platinum-palette))
+         (icon (lispm-desktop-platinum-draw-meter palette 1.0))
+         (module (lispm-desktop-platinum-draw-strip-segment palette 'module :icon icon :focused t)))
+    (should (equal (lispm-desktop-test--pixel module 0 10) "#6666CC"))
+    (should (equal (lispm-desktop-test--pixel module 1 10) "#6666CC"))
+    (should (equal (lispm-desktop-test--pixel module 13 1) "#6666CC"))
+    (should (equal (lispm-desktop-test--pixel module 27 10) "#000000"))
+    (should (= (length (dom-by-tag module 'svg)) 2)))
+  ;; The tab's pointed end is set off against what the strip lies on.
+  (let ((tab (lispm-desktop-platinum-draw-strip-segment (lispm-desktop-test--platinum-palette) 'tab
+                                                        :behind "#6666AA")))
+    (should (equal (lispm-desktop-test--pixel tab 16 0) "#6666AA"))
+    (should (equal (lispm-desktop-test--pixel tab 0 10) "#000000")))
+  ;; Its triangle stands out on a dark theme's greys too.
+  (let ((dracula (lispm-desktop-test--dracula-palette)))
+    (should (equal (lispm-desktop-test--pixel
+                    (lispm-desktop-platinum-draw-strip-segment dracula 'module :menu t) 21 11)
+                   (upcase (plist-get dracula :text))))))
+
+(ert-deftest lispm-desktop-test-strip-menu-place ()
+  "A module's menu pops up small, its outline on the module's left edge and
+its bottom two pixels into the strip, as Mac OS 9's did."
+  (lispm-desktop-test--with-strip
+    (let ((items '((:label "One" :action ignore) separator (:label "Two" :action ignore))))
+      (let ((lispm-desktop-popup-small t))
+        (should (= (cdr (lispm-desktop-popup--rows items)) (+ 13 6 13))))
+      (should (= (cdr (lispm-desktop-popup--rows items)) (+ 16 6 16)))
+      (cl-letf (((symbol-function 'frame-position) (lambda (&rest _) '(0 . 500))))
+        (should (equal (lispm-desktop-strip--menu-place 'desktop items)
+                       (cons (+ 15 14 28 -1) (- 501 32))))))))
+
+(ert-deftest lispm-desktop-test-strip-keyboard ()
+  "C-c b goes to the strip: C-f and C-b move between the modules, Return or
+Space opens the ringed one's menu, and C-g leaves; a collapsed strip shows
+whole meanwhile."
+  (lispm-desktop-test--with-strip
+    (let ((opened nil)
+          (rings nil)
+          (lispm-desktop-strip-collapsed t))
+      (cl-letf (((symbol-function 'lispm-desktop-strip--live-p) #'always)
+                ((symbol-function 'lispm-desktop-strip--render)
+                 (lambda () (when lispm-desktop-strip--focus
+                              (push (cons lispm-desktop-strip--focus lispm-desktop-strip-collapsed) rings))))
+                ((symbol-function 'lispm-desktop-strip--open)
+                 (lambda (key) (push key opened) '(:label "Chosen"))))
+        (let ((unread-command-events (list ?\C-f ?\C-f ?\C-b ?\C-f ?
+)))
+          (lispm-desktop-strip-select))
+        (should (equal opened '(keyboard)))
+        (should (equal (mapcar #'car (reverse rings)) '(appearance desktop keyboard desktop keyboard keyboard)))
+        (should-not (cdr (car rings)))
+        (should lispm-desktop-strip-collapsed)
+        (should-not lispm-desktop-strip--focus)
+        (setq opened nil)
+        (let ((unread-command-events (list ?\C-b ?\C-g)))
+          (lispm-desktop-strip-select))
+        (should-not opened)))))
+
+(ert-deftest lispm-desktop-test-strip-walks-menus ()
+  "In a module's menu opened from the keyboard, Right and Left go on to the
+menu of the module beside, as along the menu bar."
+  (lispm-desktop-test--with-strip
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'lispm-desktop-strip--open)
+                 (lambda (key)
+                   (push key opened)
+                   (when (< (length opened) 3)
+                     (throw 'lispm-desktop-popup-menu-bar-step (if (eq key 'appearance) -1 1)))
+                   nil)))
+        (should (equal (lispm-desktop-strip--walk (lispm-desktop-strip--modules) 0) '(nil . 0)))
+        (should (equal opened '(appearance mail appearance)))))))
 
 (provide 'lispm-desktop-test)
 ;;; lispm-desktop-test.el ends here

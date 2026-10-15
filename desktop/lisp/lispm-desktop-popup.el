@@ -221,10 +221,10 @@ The click that opened the popup is not echoed as an unfinished key."
 
 (defun lispm-desktop-popup-apply-faces (&rest _)
   "Fit the menu item faces to the active theme: disabled items are dimmed
-in Platinum's grey for them."
+in the theme's dim colour, Platinum's grey for them."
   (when lispm-desktop-platinum--palette
     (set-face-attribute 'lispm-desktop-popup-item-disabled nil
-                        :foreground (lispm-desktop-platinum-grey lispm-desktop-platinum--palette #x77))))
+                        :foreground (lispm-desktop-platinum--color :dim))))
 
 (defconst lispm-desktop-popup-item-height 16
   "Height in pixels of a menu item, Mac OS 9's in the system font.")
@@ -238,6 +238,35 @@ outline, as Mac OS 9 left room for a check mark.")
 
 (defconst lispm-desktop-popup-key-margin 16
   "Pixels from the end of a menu's key equivalents to its inside right edge.")
+
+(defvar lispm-desktop-popup-small nil
+  "Non-nil while menus pop up small, as the Control Strip's modules popped
+theirs up on Mac OS 9: in the small system font, items 13 pixels tall,
+labels 15 pixels in.  Bind it around `lispm-desktop-popup-menu'.")
+
+(defvar lispm-desktop-popup-parent nil
+  "The frame menus pop up over, or nil for the selected frame.
+The Control Strip binds it to the screen, so its menus open there while
+the window in front keeps the keyboard.")
+
+(defun lispm-desktop-popup--item-height ()
+  "Return the height in pixels of a menu item, see `lispm-desktop-popup-small'."
+  (if lispm-desktop-popup-small 13 lispm-desktop-popup-item-height))
+
+(defun lispm-desktop-popup--label-x ()
+  "Return how far in a menu's labels start, see `lispm-desktop-popup-small'."
+  (if lispm-desktop-popup-small 15 lispm-desktop-popup-label-x))
+
+(defun lispm-desktop-popup--key-margin ()
+  "Return the blank pixels after a menu's longest label or key, see
+`lispm-desktop-popup-small'."
+  (if lispm-desktop-popup-small 11 lispm-desktop-popup-key-margin))
+
+(defun lispm-desktop-popup--face (enabled)
+  "Return the face of a menu item's label, ENABLED or not."
+  (cond (lispm-desktop-popup-small 'lispm-desktop-platinum-small)
+        (enabled 'lispm-desktop-popup-item)
+        (t 'lispm-desktop-popup-item-disabled)))
 
 (defun lispm-desktop-popup--separator-p (item)
   "Return non-nil when menu ITEM is a separator."
@@ -291,7 +320,7 @@ submenu shows the triangle pointing to it."
 
 (defun lispm-desktop-popup--label-width (label)
   "Return the width in pixels of LABEL in a menu item's face."
-  (lispm-desktop-platinum--content-width label 'lispm-desktop-popup-item))
+  (lispm-desktop-platinum--content-width label (lispm-desktop-popup--face t)))
 
 (defun lispm-desktop-popup--menu-width (items)
   "Return the pixel width a menu of ITEMS needs, its edges included."
@@ -303,7 +332,7 @@ submenu shows the triangle pointing to it."
                                  ((lispm-desktop-popup--key item)
                                   (lispm-desktop-popup--label-width (lispm-desktop-popup--key item)))
                                  (t 0))))))
-    (+ lispm-desktop-popup-label-x label (if (> key 0) (+ 24 key) 0) lispm-desktop-popup-key-margin)))
+    (+ (lispm-desktop-popup--label-x) label (if (> key 0) (+ 24 key) 0) (lispm-desktop-popup--key-margin))))
 
 (defun lispm-desktop-popup--rows (items)
   "Return where the rows of a menu of ITEMS start, as (TOPS . HEIGHT).
@@ -313,14 +342,15 @@ TOPS lists each item's top in pixels; HEIGHT is the menu's."
       (push y tops)
       (setq y (+ y (if (lispm-desktop-popup--separator-p item)
                        lispm-desktop-popup-separator-height
-                     lispm-desktop-popup-item-height))))
+                     (lispm-desktop-popup--item-height)))))
     (cons (nreverse tops) y)))
 
 (defun lispm-desktop-popup-draw-menu (palette items width highlight)
   "Return an SVG of a menu WIDTH pixels wide listing ITEMS, in PALETTE.
 It is drawn as Mac OS 9 drew its menus, inside the outline the menu's
 frame draws: lit along its top and left, shaded along its bottom and
-right; items sixteen pixels tall, a check mark before the checked ones,
+right; items sixteen pixels tall, or 13 in a small menu (see
+`lispm-desktop-popup-small'), a check mark before the checked ones,
 their key equivalents flush right and a black triangle on those holding
 a submenu; separators engraved across the whole width; disabled items
 greyed.  HIGHLIGHT is the index of the item under the mouse, drawn in the
@@ -342,13 +372,14 @@ variation colour, light on dark, its edges lit and shaded in it too."
              (progn
                (lispm-desktop-platinum--row svg 0 right (+ top 2) (funcall grey #x88))
                (lispm-desktop-platinum--row svg 0 right (+ top 3) (funcall grey #xFF)))
-           (let* ((h lispm-desktop-popup-item-height)
+           (let* ((h (lispm-desktop-popup--item-height))
                   (lit (eql index highlight))
                   (ink (cond (lit (plist-get palette :highlight-text))
                              ((lispm-desktop-popup--enabled-p item) (plist-get palette :text))
-                             (t (funcall grey #x77))))
-                  (face (if (or lit (lispm-desktop-popup--enabled-p item)) 'lispm-desktop-popup-item
-                          'lispm-desktop-popup-item-disabled))
+                             ;; Platinum's #777777; a dark theme's own
+                             ;; dim colour, which its menus show.
+                             (t (plist-get palette :dim))))
+                  (face (lispm-desktop-popup--face (or lit (lispm-desktop-popup--enabled-p item))))
                   (key (and (not (plist-get item :submenu)) (lispm-desktop-popup--key item))))
              (when lit
                (lispm-desktop-platinum--fill svg 0 top width h (plist-get palette :highlight))
@@ -359,8 +390,8 @@ variation colour, light on dark, its edges lit and shaded in it too."
                (when (= (+ top h) height)
                  (lispm-desktop-platinum--row svg 0 right bottom (plist-get palette :highlight-dark))))
              (when (plist-get item :checked)
-               (lispm-desktop-platinum--draw-content svg "✓" 4 top h ink face))
-             (lispm-desktop-platinum--draw-content svg (plist-get item :label) lispm-desktop-popup-label-x
+               (lispm-desktop-platinum--draw-content svg "✓" (if lispm-desktop-popup-small 3 4) top h ink face))
+             (lispm-desktop-platinum--draw-content svg (plist-get item :label) (lispm-desktop-popup--label-x)
                                                    top h ink face)
              (cond ((plist-get item :submenu)
                     (lispm-desktop-platinum--draw-map
@@ -369,7 +400,7 @@ variation colour, light on dark, its edges lit and shaded in it too."
                      `((?# . ,ink))))
                    (key
                     (lispm-desktop-platinum--draw-content
-                     svg key (- width lispm-desktop-popup-key-margin (lispm-desktop-popup--label-width key))
+                     svg key (- width (lispm-desktop-popup--key-margin) (lispm-desktop-popup--label-width key))
                      top h ink face)))))))
      items)
     svg))
@@ -382,7 +413,7 @@ variation colour, light on dark, its edges lit and shaded in it too."
 (defun lispm-desktop-popup-open-menu (items &optional x y align)
   "Show a menu of ITEMS placed by X, Y and ALIGN, see `lispm-desktop-popup-menu'.
 Return its frame; nothing is read from the user."
-  (let* ((popup (lispm-desktop-popup--frame (selected-frame)))
+  (let* ((popup (lispm-desktop-popup--frame (or lispm-desktop-popup-parent (selected-frame))))
          (width (lispm-desktop-popup--menu-width items)))
     (lispm-desktop-popup--fill popup (propertize " " 'display (lispm-desktop-popup--menu-image items width nil)))
     (lispm-desktop-popup--size popup width (cdr (lispm-desktop-popup--rows items)))
@@ -593,7 +624,9 @@ without entering it."
   "Run the action of menu ITEM, when there is one; return ITEM.
 A menu the action pops up is its own, not a step of a menu bar walk."
   (when-let* ((action (and item (plist-get item :action))))
-    (let ((lispm-desktop-popup-menu-bar-step nil))
+    (let ((lispm-desktop-popup-menu-bar-step nil)
+          (lispm-desktop-popup-small nil)
+          (lispm-desktop-popup-parent nil))
       (if (commandp action) (call-interactively action) (funcall action))))
   item)
 

@@ -45,9 +45,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   Apple, opening the λ menu (new agents, sessions, shells, the browser, Control Panels), then the
   menus of the application in front: the desktop's File, View, Go and Special (Restart, Shut
   Down), the editor's File, Edit, View, Project and Window, the browser's File, View, Go,
-  Bookmarks and Window.  At its right end, Emacs's own load average, mail flag, battery and time, each a
-  title with a menu of its own (the Mail menu reads, composes and checks mail), then the
-  Application menu.
+  Bookmarks and Window.  At its right end, as Mac OS 9 held its clock there alone, Emacs's own
+  time, with a menu of the date, the calendar and the world clock, then the Application menu.
 - *The editor*, an application of its own: a title strip across its top, the editor's title bar
   over a row of tabs choosing the sidebar's view (Files, Agents, Shells), then the sidebar and
   the windows.  Its workspaces, one per project, drop from its Project menu as a panel of
@@ -96,6 +95,14 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   it (fill, fit, center, tile), and arranges its icons; Keyboard Vim or Emacs keys; Internet the
   browser's home page and search address, its history and its bookmarks.  Each choice takes
   effect at once where it can and is kept for the next start.
+- *The Control Strip*, as Mac OS 9's, floating in the desktop's bottom-left corner over the
+  windows: a collapse box, scroll arrows, a module each for Appearance, Desktop, Keyboard and
+  Internet, and Emacs's own battery, load average and mail flag, then a tab.  Pressing a module
+  pops its menu up in the small system font: its panel's quick choices (the theme, the desktop's
+  colour and picture, Vim or Emacs keys, the home page) and the panel itself, or the battery's
+  charge, the load averages and the processes, reading, composing and checking mail.  The
+  collapse box leaves the tab, the tab brings the strip back, and dragging the tab sets how many
+  modules show; both are kept for the next start.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
   desktop or the λ menu and brought forward from the Application menu.  Its window is laid out
   as Netscape Communicator's was, in the theme's colours: the navigation toolbar (Back,
@@ -307,6 +314,7 @@ Two things to know when both builds run:
 | =C-c o=                | the next application: the desktop, Emacs, the browser, Control Panels |
 | =C-c h=                | hide the desktop in the Dock, its windows out on the screen, or show it again |
 | =C-c m=                | the menu bar from the keyboard: =C-f=, =C-b= to the menu beside, =C-n=, =C-p= or a letter to an item, =RET= chooses |
+| =C-c b=                | the Control Strip from the keyboard: =C-f=, =C-b= to a module, =RET= or =SPC= opens its menu, =C-g= leaves |
 | =C-c a l=              | start a LispM agent in this project (=C-u= to pick a role) |
 | =C-c a c=, =x=, =h=    | start Claude Code, Codex or Hermes in this project         |
 | =C-c a s=              | resume any recorded session                                |
