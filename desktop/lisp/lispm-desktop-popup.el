@@ -97,11 +97,46 @@ It takes no focus, and hooks run for new frames do not see it."
     frame))
 
 (defun lispm-desktop-popup--dispose (frame)
-  "Delete popup FRAME and its buffer."
+  "Delete popup FRAME, its shadow and its buffer."
   (when (frame-live-p frame)
-    (let ((buffer (window-buffer (frame-root-window frame))))
+    (let ((buffer (window-buffer (frame-root-window frame)))
+          (shadow (frame-parameter frame 'lispm-desktop-popup-shadow)))
+      (when (frame-live-p shadow)
+        (delete-frame shadow t))
       (delete-frame frame t)
       (kill-buffer buffer))))
+
+(defun lispm-desktop-popup--shadow (frame kind)
+  "Show the shadow of popup FRAME, a frame of its size a pixel down and right.
+KIND is `menu', whose shadow is a dark grey line along its right and
+bottom, or `alert', whose shadow is black.  The shadow is shown before
+FRAME, so FRAME stands over it."
+  (let* ((parent (frame-parent frame))
+         (color (if (eq kind 'alert)
+                    (lispm-desktop-platinum--color :outline)
+                  (lispm-desktop-platinum-grey lispm-desktop-platinum--palette #x22)))
+         (shadow (let ((after-make-frame-functions nil)
+                       (before-make-frame-hook nil))
+                   (make-frame
+                    `((parent-frame . ,parent)
+                      (minibuffer . nil) (no-accept-focus . t) (no-focus-on-map . t)
+                      (undecorated . t) (unsplittable . t) (no-other-frame . t)
+                      (child-frame-border-width . 0) (internal-border-width . 0)
+                      (left-fringe . 0) (right-fringe . 0)
+                      (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
+                      (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
+                      (cursor-type . nil) (no-special-glyphs . t)
+                      (desktop-dont-save . t) (visibility . nil)
+                      (background-color . ,color)
+                      (width . 2) (height . 1))))))
+    (set-window-buffer (frame-root-window shadow) (get-buffer-create " *lispm-desktop-shadow*"))
+    (with-current-buffer " *lispm-desktop-shadow*"
+      (setq-local mode-line-format nil header-line-format nil tab-line-format nil cursor-type nil))
+    (lispm-desktop-popup--size shadow (frame-pixel-width frame) (frame-pixel-height frame))
+    (pcase-let ((`(,x . ,y) (frame-position frame)))
+      (set-frame-position shadow (1+ x) (1+ y)))
+    (set-frame-parameter frame 'lispm-desktop-popup-shadow shadow)
+    (make-frame-visible shadow)))
 
 (defun lispm-desktop-popup--fill (frame text)
   "Replace popup FRAME's text with TEXT, scrolled to its start."
@@ -123,13 +158,16 @@ It takes no focus, and hooks run for new frames do not see it."
         (frame-resize-pixelwise t))
     (set-frame-size frame width height t)))
 
-(defun lispm-desktop-popup--show (frame x y)
-  "Show popup FRAME with its top left at X, Y of its parent, kept inside it."
+(defun lispm-desktop-popup--show (frame x y &optional shadow)
+  "Show popup FRAME with its top left at X, Y of its parent, kept inside it.
+SHADOW, `menu' or `alert', casts its shadow, see `lispm-desktop-popup--shadow'."
   (let ((parent (frame-parent frame)))
     (set-frame-position frame
                         (max 0 (min x (- (frame-pixel-width parent) (frame-pixel-width frame) 2)))
                         (max 0 (min y (- (frame-pixel-height parent)
                                          (frame-pixel-height frame) 2))))
+    (when shadow
+      (lispm-desktop-popup--shadow frame shadow))
     (make-frame-visible frame)
     (redisplay t)))
 
@@ -177,31 +215,29 @@ The click that opened the popup is not echoed as an unfinished key."
   "Face of the menu item under the mouse."
   :group 'lispm-desktop-platinum)
 
-(defconst lispm-desktop-popup-item-padding 2
-  "Pixels above and below a menu item's label, about as Mac OS 9 spaced them.")
-
 (defface lispm-desktop-popup-item-disabled '((t :inherit lispm-desktop-popup-item))
   "Face of a menu item that cannot be chosen: dimmed, as Mac OS 9 greyed it."
   :group 'lispm-desktop-platinum)
 
 (defun lispm-desktop-popup-apply-faces (&rest _)
-  "Fit the menu item faces to the active theme.
-Items are padded less than menu bar titles; disabled ones are dimmed in
-the theme's muted colour."
+  "Fit the menu item faces to the active theme: disabled items are dimmed
+in Platinum's grey for them."
   (when lispm-desktop-platinum--palette
-    (let ((chrome (lispm-desktop-platinum--color :chrome))
-          (accent (lispm-desktop-platinum--color :accent)))
-      (set-face-attribute 'lispm-desktop-popup-item nil
-                          :box `(:line-width (1 . ,lispm-desktop-popup-item-padding) :color ,chrome))
-      (set-face-attribute 'lispm-desktop-popup-item-highlight nil
-                          :box `(:line-width (1 . ,lispm-desktop-popup-item-padding) :color ,accent))
-      (set-face-attribute 'lispm-desktop-popup-item-disabled nil
-                          :foreground (lispm-desktop-platinum--color :muted)
-                          :box `(:line-width (1 . ,lispm-desktop-popup-item-padding) :color ,chrome)))))
+    (set-face-attribute 'lispm-desktop-popup-item-disabled nil
+                        :foreground (lispm-desktop-platinum-grey lispm-desktop-platinum--palette #x77))))
 
-(defconst lispm-desktop-popup-menu-padding '(22 . 18)
-  "Pixels before a menu item's label (room for a check mark) and after the
-key equivalent.")
+(defconst lispm-desktop-popup-item-height 16
+  "Height in pixels of a menu item, Mac OS 9's in the system font.")
+
+(defconst lispm-desktop-popup-separator-height 6
+  "Height in pixels of a menu's separator.")
+
+(defconst lispm-desktop-popup-label-x 21
+  "Pixels from a menu's inside left edge to its labels: 22 from its
+outline, as Mac OS 9 left room for a check mark.")
+
+(defconst lispm-desktop-popup-key-margin 16
+  "Pixels from the end of a menu's key equivalents to its inside right edge.")
 
 (defun lispm-desktop-popup--separator-p (item)
   "Return non-nil when menu ITEM is a separator."
@@ -253,68 +289,105 @@ submenu shows the triangle pointing to it."
           (when-let* ((keys (seq-find #'lispm-desktop-popup--keyboard-p (where-is-internal action))))
             (key-description keys))))))
 
+(defun lispm-desktop-popup--label-width (label)
+  "Return the width in pixels of LABEL in a menu item's face."
+  (lispm-desktop-platinum--content-width label 'lispm-desktop-popup-item))
+
 (defun lispm-desktop-popup--menu-width (items)
-  "Return the pixel width a menu of ITEMS needs."
+  "Return the pixel width a menu of ITEMS needs, its edges included."
   (let ((label 0) (key 0))
     (dolist (item items)
       (unless (lispm-desktop-popup--separator-p item)
-        (setq label (max label (string-pixel-width
-                                (propertize (plist-get item :label) 'face 'lispm-desktop-popup-item))))
-        (when-let* ((equivalent (lispm-desktop-popup--key item)))
-          (setq key (max key (string-pixel-width
-                              (propertize equivalent 'face 'lispm-desktop-popup-item)))))))
-    (+ (car lispm-desktop-popup-menu-padding) label (if (> key 0) (+ 28 key) 0)
-       (cdr lispm-desktop-popup-menu-padding))))
+        (setq label (max label (lispm-desktop-popup--label-width (plist-get item :label))))
+        (setq key (max key (cond ((plist-get item :submenu) 6)
+                                 ((lispm-desktop-popup--key item)
+                                  (lispm-desktop-popup--label-width (lispm-desktop-popup--key item)))
+                                 (t 0))))))
+    (+ lispm-desktop-popup-label-x label (if (> key 0) (+ 24 key) 0) lispm-desktop-popup-key-margin)))
 
-(defun lispm-desktop-popup-menu-text (items width highlight)
-  "Return the text of a menu WIDTH pixels wide listing ITEMS.
-HIGHLIGHT is the index of the item under the mouse, or nil.  Each item
-is one line: a check mark when checked, its label, and its key
-equivalent flush right; a separator is a thin rule.  Every line ends in
-a newline of its own face, so a separator line is as short as its rule
-both when drawn and when measured."
-  (let ((index -1)
-        (last (1- (length items))))
-    (mapconcat
-     (lambda (item)
-       (cl-incf index)
-       (let ((newline (if (= index last) "" "\n")))
+(defun lispm-desktop-popup--rows (items)
+  "Return where the rows of a menu of ITEMS start, as (TOPS . HEIGHT).
+TOPS lists each item's top in pixels; HEIGHT is the menu's."
+  (let ((y 0) (tops nil))
+    (dolist (item items)
+      (push y tops)
+      (setq y (+ y (if (lispm-desktop-popup--separator-p item)
+                       lispm-desktop-popup-separator-height
+                     lispm-desktop-popup-item-height))))
+    (cons (nreverse tops) y)))
+
+(defun lispm-desktop-popup-draw-menu (palette items width highlight)
+  "Return an SVG of a menu WIDTH pixels wide listing ITEMS, in PALETTE.
+It is drawn as Mac OS 9 drew its menus, inside the outline the menu's
+frame draws: lit along its top and left, shaded along its bottom and
+right; items sixteen pixels tall, a check mark before the checked ones,
+their key equivalents flush right and a black triangle on those holding
+a submenu; separators engraved across the whole width; disabled items
+greyed.  HIGHLIGHT is the index of the item under the mouse, drawn in the
+variation colour, light on dark, its edges lit and shaded in it too."
+  (pcase-let* ((`(,tops . ,height) (lispm-desktop-popup--rows items))
+               (svg (svg-create width height))
+               (grey (lambda (level) (lispm-desktop-platinum-grey palette level)))
+               (right (1- width))
+               (bottom (1- height)))
+    (lispm-desktop-platinum--fill svg 0 0 width height (funcall grey #xDD))
+    (lispm-desktop-platinum--row svg 0 (1- right) 0 (funcall grey #xFF))
+    (lispm-desktop-platinum--column svg 0 0 (1- bottom) (funcall grey #xFF))
+    (lispm-desktop-platinum--column svg right 0 bottom (funcall grey #x99))
+    (lispm-desktop-platinum--row svg 0 right bottom (funcall grey #x99))
+    (seq-do-indexed
+     (lambda (item index)
+       (let ((top (nth index tops)))
          (if (lispm-desktop-popup--separator-p item)
-             (let ((face `(:strike-through ,(lispm-desktop-platinum--color :shade) :height 0.6
-                           :background ,(lispm-desktop-platinum--color :chrome))))
-               (concat (propertize " " 'display `(space :align-to (,width)) 'face face)
-                       (propertize newline 'face face)))
-           (let* ((face (cond ((eql index highlight) 'lispm-desktop-popup-item-highlight)
-                              ((lispm-desktop-popup--enabled-p item) 'lispm-desktop-popup-item)
-                              (t 'lispm-desktop-popup-item-disabled)))
-                  (key (lispm-desktop-popup--key item))
-                  (key-width (if key (string-pixel-width (propertize key 'face face)) 0)))
-             (propertize
-              (concat (propertize " " 'display '(space :width (7)))
-                      (if (plist-get item :checked) "✓" "")
-                      (propertize " " 'display `(space :align-to (,(car lispm-desktop-popup-menu-padding))))
-                      (plist-get item :label)
-                      (propertize " " 'display
-                                  `(space :align-to (,(- width key-width
-                                                         (cdr lispm-desktop-popup-menu-padding)))))
-                      (or key "")
-                      (propertize " " 'display `(space :align-to (,width)))
-                      newline)
-              'face face 'lispm-desktop-popup-index index)))))
-     items "")))
+             (progn
+               (lispm-desktop-platinum--row svg 0 right (+ top 2) (funcall grey #x88))
+               (lispm-desktop-platinum--row svg 0 right (+ top 3) (funcall grey #xFF)))
+           (let* ((h lispm-desktop-popup-item-height)
+                  (lit (eql index highlight))
+                  (ink (cond (lit (plist-get palette :highlight-text))
+                             ((lispm-desktop-popup--enabled-p item) (plist-get palette :text))
+                             (t (funcall grey #x77))))
+                  (face (if (or lit (lispm-desktop-popup--enabled-p item)) 'lispm-desktop-popup-item
+                          'lispm-desktop-popup-item-disabled))
+                  (key (and (not (plist-get item :submenu)) (lispm-desktop-popup--key item))))
+             (when lit
+               (lispm-desktop-platinum--fill svg 0 top width h (plist-get palette :highlight))
+               (lispm-desktop-platinum--column svg 0 top (+ top h -1) (plist-get palette :thumb-dark))
+               (lispm-desktop-platinum--column svg right top (+ top h -1) (plist-get palette :highlight-dark))
+               (when (= top 0)
+                 (lispm-desktop-platinum--row svg 0 (1- right) 0 (plist-get palette :thumb-dark)))
+               (when (= (+ top h) height)
+                 (lispm-desktop-platinum--row svg 0 right bottom (plist-get palette :highlight-dark))))
+             (when (plist-get item :checked)
+               (lispm-desktop-platinum--draw-content svg "✓" 4 top h ink face))
+             (lispm-desktop-platinum--draw-content svg (plist-get item :label) lispm-desktop-popup-label-x
+                                                   top h ink face)
+             (cond ((plist-get item :submenu)
+                    (lispm-desktop-platinum--draw-map
+                     svg (- width 12) (+ top 2)
+                     '("#" "##" "###" "####" "#####" "######" "#####" "####" "###" "##" "#")
+                     `((?# . ,ink))))
+                   (key
+                    (lispm-desktop-platinum--draw-content
+                     svg key (- width lispm-desktop-popup-key-margin (lispm-desktop-popup--label-width key))
+                     top h ink face)))))))
+     items)
+    svg))
+
+(defun lispm-desktop-popup--menu-image (items width highlight)
+  "Return the image of a menu of ITEMS, see `lispm-desktop-popup-draw-menu'."
+  (svg-image (lispm-desktop-popup-draw-menu lispm-desktop-platinum--palette items width highlight)
+             :ascent 100 :scale 1))
 
 (defun lispm-desktop-popup-open-menu (items &optional x y align)
   "Show a menu of ITEMS placed by X, Y and ALIGN, see `lispm-desktop-popup-menu'.
 Return its frame; nothing is read from the user."
   (let* ((popup (lispm-desktop-popup--frame (selected-frame)))
-         (window (frame-root-window popup))
          (width (lispm-desktop-popup--menu-width items)))
-    (lispm-desktop-popup--fill popup (lispm-desktop-popup-menu-text items width nil))
-    ;; Measured once the frame is as wide as the menu, so no item wraps.
-    (lispm-desktop-popup--size popup width 400)
-    (lispm-desktop-popup--size popup width (cdr (buffer-text-pixel-size (window-buffer window) window)))
+    (lispm-desktop-popup--fill popup (propertize " " 'display (lispm-desktop-popup--menu-image items width nil)))
+    (lispm-desktop-popup--size popup width (cdr (lispm-desktop-popup--rows items)))
     (pcase-let ((`(,mx . ,my) (or (and x y (cons x y)) (cdr (mouse-pixel-position)))))
-      (lispm-desktop-popup--show popup (if (eq align 'right) (- mx width) mx) my))
+      (lispm-desktop-popup--show popup (if (eq align 'right) (- mx width) mx) my 'menu))
     popup))
 
 (defun lispm-desktop-popup--submenu (item)
@@ -345,28 +418,30 @@ A submenu given as a function is asked for its items only now."
 (defun lispm-desktop-popup--draw-level (level)
   "Redraw menu LEVEL with its item under the mouse highlighted."
   (lispm-desktop-popup--fill (plist-get level :frame)
-                             (lispm-desktop-popup-menu-text (plist-get level :items) (plist-get level :width)
-                                                            (plist-get level :highlight))))
+                             (propertize " " 'display
+                                         (lispm-desktop-popup--menu-image (plist-get level :items)
+                                                                          (plist-get level :width)
+                                                                          (plist-get level :highlight)))))
 
 (defun lispm-desktop-popup--row-y (level index)
   "Return how far down menu LEVEL's frame its item INDEX starts, in pixels."
-  (let ((window (frame-root-window (plist-get level :frame))))
-    (with-current-buffer (window-buffer window)
-      (save-excursion
-        (goto-char (point-min))
-        (forward-line index)
-        (or (cdr (posn-x-y (posn-at-point (point) window))) 0)))))
+  (nth index (car (lispm-desktop-popup--rows (plist-get level :items)))))
+
+(defun lispm-desktop-popup--index-at (items y)
+  "Return the index of the enabled item of a menu of ITEMS Y pixels down, or nil."
+  (let ((index (seq-position (car (lispm-desktop-popup--rows items)) y
+                             (lambda (top y) (> top y)))))
+    (setq index (1- (or index (length items))))
+    (when (and (< -1 index (length items)) (< y (cdr (lispm-desktop-popup--rows items)))
+               (lispm-desktop-popup--enabled-p (nth index items)))
+      index)))
 
 (defun lispm-desktop-popup--level-index (event level)
   "Return the index of the enabled item of LEVEL under EVENT, or nil."
   (when-let* ((frame (plist-get level :frame))
               (position (lispm-desktop-popup--over event frame))
-              (point (posn-point position)))
-    (let ((index (with-current-buffer (window-buffer (posn-window position))
-                   (1- (line-number-at-pos point))))
-          (items (plist-get level :items)))
-      (when (and (< -1 index (length items)) (lispm-desktop-popup--enabled-p (nth index items)))
-        index))))
+              (xy (posn-x-y position)))
+    (lispm-desktop-popup--index-at (plist-get level :items) (cdr xy))))
 
 (defvar lispm-desktop-popup-menu-bar-step nil
   "Non-nil while the menu bar is walked from the keyboard.
@@ -772,101 +847,149 @@ command of the place clicked."
 
 ;;;; Alerts
 
-(defconst lispm-desktop-popup-alert-width 420
-  "Width in pixels of an alert.")
+(defconst lispm-desktop-popup-alert-width 364
+  "Width in pixels of an alert inside its outline, Mac OS 9's.")
 
-(defconst lispm-desktop-popup-button-pad 5
-  "Pixels left clear about an alert's push button: room for the default
-ring, three pixels, and the focus ring outside it, two more.  Every
-button takes as much, so none moves as the focus does.")
+(defconst lispm-desktop-popup-alert-text-x 79
+  "Pixels from an alert's inside left edge to its message: 80 from its outline.")
 
 (defconst lispm-desktop-popup-button-gap 10
   "Pixels between neighbouring buttons of an alert, ring to outline.")
 
-(defun lispm-desktop-popup--button (label value role pressed focused)
-  "Return the push button of an alert reading LABEL, answering VALUE.
-ROLE `default' rings it; PRESSED and FOCUSED are the values of the
-buttons held down and under the keyboard.  The value is (STRING . WIDTH):
-the button as a string displaying it, and its width."
-  (let* ((width (lispm-desktop-platinum-push-button-width label))
-         (pad lispm-desktop-popup-button-pad))
-    (cons (propertize " " 'display
-                      (svg-image (lispm-desktop-platinum-draw-push-button
-                                  lispm-desktop-platinum--palette label width
-                                  :state (and (equal pressed value) 'pressed)
-                                  :default (eq role 'default)
-                                  :focused (and focused (equal focused value))
-                                  :pad pad)
-                                 :ascent 'center :scale 1)
-                      'lispm-desktop-popup-button value)
-          (+ width (* 2 pad)))))
+(defun lispm-desktop-popup--wrap (text width face)
+  "Return TEXT broken into lines no wider than WIDTH pixels in FACE.
+Lines break between words; a word wider than WIDTH stands alone."
+  (let ((lines nil) (line nil))
+    (dolist (word (split-string text "[ \t\n]+" t))
+      (let ((longer (if line (concat line " " word) word)))
+        (if (or (null line)
+                (<= (lispm-desktop-platinum--content-width longer face) width))
+            (setq line longer)
+          (push line lines)
+          (setq line word))))
+    (nreverse (if line (cons line lines) lines))))
 
-(defun lispm-desktop-popup-alert-text (icon message detail buttons pressed &optional focused)
-  "Return the text of an alert: ICON, MESSAGE, DETAIL and its BUTTONS.
-BUTTONS is a list of (LABEL VALUE ROLE), ROLE `default' or `cancel' or
-nil, laid left to right ending at the alert's right; PRESSED is the
-VALUE of the one held down, FOCUSED that of the one the keyboard is on.
-Neighbours stand `lispm-desktop-popup-button-gap' apart, the clear room
-each image leaves about its button and its default ring counted in."
-  (let* ((pad lispm-desktop-popup-button-pad)
-         (clear (lambda (role) (- pad (if (eq role 'default) 3 0))))
-         (images (let ((previous nil))
-                   (mapcar (pcase-lambda (`(,label ,value ,role))
-                             (let ((button (lispm-desktop-popup--button label value role pressed focused))
-                                   (gap (and previous
-                                             (max 0 (- lispm-desktop-popup-button-gap
-                                                       (funcall clear (car previous))
-                                                       (funcall clear role))))))
-                               (setq previous (list role))
-                               (cons (concat (when gap
-                                               (propertize " " 'display `(space :width (,gap))))
-                                             (car button))
-                                     (+ (cdr button) (or gap 0)))))
-                           buttons)))
-         (row (apply #'+ (mapcar #'cdr images))))
-    (concat (propertize " " 'display '(space :height (10))) "\n"
-            ;; The icon stands in the left margin, inset from the frame by
-            ;; its own margin.
-            (propertize " " 'display
-                        `((margin left-margin)
-                          ,(create-image (expand-file-name (format "icons/os9/%s.svg" icon)
-                                                           lispm-desktop-directory)
-                                         nil nil :ascent 80 :scale 1 :margin '(16 . 0))))
-            (propertize message 'face '(:inherit lispm-desktop-platinum-title :weight bold))
-            "\n"
-            (when detail
-              (concat (propertize " " 'display '(space :height (6))) "\n"
-                      (propertize detail 'face 'lispm-desktop-platinum-list) "\n"))
-            (propertize " " 'display '(space :height (16))) "\n"
-            (propertize " " 'display `(space :align-to (- right (,(+ row 2)))))
-            (mapconcat #'car images)
-            "\n"
-            (propertize " " 'display '(space :height (12))))))
+(defun lispm-desktop-popup--alert-layout (message detail buttons)
+  "Return where an alert of MESSAGE, DETAIL and BUTTONS draws its parts.
+The value is a plist: :height of the alert inside its outline,
+:message and :detail as lists of lines, and :buttons as (LABEL VALUE
+ROLE X Y WIDTH).  Laid out as Mac OS 9 laid out its alerts: the caution,
+stop or note icon at the top left, the message to its right in the
+system font, the detail under it; the default button at the bottom
+right, Cancel to its left, and a button such as Don't Save, which comes
+before Cancel, standing apart at the left, under the message."
+  (let* ((w lispm-desktop-popup-alert-width)
+         (text-width (- w lispm-desktop-popup-alert-text-x 20))
+         (lines (lispm-desktop-popup--wrap message text-width 'lispm-desktop-platinum-title))
+         (details (and detail (lispm-desktop-popup--wrap detail text-width 'lispm-desktop-platinum-list)))
+         (text-bottom (+ 15 (* 16 (length lines)) (if details (+ 6 (* 16 (length details))) 0)))
+         (top (+ (max text-bottom 47) 29))
+         (cancel (seq-position buttons 'cancel (lambda (button role) (eq (nth 2 button) role))))
+         (apart (lambda (index) (and cancel (< index cancel) (null (nth 2 (nth index buttons))))))
+         (placed nil))
+    ;; The buttons at the right, from the right: the default's ring three
+    ;; pixels about it and twelve from the edge.
+    (let ((right (- w 13)) (previous nil))
+      (dolist (index (number-sequence (1- (length buttons)) 0 -1))
+        (unless (funcall apart index)
+          (pcase-let* ((`(,label ,value ,role) (nth index buttons))
+                       (width (lispm-desktop-platinum-push-button-width label))
+                       (ring (if (eq role 'default) 3 0)))
+            (when previous
+              (setq right (- right lispm-desktop-popup-button-gap 1)))
+            (push (list label value role (- right ring width -1) top width) placed)
+            (setq right (- right ring width -1 ring) previous t)))))
+    ;; Those standing apart, from the message's left.
+    (let ((left (- lispm-desktop-popup-alert-text-x 4)))
+      (seq-do-indexed
+       (lambda (button index)
+         (when (funcall apart index)
+           (pcase-let* ((`(,label ,value ,role) button)
+                        (width (lispm-desktop-platinum-push-button-width label)))
+             (push (list label value role left top width) placed)
+             (setq left (+ left width lispm-desktop-popup-button-gap)))))
+       buttons))
+    (list :height (+ top lispm-desktop-platinum-button-height 15)
+          :message lines :detail details
+          :buttons (seq-sort-by (lambda (button) (seq-position buttons (nth 1 button)
+                                                               (lambda (b value) (equal (nth 1 b) value))))
+                                #'< placed))))
+
+(defun lispm-desktop-popup-draw-alert (palette icon message detail buttons pressed focused)
+  "Return an SVG of an alert of ICON, MESSAGE, DETAIL and BUTTONS, in PALETTE.
+It is drawn as Mac OS 9 drew its alerts, inside the outline the alert's
+frame draws: a light red ring lit along the top and left and darker along
+the bottom and right, then a white line and a grey one, round a platinum
+body; the parts placed by `lispm-desktop-popup--alert-layout'.  PRESSED
+is the VALUE of the button held down, FOCUSED that of the one the
+keyboard is on."
+  (let* ((layout (lispm-desktop-popup--alert-layout message detail buttons))
+         (w lispm-desktop-popup-alert-width)
+         (h (plist-get layout :height))
+         (svg (svg-create w h))
+         (grey (lambda (level) (lispm-desktop-platinum-grey palette level)))
+         (y 15))
+    (lispm-desktop-platinum--fill svg 0 0 w h (plist-get palette :alert-dark))
+    (lispm-desktop-platinum--fill svg 0 0 (1- w) (1- h) (plist-get palette :alert))
+    (lispm-desktop-platinum--fill svg 1 1 (- w 2) (- h 2) (funcall grey #x99))
+    (lispm-desktop-platinum--fill svg 1 1 (- w 3) (- h 3) (funcall grey #xFF))
+    (lispm-desktop-platinum--fill svg 2 2 (- w 4) (- h 4) (funcall grey #xDD))
+    (lispm-desktop-platinum--embed-icon svg (expand-file-name (format "icons/os9/%s.svg" icon)
+                                                              lispm-desktop-directory)
+                                        25 15 32)
+    (dolist (line (plist-get layout :message))
+      (lispm-desktop-platinum--draw-content svg line lispm-desktop-popup-alert-text-x y 16
+                                            (plist-get palette :text) 'lispm-desktop-platinum-title)
+      (setq y (+ y 16)))
+    (when (plist-get layout :detail)
+      (setq y (+ y 6))
+      (dolist (line (plist-get layout :detail))
+        (lispm-desktop-platinum--draw-content svg line lispm-desktop-popup-alert-text-x y 16
+                                              (plist-get palette :text) 'lispm-desktop-platinum-list)
+        (setq y (+ y 16))))
+    (pcase-dolist (`(,label ,value ,role ,x ,top ,width) (plist-get layout :buttons))
+      (lispm-desktop-platinum--draw-push-button svg x top palette label width
+                                                :state (and (equal pressed value) 'pressed)
+                                                :default (eq role 'default)
+                                                :focused (and focused (equal focused value))))
+    svg))
+
+(defun lispm-desktop-popup--draw-alert (frame icon message detail buttons pressed focused)
+  "Show the alert of ICON, MESSAGE, DETAIL and BUTTONS in popup FRAME.
+PRESSED and FOCUSED are as `lispm-desktop-popup-draw-alert' takes them.
+The buttons' places are kept in FRAME's `lispm-desktop-popup-buttons'."
+  (lispm-desktop-popup--fill
+   frame (propertize " " 'display
+                     (svg-image (lispm-desktop-popup-draw-alert lispm-desktop-platinum--palette icon message
+                                                                detail buttons pressed focused)
+                                :ascent 100 :scale 1)))
+  (set-frame-parameter frame 'lispm-desktop-popup-buttons
+                       (plist-get (lispm-desktop-popup--alert-layout message detail buttons) :buttons)))
 
 (defun lispm-desktop-popup--button-at (event frame)
   "Return the value of the alert button under EVENT in FRAME, or nil."
   (when-let* ((position (lispm-desktop-popup--over event frame))
-              (point (posn-point position)))
-    (with-current-buffer (window-buffer (posn-window position))
-      (get-text-property point 'lispm-desktop-popup-button))))
+              (xy (posn-x-y position)))
+    (pcase-let ((`(,x . ,y) xy))
+      (seq-some (pcase-lambda (`(,_ ,value ,_ ,left ,top ,width))
+                  (and (<= left x (+ left width -1))
+                       (<= top y (+ top lispm-desktop-platinum-button-height -1))
+                       value))
+                (frame-parameter frame 'lispm-desktop-popup-buttons)))))
 
 (defun lispm-desktop-popup-open-alert (icon message buttons &optional detail)
   "Show an alert of ICON, MESSAGE, BUTTONS and DETAIL.
 See `lispm-desktop-popup-alert'.  It sits over the upper middle of the
-selected frame, as Mac OS 9's alerts did.  Return its frame; nothing is
-read from the user."
+selected frame, as Mac OS 9's alerts did, outlined and casting a black
+shadow.  Return its frame; nothing is read from the user."
   (let* ((parent (selected-frame))
          (popup (lispm-desktop-popup--frame parent))
-         (window (frame-root-window popup)))
-    (with-current-buffer (window-buffer window)
-      (setq-local word-wrap t truncate-lines nil left-margin-width 9 right-margin-width 2))
-    (set-window-margins window 9 2)
-    (lispm-desktop-popup--fill popup (lispm-desktop-popup-alert-text icon message detail buttons nil))
-    (lispm-desktop-popup--size popup lispm-desktop-popup-alert-width 400)
-    (lispm-desktop-popup--size popup lispm-desktop-popup-alert-width
-                               (cdr (window-text-pixel-size window nil nil nil nil)))
+         (layout (lispm-desktop-popup--alert-layout message detail buttons)))
+    (lispm-desktop-popup--draw-alert popup icon message detail buttons nil nil)
+    (lispm-desktop-popup--size popup lispm-desktop-popup-alert-width (plist-get layout :height))
     (lispm-desktop-popup--show popup (/ (- (frame-pixel-width parent) lispm-desktop-popup-alert-width) 2)
-                               (/ (frame-pixel-height parent) 5))
+                               (/ (frame-pixel-height parent) 5)
+                               'alert)
     popup))
 
 (defun lispm-desktop-popup-alert (icon message buttons &optional detail)
@@ -885,8 +1008,7 @@ are events pressing a button too, as Command-D pressed Don't Save."
              (pressed nil) (held nil) (focused nil) (choice cancel))
         (unwind-protect
             (cl-flet ((redraw ()
-                        (lispm-desktop-popup--fill popup (lispm-desktop-popup-alert-text icon message detail
-                                                                                         buttons pressed focused))
+                        (lispm-desktop-popup--draw-alert popup icon message detail buttons pressed focused)
                         (redisplay t))
                       (focus (step)
                         ;; Tab goes from no button to the first, as from the

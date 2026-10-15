@@ -194,15 +194,18 @@ hold (LABEL COMMAND HELP [PRESSED]) entries, see
   "Set up the current buffer as sidebar content.
 Visual line mode is turned off explicitly, so `global-visual-line-mode'
 leaves the buffer alone and an overlong title is truncated, not wrapped.
-Rows are spaced as Finder spaced its list.  The window's bottom edge
-counts the rows, from `lispm-desktop-platinum-info', as Finder's counted items.
+Rows are spaced and coloured as Finder's list view: lighter than the
+platinum, the column sorted by in platinum, a lit line atop each.  The
+window's bottom edge counts the rows, from `lispm-desktop-platinum-info',
+as Finder's counted items.
 A list shows no text cursor, whatever state Evil is in: the row at point
 is highlighted in the selection colour instead, as Finder showed the
 selected item."
   (visual-line-mode -1)
   (setq-local truncate-lines t
               cursor-type nil
-              line-spacing 0.35)
+              line-spacing 3)
+  (face-remap-add-relative 'default 'lispm-desktop-platinum-list-body)
   (dolist (cursor '(evil-emacs-state-cursor evil-normal-state-cursor
                     evil-motion-state-cursor))
     (set (make-local-variable cursor) '(nil)))
@@ -277,12 +280,15 @@ The button sets no face, so icon fonts and colours inside LABEL survive."
                       'help-echo help
                       'mouse-face 'highlight)))
 
-(defun lispm-desktop-sidebar--insert-columns (name meta)
-  "Insert the column headings NAME and META, the list being sorted by META."
-  (insert (lispm-desktop-platinum-columns name meta)))
-
 (defconst lispm-desktop-sidebar-indent 18
   "Pixels each level of a list is indented by, the width of a triangle and gap.")
+
+(defun lispm-desktop-sidebar--insert-columns (name meta)
+  "Insert the column headings NAME and META, the list being sorted by META.
+NAME stands over the rows' names, past their indentation and icon."
+  (insert (lispm-desktop-platinum-columns name meta (lispm-desktop-sidebar--row-width)
+                                          (lispm-desktop-sidebar--column-pixels)
+                                          (+ 8 lispm-desktop-sidebar-indent))))
 
 (defun lispm-desktop-sidebar--row-width ()
   "Return the pixel width rows have to fill: the sidebar's text area."
@@ -353,9 +359,14 @@ row's text."
                       'follow-link t
                       'help-echo help
                       'mouse-face 'highlight)
+    (lispm-desktop-sidebar--mark-row beg (point))
     (when properties
       (add-text-properties beg (point) properties))
     (insert "\n")))
+
+(defun lispm-desktop-sidebar--mark-row (beg end)
+  "Draw the row from BEG to END as a list's row, a lit line atop it."
+  (add-face-text-property beg end 'lispm-desktop-platinum-row t))
 
 (defun lispm-desktop-sidebar--insert-group (open name meta action help &optional directory)
   "Insert a group's row: a disclosure triangle, OPEN or not, a folder and NAME.
@@ -377,14 +388,17 @@ the right-hand column; clicking the row calls ACTION, described by HELP."
                       'follow-link t
                       'help-echo help
                       'mouse-face 'highlight)
+    (lispm-desktop-sidebar--mark-row beg (point))
     (insert "\n")))
 
 (defun lispm-desktop-sidebar--insert-heading (name)
   "Insert NAME as the heading of a group that does not fold."
-  (insert (lispm-desktop-sidebar--blank '(space :width (8)))
-          (propertize name 'face '(:inherit (shadow lispm-desktop-platinum-list) :weight bold))
-          (lispm-desktop-sidebar--sorted-column nil)
-          "\n"))
+  (let ((beg (point)))
+    (insert (lispm-desktop-sidebar--blank '(space :width (8)))
+            (propertize name 'face '(:inherit (shadow lispm-desktop-platinum-list) :weight bold))
+            (lispm-desktop-sidebar--sorted-column nil))
+    (lispm-desktop-sidebar--mark-row beg (point))
+    (insert "\n")))
 
 ;;;; Shell sidebar
 
