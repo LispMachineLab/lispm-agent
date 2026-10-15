@@ -2811,6 +2811,72 @@ no function keys, and no Super keys where no key is Super."
     (should-not (lispm-desktop-popup--keyboard-p (kbd "s-a"))))
   (should (lispm-desktop-popup--keyboard-p (kbd "M-c"))))
 
+(defvar xwidget-list)
+
+(ert-deftest lispm-desktop-test-browser-keeps-script-callbacks ()
+  "A script's callback is kept from the garbage collector until WebKit
+calls it, and let go then; a script sent without one keeps nothing.  A
+symbol stands in for the xwidget, which batch Emacs cannot make, and the
+primitive handing scripts to WebKit is stubbed."
+  (let ((lispm-desktop-browser--script-callbacks nil)
+        (xwidget (make-symbol "xwidget"))
+        (sent nil)
+        (answers nil))
+    (cl-letf (((symbol-function 'xwidget-webkit-execute-script)
+               (lambda (xwidget script &optional fun) (push (list xwidget script fun) sent))))
+      (lispm-desktop-browser--run-script xwidget "1 + 1")
+      (should (equal sent `((,xwidget "1 + 1" nil))))
+      (should-not lispm-desktop-browser--script-callbacks)
+      (lispm-desktop-browser--run-script xwidget "document.title" (lambda (value) (push value answers)))
+      (let ((answered (nth 2 (car sent))))
+        (should (functionp answered))
+        (should (equal (mapcar #'car lispm-desktop-browser--script-callbacks) (list answered)))
+        (should (eq (nth 1 (car lispm-desktop-browser--script-callbacks)) xwidget))
+        (funcall answered "Title")
+        (should (equal answers '("Title")))
+        (should-not lispm-desktop-browser--script-callbacks)))))
+
+(ert-deftest lispm-desktop-test-browser-prunes-script-callbacks ()
+  "Callbacks WebKit never calls are let go as scripts are sent: once a
+minute old, those of closed pages all, those of open pages but the
+newest few.  Younger ones are all kept, a closed page's too."
+  (let* ((open (make-symbol "open"))
+         (closed (make-symbol "closed"))
+         (xwidget-list (list open))
+         (now (float-time))
+         (old (- now lispm-desktop-browser--script-callback-age 1))
+         (young-closed (list 'young-closed closed now))
+         (old-open-1 (list 'old-open-1 open old))
+         (old-closed (list 'old-closed closed old))
+         (old-open-2 (list 'old-open-2 open old))
+         (old-open-3 (list 'old-open-3 open old))
+         (lispm-desktop-browser--script-callbacks
+          (list young-closed old-open-1 old-closed old-open-2 old-open-3))
+         (lispm-desktop-browser--script-callbacks-kept 2))
+    (cl-letf (((symbol-function 'xwidget-webkit-execute-script) #'ignore))
+      (lispm-desktop-browser--run-script open "1 + 1" #'ignore))
+    (should (equal (cdr lispm-desktop-browser--script-callbacks)
+                   (list young-closed old-open-1 old-open-2)))
+    (should (eq (nth 1 (car lispm-desktop-browser--script-callbacks)) open))))
+
+(ert-deftest lispm-desktop-test-browser-script-callers-keep-callbacks ()
+  "The favicon lookup and the hints send their scripts through
+`lispm-desktop-browser--run-script', so the lambdas they pass are kept."
+  (require 'lispm-desktop-browser-hints)
+  (let ((lispm-desktop-browser--script-callbacks nil)
+        (xwidget (make-symbol "xwidget"))
+        (sent nil))
+    (cl-letf (((symbol-function 'xwidget-webkit-execute-script)
+               (lambda (_xwidget _script &optional fun) (push fun sent)))
+              ((symbol-function 'xwidget-at) (lambda (_pos) xwidget))
+              ((symbol-function 'lispm-desktop-browser--page-xwidget) (lambda () xwidget)))
+      (with-temp-buffer
+        (lispm-desktop-browser--look-up-favicon (current-buffer) "https://example.org/"))
+      (lispm-desktop-browser-first-field)
+      (should (= (length sent) 2))
+      (should (seq-every-p #'functionp sent))
+      (should (equal (mapcar #'car lispm-desktop-browser--script-callbacks) sent)))))
+
 (ert-deftest lispm-desktop-test-browser-hint-labels ()
   "Hint labels are distinct and all as long, so none begins another: one
 letter each while the letters suffice, two when they do not."

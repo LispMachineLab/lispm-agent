@@ -235,8 +235,8 @@ Rich-text editors, which have no such method, take `insertText'.")
   "Insert TEXT verbatim at the caret of the shown page's focused field.
 The text travels as a JSON string literal, so quotes and newlines in it
 cannot break out of `lispm-desktop-browser--paste-script'."
-  (xwidget-webkit-execute-script (xwidget-webkit-current-session)
-                                 (format lispm-desktop-browser--paste-script (json-encode text))))
+  (lispm-desktop-browser--run-script (xwidget-webkit-current-session)
+                                     (format lispm-desktop-browser--paste-script (json-encode text))))
 
 (defun lispm-desktop-browser-open-external ()
   "Open the shown browser tab's page in the system's default browser.
@@ -1071,7 +1071,7 @@ load brings."
   (with-current-buffer buffer
     (setq lispm-desktop-browser--favicon-source (cons page 'pending))
     (when-let* ((xwidget (xwidget-at (point-min))))
-      (xwidget-webkit-execute-script
+      (lispm-desktop-browser--run-script
        xwidget lispm-desktop-browser--favicon-script
        (lambda (answer)
          (when (and (buffer-live-p buffer)
@@ -1605,6 +1605,79 @@ the handler would print although they may have been freed."
   "Keep the late events of closed pages from crashing Emacs."
   (add-hook 'kill-buffer-hook #'lispm-desktop-browser--keep-killed-xwidgets)
   (advice-add 'xwidget-event-handler :before-while #'lispm-desktop-browser--xwidget-event-live-p))
+
+;;;;; Callbacks of page scripts
+;;
+;; A function given to `xwidget-webkit-execute-script' could crash Emacs on
+;; macOS (Emacs 31.1, NS build).  The bug is Emacs's.  Only GTK builds keep
+;; the function from the garbage collector, saved with the xwidget; on
+;; macOS it is held only by the completion handler WebKit runs when the
+;; script returns (src/nsxwidget.m), which the collector does not see.  A
+;; closure nothing else holds, such as a lambda written at the call, may
+;; then be collected while the script runs.  The handler tests the freed
+;; object with FUNCTIONP and posts an `xwidget-event' holding it, which
+;; `xwidget-event-handler' prints with `xwidget-log' and calls; the
+;; collector, marking the event while it waits to be read, may fault on it
+;; even before.  A symbol is safe, as an interned symbol is never collected.
+;;
+;; So pages are sent scripts by `lispm-desktop-browser--run-script', which
+;; keeps each callback in `lispm-desktop-browser--script-callbacks' until
+;; it is called, with the page's xwidget, which the event names.  On
+;; macOS, WebKit calls back only with a value: not when a script returns
+;; null or undefined, fails, or is blocked by the page's policy.  Such
+;; callbacks would be kept for ever, so the list is pruned as scripts are
+;; sent.  A callback a minute old, long after WebKit would have called
+;; it, is let go if its page is closed, its xwidget no longer in
+;; `xwidget-list'; of those whose page is open, only the newest few are
+;; kept.  A page just closed may still answer, so its callbacks are not
+;; let go at once.
+
+(declare-function xwidget-webkit-execute-script "xwidget.c" (xwidget script &optional fun))
+
+(defconst lispm-desktop-browser--script-callback-age 60
+  "Seconds a script's callback is kept at least, waiting to be called.")
+
+(defconst lispm-desktop-browser--script-callbacks-kept 32
+  "How many callbacks past that age are kept for open pages, the newest.")
+
+(defvar lispm-desktop-browser--script-callbacks nil
+  "Callbacks of scripts sent to pages, kept from the garbage collector.
+Each is (FUNCTION XWIDGET TIME): the function WebKit calls with the
+script's value, the page's xwidget, and when the script was sent.  The
+newest comes first.")
+
+(defun lispm-desktop-browser--prune-script-callbacks ()
+  "Let go of the callbacks of scripts WebKit will not call back for.
+A callback a minute old is let go when its page is closed; of those
+whose page is open, the newest `lispm-desktop-browser--script-callbacks-kept'
+are kept."
+  (let ((now (float-time))
+        (kept 0))
+    (setq lispm-desktop-browser--script-callbacks
+          (cl-remove-if-not
+           (lambda (entry)
+             (pcase-let ((`(,_ ,xwidget ,time) entry))
+               (or (< (- now time) lispm-desktop-browser--script-callback-age)
+                   (and (memq xwidget (bound-and-true-p xwidget-list))
+                        (<= (cl-incf kept) lispm-desktop-browser--script-callbacks-kept)))))
+           lispm-desktop-browser--script-callbacks))))
+
+(defun lispm-desktop-browser--run-script (xwidget script &optional callback)
+  "Run SCRIPT, JavaScript, in XWIDGET's page; call CALLBACK with its value.
+Unlike `xwidget-webkit-execute-script' on macOS, this keeps CALLBACK
+from the garbage collector until WebKit calls it.  On macOS WebKit
+calls it only with a value, never for null or undefined."
+  (if (null callback)
+      (xwidget-webkit-execute-script xwidget script)
+    (lispm-desktop-browser--prune-script-callbacks)
+    (let* ((entry (list nil xwidget (float-time)))
+           (answered (lambda (value)
+                       (setq lispm-desktop-browser--script-callbacks
+                             (delq entry lispm-desktop-browser--script-callbacks))
+                       (funcall callback value))))
+      (setcar entry answered)
+      (push entry lispm-desktop-browser--script-callbacks)
+      (xwidget-webkit-execute-script xwidget script answered))))
 
 
 (provide 'lispm-desktop-browser)

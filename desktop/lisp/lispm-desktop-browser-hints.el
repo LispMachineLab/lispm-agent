@@ -46,9 +46,9 @@
 (require 'json)
 (require 'lispm-desktop-core)
 
-(declare-function xwidget-webkit-execute-script "xwidget.c" (xwidget script &optional fun))
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function lispm-desktop-browser--window "lispm-desktop-browser" ())
+(declare-function lispm-desktop-browser--run-script "lispm-desktop-browser" (xwidget script &optional callback))
 (declare-function lispm-desktop-browser-new-tab "lispm-desktop-browser" (&optional url))
 (declare-function lispm-desktop-browser--sync "lispm-desktop-browser" (&optional force))
 (defvar xwidget-webkit-mode-map)
@@ -256,7 +256,7 @@ It defines them once per document; every call to the page sends it first.")
   "Evaluate CALL, a JavaScript expression using `__lme', in the shown page.
 CALLBACK, when given, is called with its value."
   (when-let* ((xwidget (lispm-desktop-browser--page-xwidget)))
-    (xwidget-webkit-execute-script xwidget (concat lispm-desktop-browser--hints-script call) callback)))
+    (lispm-desktop-browser--run-script xwidget (concat lispm-desktop-browser--hints-script call) callback)))
 
 (defun lispm-desktop-browser--js (value)
   "Return VALUE written as a JavaScript literal."
