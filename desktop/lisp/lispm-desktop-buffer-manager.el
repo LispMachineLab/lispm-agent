@@ -241,6 +241,68 @@ The refresh timer stops once the list is no longer shown."
   "<delete>" #'lispm-desktop-buffer-manager-close-buffer
   "g" #'lispm-desktop-buffer-manager-refresh)
 
+(defun lispm-desktop-buffer-manager--columns (width)
+  "Return the manager's column headings as (LABEL PIXELS SORTED), WIDTH wide.
+They line up with the columns `tabulated-list-format' sets, the first
+taking the padding, the last running on to the sort-direction button."
+  (let* ((char (frame-char-width))
+         (columns (append tabulated-list-format nil))
+         (sorted (car tabulated-list-sort-key))
+         (used 0)
+         (cells (seq-map-indexed
+                 (pcase-lambda (`(,name ,size . ,_) index)
+                   (let ((pixels (* char (+ size 1 (if (= index 0) tabulated-list-padding 0)))))
+                     (setq used (+ used pixels))
+                     (list name pixels (equal name sorted))))
+                 columns)))
+    (setcar (cdr (car (last cells))) (+ (cadr (car (last cells))) (max 0 (- width used 16))))
+    cells))
+
+(defvar-keymap lispm-desktop-buffer-manager-header-map
+  :doc "Keymap of the manager's column headings."
+  "<header-line> <mouse-1>" #'lispm-desktop-buffer-manager-header-click)
+
+(defun lispm-desktop-buffer-manager--header ()
+  "Return the manager's header line: Mac OS 9's column headings, the column
+sorted by pushed in.  Clicking a heading sorts by its column, again to
+turn the order over."
+  (let* ((width (window-body-width nil t))
+         (columns (lispm-desktop-buffer-manager--columns width)))
+    (propertize " " 'display
+                (lispm-desktop-platinum--image
+                 (list 'manager-header columns)
+                 (lambda () (lispm-desktop-platinum-draw-list-header lispm-desktop-platinum--palette
+                                                                     columns
+                                                                     (* (frame-char-width)
+                                                                        (1+ tabulated-list-padding)))))
+                'lispm-desktop-buffer-manager-columns columns
+                'keymap lispm-desktop-buffer-manager-header-map
+                'pointer 'hand 'help-echo "Sort by this column")))
+
+(defun lispm-desktop-buffer-manager-header-click (event)
+  "Sort the manager by the column whose heading EVENT clicked."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (x (car (posn-object-x-y position)))
+         (columns (get-text-property (cdr (posn-string position)) 'lispm-desktop-buffer-manager-columns
+                                     (car (posn-string position))))
+         (left 0))
+    (with-current-buffer (window-buffer (posn-window position))
+      (when-let* ((column (seq-find (pcase-lambda (`(,_ ,pixels ,_))
+                                      (prog1 (< x (+ left pixels)) (setq left (+ left pixels))))
+                                    columns))
+                  (name (car column))
+                  ((nth 2 (assoc name (append tabulated-list-format nil)))))
+        (setq tabulated-list-sort-key (cons name (and (equal name (car tabulated-list-sort-key))
+                                                      (not (cdr tabulated-list-sort-key)))))
+        (tabulated-list-print t)))))
+
+(defun lispm-desktop-buffer-manager--keep-header (&rest _)
+  "Give the manager's header back its drawn headings after
+`tabulated-list-init-header' set its own, as sorting from the keyboard does."
+  (when (derived-mode-p 'lispm-desktop-buffer-manager-mode)
+    (setq header-line-format '(:eval (lispm-desktop-buffer-manager--header)))))
+
 (define-derived-mode lispm-desktop-buffer-manager-mode tabulated-list-mode "Buffer Manager"
   "List the open buffers with what each costs: text, CPU and memory.
 \\{lispm-desktop-buffer-manager-mode-map}"
@@ -261,7 +323,8 @@ The refresh timer stops once the list is no longer shown."
   (visual-line-mode -1)
   (setq-local truncate-lines t)
   (face-remap-add-relative 'default 'lispm-desktop-platinum-list)
-  (face-remap-add-relative 'header-line 'lispm-desktop-platinum-header)
+  (face-remap-add-relative 'header-line '(:box nil :underline nil :overline nil))
+  (advice-add 'tabulated-list-init-header :after #'lispm-desktop-buffer-manager--keep-header)
   (tabulated-list-init-header))
 
 (defun lispm-desktop-buffer-manager ()
