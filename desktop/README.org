@@ -29,8 +29,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   they come back onto it, and when Emacs's frame changes size, as going full screen and back
   does, each returns to the place it was given, shrunk only while it does not fit.
 - *A Finder window*, opened by the home disk: a folder's items as large icons, floating over
-  the desktop, with back, forward, the enclosing folder and New Folder in its toolbar and the
-  items and the room left counted at its bottom.  A folder opens in the window, a file in the
+  the desktop, the items and the room left counted in a header under its title bar, as Mac OS
+  9's was; Command-click its title for the folder's path.  A folder opens in the window, a file in the
   editor, which comes forward.  The arrows select, Return opens, Command-Up, Command-[ and
   Command-] go up, back and forward, Command-Delete moves the selected item to the Trash (the
   system's own, from where it can be put back), typing a name's first letters selects it, and
@@ -90,7 +90,7 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
 - *Control Panels*, as Mac OS 9's: the desktop's Control Panels folder opens a Finder window
   holding a panel each, and the λ menu's Control Panels lists them too.  A panel opens in a
   window floating over the desktop, titled with its name, its tabs choosing among the panels as
-  the Appearance control panel's did.  Appearance chooses the colour theme (Dracula, Platinum,
+  the Appearance control panel's did, each group of settings framed in a group box.  Appearance chooses the colour theme (Dracula, Platinum,
   or any other installed); Desktop the desktop's colour, its picture and how the picture covers
   it (fill, fit, center, tile), and arranges its icons; Keyboard Vim or Emacs keys; Internet the
   browser's home page and search address, its history and its bookmarks.  Each choice takes
