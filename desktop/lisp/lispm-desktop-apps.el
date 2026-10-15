@@ -277,13 +277,14 @@ has a page open, Control Panels while they are open."
   (let ((spec (alist-get (lispm-desktop-apps-frontmost) lispm-desktop-apps)))
     (cons (lispm-desktop-platinum-icon (plist-get spec :icon)) (plist-get spec :name))))
 
-(declare-function lispm-desktop-coherence-available-p "lispm-desktop-coherence" ())
+(declare-function lispm-desktop-coherence-available-p "lispm-desktop-coherence" (&optional screen))
 
 (defun lispm-desktop-apps-application-items ()
   "Return the Application menu's items: Hide Desktop or Show Desktop, as
 Mac OS 9's began with Hide and Show, then every application, the front
 one checked, as Mac OS 9's listed the running applications."
-  `(,@(when (and (fboundp 'lispm-desktop-coherence-available-p) (lispm-desktop-coherence-available-p))
+  `(,@(when (and (fboundp 'lispm-desktop-coherence-available-p)
+                 (lispm-desktop-coherence-available-p (lispm-desktop-apps-screen)))
         (if (lispm-desktop-apps-hidden-p)
             '((:label "Show Desktop" :action lispm-desktop-show-desktop :key "C-c h") separator)
           '((:label "Hide Desktop" :action lispm-desktop-hide-desktop :key "C-c h") separator)))

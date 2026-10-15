@@ -44,8 +44,20 @@
 ;; shows at the top of the computer's screen while it is read from, and
 ;; for a few seconds when it echoes a message.
 ;;
-;; macOS minimizes no window without a title bar: a desktop drawn
-;; undecorated is given one for as long as it is in the Dock.
+;; Where windows go out:
+;;
+;;   macOS                    they do; a desktop full screen leaves full
+;;                            screen for the Dock and takes it back after,
+;;                            and drops past its edges move no window out,
+;;                            as nothing of the screen is left to drop on
+;;   X, under a window        not yet: Hide Desktop is not offered, C-c h
+;;   manager or as EXWM       says why, and a window dropped past the
+;;                            desktop's edge is kept on it, as before
+;;   a text terminal, batch   never
+;;
+;; `lispm-desktop-coherence-unsupported' tells which, each time, from the
+;; display the desktop is on.  macOS minimizes no window without a title
+;; bar: a desktop drawn undecorated is given one while it is in the Dock.
 
 ;;; Code:
 
@@ -63,6 +75,7 @@
 (declare-function lispm-desktop-activate "lispm-desktop-surface" ())
 (declare-function lispm-desktop-platinum--color "lispm-desktop-platinum" (key))
 (defvar lispm-desktop-platinum-frame-moved-functions)
+(defvar exwm-wm-mode)
 
 (defgroup lispm-desktop-coherence nil
   "The desktop's windows out on the computer's screen."
@@ -75,11 +88,32 @@ of it over the desktop, a window out goes in again."
   :type 'number
   :group 'lispm-desktop-coherence)
 
-(defun lispm-desktop-coherence-available-p ()
-  "Return non-nil when windows can go out on the computer's screen: on
-macOS, whose window server shows a child frame made a frame of its own
-where it was."
-  (and (eq (framep (selected-frame)) 'ns) (not noninteractive)))
+(defcustom lispm-desktop-coherence-drag-out t
+  "Non-nil when a window dropped mostly past the desktop's edge goes out on
+the computer's screen; nil keeps it on the desktop, as Hide Desktop still
+takes every window out."
+  :type 'boolean
+  :group 'lispm-desktop-coherence)
+
+(defun lispm-desktop-coherence-unsupported (&optional screen)
+  "Return why SCREEN's windows cannot go out on the computer's screen, as a
+string, or nil when they can.  SCREEN defaults to the selected one; the
+display it is on decides: macOS's window server shows a child frame made
+a frame of its own where it was, others are not known to."
+  (let ((screen (or screen (lispm-desktop-apps-screen))))
+    (cond (noninteractive "Emacs runs without a display")
+          ((not (display-graphic-p screen)) "the desktop is on a text terminal")
+          ((and (eq (framep screen) 'x) (bound-and-true-p exwm-wm-mode))
+           "Emacs manages this display's windows itself")
+          ((not (eq (framep screen) 'ns)) "windows go out on the screen only on macOS for now"))))
+
+(defun lispm-desktop-coherence-available-p (&optional screen)
+  "Return non-nil when SCREEN's windows can go out on the computer's screen."
+  (not (lispm-desktop-coherence-unsupported screen)))
+
+(defun lispm-desktop-coherence--full-screen-p (screen)
+  "Return non-nil when SCREEN covers the computer's screen, full screen."
+  (memq (frame-parameter screen 'fullscreen) '(fullboth fullscreen)))
 
 ;;;; Geometry
 
@@ -300,14 +334,19 @@ of the windows out."
 it: mostly past its screen's edge, it goes out; mostly over the screen
 shown, it comes in.  This is a `lispm-desktop-platinum-frame-moved-functions'
 function, run before the window is kept in place."
-  (when (and (lispm-desktop-coherence-available-p) (frame-parameter frame 'lispm-desktop-window))
-    (let* ((screen (lispm-desktop-apps-window-screen frame))
-           (inside (and (frame-live-p screen)
+  (when-let* (((frame-parameter frame 'lispm-desktop-window))
+              (screen (lispm-desktop-apps-window-screen frame))
+              ((frame-live-p screen))
+              ((lispm-desktop-coherence-available-p screen))
+              ;; Full screen, the desktop leaves nothing to drop a window on.
+              ((not (lispm-desktop-coherence--full-screen-p screen))))
+    (let* ((inside (and (frame-live-p screen)
                         (lispm-desktop-coherence-inside-fraction
                          (lispm-desktop-coherence--outer-rectangle frame)
                          (lispm-desktop-coherence--screen-rectangle screen)))))
       (cond ((not inside))
-            ((and (frame-parent frame) (< inside lispm-desktop-coherence-out-fraction))
+            ((and (frame-parent frame) lispm-desktop-coherence-drag-out
+                  (< inside lispm-desktop-coherence-out-fraction))
              (lispm-desktop-coherence-take-out frame))
             ((and (not (frame-parent frame)) (not (lispm-desktop-apps-hidden-p screen))
                   (>= inside lispm-desktop-coherence-out-fraction))
@@ -340,17 +379,31 @@ tile was clicked, or Emacs showed it to read from its minibuffer."
 The full-screen editor and browser float first, and go full screen again
 when the desktop shows; so does the window in front keep the keyboard."
   (interactive)
-  (unless (lispm-desktop-coherence-available-p)
-    (user-error "Windows can go out on the screen only on macOS"))
-  (let* ((screen (lispm-desktop-apps-screen))
-         (front (lispm-desktop-apps-frontmost))
+  (when-let* ((why (lispm-desktop-coherence-unsupported)))
+    (user-error "The desktop cannot hide: %s" why))
+  (let ((screen (lispm-desktop-apps-screen))
+        (selected (selected-frame)))
+    ;; macOS minimizes no window full screen: the desktop leaves full
+    ;; screen first, and takes it back when it shows again.
+    (if (and (lispm-desktop-coherence--full-screen-p screen) (not (lispm-desktop-apps-hidden-p screen)))
+        (let ((fullscreen (frame-parameter screen 'fullscreen)))
+          (set-frame-parameter screen 'fullscreen nil)
+          (set-frame-parameter screen 'lispm-desktop-hidden-fullscreen fullscreen)
+          (run-at-time 0.5 nil (lambda ()
+                                 (when (frame-live-p screen)
+                                   (lispm-desktop-coherence--hide screen selected)))))
+      (lispm-desktop-coherence--hide screen selected))))
+
+(defun lispm-desktop-coherence--hide (screen selected)
+  "Hide SCREEN, not full screen, in the Dock, its windows out, and give the
+keyboard to SELECTED when it is one of them, else to the window in front."
+  (let* ((front (lispm-desktop-apps-frontmost))
          (full (seq-filter
                 #'identity
                 (list (and (eq front 'editor) (not (lispm-desktop-editor-floating-p))
                            (progn (lispm-desktop-editor-float) 'editor))
                       (and (eq front 'browser) (not (lispm-desktop-browser-floating-p))
-                           (progn (lispm-desktop-browser-float) 'browser)))))
-         (selected (selected-frame)))
+                           (progn (lispm-desktop-browser-float) 'browser))))))
     (unless (lispm-desktop-apps-hidden-p screen)
       (pcase-let ((`(,left . ,top) (frame-position screen)))
         (set-frame-parameter screen 'lispm-desktop-hidden
@@ -363,7 +416,7 @@ when the desktop shows; so does the window in front keep the keyboard."
       (when (frame-parameter screen 'undecorated)
         (set-frame-parameter screen 'undecorated nil))
       (iconify-frame screen)
-      (when-let* ((keyboard (if (lispm-desktop-apps-out-p selected)
+      (when-let* ((keyboard (if (and (frame-live-p selected) (lispm-desktop-apps-out-p selected))
                                 selected
                               (seq-find (lambda (frame) (and (frame-visible-p frame)
                                                              (memq frame (lispm-desktop-apps-windows screen))))
@@ -386,6 +439,9 @@ front then comes in front."
         (set-frame-parameter screen 'undecorated t)
         (set-frame-position screen (plist-get hidden :left) (plist-get hidden :top))
         (set-frame-size screen (plist-get hidden :width) (plist-get hidden :height) t))
+      (when-let* ((fullscreen (frame-parameter screen 'lispm-desktop-hidden-fullscreen)))
+        (set-frame-parameter screen 'lispm-desktop-hidden-fullscreen nil)
+        (set-frame-parameter screen 'fullscreen fullscreen))
       (dolist (window (lispm-desktop-apps-windows screen))
         (when (and (not (frame-parent window))
                    (>= (lispm-desktop-coherence-inside-fraction

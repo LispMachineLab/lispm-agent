@@ -1592,6 +1592,8 @@ its window is open."
 
 ;;;; lispm-desktop-coherence
 
+(defvar exwm-wm-mode)
+
 (ert-deftest lispm-desktop-test-coherence-inside-fraction ()
   "How much of a window lies over the desktop decides where it belongs."
   (should (= 1.0 (lispm-desktop-coherence-inside-fraction '(10 10 100 100) '(0 0 1000 800))))
@@ -1599,22 +1601,27 @@ its window is open."
   (should (= 0.0 (lispm-desktop-coherence-inside-fraction '(1200 0 200 100) '(0 0 1000 800))))
   (should (= 0.0 (lispm-desktop-coherence-inside-fraction '(0 0 0 100) '(0 0 1000 800)))))
 
-(defmacro lispm-desktop-test--with-drop (child inside hidden &rest body)
-  "Run BODY with a window dropped: a CHILD of the screen or out, INSIDE its
-fraction over the screen, the screen HIDDEN or not.  `out' and `in' are
-bound to whether the window was taken out or brought in."
-  (declare (indent 3))
-  `(let ((out nil) (in nil))
+(defmacro lispm-desktop-test--with-drop (spec &rest body)
+  "Run BODY with a window dropped as SPEC says: :child, a child of the
+screen rather than out; :inside, its fraction over the screen; :hidden,
+the screen hidden; :full, the screen full screen; :drag, windows going
+out when dropped, t when left out.  `out' and `in' are bound to whether
+the window was taken out or brought in."
+  (declare (indent 1))
+  `(let ((out nil) (in nil)
+         (lispm-desktop-coherence-drag-out ,(if (plist-member spec :drag) (plist-get spec :drag) t)))
      (cl-letf (((symbol-function 'lispm-desktop-coherence-available-p) #'always)
                ((symbol-function 'frame-parameter)
                 (lambda (_frame parameter) (eq parameter 'lispm-desktop-window)))
-               ((symbol-function 'frame-parent) (lambda (_) (and ,child 'screen)))
+               ((symbol-function 'frame-parent) (lambda (_) (and ,(plist-get spec :child) 'screen)))
                ((symbol-function 'lispm-desktop-apps-window-screen) (lambda (_) 'screen))
-               ((symbol-function 'lispm-desktop-apps-hidden-p) (lambda (&rest _) ,hidden))
+               ((symbol-function 'lispm-desktop-apps-hidden-p) (lambda (&rest _) ,(plist-get spec :hidden)))
+               ((symbol-function 'lispm-desktop-coherence--full-screen-p) (lambda (_) ,(plist-get spec :full)))
                ((symbol-function 'frame-live-p) #'always)
                ((symbol-function 'lispm-desktop-coherence--outer-rectangle) #'ignore)
                ((symbol-function 'lispm-desktop-coherence--screen-rectangle) #'ignore)
-               ((symbol-function 'lispm-desktop-coherence-inside-fraction) (lambda (&rest _) ,inside))
+               ((symbol-function 'lispm-desktop-coherence-inside-fraction)
+                (lambda (&rest _) ,(plist-get spec :inside)))
                ((symbol-function 'lispm-desktop-coherence-take-out) (lambda (_) (setq out t)))
                ((symbol-function 'lispm-desktop-coherence-bring-in) (lambda (_) (setq in t))))
        (lispm-desktop-coherence--dropped 'window)
@@ -1623,11 +1630,40 @@ bound to whether the window was taken out or brought in."
 (ert-deftest lispm-desktop-test-coherence-drop-out-and-in ()
   "A window dropped mostly past the desktop's edge goes out; one out dropped
 mostly over the desktop shown comes in; nothing else moves a window."
-  (lispm-desktop-test--with-drop t 0.2 nil (should out) (should-not in))
-  (lispm-desktop-test--with-drop t 0.8 nil (should-not out) (should-not in))
-  (lispm-desktop-test--with-drop nil 0.8 nil (should in) (should-not out))
-  (lispm-desktop-test--with-drop nil 0.8 t (should-not in) (should-not out))
-  (lispm-desktop-test--with-drop nil 0.2 nil (should-not in) (should-not out)))
+  (lispm-desktop-test--with-drop (:child t :inside 0.2) (should out) (should-not in))
+  (lispm-desktop-test--with-drop (:child t :inside 0.8) (should-not out) (should-not in))
+  (lispm-desktop-test--with-drop (:inside 0.8) (should in) (should-not out))
+  (lispm-desktop-test--with-drop (:inside 0.8 :hidden t) (should-not in) (should-not out))
+  (lispm-desktop-test--with-drop (:inside 0.2) (should-not in) (should-not out)))
+
+(ert-deftest lispm-desktop-test-coherence-drop-rules ()
+  "Full screen, the desktop moves no window out or in; with dragging out
+turned off, a window dropped past its edge stays, and one out still
+comes back in."
+  (lispm-desktop-test--with-drop (:child t :inside 0.2 :full t) (should-not out))
+  (lispm-desktop-test--with-drop (:inside 0.8 :full t) (should-not in))
+  (lispm-desktop-test--with-drop (:child t :inside 0.2 :drag nil) (should-not out))
+  (lispm-desktop-test--with-drop (:inside 0.8 :drag nil) (should in)))
+
+(ert-deftest lispm-desktop-test-coherence-unsupported ()
+  "Windows go out on macOS only; elsewhere the desktop says why it cannot
+hide, and Hide Desktop is not offered."
+  (should (lispm-desktop-coherence-unsupported (selected-frame)))
+  (let ((noninteractive nil))
+    (cl-letf (((symbol-function 'display-graphic-p) #'always))
+      (cl-letf (((symbol-function 'framep) (lambda (_) 'ns)))
+        (should-not (lispm-desktop-coherence-unsupported 'screen)))
+      (cl-letf (((symbol-function 'framep) (lambda (_) 'x)))
+        (should (string-match-p "macOS" (lispm-desktop-coherence-unsupported 'screen)))
+        (let ((exwm-wm-mode t))
+          (ignore exwm-wm-mode)
+          (should (string-match-p "manages" (lispm-desktop-coherence-unsupported 'screen))))))
+    (cl-letf (((symbol-function 'display-graphic-p) #'ignore))
+      (should (string-match-p "terminal" (lispm-desktop-coherence-unsupported 'screen)))))
+  (should-error (lispm-desktop-hide-desktop) :type 'user-error)
+  (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'ignore))
+    (should-not (member "Hide Desktop" (mapcar (lambda (item) (and (consp item) (plist-get item :label)))
+                                             (lispm-desktop-apps-application-items))))))
 
 (ert-deftest lispm-desktop-test-coherence-application-menu ()
   "The Application menu begins with Hide Desktop, or Show Desktop while the
