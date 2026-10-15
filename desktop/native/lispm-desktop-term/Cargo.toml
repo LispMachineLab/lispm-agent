@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # The event loop's PTY keys in src/pty.rs were read from this version.
 alacritty_terminal = "=0.26.0"
+base64 = "0.22"
 libc = "0.2"
 polling = "3.8"
 emacs = { version = "0.23.0", features = ["emacs-28"] }

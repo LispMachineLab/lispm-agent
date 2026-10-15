@@ -141,6 +141,10 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   start where Rust's Cargo is installed, and again when an update changes its sources; until
   then, and without Rust, they run in Eat.  A program that takes the mouse, as Claude Code
   does, gets the clicks, drags and wheel; with Shift held they stay Emacs's, to select text.
+- *Agents that say what they are doing*.  A program that reports its state with the [[https://superlogical.com/rex/docs/build/program-status][Program
+  Status Protocol]] (OSC 7501) has it shown in its window's title bar and in the agents
+  view: working, done, failed, or waiting for an approval, an answer or a sign-in.
+  =C-c a n= goes to the next terminal waiting for you.
 - *Completion everywhere* (Vertico, Orderless, Consult, Embark, Corfu), Magit, Eglot and
   tree-sitter modes.
 - *Vim or Emacs keys*, chosen at the first start.  With vim keys, Evil edits program, text and
@@ -291,6 +295,7 @@ Two things to know when both builds run:
 | =C-c a s=              | resume any recorded session                                |
 | =C-c a a=              | show or hide the agents view (or click Agents)             |
 | =C-c a r=              | put a reference to the region into a running agent's input |
+| =C-c a n=              | the next terminal waiting for you: blocked, failed, then done |
 | =C-c t=                | a new terminal                                             |
 | =C-<tab>=, =C-S-<tab>= | the next, the previous workspace of the editor             |
 | =M-`=, =C-c w=         | the workspaces as thumbnails (Tab moves, Return opens)     |

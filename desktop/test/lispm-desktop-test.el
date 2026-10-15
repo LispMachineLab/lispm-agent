@@ -1710,6 +1710,150 @@ Emacs is idle: reading transcripts must not stall the terminal scheduler."
               (should (= scheduled 1)))
           (kill-buffer))))))
 
+;;;;; Program status (OSC 7501)
+
+(defun lispm-desktop-test--term-until (buffer predicate &optional seconds)
+  "Run the terminal scheduler until PREDICATE holds in BUFFER, at most
+SECONDS; return PREDICATE's value."
+  (let ((deadline (+ (float-time) (or seconds 5)))
+        (value nil))
+    (while (and (not (setq value (with-current-buffer buffer (funcall predicate))))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.02)
+      (lispm-desktop-term--tick))
+    value))
+
+(ert-deftest lispm-desktop-test-term-program-status ()
+  "What a program reports of itself (OSC 7501) reaches its terminal's
+buffer; what it finished is dismissed once the user types, and what it
+was still doing ends with it."
+  (lispm-desktop-test--with-term
+      ((term "lispm-desktop-test-status" "/bin/sh"
+             (list "-c" (concat "printf '\\033]7501;state=working:id=build:progress=40:app=make\\007'; "
+                                "printf '\\033]7501;state=blocked:kind=permission:msg="
+                                (base64-encode-string "Run tests?") "\\033\\\\'; "
+                                "read line; printf '\\033]7501;state=done\\007'; read line; read line"))))
+    (should (lispm-desktop-test--term-until
+             term (lambda () (eq (plist-get (lispm-desktop-term-status) :state) 'blocked))))
+    (with-current-buffer term
+      (should (equal lispm-desktop-term-status-records
+                     '((:id nil :state blocked :kind permission :progress nil :app nil :title nil
+                            :msg "Run tests?")
+                       (:id "build" :state working :kind nil :progress 40 :app "make" :title nil
+                            :msg nil))))
+      (should (equal (lispm-desktop-term-status-label (lispm-desktop-term-status)) "needs approval"))
+      (should (memq term (lispm-desktop-term-waiting-buffers)))
+      (lispm-desktop-term-send-string "\r"))
+    (should (lispm-desktop-test--term-until
+             term (lambda () (eq (plist-get (car lispm-desktop-term-status-records) :state) 'done))))
+    ;; A task still working outweighs the program's own done.
+    (should (eq (plist-get (lispm-desktop-term-status term) :state) 'working))
+    (with-current-buffer term (lispm-desktop-term-send-string "\r"))
+    (should (lispm-desktop-test--term-until
+             term (lambda () (equal (mapcar (lambda (r) (plist-get r :id)) lispm-desktop-term-status-records)
+                                    '("build")))))
+    (should-not (memq term (lispm-desktop-term-waiting-buffers)))
+    (with-current-buffer term (lispm-desktop-term-send-string "\r"))
+    (lispm-desktop-test--term-wait term)
+    (should-not (buffer-local-value 'lispm-desktop-term-status-records term))))
+
+(ert-deftest lispm-desktop-test-term-program-status-query ()
+  "A program asking whether the terminal takes status reports is answered,
+before the answer to what it asks next."
+  (lispm-desktop-test--with-term
+      ((term "lispm-desktop-test-status-query" "/bin/sh"
+             '("-c" "stty -icanon -echo min 0 time 10; printf '\\033]7501;?\\033\\\\\\033[c'; sleep 0.3; reply=$(dd bs=256 count=1 2>/dev/null); printf '%s\\n' \"$reply\" | tr '\\033' E")))
+    (lispm-desktop-test--term-wait term)
+    ;; Joined: the answers are longer than the terminal is wide.
+    (let ((text (string-replace "\n" "" (with-current-buffer term
+                                          (lispm-desktop-term-module-text lispm-desktop-term--terminal nil)))))
+      (should (string-match-p
+               (regexp-quote "E]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,authE\\E[?")
+               text)))))
+
+(ert-deftest lispm-desktop-test-term-status-picks-what-matters ()
+  "A terminal's status is the record that matters most to the user, and
+its label says what the program waits for."
+  (with-temp-buffer
+    (setq lispm-desktop-term-status-records
+          '((:id nil :state working :progress 30)
+            (:id "a" :state done)
+            (:id "b" :state blocked :kind question :msg "Which branch?")))
+    (let ((record (lispm-desktop-term-status)))
+      (should (equal (plist-get record :id) "b"))
+      (should (equal (lispm-desktop-term-status-label record) "has a question"))
+      (should (equal (get-text-property 0 'help-echo (lispm-desktop-term-status-label record))
+                     "Which branch?")))
+    (setq lispm-desktop-term-status-records '((:id nil :state working :progress 30) (:id "a" :state done)))
+    (should (equal (lispm-desktop-term-status-label (lispm-desktop-term-status)) "working 30%"))
+    (should (equal (lispm-desktop-term-status-label (lispm-desktop-term-status) t) "working"))
+    (setq lispm-desktop-term-status-records nil)
+    (should-not (lispm-desktop-term-status))))
+
+(ert-deftest lispm-desktop-test-agent-next-waiting ()
+  "\\`C-c a n' goes to the terminals waiting for the user, those blocked
+first, then those failed or done, and round again."
+  (should (eq (keymap-lookup lispm-desktop-agent-map "n") #'lispm-desktop-agent-next-waiting))
+  (should-error (lispm-desktop-agent-next-waiting) :type 'user-error)
+  (let ((buffers nil)
+        (shown nil))
+    (unwind-protect
+        (progn
+          (pcase-dolist (`(,name . ,state) '(("busy" . working) ("done" . done) ("asks" . blocked) ("quiet")))
+            (with-current-buffer (generate-new-buffer (format " *lispm-desktop-test-%s*" name))
+              (setq lispm-desktop-term--terminal 'fake)
+              (when state
+                (setq lispm-desktop-term-status-records (list (list :state state))))
+              (push (current-buffer) buffers)))
+          (setq buffers (nreverse buffers))
+          (should (equal (lispm-desktop-term-waiting-buffers) (list (nth 2 buffers) (nth 1 buffers))))
+          (cl-letf (((symbol-function 'lispm-desktop-agent--show) (lambda (buffer) (push buffer shown)))
+                    ((symbol-function 'lispm-desktop-sidebar-show-in-main) (lambda (buffer) (push buffer shown))))
+            (lispm-desktop-agent-next-waiting)
+            (should (eq (car shown) (nth 2 buffers)))
+            (with-current-buffer (nth 2 buffers) (lispm-desktop-agent-next-waiting))
+            (should (eq (car shown) (nth 1 buffers)))
+            (with-current-buffer (nth 1 buffers) (lispm-desktop-agent-next-waiting))
+            (should (eq (car shown) (nth 2 buffers)))))
+      (mapc #'kill-buffer buffers))))
+
+(ert-deftest lispm-desktop-test-agent-list-refreshes-on-status-changes ()
+  "An agent terminal's status refreshes the agent sidebar, once Emacs is
+idle, when its label there changes; progress alone does not."
+  (let ((lispm-desktop-agent-list--refresh-timer nil)
+        (scheduled 0))
+    (cl-letf (((symbol-function 'run-with-idle-timer)
+               (lambda (&rest _) (setq scheduled (1+ scheduled)) nil)))
+      (with-current-buffer (get-buffer-create "*codex:lispm-desktop-test*")
+        (unwind-protect
+            (progn
+              (setq major-mode 'lispm-desktop-term-mode)
+              (setq lispm-desktop-term-status-records '((:state working :progress 10)))
+              (lispm-desktop-agent-list-refresh-on-status (current-buffer))
+              (setq lispm-desktop-term-status-records '((:state working :progress 20)))
+              (lispm-desktop-agent-list-refresh-on-status (current-buffer))
+              (should (= scheduled 1))
+              (should (equal (lispm-desktop-agent-list--running-label (current-buffer)) "working"))
+              (setq lispm-desktop-term-status-records '((:state blocked :kind permission)))
+              (lispm-desktop-agent-list-refresh-on-status (current-buffer))
+              (should (= scheduled 2))
+              (should (equal (lispm-desktop-agent-list--running-label (current-buffer)) "needs approval"))
+              (setq lispm-desktop-term-status-records nil)
+              (should (equal (lispm-desktop-agent-list--running-label (current-buffer)) "running")))
+          (kill-buffer))))))
+
+(ert-deftest lispm-desktop-test-title-bar-shows-program-status ()
+  "A terminal's title bar shows what its program says it is doing."
+  ;; Drawn as SVG: an Emacs without librsvg cannot.
+  (skip-unless (image-type-available-p 'svg))
+  (let* ((lispm-desktop-platinum--palette (lispm-desktop-platinum--derive-palette "#FFFFFF" "#000000"
+                                                                                  "#777777" "#6363CE"))
+         (bar (lispm-desktop-platinum--draw-title-bar 600 t nil "codex" nil '(on on off) nil
+                                                      (propertize "needs approval" 'face 'warning)))
+         (at (string-search "codex  needs approval" bar)))
+    (should at)
+    (should (memq 'warning (ensure-list (get-text-property (+ at 8) 'face bar))))))
+
 (ert-deftest lispm-desktop-test-term-module-stale-after-source-change ()
   "The module counts as stale once a source is newer than its library."
   (let* ((root (make-temp-file "lispm-desktop-term-src" t))

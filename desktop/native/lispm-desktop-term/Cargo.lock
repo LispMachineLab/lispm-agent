@@ -260,6 +260,7 @@ name = "lispm-desktop-term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "emacs",
  "libc",
  "polling",
