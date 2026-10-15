@@ -36,6 +36,11 @@
 ;; Which one is in front is kept here, as the menu bar is drawn from it;
 ;; clicking the menu bar, which focuses the frame under it, does not change
 ;; it.
+;;
+;; The applications' windows float over the desktop, child frames of the
+;; screen, Emacs's frame the desktop is drawn in; one can also be out on
+;; the screen of the computer, a frame of its own that still belongs to
+;; the desktop, see lispm-desktop-coherence.el.
 
 ;;; Code:
 
@@ -80,27 +85,89 @@ with the desktop and hides from the full-screen editor.")
     (force-mode-line-update t))
   (run-hook-with-args 'lispm-desktop-apps-frontmost-functions app))
 
+(defun lispm-desktop-apps-out-p (frame)
+  "Return the screen FRAME belongs to when FRAME is out on the computer's
+screen, a frame of its own rather than a child of the screen, or nil.
+Windows out carry it as their frame parameter `lispm-desktop-out', and
+so does the minibuffer they share."
+  (let ((screen (frame-parameter frame 'lispm-desktop-out)))
+    (and (frame-live-p screen) screen)))
+
+(defun lispm-desktop-apps-window-screen (frame)
+  "Return the screen FRAME, a floating window, belongs to: its parent, or
+the screen it left, when it is out."
+  (or (frame-parent frame) (lispm-desktop-apps-out-p frame)))
+
 (defun lispm-desktop-apps-screen ()
   "Return the frame the desktop and the applications are drawn in: the
-selected frame's outermost parent."
+selected frame's outermost parent, or the screen a window out belongs to."
   (let ((frame (selected-frame)))
     (while (frame-parent frame)
       (setq frame (frame-parent frame)))
-    frame))
+    (or (lispm-desktop-apps-out-p frame) frame)))
+
+(defun lispm-desktop-apps-hidden-p (&optional screen)
+  "Return non-nil while SCREEN, by default the selected one, is hidden in the
+Dock, its windows out on the computer's screen."
+  (frame-parameter (or screen (lispm-desktop-apps-screen)) 'lispm-desktop-hidden))
 
 (defun lispm-desktop-apps-windows (&optional screen)
-  "Return the floating windows over SCREEN: child frames marked as windows.
-They carry the frame parameter `lispm-desktop-window'."
+  "Return the floating windows of SCREEN: child frames marked as windows,
+and those of its windows that are out.  They carry the frame parameter
+`lispm-desktop-window'."
   (let ((screen (or screen (lispm-desktop-apps-screen))))
     (seq-filter (lambda (frame)
-                  (and (eq (frame-parent frame) screen)
+                  (and (eq (lispm-desktop-apps-window-screen frame) screen)
                        (frame-parameter frame 'lispm-desktop-window)))
                 (frame-list))))
 
+(defun lispm-desktop-apps--screen-origin (screen)
+  "Return where SCREEN's inside starts on the computer's screen: (X . Y).
+A child frame's position counts from there."
+  (pcase-let ((`(,left ,top . ,_) (frame-edges screen 'native-edges)))
+    (cons left top)))
+
 (defun lispm-desktop-apps--geometry (frame)
-  "Return where FRAME is: (LEFT TOP TEXT-WIDTH TEXT-HEIGHT) in pixels."
+  "Return where FRAME is: (LEFT TOP TEXT-WIDTH TEXT-HEIGHT) in pixels, over
+its screen, whether it floats there or is out."
   (pcase-let ((`(,left . ,top) (frame-position frame)))
+    (when-let* ((screen (and (not (frame-parent frame)) (lispm-desktop-apps-out-p frame))))
+      (pcase-let ((`(,x . ,y) (lispm-desktop-apps--screen-origin screen)))
+        (setq left (- left x) top (- top y))))
     (list left top (frame-text-width frame) (frame-text-height frame))))
+
+(defun lispm-desktop-apps--workarea (frame)
+  "Return the part of the computer's screen windows may use where FRAME is:
+\(X Y WIDTH HEIGHT), the menu bar and the Dock left out."
+  (or (frame-monitor-workarea frame) (list 0 0 (display-pixel-width) (display-pixel-height))))
+
+(defun lispm-desktop-apps--keep-on-screen (frame)
+  "Keep FRAME, a window out, where its title bar can still be reached: its
+top under the menu bar, and some of it left on the screen's sides."
+  (pcase-let* ((`(,x ,y ,w ,h) (lispm-desktop-apps--workarea frame))
+               (`(,left . ,top) (frame-position frame))
+               (width (frame-pixel-width frame))
+               (keep 80))
+    (let ((new-left (max (- (+ x keep) width) (min left (- (+ x w) keep))))
+          (new-top (max y (min top (- (+ y h) 30)))))
+      (unless (and (= new-left left) (= new-top top))
+        (set-frame-position frame new-left new-top)))))
+
+(declare-function lispm-desktop-coherence-take-out "lispm-desktop-coherence" (frame))
+
+(defun lispm-desktop-apps-focus-after (frame)
+  "Give the keyboard to what comes after FRAME, a floating window going
+away: its screen, or while the screen is hidden, the window over the
+others out on the computer's screen."
+  (let ((screen (lispm-desktop-apps-window-screen frame)))
+    (cond ((not (frame-live-p screen)))
+          ((lispm-desktop-apps-hidden-p screen)
+           (when-let* ((next (seq-find (lambda (other)
+                                         (and (not (eq other frame)) (frame-visible-p other)
+                                              (memq other (lispm-desktop-apps-windows screen))))
+                                       (frame-list-z-order))))
+             (select-frame-set-input-focus next)))
+          (t (select-frame-set-input-focus screen)))))
 
 (defun lispm-desktop-apps--put (frame place)
   "Put floating FRAME at PLACE, kept whole on its screen's desktop: under
@@ -130,10 +197,17 @@ the desktop's edge would hang out of Emacs's frame over the screen."
 (defun lispm-desktop-apps-keep-on-desktop (frame)
   "Keep floating FRAME on the desktop where it was just put or moved, and
 remember that place: the window system moves child frames on its own when
-their screen changes size, so they are put back there afterwards."
+their screen changes size, so they are put back there afterwards.  A
+window out is kept on the computer's screen instead, and one shown while
+its screen is hidden goes out there at once."
   (when (frame-live-p frame)
-    (lispm-desktop-apps--put frame (lispm-desktop-apps--geometry frame))
-    (set-frame-parameter frame 'lispm-desktop-window-place (lispm-desktop-apps--geometry frame))))
+    (when (and (frame-parent frame) (lispm-desktop-apps-hidden-p (frame-parent frame))
+               (fboundp 'lispm-desktop-coherence-take-out))
+      (lispm-desktop-coherence-take-out frame))
+    (if (lispm-desktop-apps-out-p frame)
+        (lispm-desktop-apps--keep-on-screen frame)
+      (lispm-desktop-apps--put frame (lispm-desktop-apps--geometry frame))
+      (set-frame-parameter frame 'lispm-desktop-window-place (lispm-desktop-apps--geometry frame)))))
 
 (defun lispm-desktop-apps--place-windows (screen &optional again)
   "Put the floating windows of SCREEN back in their places, each kept on the
@@ -142,7 +216,7 @@ the window system to place them anew and shows them again: going full
 screen or back, macOS moves child windows its own way and may leave them
 out of sight while Emacs takes them for shown."
   (when (frame-live-p screen)
-    (dolist (window (lispm-desktop-apps-windows screen))
+    (dolist (window (seq-filter #'frame-parent (lispm-desktop-apps-windows screen)))
       (let ((place (or (frame-parameter window 'lispm-desktop-window-place)
                        (lispm-desktop-apps--geometry window))))
         (when again
@@ -203,14 +277,21 @@ has a page open, Control Panels while they are open."
   (let ((spec (alist-get (lispm-desktop-apps-frontmost) lispm-desktop-apps)))
     (cons (lispm-desktop-platinum-icon (plist-get spec :icon)) (plist-get spec :name))))
 
+(declare-function lispm-desktop-coherence-available-p "lispm-desktop-coherence" ())
+
 (defun lispm-desktop-apps-application-items ()
-  "Return the Application menu's items: every application, the front one
-checked, as Mac OS 9's listed the running applications."
-  (mapcar (pcase-lambda (`(,key . ,spec))
-            (list :label (plist-get spec :name)
-                  :action (lambda () (lispm-desktop-apps-activate key))
-                  :checked (eq key (lispm-desktop-apps-frontmost))))
-          (lispm-desktop-apps--available)))
+  "Return the Application menu's items: Hide Desktop or Show Desktop, as
+Mac OS 9's began with Hide and Show, then every application, the front
+one checked, as Mac OS 9's listed the running applications."
+  `(,@(when (and (fboundp 'lispm-desktop-coherence-available-p) (lispm-desktop-coherence-available-p))
+        (if (lispm-desktop-apps-hidden-p)
+            '((:label "Show Desktop" :action lispm-desktop-show-desktop :key "C-c h") separator)
+          '((:label "Hide Desktop" :action lispm-desktop-hide-desktop :key "C-c h") separator)))
+    ,@(mapcar (pcase-lambda (`(,key . ,spec))
+                (list :label (plist-get spec :name)
+                      :action (lambda () (lispm-desktop-apps-activate key))
+                      :checked (eq key (lispm-desktop-apps-frontmost))))
+              (lispm-desktop-apps--available))))
 
 (defvar lispm-desktop-tab-name)
 (defvar lispm-desktop-browser-workspace-name)

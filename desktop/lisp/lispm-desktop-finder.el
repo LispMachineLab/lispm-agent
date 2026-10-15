@@ -646,13 +646,11 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
   (interactive)
   (when (frame-live-p lispm-desktop-finder--frame)
     (lispm-desktop-finder--in (when lispm-desktop-finder--shade (lispm-desktop-finder--collapse-box nil)))
-    (pcase-let ((`(,left . ,top) (frame-position lispm-desktop-finder--frame)))
-      (setq lispm-desktop-finder--geometry (list left top (frame-text-width lispm-desktop-finder--frame)
-                                                 (frame-text-height lispm-desktop-finder--frame))))
-    (let ((screen (frame-parent lispm-desktop-finder--frame)))
-      (delete-frame lispm-desktop-finder--frame)
-      (setq lispm-desktop-finder--frame nil lispm-desktop-finder--had-focus nil)
-      (select-frame-set-input-focus screen)))
+    (setq lispm-desktop-finder--geometry (lispm-desktop-apps--geometry lispm-desktop-finder--frame))
+    (let ((frame lispm-desktop-finder--frame))
+      (lispm-desktop-apps-focus-after frame)
+      (delete-frame frame)
+      (setq lispm-desktop-finder--frame nil lispm-desktop-finder--had-focus nil)))
   (when-let* ((buffer (get-buffer lispm-desktop-finder-buffer-name)))
     (kill-buffer buffer)))
 
@@ -664,7 +662,7 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
   "Grow the Finder window over the desktop, or back, from its zoom box."
   (when (frame-live-p lispm-desktop-finder--frame)
     (let* ((frame lispm-desktop-finder--frame)
-           (screen (frame-parent frame))
+           (screen (lispm-desktop-apps-window-screen frame))
            (zoomed (frame-parameter frame 'lispm-desktop-finder-unzoom)))
       (if zoomed
           (pcase-let ((`(,left ,top ,width ,height) zoomed))
@@ -674,11 +672,16 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
         (pcase-let ((`(,left . ,top) (frame-position frame)))
           (set-frame-parameter frame 'lispm-desktop-finder-unzoom
                                (list left top (frame-text-width frame) (frame-text-height frame))))
-        (let ((top (+ (tab-bar-height screen t) 12)))
-          (set-frame-position frame 12 top)
-          ;; The desktop's icons stay in sight at the right.
-          (set-frame-size frame (- (frame-inner-width screen) 140)
-                          (- (frame-inner-height screen) top 30) t))))))
+        (if (lispm-desktop-apps-out-p frame)
+            ;; Out on the computer's screen, it grows over the room there.
+            (pcase-let ((`(,x ,y ,w ,h) (lispm-desktop-apps--workarea frame)))
+              (set-frame-position frame (+ x 12) (+ y 12))
+              (set-frame-size frame (- w 40) (- h 70) t))
+          (let ((top (+ (tab-bar-height screen t) 12)))
+            (set-frame-position frame 12 top)
+            ;; The desktop's icons stay in sight at the right.
+            (set-frame-size frame (- (frame-inner-width screen) 140)
+                            (- (frame-inner-height screen) top 30) t)))))))
 
 (defun lispm-desktop-finder--collapse-box (_window)
   "Roll the Finder window up into its title bar, or down again."
@@ -703,7 +706,9 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
 the floating editor or browser; hide it from the full-screen editor and
 browser.
 This is one of `lispm-desktop-apps-frontmost-functions'."
-  (when (frame-live-p lispm-desktop-finder--frame)
+  (when (and (frame-live-p lispm-desktop-finder--frame)
+             ;; Out on the computer's screen, it stays where it is.
+             (not (lispm-desktop-apps-out-p lispm-desktop-finder--frame)))
     (let ((shown (or (memq app '(desktop settings))
                      (and (eq app 'editor) (fboundp 'lispm-desktop-editor-floating-p)
                           (lispm-desktop-editor-floating-p))

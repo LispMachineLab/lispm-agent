@@ -479,6 +479,11 @@ HELP describes it.  It is pressed rather than clicked, see
   "Functions called with a child frame its title bar or grow box moved or
 resized, so it can be kept in place.")
 
+(defun lispm-desktop-platinum--movable-p (frame)
+  "Return non-nil when FRAME moves by its title bar: a child frame, or a
+floating window out on the computer's screen."
+  (or (frame-parent frame) (frame-parameter frame 'lispm-desktop-window)))
+
 (defun lispm-desktop-platinum--title-press (event)
   "Drag the child frame whose top title bar EVENT pressed, as a window.
 A window at the top of a child frame, such as the floating editor's
@@ -487,7 +492,7 @@ elsewhere the press does nothing and the release selects the window."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
-    (when (and frame (frame-parent frame) (window-at-side-p window 'top))
+    (when (and frame (lispm-desktop-platinum--movable-p frame) (window-at-side-p window 'top))
       (mouse-drag-frame-move event)
       (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame))))
 
@@ -1155,7 +1160,7 @@ only marks the corner."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
-    (when (and frame (frame-parent frame))
+    (when (and frame (lispm-desktop-platinum--movable-p frame))
       (mouse-drag-frame-resize event 'bottom-right)
       (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame))))
 
@@ -1479,7 +1484,11 @@ take the bars of windows gone or no longer wanting one away."
   (let ((wanted nil))
     (when (and lispm-desktop-platinum-scroll-bars lispm-desktop-platinum--palette)
       (dolist (frame (frame-list))
+        ;; Floating windows out on the computer's screen go without, as
+        ;; they do over the desktop.
         (when (and (frame-visible-p frame) (not (frame-parent frame))
+                   (not (frame-parameter frame 'lispm-desktop-window))
+                   (not (frame-parameter frame 'lispm-desktop-out))
                    (display-graphic-p frame))
           (dolist (window (window-list frame 'no-mini))
             (when (lispm-desktop-platinum--scroll-window-p window)
