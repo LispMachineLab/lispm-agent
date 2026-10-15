@@ -216,8 +216,17 @@ drew it with, and a theme of other colours gets their counterparts."
         (progn
           (when (> (hash-table-count lispm-desktop-platinum--images) 512)
             (clrhash lispm-desktop-platinum--images))
-          (puthash key (svg-image (funcall draw) :ascent 'center :scale 1)
+          (puthash key (lispm-desktop-platinum--svg-image (funcall draw))
                    lispm-desktop-platinum--images)))))
+
+(defun lispm-desktop-platinum--svg-image (svg)
+  "Return the image of SVG, centred on its line and never scaled.
+An Emacs built without SVG gets the image all the same, which it cannot
+show: the text under it shows instead, where `svg-image' would signal."
+  (if (image-type-available-p 'svg)
+      (svg-image svg :ascent 'center :scale 1)
+    (list 'image :type 'svg :data (with-temp-buffer (svg-print svg) (buffer-string))
+          :ascent 'center :scale 1)))
 
 (defun lispm-desktop-platinum--fill (svg x y width height color)
   "Fill the rectangle of WIDTH by HEIGHT at X, Y of SVG with COLOR.

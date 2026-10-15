@@ -1048,6 +1048,17 @@ drawing functions draw their pixels as rectangles."
   "Return the width and height of SVG as a cons."
   (cons (dom-attr svg 'width) (dom-attr svg 'height)))
 
+(ert-deftest lispm-desktop-test-images-without-svg ()
+  "An Emacs built without SVG gets the chrome's images all the same, rather
+than an error: the text under them shows instead."
+  (cl-letf* ((available (symbol-function 'image-type-available-p))
+             ((symbol-function 'image-type-available-p)
+              (lambda (type) (and (not (eq type 'svg)) (funcall available type)))))
+    (let ((image (lispm-desktop-platinum--svg-image (svg-create 4 4))))
+      (should (eq (car image) 'image))
+      (should (eq (image-property image :type) 'svg))
+      (should (string-prefix-p "<svg" (image-property image :data))))))
+
 (ert-deftest lispm-desktop-test-grey-ramp ()
   "Platinum's greys come back as themselves; another theme's keep their order."
   (let ((platinum (lispm-desktop-test--platinum-palette))
