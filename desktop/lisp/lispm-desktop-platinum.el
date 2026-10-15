@@ -912,6 +912,10 @@ to the left, a file to the right."
 (defvar lispm-desktop-platinum-menu-closed-hook nil
   "Hook run when a menu dropped from the menu bar closes, chosen or not.")
 
+(defvar lispm-desktop-platinum--menu-bar-walk nil
+  "Non-nil while the menu bar is walked from the keyboard, menu to menu:
+the window that had the keyboard gets it back once the walk is over.")
+
 (defmacro lispm-desktop-platinum--with-open-menu (key &rest body)
   "Run BODY, which pops up a menu, with menu bar item KEY highlighted."
   (declare (indent 1))
@@ -920,7 +924,8 @@ to the left, a file to the right."
      (redisplay t)
      (unwind-protect (progn ,@body)
        (force-mode-line-update t)
-       (run-hooks 'lispm-desktop-platinum-menu-closed-hook))))
+       (unless lispm-desktop-platinum--menu-bar-walk
+         (run-hooks 'lispm-desktop-platinum-menu-closed-hook)))))
 
 (defconst lispm-desktop-platinum-menu-padding 10
   "Blank pixels on either side of a menu bar title.")
@@ -1120,16 +1125,31 @@ the λ menu, the frontmost application's menus and the Application menu."
   "Open the menu bar from the keyboard: the λ menu drops with its first
 item highlighted.  Up and Down move through a menu, typing a letter goes
 to the item it starts, Left and Right go to the menu beside, Return
-chooses and Escape closes, so every menu is reached without the mouse."
+chooses and Escape closes, so every menu is reached without the mouse.
+The menus drop from the screen's menu bar, as when it is clicked,
+whichever window has the keyboard, and it is given back once they close;
+from a window out, its screen hidden in the Dock, they drop from the top
+of that window."
   (interactive)
+  (let ((screen (selected-frame)))
+    (while (frame-parent screen)
+      (setq screen (frame-parent screen)))
+    (when-let* ((out (frame-parameter screen 'lispm-desktop-out))
+                ((frame-live-p out)))
+      (setq screen (if (frame-parameter out 'lispm-desktop-hidden) (selected-frame) out)))
+    (unless (eq (selected-frame) screen)
+      (select-frame-set-input-focus screen)))
   (let ((menus (lispm-desktop-platinum--menu-bar-menus))
         (index 0)
         step)
-    (while (setq step (catch 'lispm-desktop-popup-menu-bar-step
-                        (let ((lispm-desktop-popup-menu-bar-step t))
-                          (call-interactively (cdr (nth index menus))))
-                        nil))
-      (setq index (mod (+ index step) (length menus))))))
+    (unwind-protect
+        (let ((lispm-desktop-platinum--menu-bar-walk t))
+          (while (setq step (catch 'lispm-desktop-popup-menu-bar-step
+                              (let ((lispm-desktop-popup-menu-bar-step t))
+                                (call-interactively (cdr (nth index menus))))
+                              nil))
+            (setq index (mod (+ index step) (length menus)))))
+      (run-hooks 'lispm-desktop-platinum-menu-closed-hook))))
 
 ;;;; Window bottoms
 
