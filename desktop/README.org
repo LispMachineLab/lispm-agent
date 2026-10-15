@@ -318,8 +318,9 @@ set up, so it can change anything, and the appearance takes a new value at once:
 (setq lispm-desktop-theme 'platinum)
 
 ;; The desktop: a colour of its own, rather than the theme's tinted with its
-;; accent, and a picture over it (a PNG or a JPEG), placed as Mac OS 9's Desktop
-;; Pictures were: fill (cropped to the desktop), fit, center or tile.
+;; accent (any colour Emacs knows: "#6666AA", "dark slate blue", "gray40"), and
+;; a picture over it (a PNG or a JPEG), placed as Mac OS 9's Desktop Pictures
+;; were: fill (cropped to the desktop), fit, center or tile.
 (setq lispm-desktop-color "#6666AA")
 (setq lispm-desktop-picture "~/Pictures/desktop.jpg"
       lispm-desktop-picture-position 'fill)
