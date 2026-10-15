@@ -47,7 +47,8 @@ fn init(_: &Env) -> Result<()> {
 }
 
 /// The pipe that wakes Emacs: lines of terminal ids, written from any thread.
-static CHANNEL: OnceLock<Mutex<Box<dyn Write + Send>>> = OnceLock::new();
+/// None until Emacs opens it, and again once Emacs is about to close it.
+static CHANNEL: Mutex<Option<Box<dyn Write + Send>>> = Mutex::new(None);
 
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -105,8 +106,8 @@ impl Shared {
     /// Wake Emacs for this terminal, once until it draws it.
     fn wake(&self) {
         if !self.woken.swap(true, Ordering::AcqRel) {
-            if let Some(channel) = CHANNEL.get() {
-                if let Ok(mut channel) = channel.lock() {
+            if let Ok(mut channel) = CHANNEL.lock() {
+                if let Some(channel) = channel.as_mut() {
                     let _ = writeln!(channel, "{}", self.id);
                     let _ = channel.flush();
                 }
@@ -248,11 +249,25 @@ fn strings(vector: Vector) -> Result<Vec<String>> {
     (0..vector.len()).map(|i| vector.get::<String>(i)).collect()
 }
 
-/// Wake Emacs through PROCESS, a pipe process, from now on.
+/// Wake Emacs through PROCESS, a pipe process, from now on, instead of
+/// through the pipe it woke Emacs through before, if any.
 #[defun]
 fn init_channel(env: &Env, process: Value) -> Result<()> {
     let writer = env.open_channel(process)?;
-    let _ = CHANNEL.set(Mutex::new(Box::new(writer)));
+    if let Ok(mut channel) = CHANNEL.lock() {
+        *channel = Some(Box::new(writer));
+    }
+    Ok(())
+}
+
+/// Stop waking Emacs, which is about to close the channel's pipe: a write
+/// to a pipe nobody reads raises SIGPIPE, and batch Emacs leaves SIGPIPE
+/// fatal.  No write is under way once this returns.
+#[defun]
+fn close_channel() -> Result<()> {
+    if let Ok(mut channel) = CHANNEL.lock() {
+        *channel = None;
+    }
     Ok(())
 }
 
