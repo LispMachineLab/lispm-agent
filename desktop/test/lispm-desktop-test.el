@@ -1291,6 +1291,56 @@ bottom; with nothing to scroll it lies flat."
       (should (equal (at 3 3) "#CCCCCC"))
       (should (equal (at 10 5) "#777777")))))
 
+(ert-deftest lispm-desktop-test-header-strip ()
+  "A window's header strip, under its title bar, is lit along its top,
+platinum, and shaded along its bottom over a black line."
+  (let* ((palette (lispm-desktop-test--platinum-palette))
+         (strip (lispm-desktop-platinum-draw-header-strip palette 200 "3 items")))
+    (should (equal (lispm-desktop-test--size strip) '(200 . 22)))
+    (cl-flet ((at (x y) (lispm-desktop-test--pixel strip x y)))
+      (should (equal (at 5 0) "#FFFFFF"))
+      (should (equal (at 5 10) "#DDDDDD"))
+      (should (equal (at 5 20) "#AAAAAA"))
+      (should (equal (at 5 21) "#000000")))
+    (should (dom-by-tag strip 'text))
+    (should (eq (dom-tag (lispm-desktop-platinum-draw-header-strip
+                          (lispm-desktop-test--dracula-palette) 200 "3 items"))
+                'svg))))
+
+(ert-deftest lispm-desktop-test-group-box-edge ()
+  "A group box's top edge is an engraved line, grey over lit, running down
+its sides; its title breaks the line on the panel's grey."
+  (let* ((palette (lispm-desktop-test--platinum-palette))
+         (edge (lispm-desktop-platinum-draw-group-edge palette 200))
+         (titled (lispm-desktop-platinum-draw-group-edge palette 200 "Appearance")))
+    (should (equal (lispm-desktop-test--size edge) '(200 . 18)))
+    (cl-flet ((at (svg x y) (lispm-desktop-test--pixel svg x y)))
+      (should (equal (at edge 50 9) "#888888"))
+      (should (equal (at edge 50 10) "#FFFFFF"))
+      (should (equal (at edge 0 14) "#888888"))
+      (should (equal (at edge 1 14) "#FFFFFF"))
+      (should (equal (at edge 198 14) "#888888"))
+      (should (equal (at edge 199 14) "#FFFFFF"))
+      (should (equal (at titled 10 9) "#EEEEEE")))
+    (should (dom-by-tag titled 'text))))
+
+(ert-deftest lispm-desktop-test-finder-path-menu ()
+  "The Finder window counts its items in its header, and its title pops up
+its folder's path, the folder first, each going there."
+  (lispm-desktop-test--with-folder
+    (unwind-protect
+        (let ((root (file-name-as-directory folder)))
+          (lispm-desktop-finder--go (expand-file-name "zeta" folder))
+          (lispm-desktop-finder--in
+            (should (eq lispm-desktop-platinum-title-menu-function #'lispm-desktop-finder--path-items))
+            (should (equal header-line-format '(:eval (lispm-desktop-finder--header))))
+            (let ((items (lispm-desktop-finder--path-items nil)))
+              (should (equal (plist-get (car items) :label) "zeta"))
+              (should (equal (plist-get (cadr items) :label) (lispm-desktop-finder--title root)))
+              (funcall (plist-get (cadr items) :action)))
+            (should (equal lispm-desktop-finder--directory root))))
+      (kill-buffer lispm-desktop-finder-buffer-name))))
+
 (ert-deftest lispm-desktop-test-control-strip-segments ()
   "The Control Strip's segments are 24 pixels tall in its own greys, each
 parted from the next by a black line; a pressed module is darkened."

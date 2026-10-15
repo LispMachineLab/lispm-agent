@@ -54,7 +54,6 @@
 
 (declare-function lispm-desktop-editor-activate "lispm-desktop-editor" ())
 (declare-function lispm-desktop-editor-floating-p "lispm-desktop-editor" ())
-(declare-function lispm-desktop-sidebar--toolbar-button "lispm-desktop-sidebar" (label command help row &optional state))
 (declare-function lispm-desktop-popup-menu "lispm-desktop-popup" (items &optional x y align))
 (declare-function lispm-desktop-popup--frame-xy "lispm-desktop-popup" (position))
 (declare-function lispm-desktop-popup-alert "lispm-desktop-popup" (icon message buttons &optional detail))
@@ -182,27 +181,16 @@ The virtual folders are `lispm-desktop-finder-folders'."
   "Face of an item's name in the Finder window."
   :group 'lispm-desktop-platinum)
 
-(defun lispm-desktop-finder--button (label command help enabled)
-  "Return a toolbar button LABEL running COMMAND, described by HELP.
-When not ENABLED it is drawn disabled and does nothing."
-  (lispm-desktop-sidebar--toolbar-button label command help 'header-line
-                                         (unless enabled 'disabled)))
-
-(defun lispm-desktop-finder--toolbar ()
-  "Return the window's toolbar: back, forward, enclosing folder, New Folder."
-  (let ((new (lispm-desktop-finder--button "New Folder" #'lispm-desktop-finder-new-folder
-                                           "Make a new folder here" (stringp lispm-desktop-finder--directory))))
-    (concat " "
-            (lispm-desktop-finder--button "◀" #'lispm-desktop-finder-back "Back" lispm-desktop-finder--back) " "
-            (lispm-desktop-finder--button "▶" #'lispm-desktop-finder-forward "Forward" lispm-desktop-finder--forward) " "
-            (lispm-desktop-finder--button "▲" #'lispm-desktop-finder-up "Enclosing folder"
-                                          (lispm-desktop-finder--parent lispm-desktop-finder--directory))
-            (propertize " " 'display
-                        `(space :align-to (- right (,(+ (string-pixel-width new) 6)))))
-            new)))
+(defun lispm-desktop-finder--header ()
+  "Return the window's header: Mac OS 9's strip counting its items and the
+room left on the disk, under the title bar.  The window has no toolbar:
+back, forward and the enclosing folder are on their keys, the folder's
+path on its title's Command click, New Folder in the File menu."
+  (lispm-desktop-platinum-header-strip (lispm-desktop-finder--info)))
 
 (defun lispm-desktop-finder--info ()
-  "Return the window's bottom line: its items, and the room left on the disk."
+  "Return what the window's header says: its items, and the room left on
+the disk."
   (let ((count (length lispm-desktop-finder--items))
         (available (and (stringp lispm-desktop-finder--directory)
                         (nth 2 (ignore-errors (file-system-info lispm-desktop-finder--directory))))))
@@ -266,7 +254,9 @@ When not ENABLED it is drawn disabled and does nothing."
               lispm-desktop-platinum-icon (if-let* ((folder (lispm-desktop-finder--folder lispm-desktop-finder--directory)))
                                               (lispm-desktop-platinum-icon (plist-get folder :icon))
                                             (lispm-desktop-platinum-folder-icon lispm-desktop-finder--directory))
-              lispm-desktop-platinum-info (lispm-desktop-finder--info))
+              ;; The header counts the items; the bottom edge holds only
+              ;; the grow box.
+              lispm-desktop-platinum-info "")
         ;; The selected item is kept in view.
         (let ((at (or (and lispm-desktop-finder--selected
                            (text-property-any (point-min) (point-max)
@@ -301,6 +291,20 @@ of `lispm-desktop-finder-folders'."
   (when (stringp directory)
     (let ((parent (file-name-directory (directory-file-name directory))))
       (unless (or (null parent) (equal parent directory)) parent))))
+
+(defun lispm-desktop-finder--path-items (_window)
+  "Return the menu of the shown folder's path, as its title's Command click
+pops it up, as Mac OS 9's did: the folder, then each folder enclosing it,
+each going there."
+  (let ((folders nil)
+        (directory (lispm-desktop-finder--in lispm-desktop-finder--directory)))
+    (while directory
+      (push directory folders)
+      (setq directory (lispm-desktop-finder--parent directory)))
+    (mapcar (lambda (folder)
+              (list :label (lispm-desktop-finder--title folder)
+                    :action (lambda () (lispm-desktop-finder--go folder t))))
+            (nreverse folders))))
 
 (defun lispm-desktop-finder--go (directory &optional record select)
   "Show DIRECTORY, with SELECT selected; RECORD keeps the folder left in
@@ -564,13 +568,16 @@ from the keyboard, see `lispm-desktop-context-menu-function'."
               show-trailing-whitespace nil
               evil-emacs-state-cursor '(nil)
               evil-normal-state-cursor '(nil)
-              header-line-format '(:eval (lispm-desktop-finder--toolbar))
+              header-line-format '(:eval (lispm-desktop-finder--header))
+              mode-line-format '("" mode-line-format-right-align
+                                 (:eval (lispm-desktop-platinum-mode-line-right)))
+              lispm-desktop-platinum-title-menu-function #'lispm-desktop-finder--path-items
               lispm-desktop-context-menu-function #'lispm-desktop-finder--keyboard-menu
               lispm-desktop-platinum-box-functions (list :close #'lispm-desktop-finder--close-box
                                                          :zoom #'lispm-desktop-finder--zoom-box
                                                          :collapse #'lispm-desktop-finder--collapse-box))
   (face-remap-add-relative 'default 'lispm-desktop-platinum-list)
-  (face-remap-add-relative 'header-line 'lispm-desktop-platinum-header)
+  (face-remap-add-relative 'header-line '(:box nil :underline nil :overline nil))
   (when (fboundp 'display-line-numbers-mode)
     (display-line-numbers-mode -1))
   (add-hook 'window-size-change-functions #'lispm-desktop-finder--render nil t))
@@ -677,8 +684,9 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
   (when (frame-live-p lispm-desktop-finder--frame)
     (lispm-desktop-finder--in
       (if lispm-desktop-finder--shade
-          (progn (setq header-line-format '(:eval (lispm-desktop-finder--toolbar)))
-                 (kill-local-variable 'mode-line-format)
+          (progn (setq header-line-format '(:eval (lispm-desktop-finder--header))
+                       mode-line-format '("" mode-line-format-right-align
+                                          (:eval (lispm-desktop-platinum-mode-line-right))))
                  (set-frame-height lispm-desktop-finder--frame lispm-desktop-finder--shade nil t)
                  (setq lispm-desktop-finder--shade nil))
         (setq lispm-desktop-finder--shade (frame-text-height lispm-desktop-finder--frame))

@@ -392,6 +392,94 @@ tall and the content below never shifts when the focus moves."
                                                                    (plist-get lispm-desktop-platinum--palette :chrome))
                                      svg))))
 
+(defconst lispm-desktop-platinum-header-strip-height 22
+  "Height in pixels of a window's header strip, as the Finder window's.")
+
+(defun lispm-desktop-platinum-draw-header-strip (palette width &optional label)
+  "Return an SVG of a window's header strip WIDTH pixels wide, in PALETTE.
+It runs under the title bar as the Finder window's did, lit along its
+top, platinum, shaded along its bottom over a black line, LABEL centred
+in the small system font, as \"9 items, 705 MB available\"."
+  (let* ((h lispm-desktop-platinum-header-strip-height)
+         (svg (svg-create width h))
+         (grey (lambda (level) (lispm-desktop-platinum-grey palette level))))
+    (lispm-desktop-platinum--fill svg 0 0 width h (funcall grey #xDD))
+    (lispm-desktop-platinum--row svg 0 (1- width) 0 (funcall grey #xFF))
+    (lispm-desktop-platinum--row svg 0 (1- width) (- h 2) (funcall grey #xAA))
+    (lispm-desktop-platinum--row svg 0 (1- width) (1- h) (plist-get palette :outline))
+    (when label
+      (lispm-desktop-platinum--draw-content
+       svg label (/ (- width (lispm-desktop-platinum--content-width label 'lispm-desktop-platinum-small)) 2)
+       1 (- h 3) (plist-get palette :text) 'lispm-desktop-platinum-small))
+    svg))
+
+(defun lispm-desktop-platinum-header-strip (label)
+  "Return the header strip of the window being drawn, showing LABEL.
+It is a string to put in the window's header line; see
+`lispm-desktop-platinum-draw-header-strip'."
+  (let ((width (- (window-pixel-width) (window-right-divider-width) (window-scroll-bar-width))))
+    (propertize " " 'display
+                (lispm-desktop-platinum--image
+                 (list 'header-strip label width)
+                 (lambda () (lispm-desktop-platinum-draw-header-strip lispm-desktop-platinum--palette
+                                                                      width label))))))
+
+(defconst lispm-desktop-platinum-group-title-height 18
+  "Height in pixels of a group box's top edge, which carries its title.")
+
+(defun lispm-desktop-platinum-draw-group-edge (palette width &optional title bottom)
+  "Return an SVG of a group box's top edge WIDTH pixels wide, in PALETTE.
+Mac OS 9 framed a group of controls in an engraved line, a grey line
+with a lit one along it, TITLE breaking the top line near its left end
+in the system font.  BOTTOM draws the bottom edge instead, closing the
+frame's sides at the top of a line as tall as a line of text."
+  (let* ((h (if bottom (default-line-height) lispm-desktop-platinum-group-title-height))
+         (y (if bottom 1 (/ h 2)))
+         (svg (svg-create width h))
+         (dark (lispm-desktop-platinum-grey palette #x88))
+         (lit (lispm-desktop-platinum-grey palette #xFF)))
+    (if bottom
+        (progn
+          (lispm-desktop-platinum--column svg 0 0 y dark)
+          (lispm-desktop-platinum--column svg 1 0 (1- y) lit)
+          (lispm-desktop-platinum--column svg (- width 2) 0 y dark)
+          (lispm-desktop-platinum--column svg (1- width) 0 (1+ y) lit))
+      (lispm-desktop-platinum--column svg 0 y (1- h) dark)
+      (lispm-desktop-platinum--column svg 1 (1+ y) (1- h) lit)
+      (lispm-desktop-platinum--column svg (- width 2) y (1- h) dark)
+      (lispm-desktop-platinum--column svg (1- width) y (1- h) lit))
+    (lispm-desktop-platinum--row svg 0 (- width 2) y dark)
+    (lispm-desktop-platinum--row svg 1 (1- width) (1+ y) lit)
+    (when title
+      (let ((title-width (lispm-desktop-platinum--content-width title 'lispm-desktop-platinum-title)))
+        (lispm-desktop-platinum--fill svg 8 0 (+ title-width 8) h (lispm-desktop-platinum-grey palette #xEE))
+        (lispm-desktop-platinum--draw-content svg title 12 0 h (plist-get palette :text)
+                                              'lispm-desktop-platinum-title)))
+    svg))
+
+(defun lispm-desktop-platinum-group-edge (width &optional title bottom)
+  "Return a group box's edge WIDTH pixels wide as a string displaying it.
+See `lispm-desktop-platinum-draw-group-edge'."
+  (propertize " " 'display
+              (lispm-desktop-platinum--image
+               (list 'group-edge width title bottom)
+               (lambda () (lispm-desktop-platinum-draw-group-edge lispm-desktop-platinum--palette
+                                                                  width title bottom)))))
+
+(defun lispm-desktop-platinum-group-side (height)
+  "Return a group box's side for a line HEIGHT pixels tall, as a string
+displaying it: the grey line and the lit one beside it."
+  (propertize " " 'display
+              (lispm-desktop-platinum--image
+               (list 'group-side height)
+               (lambda ()
+                 (let ((svg (svg-create 2 height)))
+                   (lispm-desktop-platinum--fill svg 0 0 1 height
+                                                 (lispm-desktop-platinum-grey lispm-desktop-platinum--palette #x88))
+                   (lispm-desktop-platinum--fill svg 1 0 1 height
+                                                 (lispm-desktop-platinum-grey lispm-desktop-platinum--palette #xFF))
+                   svg)))))
+
 (defun lispm-desktop-platinum--box (kind &optional modified pressed)
   "Return the image of a title bar box of KIND.
 See `lispm-desktop-platinum-draw-box'."
@@ -2103,20 +2191,29 @@ chrome does neither."
          (lispm-desktop-platinum-collapse-window window))
         (t (lispm-desktop-platinum-zoom-window window))))
 
+(defvar-local lispm-desktop-platinum-title-menu-function nil
+  "Function returning the menu a Command click on this buffer's title pops
+up, called with the window, or nil for the workspace's buffers.  The
+Finder window gives its folder's path, as Mac OS 9's did.")
+
 (defun lispm-desktop-platinum-title-menu (window)
   "Pop up the buffers WINDOW could show, and show the one chosen.
 As Mac OS 9 popped up a window's path from its title, the title pops up
-the workspace's buffers, the one WINDOW shows checked.  The choice goes
-to WINDOW unless the main area's columns send it elsewhere: a session
-to the left, a file to the right."
+the workspace's buffers, the one WINDOW shows checked, or what its
+buffer's `lispm-desktop-platinum-title-menu-function' gives.  A buffer
+chosen goes to WINDOW unless the main area's columns send it elsewhere:
+a session to the left, a file to the right."
   (lispm-desktop-popup-menu
-   (mapcar (lambda (buffer)
-             (list :label (lispm-desktop-platinum--buffer-title buffer)
-                   :action (lambda ()
-                             (select-window window)
-                             (switch-to-buffer buffer))
-                   :checked (eq buffer (window-buffer window))))
-           (seq-take (lispm-desktop-platinum--window-buffers window) 30))))
+   (if-let* ((function (buffer-local-value 'lispm-desktop-platinum-title-menu-function
+                                           (window-buffer window))))
+       (funcall function window)
+     (mapcar (lambda (buffer)
+               (list :label (lispm-desktop-platinum--buffer-title buffer)
+                     :action (lambda ()
+                               (select-window window)
+                               (switch-to-buffer buffer))
+                     :checked (eq buffer (window-buffer window))))
+             (seq-take (lispm-desktop-platinum--window-buffers window) 30)))))
 
 ;;;; Menu bar
 
@@ -3474,6 +3571,11 @@ as the triangles take the theme's colour."
   "Face of a list window's header, below its title bar."
   :group 'lispm-desktop-platinum)
 
+(defface lispm-desktop-platinum-small nil
+  "Face of the small system font, as Mac OS 9's Geneva 9: window headers,
+the Control Strip's menus."
+  :group 'lispm-desktop-platinum)
+
 (defface lispm-desktop-platinum-list-body nil
   "Face of a list view's body: lighter than the platinum, as Finder's."
   :group 'lispm-desktop-platinum)
@@ -3610,6 +3712,8 @@ it, as on every theme change, is idempotent."
                             :background (lispm-desktop-platinum--color :highlight)
                             :inverse-video nil :box nil)
         (set-face-attribute 'lispm-desktop-platinum-list nil :family (or list-family 'unspecified))
+        (set-face-attribute 'lispm-desktop-platinum-small nil
+                            :inherit 'lispm-desktop-platinum-list :height 90 :weight 'normal)
         (set-face-attribute 'lispm-desktop-platinum-header nil
                             :inherit 'lispm-desktop-platinum-list :background header :foreground dim
                             :box `(:line-width (1 . 4) :color ,header) :underline nil)

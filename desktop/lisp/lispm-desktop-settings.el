@@ -154,8 +154,65 @@ describes it."
    :help (or help label)))
 
 (defun lispm-desktop-settings--heading (title)
-  "Insert the heading TITLE of a group of settings."
-  (insert "\n" lispm-desktop-settings--heading-indent (propertize title 'face 'bold) "\n"))
+  "Insert the heading TITLE of a group of settings.
+The group runs to the next heading; once the panel is drawn, it is framed
+in a group box titled TITLE, see `lispm-desktop-settings--frame-groups'."
+  (insert (propertize (concat lispm-desktop-settings--heading-indent title)
+                      'face 'bold 'lispm-desktop-settings-group title)
+          "\n"))
+
+(defconst lispm-desktop-settings--group-margin 12
+  "Pixels between a group box and the pane's sides.")
+
+(defun lispm-desktop-settings--frame-groups ()
+  "Frame each group of settings in the current buffer in a group box, as
+Mac OS 9's control panels framed theirs: its heading becomes the box's
+titled top edge, each of its lines gets the box's sides, as tall as the
+line, and its bottom edge closes it, a gap after it."
+  (let* ((window (get-buffer-window (current-buffer) t))
+         (width (if window (window-body-width window t) 500))
+         (margin lispm-desktop-settings--group-margin)
+         (outside (propertize " " 'display `(space :width (,margin))))
+         (box (- width (* 2 margin)))
+         (headings nil))
+    (goto-char (point-min))
+    (while (not (eobp))
+      (when-let* ((title (get-text-property (point) 'lispm-desktop-settings-group)))
+        (push (cons (point) title) headings))
+      (forward-line 1))
+    ;; From the last group up, so earlier places hold.
+    (let ((end (point-max)))
+      (pcase-dolist (`(,start . ,title) headings)
+        (save-excursion
+          (goto-char end)
+          (insert outside (lispm-desktop-platinum-group-edge box nil t) "\n"
+                  (propertize " " 'display '(space :height (8))) "\n")
+          (goto-char start)
+          (forward-line 1)
+          (while (< (point) end)
+            (let* ((height (if window
+                               ;; The newline counted in, so a blank line
+                               ;; measures as tall as it shows.
+                               (max 1 (cdr (window-text-pixel-size window (line-beginning-position)
+                                                                   (min (1+ (line-end-position))
+                                                                        (point-max)))))
+                             16))
+                   (left (concat outside (lispm-desktop-platinum-group-side height)))
+                   (right (concat (propertize " " 'display `(space :align-to (- right (,(+ margin 2)))))
+                                  (lispm-desktop-platinum-group-side height))))
+              (put-text-property (line-beginning-position) (min (1+ (line-end-position)) (point-max))
+                                 'line-prefix left)
+              (end-of-line)
+              ;; On a blank line the side is the line's first text, so it
+              ;; carries the line's prefix too.
+              (insert (propertize right 'line-prefix left))
+              (setq end (+ end (length right)))
+              (forward-line 1)))
+          (goto-char start)
+          (delete-region start (line-end-position))
+          (insert outside (propertize (lispm-desktop-platinum-group-edge box title)
+                                      'lispm-desktop-platinum-label title)))
+        (setq end start)))))
 
 (defun lispm-desktop-settings--note (text)
   "Insert TEXT, a remark about the settings above, dimmed."
@@ -347,7 +404,9 @@ desktop's SVG cannot read."
         (setq lispm-desktop-settings--panel (car panel))
         (let ((control (lispm-desktop-settings--control-index)))
           (erase-buffer)
+          (insert (propertize " " 'display '(space :height (10))) "\n")
           (funcall (nth 2 panel))
+          (lispm-desktop-settings--frame-groups)
           (goto-char (point-min))
           (if control
               ;; The keyboard stays on the control it was on.
@@ -382,6 +441,36 @@ The panels are `lispm-desktop-settings-panels'."
   "Close the control panel's window, from its close box."
   (lispm-desktop-settings-close))
 
+(defvar lispm-desktop-settings--shade nil
+  "The control panel's window's height while it is rolled up, or nil.")
+
+(defun lispm-desktop-settings--collapse-box (_window)
+  "Roll the control panel's window up into its title bar, or down again."
+  (when (lispm-desktop-settings-open-p)
+    (with-current-buffer (lispm-desktop-settings--buffer)
+      (if lispm-desktop-settings--shade
+          (progn (setq header-line-format '(:eval (lispm-desktop-settings--tabs)))
+                 (kill-local-variable 'mode-line-format)
+                 (set-frame-height lispm-desktop-settings--frame lispm-desktop-settings--shade nil t)
+                 (setq lispm-desktop-settings--shade nil))
+        (setq lispm-desktop-settings--shade (frame-text-height lispm-desktop-settings--frame))
+        (setq header-line-format nil
+              mode-line-format nil)
+        (set-frame-height lispm-desktop-settings--frame
+                          (window-tab-line-height (frame-root-window lispm-desktop-settings--frame))
+                          nil t)))))
+
+(defvar-local lispm-desktop-settings--width nil
+  "The width in pixels the panel's group boxes were drawn for.")
+
+(defun lispm-desktop-settings--refit (window)
+  "Draw the panel again once WINDOW's width changed, its group boxes as wide
+as the pane.  This is a buffer-local `window-size-change-functions' function."
+  (let ((width (window-body-width window t)))
+    (unless (eql width lispm-desktop-settings--width)
+      (setq lispm-desktop-settings--width width)
+      (lispm-desktop-settings--render))))
+
 (defvar-keymap lispm-desktop-settings-mode-map
   :doc "Keymap of the control panel's window."
   :parent button-buffer-map
@@ -408,8 +497,11 @@ The panels are `lispm-desktop-settings-panels'."
               header-line-format '(:eval (lispm-desktop-settings--tabs))
               lispm-desktop-platinum-title "Control Panels"
               lispm-desktop-platinum-icon (lispm-desktop-platinum-icon "control-panels")
-              lispm-desktop-platinum-box-functions (list :close #'lispm-desktop-settings--close-box))
-  (face-remap-add-relative 'default 'lispm-desktop-platinum-list)
+              lispm-desktop-platinum-box-functions (list :close #'lispm-desktop-settings--close-box
+                                                         :collapse #'lispm-desktop-settings--collapse-box))
+  ;; The pane the tabs choose among, lighter than the window's platinum.
+  (face-remap-add-relative 'default 'lispm-desktop-platinum-list-body)
+  (add-hook 'window-size-change-functions #'lispm-desktop-settings--refit nil t)
   ;; The tabs fill the header line, their pane's edge under them.
   (face-remap-add-relative 'header-line '(:box nil :underline nil :overline nil))
   (add-hook 'post-command-hook #'lispm-desktop-platinum-show-focus nil t)
