@@ -1412,7 +1412,12 @@ GrowWindow drew them."
 pixels: a checkerboard whose phase follows where the line is."
   (should (equal (lispm-desktop-platinum-dots 4 2 0)
                  (vector (bool-vector t nil t nil) (bool-vector nil t nil t))))
-  (should (equal (lispm-desktop-platinum-dots 3 1 1) (vector (bool-vector nil t nil))))
+  (should (equal (lispm-desktop-platinum-dots 3 1 1) (vector (bool-vector nil t nil)))))
+
+(ert-deftest lispm-desktop-test-outline-dots-image ()
+  "The outline's dots are an XBM image of the bits, as large as they are."
+  ;; CI's Emacs builds have no window system, and so no XBM images.
+  (skip-unless (image-type-available-p 'xbm))
   ;; Bits are sized by `:data-width' and `:data-height': `:width' and
   ;; `:height' would scale the image, and make the spec invalid.
   (let ((image (lispm-desktop-platinum--dots-image 6 2 1)))
