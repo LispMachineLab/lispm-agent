@@ -1775,8 +1775,9 @@ HELP describes it.  It is pressed rather than clicked, see
                         map)))
 
 (defvar lispm-desktop-platinum-frame-moved-functions nil
-  "Functions called with a child frame its title bar or grow box moved or
-resized, so it can be kept in place.")
+  "Functions called with a floating window once it was moved or grown by
+its outline, from its title bar, its frame or its grow box, so it can be
+kept in place.")
 
 (defun lispm-desktop-platinum--movable-p (frame)
   "Return non-nil when FRAME moves by its title bar: a child frame, or a
@@ -1784,16 +1785,16 @@ floating window out on the computer's screen."
   (or (frame-parent frame) (frame-parameter frame 'lispm-desktop-window)))
 
 (defun lispm-desktop-platinum--title-press (event)
-  "Drag the child frame whose top title bar EVENT pressed, as a window.
+  "Move the child frame whose top title bar EVENT pressed, as a window.
 A window at the top of a child frame, such as the floating editor's
-title strip, moves the frame, as Mac OS 9 moved a window by its title;
-elsewhere the press does nothing and the release selects the window."
+title strip, moves the frame by its outline, as Mac OS 9 moved a window
+by its title, see `lispm-desktop-platinum-drag-outline'; elsewhere the
+press does nothing and the release selects the window."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
     (when (and frame (lispm-desktop-platinum--movable-p frame) (window-at-side-p window 'top))
-      (mouse-drag-frame-move event)
-      (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame))))
+      (lispm-desktop-platinum-drag-outline frame 'move))))
 
 (defvar lispm-desktop-platinum--title-map
   (let ((map (make-sparse-keymap)))
@@ -2619,15 +2620,15 @@ PALETTE's greys, centred in HEIGHT pixels."
     svg))
 
 (defun lispm-desktop-platinum--grow-press (event)
-  "Resize the child frame whose grow box EVENT pressed, from its corner.
-The floating editor resizes so; elsewhere windows tile, and the grow box
-only marks the corner."
+  "Resize the child frame whose grow box EVENT pressed, from its corner, by
+its outline, as Mac OS 9's GrowWindow did, see
+`lispm-desktop-platinum-drag-outline'.  Floating windows resize so;
+elsewhere windows tile, and the grow box only marks the corner."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (frame (and (windowp window) (window-frame window))))
     (when (and frame (lispm-desktop-platinum--movable-p frame))
-      (mouse-drag-frame-resize event 'bottom-right)
-      (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame))))
+      (lispm-desktop-platinum-drag-outline frame 'grow))))
 
 (defvar lispm-desktop-platinum--grow-map
   (let ((map (make-sparse-keymap)))
@@ -2720,12 +2721,26 @@ be resized; a side window cannot."
 ;;
 ;; A floating window (a child frame with the parameter
 ;; `lispm-desktop-window', as the Finder window, Control Panels, the
-;; floating editor and browser) is framed as Mac OS 9 framed its windows:
-;; a frame of its own stands behind it, a few pixels larger, showing the
-;; outline, the lit band, the content's line and the drop shadow, drawn by
-;; `lispm-desktop-platinum-draw-window-frame'.  It follows its window as it
-;; moves, changes size, is raised, hidden or shown, and as it becomes
-;; active or not; pressed, it drags its window, as Mac OS 9's frame did.
+;; floating editor and browser) is framed as Mac OS 9 framed its windows,
+;; and is one window, as Mac OS 9's was.  Its Window Manager kept a window
+;; as one object: the structure its definition drew, about the content
+;; the application drew.  Here the frame drawing a window's outline, lit
+;; band, content line and drop shadow, see
+;; `lispm-desktop-platinum-draw-window-frame', is the parent of the
+;; window's own frame, which stands in it at
+;; `lispm-desktop-platinum-frame-inset':
+;;
+;;   screen ── the window's frame ── the window: title bar, content, bottom
+;;
+;; The window system moves, orders, shows and hides a child frame with
+;; its parent, so the two go together of themselves.  Kept here is only
+;; what it leaves to Emacs: the frame is its window's size and the insets,
+;; and drawn active while its window is.  Whatever moves, raises, shows or
+;; hides a floating window does it to the frame carrying it, through
+;; `lispm-desktop-platinum-move-window', `lispm-desktop-platinum-raise-window',
+;; `lispm-desktop-platinum-show-window' and `lispm-desktop-platinum-hide-window'.
+;; Pressed, the frame moves its window, as Mac OS 9's did; see "Moving and
+;; growing windows" below.
 
 (defcustom lispm-desktop-platinum-window-frames t
   "Non-nil frames floating windows as Mac OS 9 framed its windows."
@@ -2736,14 +2751,86 @@ be resized; a side window cannot."
 where its frame is drawn for it, a pixel of outline where it is not."
   (if lispm-desktop-platinum-window-frames 0 1))
 
-(defvar lispm-desktop-platinum--framing nil
-  "Non-nil while a window's frame is raised or shown along with it.")
-
-(defun lispm-desktop-platinum--framed-p (frame)
+(defun lispm-desktop-platinum--frameable-p (frame)
   "Return non-nil when FRAME is a floating window to be framed."
   (and lispm-desktop-platinum-window-frames lispm-desktop-platinum--palette
-       (frame-live-p frame) (frame-parent frame)
+       (frame-live-p frame) (display-graphic-p frame)
        (frame-parameter frame 'lispm-desktop-window)))
+
+(defun lispm-desktop-platinum-window-frame-p (frame)
+  "Return the floating window FRAME draws the frame of, or nil when FRAME
+draws no window's frame."
+  (let ((window (frame-parameter frame 'lispm-desktop-platinum-frames)))
+    (and (frame-live-p window) window)))
+
+(defun lispm-desktop-platinum-chrome-frame-p (frame)
+  "Return non-nil when FRAME draws only a part of a window: its frame, or a
+line of the outline a window moves or grows by."
+  (or (frame-parameter frame 'lispm-desktop-platinum-frames)
+      (frame-parameter frame 'lispm-desktop-platinum-outline)))
+
+(defun lispm-desktop-platinum-window-outer (frame)
+  "Return the frame carrying floating window FRAME: the frame drawing its
+frame, its parent, or FRAME itself while it is not framed."
+  (let ((parent (frame-parent frame)))
+    (if (and parent (eq (frame-parameter parent 'lispm-desktop-platinum-frames) frame))
+        parent
+      frame)))
+
+(defun lispm-desktop-platinum--framed-p (frame)
+  "Return non-nil when floating window FRAME stands in a frame drawn for it."
+  (not (eq (lispm-desktop-platinum-window-outer frame) frame)))
+
+(defun lispm-desktop-platinum-window-parent (frame)
+  "Return the frame floating window FRAME floats over, its screen, or nil
+while it is out on the computer's screen, a window of its own."
+  (frame-parent (lispm-desktop-platinum-window-outer frame)))
+
+(defun lispm-desktop-platinum--inset (frame)
+  "Return where floating window FRAME stands in the frame carrying it:
+\(LEFT . TOP) pixels."
+  (if (lispm-desktop-platinum--framed-p frame)
+      lispm-desktop-platinum-frame-inset
+    '(0 . 0)))
+
+(defun lispm-desktop-platinum-window-position (frame)
+  "Return where floating window FRAME stands, (X . Y) in pixels: over its
+screen, counted from the screen's inside as a child frame's position is,
+or on the computer's screen while it is out."
+  (pcase-let ((`(,x . ,y) (frame-position (lispm-desktop-platinum-window-outer frame)))
+              (`(,left . ,top) (lispm-desktop-platinum--inset frame)))
+    (cons (+ x left) (+ y top))))
+
+(defun lispm-desktop-platinum-move-window (frame x y)
+  "Move floating window FRAME to X, Y, as `lispm-desktop-platinum-window-position'
+counts: the frame carrying it moves, and it with the frame."
+  (pcase-let ((`(,left . ,top) (lispm-desktop-platinum--inset frame)))
+    (set-frame-position (lispm-desktop-platinum-window-outer frame) (- x left) (- y top))))
+
+(defun lispm-desktop-platinum-raise-window (frame)
+  "Raise floating window FRAME over the other windows, its frame with it.
+Raised alone, a framed window would come up only within its frame."
+  (let ((outer (lispm-desktop-platinum-window-outer frame)))
+    (unless (eq outer frame)
+      (raise-frame outer))
+    (raise-frame frame)))
+
+(defun lispm-desktop-platinum-show-window (frame)
+  "Show floating window FRAME in its frame, framing it first when it is to
+be framed, see `lispm-desktop-platinum-frame-window'."
+  (lispm-desktop-platinum-frame-window frame)
+  (let ((outer (lispm-desktop-platinum-window-outer frame)))
+    (unless (eq outer frame)
+      (lispm-desktop-platinum--frame-update frame)
+      (make-frame-visible outer))
+    (make-frame-visible frame)))
+
+(defun lispm-desktop-platinum-hide-window (frame)
+  "Hide floating window FRAME, and its frame with it."
+  (let ((outer (lispm-desktop-platinum-window-outer frame)))
+    (make-frame-invisible frame t)
+    (unless (eq outer frame)
+      (make-frame-invisible outer t))))
 
 (defvar lispm-desktop-platinum--frame-map
   (let ((map (make-sparse-keymap)))
@@ -2751,148 +2838,451 @@ where its frame is drawn for it, a pixel of outline where it is not."
     (keymap-set map "<mouse-1>" #'ignore)
     (keymap-set map "<drag-mouse-1>" #'ignore)
     map)
-  "Keymap of a window's frame: pressed, it drags its window.")
+  "Keymap of a window's frame: pressed, it moves its window.")
 
-(defun lispm-desktop-platinum--window-frame (frame)
-  "Return the frame framing floating window FRAME, made when missing."
-  (let ((outer (frame-parameter frame 'lispm-desktop-platinum-frame)))
-    (if (frame-live-p outer)
-        outer
-      (let* ((buffer (generate-new-buffer " *lispm-desktop-window-frame*"))
-             (outer (let ((after-make-frame-functions nil)
-                          (before-make-frame-hook nil))
-                      (make-frame
-                       `((parent-frame . ,(frame-parent frame))
-                         (minibuffer . nil) (no-accept-focus . t) (no-focus-on-map . t)
-                         (undecorated . t) (unsplittable . t) (no-other-frame . t)
-                         (skip-taskbar . t) (desktop-dont-save . t)
-                         (internal-border-width . 0) (child-frame-border-width . 0)
-                         (left-fringe . 0) (right-fringe . 0)
-                         (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
-                         (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
-                         (line-spacing . 0) (cursor-type . nil) (no-special-glyphs . t)
-                         (visibility . nil)
-                         (background-color . ,(lispm-desktop-platinum--color :chrome))
-                         (lispm-desktop-platinum-frames . ,frame)
-                         (width . 2) (height . 1))))))
-        (with-current-buffer buffer
-          (setq-local mode-line-format nil header-line-format nil tab-line-format nil
-                      cursor-type nil cursor-in-non-selected-windows nil
-                      truncate-lines t auto-hscroll-mode nil
-                      ;; About a window rolled up, the frame is shorter than
-                      ;; the four lines Emacs otherwise keeps it to.
-                      window-min-height 1)
-          (use-local-map lispm-desktop-platinum--frame-map))
-        (let ((root (frame-root-window outer)))
-          (set-window-buffer root buffer)
-          (set-window-dedicated-p root t)
-          (set-window-fringes root 0 0))
-        (set-frame-parameter frame 'lispm-desktop-platinum-frame outer)
-        outer))))
+(defun lispm-desktop-platinum--make-window-frame (frame)
+  "Return a new frame to draw the frame of floating window FRAME in, over
+what FRAME floats over, not yet shown.  It takes no focus, and hooks run
+for new frames do not see it."
+  (let* ((buffer (generate-new-buffer " *lispm-desktop-window-frame*"))
+         (outer (let ((after-make-frame-functions nil)
+                      (before-make-frame-hook nil))
+                  (make-frame
+                   `((parent-frame . ,(frame-parent frame))
+                     (minibuffer . nil) (no-accept-focus . t) (no-focus-on-map . t)
+                     (undecorated . t) (unsplittable . t) (no-other-frame . t)
+                     (skip-taskbar . t) (desktop-dont-save . t)
+                     (internal-border-width . 0) (child-frame-border-width . 0)
+                     (left-fringe . 0) (right-fringe . 0)
+                     (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
+                     (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
+                     (line-spacing . 0) (cursor-type . nil) (no-special-glyphs . t)
+                     (visibility . nil)
+                     (background-color . ,(lispm-desktop-platinum--color :chrome))
+                     (lispm-desktop-platinum-frames . ,frame)
+                     ;; Out on the computer's screen, it is the window's.
+                     (lispm-desktop-out . ,(frame-parameter frame 'lispm-desktop-out))
+                     (width . 2) (height . 1))))))
+    (with-current-buffer buffer
+      (setq-local mode-line-format nil header-line-format nil tab-line-format nil
+                  cursor-type nil cursor-in-non-selected-windows nil
+                  truncate-lines t auto-hscroll-mode nil
+                  ;; About a window rolled up, the frame is shorter than
+                  ;; the four lines Emacs otherwise keeps it to.
+                  window-min-height 1)
+      (use-local-map lispm-desktop-platinum--frame-map))
+    (let ((root (frame-root-window outer)))
+      (set-window-buffer root buffer)
+      (set-window-dedicated-p root t)
+      (set-window-fringes root 0 0))
+    outer))
+
+(defun lispm-desktop-platinum-frame-window (frame)
+  "Frame floating window FRAME when it is to be framed and is not yet: the
+frame drawing its frame takes its place, and FRAME stands in it.
+Return FRAME."
+  (when (and (lispm-desktop-platinum--frameable-p frame)
+             (not (lispm-desktop-platinum--framed-p frame)))
+    (pcase-let* ((`(,x . ,y) (frame-position frame))
+                 (`(,left . ,top) lispm-desktop-platinum-frame-inset)
+                 (outer (lispm-desktop-platinum--make-window-frame frame)))
+      (set-frame-parameter frame 'lispm-desktop-platinum-frame outer)
+      (lispm-desktop-platinum--frame-update frame)
+      (set-frame-position outer (- x left) (- y top))
+      (when (frame-visible-p frame)
+        (make-frame-visible outer))
+      (modify-frame-parameters frame `((parent-frame . ,outer)))
+      ;; Emacs takes a frame just given a parent to be where it was asked
+      ;; to be before; moved by a pixel first, it is placed anew.
+      (set-frame-position frame (1+ left) top)
+      (set-frame-position frame left top)))
+  frame)
 
 (defun lispm-desktop-platinum--frame-update (frame)
-  "Bring FRAME's frame up to date: placed and sized about it, drawn active
-or not, shown when FRAME is, beneath it."
-  (if (not (lispm-desktop-platinum--framed-p frame))
-      (lispm-desktop-platinum--frame-drop frame)
-    (let* ((outer (lispm-desktop-platinum--window-frame frame))
-           (inset lispm-desktop-platinum-frame-inset)
+  "Bring the frame of floating window FRAME up to date: as large as FRAME
+and the insets, and drawn active while FRAME is selected."
+  (when-let* ((outer (frame-parameter frame 'lispm-desktop-platinum-frame))
+              ((frame-live-p outer))
+              ((frame-live-p frame)))
+    (let* ((inset lispm-desktop-platinum-frame-inset)
            (width (+ (frame-pixel-width frame) (* 2 (car inset)) 1))
            (height (+ (frame-pixel-height frame) (cdr inset) (car inset) 1))
            (active (eq frame (selected-frame)))
-           (position (frame-position frame))
-           (place (list (- (car position) (car inset)) (- (cdr position) (cdr inset)) width height))
+           (size (cons width height))
            (key (list lispm-desktop-platinum--generation width height active)))
-      (unless (and (equal place (frame-parameter outer 'lispm-desktop-platinum-place))
+      (unless (and (equal size (frame-parameter outer 'lispm-desktop-platinum-size))
                    ;; Emacs sizes a frame anew to whole lines as its fonts
                    ;; change, as with a theme.
                    (= (frame-pixel-width outer) width)
                    (= (frame-pixel-height outer) height))
-        (set-frame-parameter outer 'lispm-desktop-platinum-place place)
+        (set-frame-parameter outer 'lispm-desktop-platinum-size size)
         (let ((window-min-width 1) (window-safe-min-width 1)
               (window-min-height 1) (window-safe-min-height 1)
               (frame-resize-pixelwise t))
-          (set-frame-size outer width height t))
-        (set-frame-position outer (nth 0 place) (nth 1 place)))
+          (set-frame-size outer width height t)))
       (unless (equal key (frame-parameter outer 'lispm-desktop-platinum-key))
         (set-frame-parameter outer 'lispm-desktop-platinum-key key)
+        (set-frame-parameter outer 'background-color (lispm-desktop-platinum--color :chrome))
         (with-current-buffer (window-buffer (frame-root-window outer))
           (let ((inhibit-read-only t))
             (erase-buffer)
             (insert (propertize " " 'display
                                 (svg-image (lispm-desktop-platinum-draw-window-frame
                                             lispm-desktop-platinum--palette width height :active active)
-                                           :ascent 100 :scale 1))))))
-      (cond ((and (frame-visible-p frame) (not (frame-visible-p outer)))
-             (let ((lispm-desktop-platinum--framing t))
-               (make-frame-visible outer)
-               (raise-frame frame)))
-            ((and (not (frame-visible-p frame)) (frame-visible-p outer))
-             (make-frame-invisible outer t))))))
-
-(defun lispm-desktop-platinum--frame-drop (frame)
-  "Take FRAME's frame away."
-  (let ((outer (and (frame-live-p frame) (frame-parameter frame 'lispm-desktop-platinum-frame))))
-    (when (frame-live-p outer)
-      (let ((buffer (window-buffer (frame-root-window outer))))
-        (delete-frame outer t)
-        (kill-buffer buffer)))
-    (when (frame-live-p frame)
-      (set-frame-parameter frame 'lispm-desktop-platinum-frame nil))))
+                                           :ascent 100 :scale 1)))))))))
 
 (defun lispm-desktop-platinum-frames-sync (&rest _)
   "Bring every floating window's frame up to date, and take away the frames
-of windows gone."
-  (unless lispm-desktop-platinum--framing
-    (dolist (frame (frame-list))
-      (cond ((frame-parameter frame 'lispm-desktop-platinum-frames)
-             (unless (frame-live-p (frame-parameter frame 'lispm-desktop-platinum-frames))
-               (let ((buffer (window-buffer (frame-root-window frame))))
-                 (delete-frame frame t)
-                 (kill-buffer buffer))))
-            ((frame-parameter frame 'lispm-desktop-window)
-             (lispm-desktop-platinum--frame-update frame))))))
-
-(defun lispm-desktop-platinum--frame-follow (frame &rest _)
-  "Bring FRAME's frame along after FRAME was raised, shown or hidden.
-This is advice after `raise-frame', `make-frame-visible' and
-`make-frame-invisible'."
-  (let ((frame (if (framep frame) frame (selected-frame))))
-    (when (and (not lispm-desktop-platinum--framing) (lispm-desktop-platinum--framed-p frame))
-      (let ((lispm-desktop-platinum--framing t)
-            (outer (frame-parameter frame 'lispm-desktop-platinum-frame)))
-        (if (and (frame-live-p outer) (frame-visible-p frame) (frame-visible-p outer))
-            ;; Raised: the frame first, then the window over it.
-            (progn (raise-frame outer) (raise-frame frame))
-          (let ((lispm-desktop-platinum--framing nil))
-            (lispm-desktop-platinum--frame-update frame)))))))
+of windows gone.  A window's frame is its parent and goes with it, so
+only its size and whether it is drawn active are left to follow: this
+runs as windows change size, as the selection changes and as a theme is
+enabled."
+  (dolist (frame (frame-list))
+    (cond ((frame-parameter frame 'lispm-desktop-platinum-frames)
+           (unless (frame-live-p (frame-parameter frame 'lispm-desktop-platinum-frames))
+             (let ((buffer (window-buffer (frame-root-window frame))))
+               (delete-frame frame t)
+               (kill-buffer buffer))))
+          ((frame-parameter frame 'lispm-desktop-window)
+           (lispm-desktop-platinum--frame-update frame)))))
 
 (defun lispm-desktop-platinum--frame-press (event)
-  "Drag the window whose frame EVENT pressed until the button rises."
+  "Move the window whose frame EVENT pressed by its outline, as Mac OS 9's
+frame did, see `lispm-desktop-platinum-drag-outline'."
   (interactive "e")
-  (let* ((outer (window-frame (posn-window (event-start event))))
-         (frame (frame-parameter outer 'lispm-desktop-platinum-frames))
-         (start (mouse-absolute-pixel-position))
-         (origin (and (frame-live-p frame) (frame-position frame))))
-    (when origin
-      (select-frame-set-input-focus frame)
-      (track-mouse
-        (while (mouse-movement-p (let ((echo-keystrokes 0)) (read-event)))
-          (let ((now (mouse-absolute-pixel-position)))
-            (set-frame-position frame (+ (car origin) (- (car now) (car start)))
-                                (+ (cdr origin) (- (cdr now) (cdr start))))
-            (lispm-desktop-platinum--frame-update frame))))
-      (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame))))
+  (when-let* ((frame (lispm-desktop-platinum-window-frame-p
+                      (window-frame (posn-window (event-start event))))))
+    (lispm-desktop-platinum-drag-outline frame 'move)))
 
 (defun lispm-desktop-platinum-frames-enable ()
-  "Frame floating windows as Mac OS 9 framed its windows, and keep their
-frames in step with them."
-  (add-hook 'move-frame-functions #'lispm-desktop-platinum-frames-sync)
+  "Frame floating windows as Mac OS 9 framed its windows, each frame as
+large as its window and drawn active with it."
   (add-hook 'window-size-change-functions #'lispm-desktop-platinum-frames-sync)
   (add-hook 'window-selection-change-functions #'lispm-desktop-platinum-frames-sync)
-  (add-hook 'delete-frame-functions #'lispm-desktop-platinum--frame-drop)
-  (dolist (function '(raise-frame make-frame-visible make-frame-invisible))
-    (advice-add function :after #'lispm-desktop-platinum--frame-follow)))
+  (add-hook 'enable-theme-functions #'lispm-desktop-platinum-frames-sync 90)
+  (add-hook 'after-delete-frame-functions #'lispm-desktop-platinum-frames-sync))
+
+;;;; Moving and growing windows
+;;
+;; Mac OS 9 moved a window by its outline: pressed in its title bar or its
+;; frame, DragWindow had DragGrayRgn drag a dotted outline of the window
+;; after the mouse, the window itself staying where it was, and only once
+;; the button rose did MoveWindow put it there.  GrowWindow dragged an
+;; outline at the window's new size from its grow box, the lines of its
+;; title bar, its content and its grow box within, and the window was
+;; drawn again once, at the end.  Both were drawn in the 50% grey pattern
+;; inverted over the screen: every other pixel.
+;;
+;;   press --> outline follows the pointer --> release --> window moves once
+;;                                         \-> Escape or C-g: nothing moves
+;;
+;; The outline is drawn in frames a line each, over what the window floats
+;; over; on macOS a child frame is not clipped by its parent, so the
+;; outline passes the desktop's edge on its way out.  The window system
+;; inverts nothing an Emacs frame shows, so its dots are the theme's
+;; outline over the desktop's colour.
+
+(defconst lispm-desktop-platinum-grow-box-size 15
+  "Pixels square of the grow box the outline of a window growing marks.")
+
+(defcustom lispm-desktop-platinum-drag-interval 0.015
+  "Seconds between two looks at the mouse while a window or an icon is
+dragged.  On macOS Emacs reports a move of the mouse only once it leaves
+the glyph it was over, and an image is one glyph, however large, so the
+pointer is looked at itself."
+  :type 'number)
+
+(defun lispm-desktop-platinum-outline-lines (kind x y width height &optional title)
+  "Return the lines of the outline Mac OS 9 drew to move or grow a window.
+KIND is `move' or `grow'; X, Y, WIDTH and HEIGHT are the window's outer
+rectangle, its frame and shadow included.  Each line is
+\(X Y LENGTH THICKNESS VERTICAL).
+Moving, the outline is a band two pixels thick round the rectangle.
+Growing, it is a line a pixel thick round it; given TITLE, the height
+of the title bar of a window framed, the lines of its content follow
+within: under the title bar, round the content inside the frame, and
+round the grow box in the content's corner."
+  (if (eq kind 'move)
+      (list (list x y width 2 nil)
+            (list x (+ y height -2) width 2 nil)
+            (list x (+ y 2) (- height 4) 2 t)
+            (list (+ x width -2) (+ y 2) (- height 4) 2 t))
+    (append
+     (list (list x y width 1 nil)
+           (list x (+ y height -1) width 1 nil)
+           (list x (1+ y) (- height 2) 1 t)
+           (list (+ x width -1) (1+ y) (- height 2) 1 t))
+     (when title
+       ;; The content's black line, drawn by the frame: past the outline
+       ;; and the band, and before the shadow, see
+       ;; `lispm-desktop-platinum-draw-window-frame'.
+       (let* ((left (+ x (1- (car lispm-desktop-platinum-frame-inset))))
+              (right (+ x width -2 (- (1- (car lispm-desktop-platinum-frame-inset)))))
+              (top (+ y title))
+              (bottom (+ y height -2 (- (1- (car lispm-desktop-platinum-frame-inset)))))
+              (across (1+ (- right left)))
+              (down (1- (- bottom top)))
+              (box lispm-desktop-platinum-grow-box-size))
+         (list (list left top across 1 nil)
+               (list left (1+ top) down 1 t)
+               (list right (1+ top) down 1 t)
+               (list left bottom across 1 nil)
+               (list (- right box) (- bottom box) box 1 nil)
+               (list (- right box) (1+ (- bottom box)) (1- box) 1 t)))))))
+
+(defun lispm-desktop-platinum-dots (width height parity)
+  "Return the 50% grey pattern WIDTH by HEIGHT pixels as XBM data: a vector
+of rows, each a bool-vector, a pixel set where its column and row, PARITY
+added, sum to an even number.  PARITY is that of the pattern's top left
+corner on the screen, so the dots line up with the screen's pixels as
+Mac OS 9's patterns did, wherever the line is."
+  (let ((rows (make-vector height nil)))
+    (dotimes (row height)
+      (let ((bits (make-bool-vector width nil)))
+        (dotimes (column width)
+          (when (cl-evenp (+ parity row column))
+            (aset bits column t)))
+        (aset rows row bits)))
+    rows))
+
+(defvar lispm-desktop-platinum--dots (make-hash-table :test #'equal)
+  "Images of the outline's lines, by (WIDTH HEIGHT PARITY GENERATION).")
+
+(defun lispm-desktop-platinum--dots-image (width height parity)
+  "Return an image of the outline's dots WIDTH by HEIGHT, see
+`lispm-desktop-platinum-dots': the theme's outline over the desktop's colour."
+  (let ((key (list width height parity lispm-desktop-platinum--generation)))
+    (or (gethash key lispm-desktop-platinum--dots)
+        (progn
+          (when (> (hash-table-count lispm-desktop-platinum--dots) 400)
+            (clrhash lispm-desktop-platinum--dots))
+          (puthash key
+                   (create-image (lispm-desktop-platinum-dots width height parity) 'xbm t
+                                 :data-width width :data-height height :ascent 100
+                                 :foreground (lispm-desktop-platinum--color :outline)
+                                 :background (lispm-desktop-platinum--desktop-color))
+                   lispm-desktop-platinum--dots)))))
+
+(declare-function lispm-desktop--color "lispm-desktop-surface" ())
+
+(defun lispm-desktop-platinum--desktop-color ()
+  "Return the desktop's colour: the one it is drawn in, or the theme's."
+  (or (and (fboundp 'lispm-desktop--color) (lispm-desktop--color))
+      (lispm-desktop-platinum--color :desktop)))
+
+(defvar lispm-desktop-platinum--outline-frames nil
+  "The frames drawing outlines' lines, by what they are drawn over:
+\(PARENT . FRAMES), PARENT nil for the computer's screen.")
+
+(defun lispm-desktop-platinum--make-line-frame (parent)
+  "Return a new frame to draw a line of an outline in, over PARENT, or on
+the computer's screen, above its windows, when PARENT is nil.  Its font
+is a pixel tall, so the frame can be a pixel thin."
+  (let* ((buffer (generate-new-buffer " *lispm-desktop-outline*"))
+         (frame (let ((after-make-frame-functions nil)
+                      (before-make-frame-hook nil))
+                  (make-frame
+                   `((parent-frame . ,parent)
+                     (minibuffer . nil) (no-accept-focus . t) (no-focus-on-map . t)
+                     (undecorated . t) (unsplittable . t) (no-other-frame . t)
+                     (skip-taskbar . t) (desktop-dont-save . t)
+                     (internal-border-width . 0) (child-frame-border-width . 0)
+                     (left-fringe . 0) (right-fringe . 0)
+                     (vertical-scroll-bars . nil) (horizontal-scroll-bars . nil)
+                     (menu-bar-lines . 0) (tool-bar-lines . 0) (tab-bar-lines . 0)
+                     (line-spacing . 0) (cursor-type . nil) (no-special-glyphs . t)
+                     (visibility . nil) (lispm-desktop-platinum-outline . t)
+                     (background-color . ,(lispm-desktop-platinum--desktop-color))
+                     ,@(unless parent '((z-group . above)))
+                     (width . 2) (height . 1))))))
+    (ignore-errors (set-frame-font (font-spec :family (face-attribute 'default :family nil t) :size 1)
+                                 nil (list frame)))
+    (with-current-buffer buffer
+      (setq-local mode-line-format nil header-line-format nil tab-line-format nil
+                  cursor-type nil cursor-in-non-selected-windows nil
+                  truncate-lines t auto-hscroll-mode nil line-spacing 0))
+    (let ((root (frame-root-window frame)))
+      (set-window-buffer root buffer)
+      (set-window-dedicated-p root t)
+      (set-window-fringes root 0 0)
+      (set-window-margins root 0 0))
+    frame))
+
+(defun lispm-desktop-platinum--line-frames (parent count)
+  "Return COUNT frames to draw an outline's lines over PARENT, made when
+missing and kept for the next outline."
+  (setq lispm-desktop-platinum--outline-frames
+        (seq-filter (lambda (entry) (or (null (car entry)) (frame-live-p (car entry))))
+                    lispm-desktop-platinum--outline-frames))
+  (let ((frames (seq-filter #'frame-live-p (alist-get parent lispm-desktop-platinum--outline-frames))))
+    (while (< (length frames) count)
+      (setq frames (append frames (list (lispm-desktop-platinum--make-line-frame parent)))))
+    (setf (alist-get parent lispm-desktop-platinum--outline-frames) frames)
+    frames))
+
+(defun lispm-desktop-platinum--draw-line (frame line origin)
+  "Draw LINE, a value of `lispm-desktop-platinum-outline-lines', in FRAME,
+placed in the coordinates of what FRAME is drawn over.  ORIGIN, (X . Y),
+is where those start on the computer's screen, which lines the dots up."
+  (pcase-let* ((`(,x ,y ,length ,thickness ,vertical) line)
+               (width (max 1 (if vertical thickness length)))
+               (height (max 1 (if vertical length thickness)))
+               (parity (mod (+ x y (car origin) (cdr origin)) 2))
+               (size (list width height parity lispm-desktop-platinum--generation)))
+    (unless (equal size (frame-parameter frame 'lispm-desktop-platinum-line))
+      (set-frame-parameter frame 'lispm-desktop-platinum-line size)
+      (let ((window-min-width 1) (window-safe-min-width 1)
+            (window-min-height 1) (window-safe-min-height 1)
+            (frame-resize-pixelwise t))
+        (set-frame-size frame width height t))
+      (with-current-buffer (window-buffer (frame-root-window frame))
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (propertize " " 'display (lispm-desktop-platinum--dots-image width height parity)))))
+      (set-window-start (frame-root-window frame) 1))
+    (set-frame-position frame x y)))
+
+(defun lispm-desktop-platinum-keep-in-front (frames parent)
+  "Raise FRAMES, children of PARENT, unless one of them is in front of
+PARENT's children already.  Over the screen, the window clicked comes in
+front once Emacs notices it was selected, and others may, while what a
+drag draws is to stay over them all, as Mac OS 9 drew it over the
+screen; a new child frame need not come in front either."
+  (when (and parent frames (not (memq (car (frame-list-z-order parent)) frames)))
+    (mapc #'raise-frame frames)))
+
+(defun lispm-desktop-platinum--show-outline (parent lines origin)
+  "Draw LINES over PARENT, or on the computer's screen when PARENT is nil,
+ORIGIN as `lispm-desktop-platinum--draw-line' takes it; frames left over
+from a longer outline are hidden."
+  (let ((frames (lispm-desktop-platinum--line-frames parent (length lines)))
+        (shown nil))
+    (dolist (frame frames)
+      (if-let* ((line (pop lines)))
+          (progn
+            (lispm-desktop-platinum--draw-line frame line origin)
+            (unless (frame-visible-p frame)
+              (make-frame-visible frame))
+            (push frame shown))
+        (when (frame-visible-p frame)
+          (make-frame-invisible frame t))))
+    ;; On the computer's screen the outline floats above all by itself.
+    (lispm-desktop-platinum-keep-in-front shown parent)))
+
+(defun lispm-desktop-platinum--hide-outline ()
+  "Take every outline away."
+  (dolist (entry lispm-desktop-platinum--outline-frames)
+    (dolist (frame (cdr entry))
+      (when (and (frame-live-p frame) (frame-visible-p frame))
+        (make-frame-invisible frame t)))))
+
+(defun lispm-desktop-platinum--origin (parent)
+  "Return where PARENT's inside starts on the computer's screen, (X . Y),
+or (0 . 0) when PARENT is nil, the computer's screen itself."
+  (if (null parent)
+      '(0 . 0)
+    (pcase-let ((`(,left ,top . ,_) (frame-edges parent 'native-edges)))
+      (cons left top))))
+
+(defun lispm-desktop-platinum--track (step &optional pointer start)
+  "Follow the mouse while its button is held, calling STEP with how far it
+has moved from START, (DX . DY) in pixels, whenever that changes.
+POINTER, a function of no arguments, tells where the mouse is, (X . Y),
+or nil when it cannot; by default, on the computer's screen.  START is
+by default where the mouse is when the drag begins.  The mouse is looked
+at every `lispm-desktop-platinum-drag-interval' seconds.
+Return (EVENT . DELTA): EVENT the button's release, or nil when Escape
+or C-g gave the drag up; DELTA the last move, or nil when it never moved.
+Other keys and the window system's own events change nothing."
+  (let* ((pointer (or pointer #'mouse-absolute-pixel-position))
+         (start (or start (funcall pointer) '(0 . 0)))
+         (delta nil)
+        (event nil)
+        (done nil))
+    (condition-case nil
+        (track-mouse
+          (setq track-mouse 'dragging)
+          (while (not done)
+            (setq event (read-event nil nil lispm-desktop-platinum-drag-interval))
+            (cond ((memq event '(escape ?\e ?\C-g))
+                   (setq done t event nil))
+                  ((and event (not (mouse-movement-p event))
+                        (eq (event-basic-type event) 'mouse-1)
+                        (seq-intersection (event-modifiers event) '(click drag)))
+                   (setq done t)))
+            (when-let* (((or (not done) event))
+                        (place (funcall pointer))
+                        (now (cons (- (car place) (car start)) (- (cdr place) (cdr start))))
+                        ((not (or (equal now delta) (and (null delta) (equal now '(0 . 0)))))))
+              (setq delta now)
+              (funcall step delta))))
+      (quit (setq event nil)))
+    (cons event delta)))
+
+(defun lispm-desktop-platinum--moved-p (delta)
+  "Return non-nil when DELTA, as `lispm-desktop-platinum--track' returns it,
+is a move rather than a hand's jitter in a click."
+  (and delta
+       (> (max (abs (car delta)) (abs (cdr delta)))
+          (if (numberp double-click-fuzz) double-click-fuzz 3))))
+
+(defconst lispm-desktop-platinum-window-min-size '(200 . 100)
+  "The least a window grows to: (WIDTH . HEIGHT) of its text, in pixels.")
+
+(defun lispm-desktop-platinum-drag-outline (frame kind)
+  "Move floating window FRAME, KIND `move', or grow it, KIND `grow', by an
+outline the mouse drags, as Mac OS 9's DragWindow and GrowWindow did.
+The outline follows the mouse from where the button was pressed, see
+`lispm-desktop-platinum-outline-lines'; the window moves or grows once,
+when the button rises, comes in front and has the keyboard, and
+`lispm-desktop-platinum-frame-moved-functions' run.  Escape or C-g gives
+up and leaves it where it was; a press let go where it was is a click,
+handed on.  Return non-nil when the window moved or grew."
+  (let* ((outer (lispm-desktop-platinum-window-outer frame))
+         (parent (frame-parent outer))
+         (origin (lispm-desktop-platinum--origin parent))
+         (position (frame-position outer))
+         (width (frame-pixel-width outer))
+         (height (frame-pixel-height outer))
+         (title (and (eq kind 'grow) (not (eq outer frame)) lispm-desktop-platinum-title-bar-height))
+         (least (cons (- (car lispm-desktop-platinum-window-min-size) (frame-text-width frame))
+                      (- (cdr lispm-desktop-platinum-window-min-size) (frame-text-height frame))))
+         (rectangle
+          (lambda (delta)
+            (if (eq kind 'move)
+                (list (+ (car position) (car delta)) (+ (cdr position) (cdr delta)) width height)
+              (list (car position) (cdr position)
+                    (+ width (max (min 0 (car least)) (car delta)))
+                    (+ height (max (min 0 (cdr least)) (cdr delta)))))))
+         (result
+          (unwind-protect
+              (lispm-desktop-platinum--track
+               (lambda (delta)
+                 (lispm-desktop-platinum--show-outline
+                  parent (apply #'lispm-desktop-platinum-outline-lines kind
+                                (append (funcall rectangle delta) (list title)))
+                  origin)))
+            (lispm-desktop-platinum--hide-outline)))
+         (event (car result))
+         (delta (cdr result)))
+    (cond ((null event) nil)
+          ((not (lispm-desktop-platinum--moved-p delta))
+           ;; A click: what a click there does, it does.
+           (if (memq 'click (event-modifiers event))
+               (push event unread-command-events)
+             (select-frame-set-input-focus frame))
+           nil)
+          (t
+           (pcase-let ((`(,x ,y ,new-width ,new-height) (funcall rectangle delta)))
+             (if (eq kind 'move)
+                 (set-frame-position outer x y)
+               (set-frame-size frame (+ (frame-text-width frame) (- new-width width))
+                               (+ (frame-text-height frame) (- new-height height)) t)
+               (lispm-desktop-platinum--frame-update frame)))
+           (select-frame-set-input-focus frame)
+           (lispm-desktop-platinum-raise-window frame)
+           (run-hook-with-args 'lispm-desktop-platinum-frame-moved-functions frame)
+           t))))
 
 ;;;; Scroll bars
 ;;
@@ -3159,10 +3549,11 @@ take the bars of windows gone or no longer wanting one away."
     (when (and lispm-desktop-platinum-scroll-bars lispm-desktop-platinum--palette)
       (dolist (frame (frame-list))
         ;; Floating windows out on the computer's screen go without, as
-        ;; they do over the desktop.
+        ;; they do over the desktop, and so do their frames and outlines.
         (when (and (frame-visible-p frame) (not (frame-parent frame))
                    (not (frame-parameter frame 'lispm-desktop-window))
                    (not (frame-parameter frame 'lispm-desktop-out))
+                   (not (lispm-desktop-platinum-chrome-frame-p frame))
                    (display-graphic-p frame))
           (dolist (window (window-list frame 'no-mini))
             (when (lispm-desktop-platinum--scroll-window-p window)

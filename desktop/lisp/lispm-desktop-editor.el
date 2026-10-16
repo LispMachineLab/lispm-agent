@@ -127,6 +127,8 @@ are no application's window, go with the editor."
         ;; Another application's window, over the desktop or out on the
         ;; computer's screen.
         ((frame-parameter frame 'lispm-desktop-window) nil)
+        ;; The frame drawing a window's frame, or an outline.
+        ((lispm-desktop-platinum-chrome-frame-p frame) nil)
         ((frame-parent frame) t)
         ((lispm-desktop-apps-screen-p frame) (lispm-desktop-editor--in-workspace-p frame))))
 
@@ -354,7 +356,7 @@ the workspace it showed last."
           (unless (lispm-desktop-apps-hidden-p screen)
             (with-selected-frame screen
               (lispm-desktop--select-tab)))
-          (make-frame-visible lispm-desktop-editor--frame)
+          (lispm-desktop-platinum-show-window lispm-desktop-editor--frame)
           (select-frame-set-input-focus lispm-desktop-editor--frame)
           (lispm-desktop-editor--keep-floating-chrome))
       (unless (eq (selected-frame) screen)
@@ -373,13 +375,13 @@ the workspace it showed last."
   (when (and (lispm-desktop-editor-floating-p)
              ;; Out on the computer's screen, it stays where it is.
              (not (lispm-desktop-apps-out-p lispm-desktop-editor--frame)))
-    (make-frame-invisible lispm-desktop-editor--frame)
-    (select-frame-set-input-focus (frame-parent lispm-desktop-editor--frame))))
+    (lispm-desktop-platinum-hide-window lispm-desktop-editor--frame)
+    (select-frame-set-input-focus (lispm-desktop-platinum-window-parent lispm-desktop-editor--frame))))
 
 (defun lispm-desktop-editor--show-with-desktop ()
   "Show the floating editor again over the desktop, unless it was closed."
   (when (and (lispm-desktop-editor-floating-p) (not lispm-desktop-editor--closed))
-    (make-frame-visible lispm-desktop-editor--frame)))
+    (lispm-desktop-platinum-show-window lispm-desktop-editor--frame)))
 
 (defun lispm-desktop-editor-close ()
   "Close the editor, leaving the desktop in front.  Nothing in it is lost:
@@ -388,7 +390,7 @@ it opens again as it was."
   (setq lispm-desktop-editor--closed t)
   (if (lispm-desktop-editor-floating-p)
       (progn (lispm-desktop-apps-focus-after lispm-desktop-editor--frame)
-             (make-frame-invisible lispm-desktop-editor--frame))
+             (lispm-desktop-platinum-hide-window lispm-desktop-editor--frame))
     (when-let* ((workspace (lispm-desktop-editor--current-workspace)))
       (setq lispm-desktop-editor--last-workspace workspace)))
   ;; With the desktop hidden, the windows left out keep the screen.
@@ -400,7 +402,7 @@ it opens again as it was."
   (cond ((lispm-desktop-editor-floating-p)
          (unless (eq (selected-frame) lispm-desktop-editor--frame)
            (lispm-desktop-apps-set-frontmost 'editor)
-           (make-frame-visible lispm-desktop-editor--frame)
+           (lispm-desktop-platinum-show-window lispm-desktop-editor--frame)
            (select-frame-set-input-focus lispm-desktop-editor--frame)))
         ((not (lispm-desktop-editor--in-workspace-p))
          (lispm-desktop-editor-activate))))
@@ -555,7 +557,7 @@ its screen."
               (tab-bar-rename-tab (or (bound-and-true-p tabspaces-default-tab) "Home"))
             (tab-bar-select-tab (+ 2 (or (seq-position names workspace) 0)))
             (tab-bar-tabs-set (cdr (funcall tab-bar-tabs-function frame)) frame))))
-      (make-frame-visible frame)
+      (lispm-desktop-platinum-show-window frame)
       (lispm-desktop-apps-keep-on-desktop frame)
       (select-frame-set-input-focus frame)
       (let ((lispm-desktop-editor--moving nil))
@@ -572,7 +574,7 @@ its screen."
   (when (lispm-desktop-editor-floating-p)
     (let* ((frame lispm-desktop-editor--frame)
            (_ (when (lispm-desktop-apps-out-p frame) (lispm-desktop-coherence-bring-in frame)))
-           (screen (frame-parent frame))
+           (screen (lispm-desktop-platinum-window-parent frame))
            (lispm-desktop-editor--moving t)
            (_ (lispm-desktop-editor--take-off-chrome frame))
            (workspace (with-selected-frame frame (lispm-desktop-editor--current-workspace))))

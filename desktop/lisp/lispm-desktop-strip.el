@@ -379,8 +379,12 @@ tab alone while the strip is collapsed."
 (defun lispm-desktop-strip--place ()
   "Put the strip in its screen's bottom-left corner, over the echo area."
   (when (lispm-desktop-strip--live-p)
-    (let* ((root (frame-root-window (frame-parent lispm-desktop-strip--frame)))
-           (bottom (- (nth 3 (window-pixel-edges root)) (window-bottom-divider-width root))))
+    ;; The root window of a screen split in windows is not live, and
+    ;; only a live window has a divider: the bottom windows' is the one.
+    (let* ((screen (frame-parent lispm-desktop-strip--frame))
+           (root (frame-root-window screen))
+           (bottom (- (nth 3 (window-pixel-edges root))
+                      (window-bottom-divider-width (car (window-at-side-list screen 'bottom))))))
       (set-frame-position lispm-desktop-strip--frame 0
                           (- bottom lispm-desktop-platinum-strip-height)))))
 
@@ -394,8 +398,12 @@ tab alone while the strip is collapsed."
           (insert (lispm-desktop-strip--line))))
       (set-window-start window 1)
       (set-window-hscroll window 0))
-    (set-frame-parameter lispm-desktop-strip--frame 'background-color
-                         (lispm-desktop-platinum--color :strip))
+    ;; Only a new colour is set: NS Emacs clears a frame whenever its
+    ;; background is set, to the same colour too, and a strip cleared
+    ;; just before an update of the screen shows as an empty bar.
+    (let ((color (lispm-desktop-platinum--color :strip)))
+      (unless (equal (frame-parameter lispm-desktop-strip--frame 'background-color) color)
+        (set-frame-parameter lispm-desktop-strip--frame 'background-color color)))
     (lispm-desktop-popup--size lispm-desktop-strip--frame (lispm-desktop-strip--width)
                                lispm-desktop-platinum-strip-height)
     (lispm-desktop-strip--place)))

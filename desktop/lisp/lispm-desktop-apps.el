@@ -98,12 +98,12 @@ so does the minibuffer they share."
 in: one of its own that is neither a floating window out on the
 computer's screen nor the minibuffer they share."
   (not (or (frame-parent frame) (frame-parameter frame 'lispm-desktop-window)
-           (lispm-desktop-apps-out-p frame))))
+           (lispm-desktop-apps-out-p frame) (lispm-desktop-platinum-chrome-frame-p frame))))
 
 (defun lispm-desktop-apps-window-screen (frame)
-  "Return the screen FRAME, a floating window, belongs to: its parent, or
-the screen it left, when it is out."
-  (or (frame-parent frame) (lispm-desktop-apps-out-p frame)))
+  "Return the screen FRAME, a floating window, belongs to: the one it floats
+over, or the screen it left, when it is out."
+  (or (lispm-desktop-platinum-window-parent frame) (lispm-desktop-apps-out-p frame)))
 
 (defun lispm-desktop-apps-screen ()
   "Return the frame the desktop and the applications are drawn in: the
@@ -137,8 +137,9 @@ A child frame's position counts from there."
 (defun lispm-desktop-apps--geometry (frame)
   "Return where FRAME is: (LEFT TOP TEXT-WIDTH TEXT-HEIGHT) in pixels, over
 its screen, whether it floats there or is out."
-  (pcase-let ((`(,left . ,top) (frame-position frame)))
-    (when-let* ((screen (and (not (frame-parent frame)) (lispm-desktop-apps-out-p frame))))
+  (pcase-let ((`(,left . ,top) (lispm-desktop-platinum-window-position frame)))
+    (when-let* ((screen (and (not (lispm-desktop-platinum-window-parent frame))
+                             (lispm-desktop-apps-out-p frame))))
       (pcase-let ((`(,x . ,y) (lispm-desktop-apps--screen-origin screen)))
         (setq left (- left x) top (- top y))))
     ;; A window rolled up is remembered at the height it rolls down to.
@@ -152,17 +153,27 @@ its screen, whether it floats there or is out."
 
 (defun lispm-desktop-apps--keep-on-screen (frame)
   "Keep FRAME, a window out, where its title bar can still be reached: its
-top under the menu bar, and some of it left on the screen's sides."
-  (pcase-let* ((`(,x ,y ,w ,h) (lispm-desktop-apps--workarea frame))
-               (`(,left . ,top) (frame-position frame))
-               (width (frame-pixel-width frame))
+top under the menu bar, and some of it left on the screen's sides.  The
+frame carrying it moves, see `lispm-desktop-platinum-window-outer'."
+  (pcase-let* ((outer (lispm-desktop-platinum-window-outer frame))
+               (`(,x ,y ,w ,h) (lispm-desktop-apps--workarea frame))
+               (`(,left . ,top) (frame-position outer))
+               (width (frame-pixel-width outer))
                (keep 80))
     (let ((new-left (max (- (+ x keep) width) (min left (- (+ x w) keep))))
           (new-top (max y (min top (- (+ y h) 30)))))
       (unless (and (= new-left left) (= new-top top))
-        (set-frame-position frame new-left new-top)))))
+        (set-frame-position outer new-left new-top)))))
 
 (declare-function lispm-desktop-coherence-take-out "lispm-desktop-coherence" (frame))
+
+(defun lispm-desktop-apps-windows-out-in-order (screen)
+  "Return the windows of SCREEN out on the computer's screen, the one in
+front first.  The window system orders the frames carrying them."
+  (let ((windows (lispm-desktop-apps-windows screen)))
+    (seq-filter (lambda (frame) (memq frame windows))
+                (mapcar (lambda (frame) (or (lispm-desktop-platinum-window-frame-p frame) frame))
+                        (frame-list-z-order)))))
 
 (defun lispm-desktop-apps-focus-after (frame)
   "Give the keyboard to what comes after FRAME, a floating window going
@@ -172,9 +183,8 @@ others out on the computer's screen."
     (cond ((not (frame-live-p screen)))
           ((lispm-desktop-apps-hidden-p screen)
            (when-let* ((next (seq-find (lambda (other)
-                                         (and (not (eq other frame)) (frame-visible-p other)
-                                              (memq other (lispm-desktop-apps-windows screen))))
-                                       (frame-list-z-order))))
+                                         (and (not (eq other frame)) (frame-visible-p other)))
+                                       (lispm-desktop-apps-windows-out-in-order screen))))
              (select-frame-set-input-focus next)))
           (t (select-frame-set-input-focus screen)))))
 
@@ -185,7 +195,7 @@ the menu bar, and no larger than the desktop.  PLACE is a value of
 On macOS a child frame is not clipped to its parent, so a window let past
 the desktop's edge would hang out of Emacs's frame over the screen."
   (when-let* (((frame-live-p frame))
-              (screen (frame-parent frame)))
+              (screen (lispm-desktop-platinum-window-parent frame)))
     (pcase-let* ((`(,left ,top ,width ,height) place)
                  (top-min (tab-bar-height screen t))
                  (screen-width (frame-native-width screen))
@@ -200,11 +210,12 @@ the desktop's edge would hang out of Emacs's frame over the screen."
                                (max 100 (min height (- screen-height top-min extra-height))))))
       (unless (and (= fit-width (frame-text-width frame))
                    (= fit-height (frame-text-height frame)))
-        (set-frame-size frame fit-width fit-height t))
-      (set-frame-position
-       frame
-       (max 0 (min left (- screen-width fit-width extra-width)))
-       (max top-min (min top (- screen-height fit-height extra-height)))))))
+        (set-frame-size frame fit-width fit-height t)
+        (lispm-desktop-platinum--frame-update frame))
+      (let ((x (max 0 (min left (- screen-width fit-width extra-width))))
+            (y (max top-min (min top (- screen-height fit-height extra-height)))))
+        (unless (equal (cons x y) (lispm-desktop-platinum-window-position frame))
+          (lispm-desktop-platinum-move-window frame x y))))))
 
 (defun lispm-desktop-apps-keep-on-desktop (frame)
   "Keep floating FRAME on the desktop where it was just put or moved, and
@@ -213,7 +224,8 @@ their screen changes size, so they are put back there afterwards.  A
 window out is kept on the computer's screen instead, and one shown while
 its screen is hidden goes out there at once."
   (when (frame-live-p frame)
-    (when (and (frame-parent frame) (lispm-desktop-apps-hidden-p (frame-parent frame))
+    (when (and (lispm-desktop-platinum-window-parent frame)
+               (lispm-desktop-apps-hidden-p (lispm-desktop-platinum-window-parent frame))
                (fboundp 'lispm-desktop-coherence-take-out))
       (lispm-desktop-coherence-take-out frame))
     (if (lispm-desktop-apps-out-p frame)
@@ -228,23 +240,24 @@ the window system to place them anew and shows them again: going full
 screen or back, macOS moves child windows its own way and may leave them
 out of sight while Emacs takes them for shown."
   (when (frame-live-p screen)
-    (dolist (window (seq-filter #'frame-parent (lispm-desktop-apps-windows screen)))
+    (dolist (window (seq-filter #'lispm-desktop-platinum-window-parent
+                                (lispm-desktop-apps-windows screen)))
       (let ((place (or (frame-parameter window 'lispm-desktop-window-place)
                        (lispm-desktop-apps--geometry window))))
         (when again
           ;; A move to where Emacs takes the window to be would be skipped.
-          (set-frame-position window (1+ (car place)) (cadr place)))
+          (lispm-desktop-platinum-move-window window (1+ (car place)) (cadr place)))
         (lispm-desktop-apps--put window place)
         (when (and again (frame-visible-p window))
-          (make-frame-invisible window t)
-          (make-frame-visible window))))))
+          (lispm-desktop-platinum-hide-window window)
+          (lispm-desktop-platinum-show-window window))))))
 
 (defun lispm-desktop-apps--screen-resized (frame)
   "Put the floating windows of FRAME back in their places when it changed
 size, and once more after it went full screen or back, when the window
 system is done with them.  This is a `window-size-change-functions'
 function."
-  (unless (frame-parent frame)
+  (unless (or (frame-parent frame) (lispm-desktop-platinum-chrome-frame-p frame))
     (lispm-desktop-apps--place-windows frame)
     (let ((fullscreen (frame-parameter frame 'fullscreen)))
       (unless (equal fullscreen (frame-parameter frame 'lispm-desktop-apps-fullscreen))
@@ -338,7 +351,7 @@ This is a `window-selection-change-functions' function."
       ;; The window clicked comes over the other floating windows, as on
       ;; Mac OS 9; macOS leaves a child window where it was.
       (when (frame-parameter frame 'lispm-desktop-window)
-        (raise-frame frame)))))
+        (lispm-desktop-platinum-raise-window frame)))))
 
 (defun lispm-desktop-setup-apps ()
   "Draw the menu bar and the Application menu from the application in front."

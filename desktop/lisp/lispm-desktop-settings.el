@@ -563,9 +563,9 @@ as the pane.  This is a buffer-local `window-size-change-functions' function."
   (if panel
       (lispm-desktop-settings-select panel)
     (lispm-desktop-settings--render))
-  (make-frame-visible lispm-desktop-settings--frame)
+  (lispm-desktop-platinum-show-window lispm-desktop-settings--frame)
   (lispm-desktop-apps-keep-on-desktop lispm-desktop-settings--frame)
-  (raise-frame lispm-desktop-settings--frame)
+  (lispm-desktop-platinum-raise-window lispm-desktop-settings--frame)
   (select-frame-set-input-focus lispm-desktop-settings--frame)
   (lispm-desktop-apps-set-frontmost 'settings))
 
@@ -595,14 +595,14 @@ This is one of `lispm-desktop-apps-frontmost-functions'."
                           (lispm-desktop-editor-floating-p))
                      (and (eq app 'browser) (bound-and-true-p lispm-desktop-browser-floating)))))
       (cond ((and shown (not (frame-visible-p lispm-desktop-settings--frame)))
-             (make-frame-visible lispm-desktop-settings--frame)
+             (lispm-desktop-platinum-show-window lispm-desktop-settings--frame)
              (when-let* ((front (pcase app
                                   ('editor (bound-and-true-p lispm-desktop-editor--frame))
                                   ('browser (bound-and-true-p lispm-desktop-browser--frame))))
                          ((frame-live-p front)))
-               (raise-frame front)))
+               (lispm-desktop-platinum-raise-window front)))
             ((and (not shown) (frame-visible-p lispm-desktop-settings--frame))
-             (make-frame-invisible lispm-desktop-settings--frame))))))
+             (lispm-desktop-platinum-hide-window lispm-desktop-settings--frame))))))
 
 (defun lispm-desktop-settings--refocus ()
   "Give the control panel's window the keyboard back after a menu bar menu closes,
