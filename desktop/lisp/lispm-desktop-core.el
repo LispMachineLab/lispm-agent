@@ -64,17 +64,75 @@ personal.el: once Emacs is set up, a new value is loaded at once."
 (defvar lispm-desktop--set-up nil
   "Non-nil once lispm-desktop is set up, its theme loaded.")
 
+(defvar lispm-desktop--loading-theme nil
+  "Non-nil while `lispm-desktop--load-theme-now' loads a theme.")
+
+(defvar lispm-desktop--pending-theme nil
+  "The theme the next redisplay loads before it draws, as (THEME), or nil.")
+
+(defvar lispm-desktop--theme-error nil
+  "The error loading the pending theme signalled, or nil.")
+
 (defun lispm-desktop--theme-changed (_symbol theme operation _where)
   "Load THEME when `lispm-desktop-theme' is set to it once Emacs is set up.
-This is a variable watcher."
+The theme is loaded once the command setting it is done, as whatever
+the variable is set to by then.  What a theme being loaded sets it to
+is not followed: enabling a theme enables the `user' theme again, which
+sets the variable back to the value saved with Customize for a moment,
+and loading that theme too would show the old theme again before the
+new one.  This is a variable watcher."
   (when (and lispm-desktop--set-up (eq operation 'set) theme
-             (not (equal custom-enabled-themes (list theme))))
-    (run-at-time 0 nil #'lispm-desktop-load-theme theme)))
+             (not lispm-desktop--loading-theme))
+    (run-at-time 0 nil #'lispm-desktop--follow-theme)))
+
+(defun lispm-desktop--follow-theme ()
+  "Load `lispm-desktop-theme' unless it is already the only theme enabled."
+  (when (and lispm-desktop-theme
+             (not (equal custom-enabled-themes (list lispm-desktop-theme))))
+    (lispm-desktop-load-theme lispm-desktop-theme)))
+
+(defun lispm-desktop--load-theme-now (theme)
+  "Make THEME, by default Dracula, the only colour theme enabled."
+  (let ((lispm-desktop--loading-theme t)
+        (chosen lispm-desktop-theme))
+    (mapc #'disable-theme custom-enabled-themes)
+    (load-theme (or theme 'dracula) t)
+    ;; The `user' theme enabled again set the variable back to the value
+    ;; saved with Customize; it keeps the one it had.
+    (unless (eq lispm-desktop-theme chosen)
+      (set-default 'lispm-desktop-theme chosen))))
+
+(defun lispm-desktop--load-pending-theme (&rest _)
+  "Load the theme left for this redisplay, before it draws anything.
+This is advice before `pre-redisplay-function', which removes itself."
+  (remove-function pre-redisplay-function #'lispm-desktop--load-pending-theme)
+  (when-let* ((pending lispm-desktop--pending-theme))
+    (setq lispm-desktop--pending-theme nil)
+    (condition-case err
+        (lispm-desktop--load-theme-now (car pending))
+      (error (setq lispm-desktop--theme-error err)))))
 
 (defun lispm-desktop-load-theme (theme)
-  "Make THEME, by default Dracula, the only colour theme enabled."
-  (mapc #'disable-theme custom-enabled-themes)
-  (load-theme (or theme 'dracula) t))
+  "Make THEME, by default Dracula, the only colour theme enabled.
+On macOS, once Emacs is set up, the theme is loaded by a redisplay run
+for it, as the redisplay starts and before it draws anything.  NS Emacs
+clears a frame to its new background as soon as the background changes,
+which a theme change does twice on every frame, and it puts what the
+frames hold on the screen whenever it looks for input, which every
+redisplay does first: a theme loaded before would show every window
+blank for as long as the redisplay takes to draw them all again, a
+third of a second on the desktop."
+  (if (not (and lispm-desktop--set-up (eq (window-system) 'ns)))
+      (lispm-desktop--load-theme-now theme)
+    (setq lispm-desktop--pending-theme (list theme)
+          lispm-desktop--theme-error nil)
+    (add-function :before pre-redisplay-function #'lispm-desktop--load-pending-theme)
+    (redisplay t)
+    ;; Loaded now if no redisplay ran, as while a keyboard macro runs.
+    (lispm-desktop--load-pending-theme)
+    (when-let* ((err lispm-desktop--theme-error))
+      (setq lispm-desktop--theme-error nil)
+      (signal (car err) (cdr err)))))
 
 (defun lispm-desktop-set-theme (theme)
   "Switch to colour THEME now and at every later start."
