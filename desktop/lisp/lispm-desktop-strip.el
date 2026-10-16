@@ -349,6 +349,8 @@ tab alone while the strip is collapsed."
                     truncate-lines t
                     line-spacing 0
                     buffer-read-only t)
+        ;; Its frame keeps the strip's size as the font changes.
+        (lispm-desktop-popup--hold-size)
         ;; The line is as tall as the strip's images, whatever the font.
         (face-remap-add-relative 'default :height 10)
         (current-buffer))))

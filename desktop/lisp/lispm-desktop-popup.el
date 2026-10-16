@@ -89,7 +89,8 @@ It takes no focus, and hooks run for new frames do not see it."
                   display-line-numbers nil
                   auto-hscroll-mode nil
                   truncate-lines t
-                  line-spacing 0))
+                  line-spacing 0)
+      (lispm-desktop-popup--hold-size))
     (let ((root (frame-root-window frame)))
       (set-window-buffer root buffer)
       (set-window-dedicated-p root t)
@@ -131,7 +132,8 @@ FRAME, so FRAME stands over it."
                       (width . 2) (height . 1))))))
     (set-window-buffer (frame-root-window shadow) (get-buffer-create " *lispm-desktop-shadow*"))
     (with-current-buffer " *lispm-desktop-shadow*"
-      (setq-local mode-line-format nil header-line-format nil tab-line-format nil cursor-type nil))
+      (setq-local mode-line-format nil header-line-format nil tab-line-format nil cursor-type nil)
+      (lispm-desktop-popup--hold-size))
     (lispm-desktop-popup--size shadow (frame-pixel-width frame) (frame-pixel-height frame))
     (pcase-let ((`(,x . ,y) (frame-position frame)))
       (set-frame-position shadow (1+ x) (1+ y)))
@@ -150,13 +152,40 @@ FRAME, so FRAME stands over it."
     (set-window-hscroll window 0)))
 
 (defun lispm-desktop-popup--size (frame width height)
-  "Make popup FRAME's text area WIDTH by HEIGHT pixels."
+  "Make popup FRAME's text area WIDTH by HEIGHT pixels.
+FRAME keeps that size while its buffer holds it, see
+`lispm-desktop-popup--hold-size'."
+  (set-frame-parameter frame 'lispm-desktop-popup-size (cons width height))
   (let ((window-min-width 1)
         (window-safe-min-width 1)
         (window-min-height 1)
         (window-safe-min-height 1)
         (frame-resize-pixelwise t))
     (set-frame-size frame width height t)))
+
+(defun lispm-desktop-popup--keep-size (window)
+  "Size WINDOW's frame again as `lispm-desktop-popup--size' last did, once
+Emacs has sized it anew.  This is a buffer-local
+`window-size-change-functions' function."
+  (let* ((frame (window-frame window))
+         (size (frame-parameter frame 'lispm-desktop-popup-size)))
+    (when (and size (not (and (= (frame-text-width frame) (car size))
+                              (= (frame-text-height frame) (cdr size)))))
+      (lispm-desktop-popup--size frame (car size) (cdr size)))))
+
+(defun lispm-desktop-popup--hold-size ()
+  "Have the frame showing the current buffer hold the size
+`lispm-desktop-popup--size' gives it.
+As its font changes, with `set-face-attribute' or a theme, Emacs sizes a
+frame anew to whole lines and columns of the new font, and not below the
+four lines and ten columns `window-min-height' and `window-min-width'
+keep a window to.  The buffer asks its window for a line and a column
+instead, as `lispm-desktop-popup--size' does, and its frame is sized back
+once Emacs has sized it."
+  (setq-local window-min-height 1
+              window-min-width 1
+              window-safe-min-width 1)
+  (add-hook 'window-size-change-functions #'lispm-desktop-popup--keep-size nil t))
 
 (defun lispm-desktop-popup--show (frame x y &optional shadow)
   "Show popup FRAME with its top left at X, Y of its parent, kept inside it.

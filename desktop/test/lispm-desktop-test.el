@@ -2049,6 +2049,44 @@ cannot be chosen, and panes are parted by separators."
                                                              ("Save" save default)))
                 'save))))
 
+(ert-deftest lispm-desktop-test-popup-holds-size ()
+  "A popup frame keeps the size it was given as its font changes, when
+Emacs sizes a frame anew to whole lines and columns of the new font, no
+less than its window's minimum: the popup's buffer asks its window for a
+line and a column, not four lines and ten columns, and has its frame
+sized back."
+  (with-temp-buffer
+    (setq-local mode-line-format nil)
+    (lispm-desktop-popup--hold-size)
+    (save-window-excursion
+      (set-window-buffer nil (current-buffer))
+      (should (= (window-min-size nil nil nil t) (frame-char-height)))
+      (should (= (window-min-size nil t nil t) (frame-char-width)))))
+  (let ((frame (selected-frame))
+        (text '(80 . 25))
+        (sized nil))
+    (cl-letf (((symbol-function 'set-frame-size)
+               (lambda (_frame width height &optional _pixelwise)
+                 (push (cons width height) sized)
+                 (setq text (cons width height))))
+              ((symbol-function 'frame-text-width) (lambda (&optional _frame) (car text)))
+              ((symbol-function 'frame-text-height) (lambda (&optional _frame) (cdr text))))
+      (unwind-protect
+          (progn
+            ;; A frame `lispm-desktop-popup--size' never sized is left alone.
+            (lispm-desktop-popup--keep-size (selected-window))
+            (should-not sized)
+            (lispm-desktop-popup--size frame 256 24)
+            (should (equal sized '((256 . 24))))
+            ;; A larger font: Emacs made it whole columns, and four lines.
+            (setq text '(288 . 76) sized nil)
+            (lispm-desktop-popup--keep-size (selected-window))
+            (should (equal sized '((256 . 24))))
+            (setq sized nil)
+            (lispm-desktop-popup--keep-size (selected-window))
+            (should-not sized))
+        (set-frame-parameter frame 'lispm-desktop-popup-size nil)))))
+
 (ert-deftest lispm-desktop-test-alert-text ()
   "An alert shows its message, its detail and a button per choice, framed
 as Mac OS 9 framed its alerts."
@@ -3567,6 +3605,20 @@ theme."
     (should (equal (lispm-desktop-test--pixel
                     (lispm-desktop-platinum-draw-strip-segment dracula 'module :menu t) 21 11)
                    (upcase (plist-get dracula :text))))))
+
+(ert-deftest lispm-desktop-test-strip-holds-size ()
+  "The strip's frame keeps the strip's size as the font changes, where it
+grew to the four lines Emacs keeps a window to, over the echo area."
+  (when-let* ((old (get-buffer lispm-desktop-strip-buffer-name)))
+    (kill-buffer old))
+  (let ((buffer (lispm-desktop-strip--buffer)))
+    (unwind-protect
+        (save-window-excursion
+          (set-window-buffer nil buffer)
+          (should (= (window-min-size nil nil nil t) (frame-char-height)))
+          (with-current-buffer buffer
+            (should (memq #'lispm-desktop-popup--keep-size window-size-change-functions))))
+      (kill-buffer buffer))))
 
 (ert-deftest lispm-desktop-test-strip-menu-place ()
   "A module's menu pops up small, its outline on the module's left edge and
