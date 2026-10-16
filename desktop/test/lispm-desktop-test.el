@@ -886,6 +886,32 @@ them, up selecting the folder it came from."
           (should (equal lispm-desktop-finder--selected "init.el")))))
     (kill-buffer lispm-desktop-finder-buffer-name)))
 
+(ert-deftest lispm-desktop-test-finder-rolls-up ()
+  "The Finder window's collapse box rolls it up to its title bar, its
+header and its bottom line put away, and down to its height again."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((lispm-desktop-finder--frame (selected-frame))
+          (rolls nil))
+      (set-window-buffer (selected-window) (lispm-desktop-finder--buffer))
+      (cl-letf (((symbol-function 'lispm-desktop-platinum-roll-up)
+                 (lambda (frame height) (push (list 'up frame height) rolls)))
+                ((symbol-function 'lispm-desktop-platinum-roll-down)
+                 (lambda (frame height) (push (list 'down frame height) rolls))))
+        (let ((height (frame-text-height)))
+          (lispm-desktop-finder--collapse-box nil)
+          (should (equal (car rolls) (list 'up (selected-frame) (window-tab-line-height))))
+          (lispm-desktop-finder--in
+            (should-not header-line-format)
+            (should-not mode-line-format))
+          (lispm-desktop-finder--collapse-box nil)
+          (should (equal (car rolls) (list 'down (selected-frame) height)))
+          (lispm-desktop-finder--in
+            (should header-line-format)
+            (should mode-line-format)
+            (should-not lispm-desktop-finder--shade)))))
+    (kill-buffer lispm-desktop-finder-buffer-name)))
+
 (ert-deftest lispm-desktop-test-views-ask-the-editor-first ()
   "A view is asked for through the editor, which comes forward first."
   (let ((asked nil))
@@ -2088,6 +2114,66 @@ pops up its buffers on a Meta click."
         (lispm-desktop-platinum-shade-or-zoom (split-window-below))
         (should (and shaded (not zoomed)))))))
 
+(ert-deftest lispm-desktop-test-roll-up ()
+  "A floating window rolls up to its title bar alone, as Mac OS 9's
+WindowShade rolled it: no minimum height of Emacs's holds it taller, and
+no scroll function runs on it while none of its text is in sight.  It
+rolls down to the height it is given, its buffer as it was."
+  (save-window-excursion
+    (delete-other-windows)
+    (with-temp-buffer
+      (setq-local tab-line-format "Title" header-line-format nil mode-line-format nil)
+      (let ((frame (selected-frame))
+            (window (selected-window))
+            (heights nil))
+        (set-window-buffer window (current-buffer))
+        (let ((title (window-tab-line-height window))
+              (minimum (window-min-size window nil nil t))
+              (unrolled (frame-text-height frame)))
+          (should (> minimum title))
+          (cl-letf (((symbol-function 'set-frame-height)
+                     (lambda (_frame height &optional _pretend pixelwise)
+                       (should pixelwise)
+                       (push height heights))))
+            (lispm-desktop-platinum-roll-up frame title)
+            (should (= (window-min-size window nil nil t) title))
+            ;; The title bar, unless a line of the font is as tall: Emacs
+            ;; shows a tab line only in a window taller than a line.
+            (should (= (car heights) (max title (1+ (frame-char-height frame)))))
+            (should (= (lispm-desktop-platinum-rolled-up-height frame) unrolled))
+            (should (local-variable-p 'window-scroll-functions))
+            (should-not window-scroll-functions)
+            (lispm-desktop-platinum-roll-down frame 300)
+            (should (= (car heights) 300))
+            (should (= (window-min-size window nil nil t) minimum))
+            (should-not (local-variable-p 'window-scroll-functions))
+            (should-not (lispm-desktop-platinum-rolled-up-height frame))))))))
+
+(ert-deftest lispm-desktop-test-rolled-up-window-kept-on-desktop ()
+  "A window rolled up keeps to its title bar when put back on the desktop,
+as after it was moved or its screen changed size, and is remembered at
+the height it rolls down to."
+  (let* ((frame (selected-frame))
+         (rolled (frame-text-height frame))
+         (sizes nil))
+    (cl-letf (((symbol-function 'frame-parent) (lambda (&optional _) frame))
+              ((symbol-function 'set-frame-size)
+               (lambda (_frame width height &optional _pixelwise) (push (cons width height) sizes)))
+              ((symbol-function 'set-frame-position) #'ignore)
+              ;; CI's Emacs builds have no window system, and so no tab bar.
+              ((symbol-function 'tab-bar-height) (lambda (&rest _) 0)))
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up (cons (current-buffer) 300))
+            (should (= (nth 3 (lispm-desktop-apps--geometry frame)) 300))
+            (lispm-desktop-apps--put frame (list 0 0 (frame-text-width frame) 300))
+            (should (seq-every-p (lambda (size) (= (cdr size) rolled)) sizes))
+            (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up nil)
+            (should (= (nth 3 (lispm-desktop-apps--geometry frame)) rolled))
+            (lispm-desktop-apps--put frame (list 0 0 (frame-text-width frame) 300))
+            (should (/= (cdar sizes) rolled)))
+        (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up nil)))))
+
 (ert-deftest lispm-desktop-test-status-drawings ()
   "The battery and the load meter, the Control Strip's module icons, are
 sixteen pixels square and draw at any level."
@@ -2545,6 +2631,24 @@ positions, the keys, the browser's pages."
           (button-activate button))
         (should (equal (car saved) '(lispm-desktop-editing-style . emacs)))))))
 
+(ert-deftest lispm-desktop-test-settings-close-rolls-down ()
+  "The control panel's window closed rolled up rolls down first, as the
+Finder window does: it opens again with its tabs, as tall as it was."
+  (let ((lispm-desktop-settings--frame (selected-frame))
+        (lispm-desktop-settings--shade 300)
+        (lispm-desktop-settings--geometry nil)
+        (rolled nil))
+    (cl-letf (((symbol-function 'lispm-desktop-settings--collapse-box)
+               (lambda (_window) (setq rolled t lispm-desktop-settings--shade nil)))
+              ((symbol-function 'lispm-desktop-apps--geometry)
+               (lambda (_frame) (should rolled) '(0 0 400 300)))
+              ((symbol-function 'lispm-desktop-apps-focus-after) #'ignore)
+              ((symbol-function 'delete-frame) #'ignore)
+              ((symbol-function 'lispm-desktop-apps-hidden-p) #'always))
+      (lispm-desktop-settings-close)
+      (should rolled)
+      (should (equal lispm-desktop-settings--geometry '(0 0 400 300))))))
+
 (ert-deftest lispm-desktop-test-control-panels-folder ()
   "The Control Panels folder is a Finder folder of a panel each: opening an
 item opens its panel, and nothing is made, renamed or thrown away there."
@@ -2682,7 +2786,8 @@ it opens there again, a child of the screen."
             ((symbol-function 'lispm-desktop-apps-out-p) (lambda (_) 'screen))
             ((symbol-function 'lispm-desktop-apps--screen-origin) (lambda (_) '(40 . 100)))
             ((symbol-function 'frame-text-width) (lambda (_) 700))
-            ((symbol-function 'frame-text-height) (lambda (_) 400)))
+            ((symbol-function 'frame-text-height) (lambda (_) 400))
+            ((symbol-function 'lispm-desktop-platinum-rolled-up-height) #'ignore))
     (should (equal (lispm-desktop-apps--geometry 'window) '(460 200 700 400)))))
 
 (ert-deftest lispm-desktop-test-coherence-keep-on-screen ()

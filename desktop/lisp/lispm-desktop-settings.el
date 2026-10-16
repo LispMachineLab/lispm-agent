@@ -451,14 +451,14 @@ The panels are `lispm-desktop-settings-panels'."
       (if lispm-desktop-settings--shade
           (progn (setq header-line-format '(:eval (lispm-desktop-settings--tabs)))
                  (kill-local-variable 'mode-line-format)
-                 (set-frame-height lispm-desktop-settings--frame lispm-desktop-settings--shade nil t)
+                 (lispm-desktop-platinum-roll-down lispm-desktop-settings--frame lispm-desktop-settings--shade)
                  (setq lispm-desktop-settings--shade nil))
         (setq lispm-desktop-settings--shade (frame-text-height lispm-desktop-settings--frame))
         (setq header-line-format nil
               mode-line-format nil)
-        (set-frame-height lispm-desktop-settings--frame
-                          (window-tab-line-height (frame-root-window lispm-desktop-settings--frame))
-                          nil t)))))
+        (lispm-desktop-platinum-roll-up
+         lispm-desktop-settings--frame
+         (window-tab-line-height (frame-root-window lispm-desktop-settings--frame)))))))
 
 (defvar-local lispm-desktop-settings--width nil
   "The width in pixels the panel's group boxes were drawn for.")
@@ -573,6 +573,8 @@ as the pane.  This is a buffer-local `window-size-change-functions' function."
   "Close the control panel's window; the desktop comes in front."
   (interactive)
   (when (lispm-desktop-settings-open-p)
+    (when lispm-desktop-settings--shade
+      (lispm-desktop-settings--collapse-box nil))
     (setq lispm-desktop-settings--geometry (lispm-desktop-apps--geometry lispm-desktop-settings--frame))
     (let ((frame lispm-desktop-settings--frame))
       (lispm-desktop-apps-focus-after frame)

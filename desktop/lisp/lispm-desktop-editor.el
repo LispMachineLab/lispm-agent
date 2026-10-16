@@ -600,7 +600,7 @@ box does."
   (when lispm-desktop-editor--shade
     (pcase-let ((`(,config . ,height) lispm-desktop-editor--shade))
       (setq lispm-desktop-editor--shade nil)
-      (set-frame-height lispm-desktop-editor--frame height nil t)
+      (lispm-desktop-platinum-roll-down lispm-desktop-editor--frame height)
       (set-window-configuration config))))
 
 (defun lispm-desktop-editor-shade ()
@@ -622,7 +622,7 @@ rolled a window up into its title bar."
           (delete-other-windows window)
           (set-window-dedicated-p window nil)
           (set-window-buffer window (lispm-desktop-editor--strip-buffer))
-          (set-frame-height lispm-desktop-editor--frame height nil t))))))
+          (lispm-desktop-platinum-roll-up lispm-desktop-editor--frame height))))))
 
 ;;;; Menus
 
