@@ -1389,7 +1389,7 @@ desktop show with it."
             (t (select-window (frame-first-window))
                (xwidget-webkit-browse-url lispm-desktop-browser-home-url t)))
       (lispm-desktop-browser--ensure-layout))
-    (make-frame-visible lispm-desktop-browser--frame)
+    (lispm-desktop-platinum-show-window lispm-desktop-browser--frame)
     (lispm-desktop-apps-keep-on-desktop lispm-desktop-browser--frame)
     (select-frame-set-input-focus lispm-desktop-browser--frame)
     (select-window (or (lispm-desktop-browser--window) (frame-first-window lispm-desktop-browser--frame)))
@@ -1480,12 +1480,12 @@ cover.  This is one of `lispm-desktop-apps-frontmost-functions'."
                      (and (eq app 'editor) (fboundp 'lispm-desktop-editor-floating-p)
                           (lispm-desktop-editor-floating-p)))))
       (cond ((and shown (not (frame-visible-p lispm-desktop-browser--frame)))
-             (make-frame-visible lispm-desktop-browser--frame)
+             (lispm-desktop-platinum-show-window lispm-desktop-browser--frame)
              ;; The editor in front stays over it.
              (when (and (eq app 'editor) (frame-live-p (bound-and-true-p lispm-desktop-editor--frame)))
-               (raise-frame lispm-desktop-editor--frame)))
+               (lispm-desktop-platinum-raise-window lispm-desktop-editor--frame)))
             ((and (not shown) (frame-visible-p lispm-desktop-browser--frame))
-             (make-frame-invisible lispm-desktop-browser--frame))))))
+             (lispm-desktop-platinum-hide-window lispm-desktop-browser--frame))))))
 
 (defun lispm-desktop-browser--refocus ()
   "Give the floating browser the keyboard back after a menu bar menu closes.

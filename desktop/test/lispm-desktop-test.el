@@ -355,15 +355,16 @@ nearest it, kept whole on the desktop; the others keep to free cells."
       (should-not lispm-desktop-icon-places))))
 
 (ert-deftest lispm-desktop-test-desktop-drag-survives-empty-reads ()
-  "Catching up with the mouse while input is pending but nothing can be read
-yet does not end the drag: the icon is still dropped where it is let go."
+  "Reads that come back empty, as the mouse is looked at between moves, do
+not end the drag, nor do moves Emacs reports: the icon is still dropped
+where it is let go."
   (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'ignore)
             ((symbol-function 'lispm-desktop--font) (lambda () '("Geneva" 12 10)))
             ((symbol-function 'window-body-width) (lambda (&rest _) 800))
             ((symbol-function 'window-body-height) (lambda (&rest _) 601))
             ((symbol-function 'window-inside-pixel-edges) (lambda (&rest _) '(0 0 800 601)))
-            ((symbol-function 'lispm-desktop--copy-frame) #'ignore)
-            ((symbol-function 'lispm-desktop--show-copy) #'ignore)
+            ((symbol-function 'lispm-desktop--copy-frames) (lambda (&rest _) '(icon . name)))
+            ((symbol-function 'lispm-desktop--place-copy) #'ignore)
             ((symbol-function 'lispm-desktop-popup--dispose) #'ignore)
             ((symbol-function 'lispm-desktop--render) #'ignore)
             ((symbol-function 'customize-save-variable)
@@ -371,27 +372,77 @@ yet does not end the drag: the icon is still dropped where it is let go."
     (let* ((lispm-desktop-icon-places nil)
            (cell (lispm-desktop--cell-at 'home nil))
            (press (cons (+ (car cell) 40) (+ (cadr cell) 16)))
-           (moves 0)
+           (reads 0)
            (pointer press)
            (unread-command-events nil))
       (cl-letf (((symbol-function 'lispm-desktop--pointer) (lambda (_) pointer))
-                ((symbol-function 'input-pending-p) #'always)
                 ((symbol-function 'read-event)
-                 (lambda (&optional _prompt _method seconds)
-                   (cond (seconds nil)
-                         (unread-command-events (pop unread-command-events))
-                         ((< moves 5)
-                          (setq moves (1+ moves)
-                                pointer (cons (- (car pointer) 20) (+ (cdr pointer) 10)))
-                          '(mouse-movement (nil)))
-                         (t '(drag-mouse-1 (nil) (nil)))))))
-        (lispm-desktop--drag 'home nil press))
+                 (lambda (&rest _)
+                   (setq reads (1+ reads))
+                   (cond ((> reads 10) '(drag-mouse-1 (nil) (nil)))
+                         ;; Every other read times out with nothing.
+                         ((cl-oddp reads)
+                          (setq pointer (cons (- (car pointer) 20) (+ (cdr pointer) 10)))
+                          nil)
+                         (t '(mouse-movement (nil)))))))
+        (should (lispm-desktop--drag 'home nil press)))
       (should (equal (alist-get 'home lispm-desktop-icon-places)
                      (lispm-desktop--snap (- (car cell) 100) (+ (cadr cell) 50) 800 600
                                           (mapcar #'cdr (seq-remove
                                                          (lambda (entry) (eq (car (car entry)) 'home))
                                                          (lispm-desktop--layout 800 600))))))
       (should-not unread-command-events))))
+
+(ert-deftest lispm-desktop-test-desktop-copy-follows-the-pointer ()
+  "The dragged copy follows the pointer pixel by pixel, keeping it where it
+grabbed the icon, and only the drop snaps the icon to the grid; Escape
+gives the drag up, the icon left where it was."
+  (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'ignore)
+            ((symbol-function 'lispm-desktop--font) (lambda () '("Geneva" 12 10)))
+            ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+            ((symbol-function 'window-body-height) (lambda (&rest _) 601))
+            ((symbol-function 'window-inside-pixel-edges) (lambda (&rest _) '(0 0 800 601)))
+            ((symbol-function 'lispm-desktop--copy-frames) (lambda (&rest _) '(icon . name)))
+            ((symbol-function 'lispm-desktop-popup--dispose) #'ignore)
+            ((symbol-function 'lispm-desktop--render) #'ignore)
+            ((symbol-function 'customize-save-variable)
+             (lambda (variable value) (set variable value))))
+    (let* ((lispm-desktop-icon-places nil)
+           (cell (lispm-desktop--cell-at 'home nil))
+           (press (cons (+ (car cell) 40) (+ (cadr cell) 16)))
+           (pointer press)
+           (script nil)
+           (placed nil)
+           (unread-command-events nil))
+      (cl-letf (((symbol-function 'lispm-desktop--pointer) (lambda (_) pointer))
+                ((symbol-function 'lispm-desktop--place-copy)
+                 (lambda (_frames _key x y _window) (push (cons x y) placed)))
+                ((symbol-function 'read-event)
+                 (lambda (&rest _)
+                   (pcase-let ((`(,dx ,dy . ,event) (pop script)))
+                     (setq pointer (cons (+ (car press) dx) (+ (cdr press) dy)))
+                     event))))
+        ;; A jitter shows no copy; then the copy goes wherever the pointer
+        ;; does, by the pixel.
+        (setq script '((-3 2) (-57 23) (-101 47) (-101 47 drag-mouse-1 (nil) (nil))))
+        (should (lispm-desktop--drag 'home nil press))
+        (should (equal placed (list (cons (- (car cell) 101) (+ (cadr cell) 47))
+                                    (cons (- (car cell) 57) (+ (cadr cell) 23)))))
+        ;; Let go, the icon is put on the grid cell nearest.
+        (let ((saved (lispm-desktop--place-xy (alist-get 'home lispm-desktop-icon-places) 800 600)))
+          (should (equal (lispm-desktop--xy-place (car saved) (cdr saved) 800 600)
+                         (lispm-desktop--snap (- (car cell) 101) (+ (cadr cell) 47) 800 600
+                                              (mapcar #'cdr (seq-remove
+                                                             (lambda (entry) (eq (car (car entry)) 'home))
+                                                             (lispm-desktop--layout 800 600))))))
+          (should-not (equal saved (car placed)))
+          ;; Escape, and nothing more moves.
+          (setq placed nil
+                script '((-30 40) (-30 40 . 27)))
+          (lispm-desktop--drag 'home nil press)
+          (should placed)
+          (should (equal (lispm-desktop--place-xy (alist-get 'home lispm-desktop-icon-places) 800 600)
+                         saved)))))))
 
 (ert-deftest lispm-desktop-test-desktop-right-click-menu ()
   "A right click on the desktop offers Arrange Icons and the picture; on an
@@ -423,8 +474,8 @@ icon's own cell saves nothing."
             ((symbol-function 'window-body-width) (lambda (&rest _) 800))
             ((symbol-function 'window-body-height) (lambda (&rest _) 601))
             ((symbol-function 'window-inside-pixel-edges) (lambda (&rest _) '(0 0 800 601)))
-            ((symbol-function 'lispm-desktop--copy-frame) #'ignore)
-            ((symbol-function 'lispm-desktop--show-copy) #'ignore)
+            ((symbol-function 'lispm-desktop--copy-frames) (lambda (&rest _) '(icon . name)))
+            ((symbol-function 'lispm-desktop--place-copy) #'ignore)
             ((symbol-function 'lispm-desktop-popup--dispose) #'ignore)
             ((symbol-function 'lispm-desktop--render) #'ignore))
     (let* ((lispm-desktop-icon-places nil)
@@ -444,11 +495,10 @@ icon's own cell saves nothing."
                 ((symbol-function 'lispm-desktop--select) #'ignore)
                 ((symbol-function 'lispm-desktop--item-at) (lambda (_) 'home))
                 ((symbol-function 'lispm-desktop--pointer) (lambda (_) pointer))
-                ((symbol-function 'input-pending-p) #'ignore)
                 ((symbol-function 'read-event)
                  (lambda (&rest _)
                    (if moves
-                       (progn (setq pointer (pop moves)) '(mouse-movement (nil)))
+                       (progn (setq pointer (pop moves)) nil)
                      '(mouse-1 (nil))))))
         (let ((event `(down-mouse-1 (nil 1 ,press 0))))
           ;; A first click that jitters 3 and 4 pixels is a click.
@@ -470,17 +520,25 @@ icon's own cell saves nothing."
           (should-not saved))))))
 
 (ert-deftest lispm-desktop-test-desktop-draws-the-dragged-copy ()
-  "The dragged copy is its cell's piece of the desktop, the icon translucent
-over it."
-  (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'ignore))
-    (let* ((lispm-desktop-picture nil)
-           (svg (lispm-desktop--copy-svg 'home 50 60 800 600)))
-      (should (string-match-p "viewBox=\"[0-9-]+ 60 " svg))
-      (should (string-match-p (format "<rect width=\"800\" height=\"600\" fill=\"%s\"/>"
-                                      (lispm-desktop--color))
-                              svg))
-      (should (string-suffix-p "Home</text></g></svg>" svg))
-      (should (string-match-p "<g opacity=\"0.5\">" svg)))))
+  "The dragged copy is the icon alone and its name inverted, as Mac OS 9's
+drag image was, no piece of the desktop about them; the icon stands
+centred at the top of its cell, its name under it."
+  (cl-letf (((symbol-function 'lispm-desktop-xwidget-available-p) #'ignore)
+            ((symbol-function 'lispm-desktop--font) (lambda () '("Geneva" 12 10)))
+            ((symbol-function 'string-pixel-width) (lambda (&rest _) 40)))
+    (let ((lispm-desktop-picture nil))
+      (pcase-let ((`(,icon . ,name) (lispm-desktop--copy-svgs 'home)))
+        (should (string-match-p "width=\"32\" height=\"32\" viewBox=\"0 0 32 32\"" icon))
+        (should-not (string-match-p (regexp-quote (lispm-desktop--color)) icon))
+        (should-not (string-match-p "opacity" icon))
+        (should (string-match-p (format "<rect width=\"48\" height=\"16\" fill=\"%s\"/>"
+                                        (or (lispm-desktop-platinum--color :text) "#000000"))
+                                name))
+        (should (string-match-p (format "fill=\"%s\">Home</text></svg>\\'"
+                                        (or (lispm-desktop-platinum--color :content) "#FFFFFF"))
+                                name)))
+      (should (equal (lispm-desktop--copy-place 'home 100 50)
+                     (list (cons (+ 100 40 -16) 50) (cons (+ 100 40 -24) (+ 50 32 4))))))))
 
 (ert-deftest lispm-desktop-test-desktop-picture-scaled-copy ()
   "A picture filling the desktop is drawn from a copy scaled to it once one
@@ -1246,6 +1304,220 @@ lines; an inactive one lies flat in a dark grey outline."
       (should (equal (at active 3 21) "#000000"))
       (should (equal (at inactive 0 40) "#555555"))
       (should (equal (at inactive 2 40) "#DDDDDD")))))
+
+(defmacro lispm-desktop-test--with-frames (frames &rest body)
+  "Run BODY among fake frames: FRAMES evaluates to a list of
+\(NAME . PARAMETERS), symbols standing for frames, whose parameters the frame primitives read
+and set; `parent-frame', `position', `size' and `visibility' stand for a
+frame's parent, place, size and visibility.  In BODY, `moves' holds the
+moves made, (FRAME X Y), the latest first, and `raised' the frames
+raised, the latest first."
+  (declare (indent 1))
+  `(let ((parameters (mapcar (lambda (frame) (cons (car frame) (copy-tree (cdr frame)))) ,frames))
+         (moves nil)
+         (raised nil))
+     (cl-flet ((frame-get (frame name) (alist-get name (alist-get frame parameters)))
+               (frame-put (frame name value) (setf (alist-get name (alist-get frame parameters)) value)))
+       (cl-letf (((symbol-function 'frame-live-p) (lambda (frame) (and (assq frame parameters) t)))
+                 ((symbol-function 'frame-parameter) (lambda (frame name) (frame-get frame name)))
+                 ((symbol-function 'set-frame-parameter) (lambda (frame name value) (frame-put frame name value)))
+                 ((symbol-function 'modify-frame-parameters)
+                  (lambda (frame alist) (pcase-dolist (`(,name . ,value) alist) (frame-put frame name value))))
+                 ((symbol-function 'frame-parent) (lambda (&optional frame) (frame-get frame 'parent-frame)))
+                 ((symbol-function 'frame-position) (lambda (&optional frame) (frame-get frame 'position)))
+                 ((symbol-function 'set-frame-position)
+                  (lambda (frame x y) (push (list frame x y) moves) (frame-put frame 'position (cons x y))))
+                 ((symbol-function 'frame-visible-p) (lambda (frame) (frame-get frame 'visibility)))
+                 ((symbol-function 'make-frame-visible) (lambda (&optional frame) (frame-put frame 'visibility t)))
+                 ((symbol-function 'make-frame-invisible)
+                  (lambda (&optional frame _force) (frame-put frame 'visibility nil)))
+                 ((symbol-function 'raise-frame) (lambda (&optional frame) (push frame raised)))
+                 ((symbol-function 'frame-pixel-width) (lambda (&optional frame) (car (frame-get frame 'size))))
+                 ((symbol-function 'frame-pixel-height) (lambda (&optional frame) (cdr (frame-get frame 'size))))
+                 ((symbol-function 'frame-text-width) (lambda (&optional frame) (car (frame-get frame 'size))))
+                 ((symbol-function 'frame-text-height) (lambda (&optional frame) (cdr (frame-get frame 'size))))
+                 ((symbol-function 'frame-edges)
+                  (lambda (&optional frame _type)
+                    (pcase-let ((`(,x . ,y) (frame-get frame 'position))
+                                (`(,w . ,h) (frame-get frame 'size)))
+                      (list x y (+ x w) (+ y h)))))
+                 ((symbol-function 'frame-list) (lambda () (mapcar #'car parameters)))
+                 ((symbol-function 'frame-list-z-order)
+                  (lambda (&optional _) (seq-remove (lambda (frame) (frame-get frame 'parent-frame))
+                                                    (mapcar #'car parameters))))
+                 ((symbol-function 'lispm-desktop-platinum--frameable-p) #'ignore)
+                 ((symbol-function 'lispm-desktop-platinum--frame-update) #'ignore))
+         ,@body))))
+
+(defconst lispm-desktop-test--window-frames
+  '((screen (position 0 . 0) (size 1200 . 800) (visibility . t))
+    (outer (lispm-desktop-platinum-frames . window) (parent-frame . screen)
+           (position 94 . 49) (size 413 . 308) (visibility . t))
+    (window (lispm-desktop-window . t) (parent-frame . outer) (lispm-desktop-platinum-frame . outer)
+            (position 6 . 1) (size 400 . 300) (visibility . t)))
+  "A floating window in its frame over the screen, for
+`lispm-desktop-test--with-frames'.")
+
+(ert-deftest lispm-desktop-test-window-in-its-frame ()
+  "A framed window stands in its frame, its parent: moved, raised, shown or
+hidden, the frame is, the window going with it, as Mac OS 9 kept a
+window's structure and content as one."
+  (lispm-desktop-test--with-frames lispm-desktop-test--window-frames
+      (should (eq (lispm-desktop-platinum-window-outer 'window) 'outer))
+      (should (eq (lispm-desktop-platinum-window-outer 'screen) 'screen))
+      (should (eq (lispm-desktop-platinum-window-frame-p 'outer) 'window))
+      (should (lispm-desktop-platinum-chrome-frame-p 'outer))
+      (should-not (lispm-desktop-apps-screen-p 'outer))
+      (should (eq (lispm-desktop-platinum-window-parent 'window) 'screen))
+      (should (eq (lispm-desktop-apps-window-screen 'window) 'screen))
+      (should (equal (lispm-desktop-platinum-window-position 'window) '(100 . 50)))
+      (lispm-desktop-platinum-move-window 'window 300 200)
+      (should (equal moves '((outer 294 199))))
+      (should (equal (frame-position 'window) '(6 . 1)))
+      (should (equal (lispm-desktop-platinum-window-position 'window) '(300 . 200)))
+      (should (equal (lispm-desktop-apps--geometry 'window) '(300 200 400 300)))
+      (lispm-desktop-platinum-raise-window 'window)
+      (should (equal raised '(window outer)))
+      (lispm-desktop-platinum-hide-window 'window)
+      (should-not (frame-visible-p 'outer))
+      (should-not (frame-visible-p 'window))
+      (lispm-desktop-platinum-show-window 'window)
+      (should (frame-visible-p 'outer))
+      (should (frame-visible-p 'window))))
+
+(ert-deftest lispm-desktop-test-outline-geometry ()
+  "Moving, a window's outline is a band two pixels thick round its outer
+rectangle; growing, a line a pixel thick round it and, within, the
+title bar's line, the content's lines and the grow box, where Mac OS 9's
+GrowWindow drew them."
+  (should (equal (lispm-desktop-platinum-outline-lines 'move 10 20 300 200)
+                 '((10 20 300 2 nil) (10 218 300 2 nil) (10 22 196 2 t) (308 22 196 2 t))))
+  (let ((lines (lispm-desktop-platinum-outline-lines 'grow 10 20 300 200 21)))
+    (should (= (length lines) 10))
+    (dolist (line '((10 20 300 1 nil) (10 219 300 1 nil) (10 21 198 1 t) (309 21 198 1 t)
+                    ;; Under the title bar, from the content's left line to
+                    ;; its right one, and round the content.
+                    (15 41 289 1 nil) (15 42 171 1 t) (303 42 171 1 t) (15 213 289 1 nil)
+                    ;; The grow box in the content's bottom right corner.
+                    (288 198 15 1 nil) (288 199 14 1 t)))
+      (should (member line lines)))
+    (dolist (line lines)
+      (pcase-let ((`(,x ,y ,length ,thickness ,vertical) line))
+        (should (<= 10 x (+ x (if vertical thickness length)) 310))
+        (should (<= 20 y (+ y (if vertical length thickness)) 220)))))
+  (should (= 4 (length (lispm-desktop-platinum-outline-lines 'grow 10 20 300 200)))))
+
+(ert-deftest lispm-desktop-test-outline-dots ()
+  "The outline's dots are the 50% grey pattern lined up with the screen's
+pixels: a checkerboard whose phase follows where the line is."
+  (should (equal (lispm-desktop-platinum-dots 4 2 0)
+                 (vector (bool-vector t nil t nil) (bool-vector nil t nil t))))
+  (should (equal (lispm-desktop-platinum-dots 3 1 1) (vector (bool-vector nil t nil)))))
+
+(ert-deftest lispm-desktop-test-outline-dots-image ()
+  "The outline's dots are an XBM image of the bits, as large as they are."
+  ;; CI's Emacs builds have no window system, and so no XBM images.
+  (skip-unless (image-type-available-p 'xbm))
+  ;; Bits are sized by `:data-width' and `:data-height': `:width' and
+  ;; `:height' would scale the image, and make the spec invalid.
+  (let ((image (lispm-desktop-platinum--dots-image 6 2 1)))
+    (should (eq (plist-get (cdr image) :type) 'xbm))
+    (should (equal (list (plist-get (cdr image) :data-width) (plist-get (cdr image) :data-height)) '(6 2)))
+    (should-not (plist-member (cdr image) :width))))
+
+(ert-deftest lispm-desktop-test-drag-keeps-in-front ()
+  "What a drag draws comes back over whatever came in front of it, and is
+left where it is while it is in front."
+  (let ((order '(window outer line-a line-b))
+        (raised nil))
+    (cl-letf (((symbol-function 'frame-list-z-order) (lambda (&optional _) order))
+              ((symbol-function 'raise-frame) (lambda (frame) (push frame raised))))
+      (lispm-desktop-platinum-keep-in-front '(line-a line-b) 'screen)
+      (should (equal raised '(line-b line-a)))
+      (setq raised nil order '(line-b window outer line-a))
+      (lispm-desktop-platinum-keep-in-front '(line-a line-b) 'screen)
+      (should-not raised)
+      ;; On the computer's screen, the outline floats above by itself.
+      (setq order '(window line-a))
+      (lispm-desktop-platinum-keep-in-front '(line-a) nil)
+      (should-not raised))))
+
+(defmacro lispm-desktop-test--with-outline (script &rest body)
+  "Run BODY with the framed window of `lispm-desktop-test--window-frames'
+and a mouse following SCRIPT, a list of ((X . Y) . EVENT): each read
+puts the mouse at X, Y on the computer's screen and gives EVENT, nil for
+a read that waited in vain.  In BODY, `ran' counts the runs of
+`lispm-desktop-platinum-frame-moved-functions', `outlines' holds the
+outlines drawn, the latest first, and `sizes' the sizes given the window."
+  (declare (indent 1))
+  `(lispm-desktop-test--with-frames lispm-desktop-test--window-frames
+       (let* ((script ,script)
+              (pointer (car (car script)))
+              (ran 0)
+              (outlines nil)
+              (sizes nil)
+              (unread-command-events nil)
+              (lispm-desktop-platinum-frame-moved-functions (list (lambda (_) (setq ran (1+ ran))))))
+         (cl-letf (((symbol-function 'mouse-absolute-pixel-position) (lambda () pointer))
+                   ((symbol-function 'read-event)
+                    (lambda (&rest _)
+                      (pcase-let ((`(,place . ,event) (pop script)))
+                        (setq pointer place)
+                        event)))
+                   ((symbol-function 'lispm-desktop-platinum--show-outline)
+                    (lambda (_parent lines _origin) (push lines outlines)))
+                   ((symbol-function 'lispm-desktop-platinum--hide-outline) #'ignore)
+                   ((symbol-function 'lispm-desktop-platinum--origin) (lambda (_) '(0 . 0)))
+                   ((symbol-function 'select-frame-set-input-focus) #'ignore)
+                   ((symbol-function 'set-frame-size)
+                    (lambda (frame width height &optional _) (push (list frame width height) sizes))))
+           ,@body))))
+
+(ert-deftest lispm-desktop-test-outline-moves-the-window-once ()
+  "Dragged by its outline, a window stays where it is while the outline
+follows the mouse, and moves once the button rises, by as far as the
+mouse went; the moved functions run once.  Escape or C-g leaves it where
+it was; a press let go where it was is handed on as a click."
+  (lispm-desktop-test--with-outline (list (cons '(500 . 300) nil) (cons '(510 . 305) nil)
+                                          (cons '(530 . 320) '(mouse-movement (nil)))
+                                          (cons '(560 . 340) nil)
+                                          (cons '(560 . 340) '(drag-mouse-1 (nil) (nil))))
+    (should (lispm-desktop-platinum-drag-outline 'window 'move))
+    (should (equal moves '((outer 154 89))))
+    (should (= ran 1))
+    (should (= (length outlines) 3))
+    (should (equal (car (car outlines)) '(154 89 413 2 nil)))
+    (should (equal (car (car (last outlines))) '(104 54 413 2 nil))))
+  (dolist (stop '(27 escape ?\C-g))
+    (lispm-desktop-test--with-outline (list (cons '(500 . 300) nil) (cons '(580 . 360) nil)
+                                            (cons '(580 . 360) stop))
+      (should-not (lispm-desktop-platinum-drag-outline 'window 'move))
+      (should outlines)
+      (should-not moves)
+      (should (= ran 0))))
+  (lispm-desktop-test--with-outline (list (cons '(500 . 300) nil) (cons '(502 . 301) nil)
+                                          (cons '(502 . 301) '(mouse-1 (nil))))
+    (should-not (lispm-desktop-platinum-drag-outline 'window 'move))
+    (should-not moves)
+    (should (= ran 0))
+    (should (equal unread-command-events '((mouse-1 (nil)))))))
+
+(ert-deftest lispm-desktop-test-outline-grows-the-window-once ()
+  "Grown by its outline, a window is given its new size once, when the
+button rises, and grows no smaller than its least."
+  (lispm-desktop-test--with-outline (list (cons '(500 . 300) nil) (cons '(520 . 310) nil)
+                                          (cons '(540 . 330) '(drag-mouse-1 (nil) (nil))))
+    (should (lispm-desktop-platinum-drag-outline 'window 'grow))
+    (should (equal sizes '((window 440 330))))
+    (should-not moves)
+    (should (= ran 1))
+    (should (= (length (car outlines)) 10))
+    (should (member '(94 49 453 1 nil) (car outlines))))
+  (lispm-desktop-test--with-outline (list (cons '(500 . 300) nil)
+                                          (cons '(0 . 0) '(drag-mouse-1 (nil) (nil))))
+    (lispm-desktop-platinum-drag-outline 'window 'grow)
+    (should (equal sizes (list (list 'window (car lispm-desktop-platinum-window-min-size)
+                                     (cdr lispm-desktop-platinum-window-min-size)))))))
 
 (ert-deftest lispm-desktop-test-scroll-bar-parts ()
   "A scroll bar is outlined down both sides, its track recessed, its thumb
@@ -2300,11 +2572,44 @@ it opens there again, a child of the screen."
 computer's screen."
   (let ((moved nil))
     (cl-letf (((symbol-function 'lispm-desktop-apps--workarea) (lambda (_) '(0 25 1728 1000)))
+              ((symbol-function 'lispm-desktop-platinum-window-outer) #'identity)
               ((symbol-function 'frame-position) (lambda (_) '(2000 . 5)))
               ((symbol-function 'frame-pixel-width) (lambda (_) 700))
               ((symbol-function 'set-frame-position) (lambda (_ x y) (setq moved (list x y)))))
       (lispm-desktop-apps--keep-on-screen 'window)
       (should (equal moved '(1648 25))))))
+
+(ert-deftest lispm-desktop-test-coherence-window-out-keeps-its-frame ()
+  "A window taken out goes out in its frame: the frame carrying it becomes a
+frame of its own where it was, the window still standing in it, framed;
+brought back in, the frame is a child of the screen again where it is."
+  (lispm-desktop-test--with-frames lispm-desktop-test--window-frames
+      (cl-letf (((symbol-function 'lispm-desktop-coherence--minibuffer) (lambda (_) 'minibuffer))
+                ((symbol-function 'minibuffer-window) (lambda (&optional frame) (list 'mini frame)))
+                ((symbol-function 'lispm-desktop-apps--screen-origin) (lambda (_) '(40 . 100)))
+                ((symbol-function 'lispm-desktop-apps--keep-on-screen) #'ignore)
+                ((symbol-function 'lispm-desktop-apps-keep-on-desktop) #'ignore))
+        (lispm-desktop-coherence-take-out 'window)
+        (should-not (frame-parent 'outer))
+        (should (eq (frame-parent 'window) 'outer))
+        (should (lispm-desktop-platinum--framed-p 'window))
+        (should (equal (frame-position 'outer) '(134 . 149)))
+        (should (equal (frame-position 'window) '(6 . 1)))
+        (should (eq (lispm-desktop-apps-out-p 'window) 'screen))
+        (should (eq (lispm-desktop-apps-out-p 'outer) 'screen))
+        (should-not (lispm-desktop-apps-screen-p 'outer))
+        (should (eq (lispm-desktop-apps-window-screen 'window) 'screen))
+        (should-not (lispm-desktop-platinum-window-parent 'window))
+        (should (equal (frame-parameter 'window 'minibuffer) '(mini minibuffer)))
+        (should (equal (frame-parameter 'outer 'minibuffer) '(mini minibuffer)))
+        (should (equal (lispm-desktop-apps-windows-out-in-order 'screen) '(window)))
+        (lispm-desktop-coherence-bring-in 'window)
+        (should (eq (frame-parent 'outer) 'screen))
+        (should (eq (frame-parent 'window) 'outer))
+        (should (equal (frame-position 'outer) '(94 . 49)))
+        (should-not (lispm-desktop-apps-out-p 'window))
+        (should-not (lispm-desktop-apps-out-p 'outer))
+        (should (equal (frame-parameter 'window 'minibuffer) '(mini screen))))))
 
 (ert-deftest lispm-desktop-test-coherence-screen-of-a-window-out ()
   "The screen is the desktop's frame, also while a window out is selected."

@@ -19,9 +19,11 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   Panels folder, at the top,
   the Trash in the bottom corner, bulging once something is in it.  Click one to select it,
   double-click it (or press Return) to open it; C-n, C-p, C-f and C-b select from the keyboard
-  and C-M-n, C-M-p, C-M-f and C-M-b move the icon selected a cell.  Drag one anywhere, a translucent copy following
-  the mouse, and it is dropped on the grid the column lies on, in the free cell nearest, and stays
-  there at the next start too, kept by the edges nearest it so that it follows them as the
+  and C-M-n, C-M-p, C-M-f and C-M-b move the icon selected a cell.  Drag one anywhere: a
+  translucent copy of the icon and its name follows the mouse pixel by pixel, over other icons
+  and windows alike, while the icon itself stays where it was, drawn selected, as Mac OS 9's
+  Drag Manager did.  Let go, it lands on the grid the column lies on, in the free cell nearest
+  (Escape gives up), and stays there at the next start too, kept by the edges nearest it so that it follows them as the
   desktop changes size.  Arrange Icons, in the desktop's right-click menu and its View menu,
   puts every icon back where it stood at first.  A desktop picture is drawn from a copy scaled to the desktop, made once by the
   system's =sips= (or ImageMagick), so clicks and drags stay quick.  Floating windows (the Finder's, the floating
@@ -75,6 +77,14 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   the thumb drags.  An inactive window shows its empty track; sessions scroll their own way.
 - *Window frames*: neighbouring windows meet as Mac OS 9's windows were framed, a dark outline
   on each edge and platinum between.
+- *Floating windows* (the Finder's, the editor's, the browser's, a control panel's) are framed
+  as Mac OS 9's were, an outline, a lit band and a drop shadow about them, and each is one
+  window with its frame: the frame drawing it carries the window, so the two move, come in
+  front, show and hide together.  Press a window's title bar or its frame and a dotted outline
+  of it follows the mouse, the window staying where it is; let go, it moves there once, as
+  Mac OS 9's DragWindow moved it.  The grow box drags the outline at the window's new size, with
+  the lines of its title bar, its content and its grow box within, and the window takes that
+  size once, at the end.  Escape or C-g gives a move or a resize up.
 - *A bottom edge on every window*: placards for the buffer, its position, its diagnostics, its
   branch and its mode, and the grow box in the active window's corner.
 - *Finder's icons*: folders (badged when they hold a git repository), a hard disk, documents by
@@ -128,7 +138,8 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   top of the Application menu or =C-c h=, takes every window out, the full-screen editor and
   browser floated first, and puts the desktop in the Dock; Show Desktop, =C-c h= again or a
   click on its tile in the Dock brings it back, the windows over it going in and the
-  applications full screen as they were.  A window out keeps its title bar and boxes; what it
+  applications full screen as they were.  A window out keeps its frame, its title bar and its
+  boxes, and moves and grows by its outline as over the desktop; what it
   asks, and the messages it echoes, show in a small window over the top of the screen, titled
   with its name, since the desktop's own minibuffer is in the Dock with it.
 - *Menus and alerts*: the λ menu, the Application menu, a title bar's buffer menu, every
@@ -234,6 +245,11 @@ what it was built with.
   screen leaves full screen to go to the Dock, and takes it back when it shows again; while it
   is full screen, dropping a window moves none out.  =(setq lispm-desktop-coherence-drag-out nil)=
   keeps dropped windows on the desktop, Hide Desktop still taking them out.
+- *Outlines and drag images*: on macOS a child frame is not clipped by its parent, so a
+  window's outline passes the desktop's edge as the window is dragged out; X clips it at the
+  edge.  No window system inverts what a frame shows, so the outline's dots are the theme's
+  outline over the desktop's colour where Mac OS 9 inverted the screen.  A dragged icon's copy
+  is translucent where frames can be (macOS, X with a compositing manager), opaque elsewhere.
 - *The browser* needs an Emacs built with xwidgets (on X, with GTK and WebKitGTK); without, its
   icon and menu items are not shown.
 - *Tree-sitter modes* are used when Emacs is built with tree-sitter.

@@ -35,10 +35,12 @@
 ;; it, the Trash in the bottom corner.
 ;; A click selects an icon, darkening it and inverting its name, and a
 ;; double click opens it; the arrow keys select, Return or Command-O opens.
-;; An icon is dragged anywhere on the desktop, a translucent copy following
-;; the mouse, and is dropped on the grid the column lies on, in the free
-;; cell nearest; Arrange Icons, in the View menu and the desktop's
-;; right-click menu, puts every icon back where it stood at first.
+;; An icon is dragged anywhere on the desktop, a translucent copy of it
+;; and its name following the mouse pixel by pixel while the icon itself
+;; stays drawn selected, and is dropped on the grid the column lies on, in
+;; the free cell nearest, once the button rises; Arrange Icons, in the
+;; View menu and the desktop's right-click menu, puts every icon back
+;; where it stood at first.
 ;;
 ;;   window --size--> layout: each icon where it was put, from the edges
 ;;                    nearest it, or in the column; the Trash at the bottom
@@ -609,24 +611,29 @@ over it, by default `lispm-desktop-picture'.  Icons stand where
   (concat (format "<rect width=\"%d\" height=\"%d\" fill=\"%s\"/>" width height (lispm-desktop--color))
           (or (lispm-desktop--picture width height picture) "")))
 
-(defun lispm-desktop--copy-svg (key x y width height &optional picture)
-  "Return SVG of the dragged copy of icon KEY, its cell's top left at X, Y
-of a desktop WIDTH by HEIGHT: the cell's piece of the desktop, PICTURE
-included, and the icon over it, translucent, as Mac OS 9 dragged one."
+(defun lispm-desktop--copy-svgs (key)
+  "Return the dragged copy of icon KEY as two SVGs, (ICON . NAME): the icon
+alone, and its name as a selected icon shows it, inverted.  Mac OS 9's
+Drag Manager dragged an image of the two, translucent, without the
+desktop between them."
   (pcase-let* ((`(,family ,size ,ascent) (lispm-desktop--font))
-               (`(,cell-width . ,cell-height) (lispm-desktop--cell-size))
                (spec (alist-get key lispm-desktop-items))
-               (label-width (+ 8 (string-pixel-width
-                                  (propertize (plist-get spec :label) 'face 'lispm-desktop-platinum-list))))
-               (copy-width (max cell-width label-width))
-               (left (- x (/ (- copy-width cell-width) 2))))
-    (concat
-     (format "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"%d\" height=\"%d\" viewBox=\"%d %d %d %d\">"
-             copy-width cell-height left y copy-width cell-height)
-     (lispm-desktop--background width height picture)
-     (format "<g opacity=\"0.5\">%s</g>"
-             (lispm-desktop--draw-icon spec x y nil label-width family size ascent))
-     "</svg>")))
+               (label (plist-get spec :label))
+               (label-width (+ 8 (string-pixel-width (propertize label 'face 'lispm-desktop-platinum-list))))
+               (label-height (+ size 4))
+               (s lispm-desktop-icon-size))
+    (cons
+     (format "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">%s</svg>"
+             s s s s (lispm-desktop--nest (lispm-desktop--item-icon spec) nil 0 0))
+     (concat
+      (format "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">"
+              label-width label-height label-width label-height)
+      (format "<rect width=\"%d\" height=\"%d\" fill=\"%s\"/>" label-width label-height
+              (or (lispm-desktop-platinum--color :text) "#000000"))
+      (format "<text x=\"%d\" y=\"%d\" font-family=\"%s\" font-size=\"%d\" text-anchor=\"middle\" fill=\"%s\">%s</text>"
+              (/ label-width 2) (+ 2 ascent) (lispm-desktop--escape family) size
+              (or (lispm-desktop-platinum--color :content) "#FFFFFF") (lispm-desktop--escape label))
+      "</svg>"))))
 
 (defun lispm-desktop--render (&optional window)
   "Draw the desktop for WINDOW, by default the window showing it.
@@ -836,119 +843,122 @@ would land back on the icon's own cell."
 
 (declare-function lispm-desktop-popup--frame "lispm-desktop-popup" (parent))
 (declare-function lispm-desktop-popup--dispose "lispm-desktop-popup" (frame))
+(declare-function lispm-desktop-popup--fill "lispm-desktop-popup" (frame text))
 (declare-function lispm-desktop-popup--size "lispm-desktop-popup" (frame width height))
 
-(defun lispm-desktop--copy-frame (window)
-  "Return a hidden child frame for the dragged copy over the desktop in
-WINDOW: borderless, taking no focus."
-  (let ((frame (lispm-desktop-popup--frame (window-frame window))))
-    (modify-frame-parameters frame `((child-frame-border-width . 0)
-                                     (background-color . ,(lispm-desktop--color))))
-    frame))
+(defconst lispm-desktop-drag-opacity 0.5
+  "How opaque the dragged copy of an icon is, as Mac OS 9's drag image was.")
 
-(defun lispm-desktop--place-copy (frame x y window)
-  "Put the copy's FRAME with its cell at X, Y of the desktop in WINDOW."
-  (let ((edges (window-inside-pixel-edges window))
-        (cell-width (car (lispm-desktop--cell-size))))
-    (set-frame-position frame
-                        (+ (nth 0 edges) x (- (/ (- (frame-text-width frame) cell-width) 2)))
-                        (+ (nth 1 edges) y))))
+(defun lispm-desktop--copy-frames (key window)
+  "Return the dragged copy of icon KEY over the desktop in WINDOW, hidden:
+\(ICON . NAME), a borderless frame each, see `lispm-desktop--copy-svgs',
+translucent as a whole, as no part of a child frame can be clear.  Two
+frames hold no more than the icon and its name, so the copy paints no
+piece of the desktop over the icons and windows it passes."
+  (let ((parent (window-frame window))
+        (svgs (lispm-desktop--copy-svgs key)))
+    (cl-flet ((make (svg)
+                (let* ((frame (lispm-desktop-popup--frame parent))
+                       (image (create-image svg 'svg t :scale 1 :ascent 100
+                                            :base-uri default-directory))
+                       (size (image-size image t)))
+                  (modify-frame-parameters frame `((child-frame-border-width . 0)
+                                                   (background-color . ,(lispm-desktop--color))
+                                                   (alpha . ,lispm-desktop-drag-opacity)))
+                  (lispm-desktop-popup--fill frame (propertize " " 'display image))
+                  (lispm-desktop-popup--size frame (car size) (cdr size))
+                  frame)))
+      (cons (make (car svgs)) (make (cdr svgs))))))
 
-(defun lispm-desktop--draw-copy (frame key x y window picture)
-  "Draw in FRAME the copy of icon KEY with its cell at X, Y of the desktop in
-WINDOW, PICTURE under it, and fit FRAME to it."
-  (let* ((width (window-body-width window t))
-         (height (1- (window-body-height window t)))
-         (image (create-image (lispm-desktop--copy-svg key x y width height picture) 'svg t
-                              :scale 1 :ascent 'center
-                              :base-uri (or picture default-directory)))
-         (size (image-size image t))
-         (buffer (window-buffer (frame-root-window frame))))
-    (with-current-buffer buffer
-      (let ((old (get-text-property (point-min) 'display)))
-        (erase-buffer)
-        (insert (propertize " " 'display image))
-        (when old
-          (image-flush old t))))
-    (lispm-desktop-popup--size frame (car size) (cdr size))))
+(defun lispm-desktop--copy-place (key x y)
+  "Return where the dragged copy of icon KEY stands with its cell's top left
+at X, Y: ((ICON-X . ICON-Y) (NAME-X . NAME-Y)), in the desktop's pixels.
+The icon is centred at the top of the cell, its name under it, as the
+icon itself is drawn, see `lispm-desktop--draw-icon'."
+  (let* ((label (plist-get (alist-get key lispm-desktop-items) :label))
+         (label-width (+ 8 (string-pixel-width (propertize label 'face 'lispm-desktop-platinum-list))))
+         (center (+ x (/ lispm-desktop-column 2))))
+    (list (cons (- center (/ lispm-desktop-icon-size 2)) y)
+          (cons (- center (/ label-width 2)) (+ y lispm-desktop-icon-size 4)))))
 
-(defun lispm-desktop--show-copy (frame key x y window picture)
-  "Show in FRAME the copy of icon KEY with its cell at X, Y of the desktop in
-WINDOW, PICTURE under it.  The copy moves at once.  On the desktop's
-colour it is drawn only the first time, for the colour under it does not
-change; over PICTURE its piece of the picture is drawn again once the
-mouse has no more moves queued, so drawing never holds the copy back."
-  (let ((fresh (not (frame-visible-p frame))))
-    (when fresh
-      (lispm-desktop--draw-copy frame key x y window picture))
-    (lispm-desktop--place-copy frame x y window)
-    (if fresh
-        (make-frame-visible frame)
-      (when (and picture (not (input-pending-p)))
-        (lispm-desktop--draw-copy frame key x y window picture)))))
+(defun lispm-desktop--frame-box (frame screen)
+  "Return where FRAME, a child of SCREEN or of one of its children, stands
+over SCREEN's inside: (LEFT TOP RIGHT BOTTOM) in pixels, or nil when it
+does not stand over SCREEN."
+  (pcase-let ((`(,left . ,top) (frame-position frame))
+              (parent (frame-parent frame)))
+    (while (and parent (not (eq parent screen)))
+      (pcase-let ((`(,x . ,y) (frame-position parent)))
+        (setq left (+ left x) top (+ top y) parent (frame-parent parent))))
+    (when parent
+      (list left top (+ left (frame-pixel-width frame)) (+ top (frame-pixel-height frame))))))
+
+(defun lispm-desktop--color-under (x y screen)
+  "Return the colour of what lies at X, Y of SCREEN's inside: the background
+of the floating window in front there, or else the desktop's colour."
+  (or (seq-some (lambda (frame)
+                  (and (frame-parameter frame 'lispm-desktop-window)
+                       (frame-visible-p frame)
+                       (pcase (lispm-desktop--frame-box frame screen)
+                         (`(,left ,top ,right ,bottom)
+                          (and (<= left x right) (<= top y bottom)
+                               (frame-parameter frame 'background-color))))))
+                (frame-list-z-order screen))
+      (lispm-desktop--color)))
+
+(defun lispm-desktop--place-copy (frames key x y window)
+  "Put the copy's FRAMES, (ICON . NAME), with the cell of icon KEY at X, Y of
+the desktop in WINDOW, and show them.  What shows between the icon's
+lines, translucent as the rest, is the colour of what the icon passes
+over: the desktop's, or a floating window's."
+  (pcase-let* ((`(,left ,top . ,_) (window-inside-pixel-edges window))
+               (`((,icon-x . ,icon-y) (,name-x . ,name-y)) (lispm-desktop--copy-place key x y))
+               (half (/ lispm-desktop-icon-size 2))
+               (under (lispm-desktop--color-under (+ left icon-x half) (+ top icon-y half)
+                                                  (window-frame window))))
+    (unless (equal under (frame-parameter (car frames) 'background-color))
+      (set-frame-parameter (car frames) 'background-color under))
+    (set-frame-position (car frames) (+ left icon-x) (+ top icon-y))
+    (set-frame-position (cdr frames) (+ left name-x) (+ top name-y))
+    (dolist (frame (list (car frames) (cdr frames)))
+      (unless (frame-visible-p frame)
+        (make-frame-visible frame)))
+    ;; Over the windows too, as Mac OS 9's drag image went.
+    (lispm-desktop-platinum-keep-in-front (list (car frames) (cdr frames)) (window-frame window))))
 
 (defun lispm-desktop--drag (key window press)
   "Drag icon KEY of the desktop in WINDOW while the mouse button is held,
 from PRESS, where it was pressed in WINDOW's text area: (X . Y).
 Return non-nil when the icon was dragged, nil for a click.
-Once the mouse has moved a few pixels a translucent copy of the icon
-follows it, as Mac OS 9's did, in a small frame of its own so that only
-the copy is drawn as it moves; let go, the icon stays there.  The move is
-measured from the press, not from where the mouse was once the icon was
-drawn selected, so the copy stays where it was grabbed.  Escape gives
-up, and a press let go where it was only selects."
-  (pcase-let* ((`(,start-x . ,start-y) press)
-               (`(,cell-x ,cell-y) (lispm-desktop--cell-at key window))
-               (width (window-body-width window t))
-               (height (1- (window-body-height window t)))
-               (picture (and lispm-desktop-picture
-                             (file-readable-p (expand-file-name lispm-desktop-picture))
-                             (lispm-desktop--picture-file width height)))
-               (frame nil)
+Once the mouse has moved a few pixels, a translucent copy of the icon and
+its name follows it pixel by pixel, as Mac OS 9's drag image did, in
+small frames of their own, the icon itself staying where it is, drawn
+selected.  The move is measured from the press, not from where the mouse
+was once the icon was drawn selected, so the copy keeps the pointer
+where it grabbed the icon.  Let go, the icon lands on the grid, see
+`lispm-desktop--drop'.  Escape or C-g gives up, and a press let go where
+it was only selects."
+  (pcase-let* ((`(,cell-x ,cell-y) (lispm-desktop--cell-at key window))
+               (frames nil)
                (to nil)
-               (event nil))
-    (unwind-protect
-        (track-mouse
-          (setq track-mouse 'dragging)
-          (let ((mouse-fine-grained-tracking t))
-            (while (progn
-                     (setq event (read-event))
-                     ;; The copy under the mouse, a frame of its own, brings
-                     ;; focus and frame events: they do not end the drag.
-                     (or (null event)
-                         (mouse-movement-p event)
-                         (memq (event-basic-type event)
-                               '(switch-frame focus-in focus-out select-window help-echo))))
-              (when (mouse-movement-p event)
-                ;; Only the latest position counts.  Input can be pending
-                ;; with nothing to read yet: a read that times out gives
-                ;; nil, which ends the catching up and is never put back.
-                (while (and (input-pending-p)
-                            (let ((next (read-event nil nil 0)))
-                              (cond ((null next) nil)
-                                    ((mouse-movement-p next) t)
-                                    (t (setq unread-command-events
-                                             (append unread-command-events (list next)))
-                                       nil)))))
-                (pcase-let ((`(,x . ,y) (or (lispm-desktop--pointer window)
-                                            (cons start-x start-y))))
-                  (when (or to (> (+ (expt (- x start-x) 2) (expt (- y start-y) 2))
-                                  (expt lispm-desktop-drag-threshold 2)))
-                    (setq to (lispm-desktop--place-xy
-                              (lispm-desktop--xy-place (+ cell-x (- x start-x))
-                                                       (+ cell-y (- y start-y))
-                                                       width height)
-                              width height))
-                    (unless frame
-                      (setq frame (lispm-desktop--copy-frame window)))
-                    (lispm-desktop--show-copy frame key (car to) (cdr to) window picture)))))))
-      (when frame
-        (lispm-desktop-popup--dispose frame)))
-    (cond ((and to (memq (event-basic-type event) '(mouse-1 drag-mouse-1)))
-           (lispm-desktop--drop key (car to) (cdr to) window)
-           (lispm-desktop--render window))
-          ((not (memq (event-basic-type event) '(mouse-1 drag-mouse-1 escape)))
-           (setq unread-command-events (list event))))
+               (result
+                (unwind-protect
+                    (lispm-desktop-platinum--track
+                     (lambda (delta)
+                       (when (or to (> (+ (expt (car delta) 2) (expt (cdr delta) 2))
+                                       (expt lispm-desktop-drag-threshold 2)))
+                         (setq to (cons (+ cell-x (car delta)) (+ cell-y (cdr delta))))
+                         (unless frames
+                           (setq frames (lispm-desktop--copy-frames key window)))
+                         (lispm-desktop--place-copy frames key (car to) (cdr to) window)))
+                     (lambda () (lispm-desktop--pointer window))
+                     press)
+                  (when frames
+                    (lispm-desktop-popup--dispose (car frames))
+                    (lispm-desktop-popup--dispose (cdr frames))))))
+    (when (and to (car result))
+      (lispm-desktop--drop key (car to) (cdr to) window)
+      (lispm-desktop--render window))
     ;; Dragged or not: a press let go where it was is a click.
     (and to t)))
 

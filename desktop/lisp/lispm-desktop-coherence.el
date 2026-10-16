@@ -37,8 +37,11 @@
 ;;     its tile in the Dock brings it back, the windows over it going in
 ;;     and the applications full screen as they were.
 ;;
-;; A window out is still the desktop's: it keeps its title bar, its boxes
-;; and its grow box, and moves among the computer's windows as they do.
+;; A window out is still the desktop's: it keeps its frame, its title bar,
+;; its boxes and its grow box, and moves among the computer's windows as
+;; they do.  The frame drawing its Mac OS 9 frame is its parent, see
+;; lispm-desktop-platinum.el, so that frame is what goes out and comes in,
+;; the window in it.
 ;; The desktop's minibuffer is the screen's, in the Dock while it is
 ;; hidden, so the windows out share one of their own, a small window that
 ;; shows at the top of the computer's screen while it is read from, and
@@ -118,10 +121,12 @@ a frame of its own where it was, others are not known to."
 ;;;; Geometry
 
 (defun lispm-desktop-coherence--outer-rectangle (frame)
-  "Return FRAME's outer rectangle on the computer's screen: (X Y WIDTH HEIGHT).
-A child frame's edges count from its parent's inside."
-  (pcase-let ((`(,left ,top ,right ,bottom) (frame-edges frame 'outer-edges)))
-    (when-let* ((parent (frame-parent frame)))
+  "Return the outer rectangle of floating window FRAME on the computer's
+screen, its frame and shadow included: (X Y WIDTH HEIGHT).  A child
+frame's edges count from its parent's inside."
+  (pcase-let* ((outer (lispm-desktop-platinum-window-outer frame))
+               (`(,left ,top ,right ,bottom) (frame-edges outer 'outer-edges)))
+    (when-let* ((parent (frame-parent outer)))
       (pcase-let ((`(,x . ,y) (lispm-desktop-apps--screen-origin parent)))
         (setq left (+ left x) right (+ right x) top (+ top y) bottom (+ bottom y))))
     (list left top (- right left) (- bottom top))))
@@ -292,48 +297,61 @@ it to the message and hides it again.  This is one of
 ;;;; Out and in
 
 (defun lispm-desktop-coherence--move (frame x y)
-  "Move FRAME, just given a new parent or none, to X, Y.
-Emacs takes a frame reparented to be where it should be, whereas the
-window server leaves it where it was: a move to that place would be
-skipped, so FRAME is moved by a pixel first."
+  "Move FRAME, the frame carrying a window, just given a new parent or
+none, to X, Y.  Emacs takes a frame reparented to be where it should
+be, whereas the window server leaves it where it was: a move to that
+place would be skipped, so FRAME is moved by a pixel first."
   (set-frame-position frame (1+ x) y)
   (set-frame-position frame x y))
 
 (defun lispm-desktop-coherence-take-out (frame)
   "Take FRAME, a floating window over its screen, out on the computer's
-screen: a frame of its own, where it was, reading from the minibuffer
-of the windows out."
-  (when-let* ((screen (frame-parent frame))
+screen: in a frame of its own, where it was, reading from the minibuffer
+of the windows out.  The frame carrying it goes out, it in the frame,
+its Mac OS 9 frame kept."
+  (when-let* ((screen (lispm-desktop-platinum-window-parent frame))
               ((frame-parameter frame 'lispm-desktop-window)))
     (pcase-let ((`(,x ,y . ,_) (lispm-desktop-coherence--outer-rectangle frame))
+                (outer (lispm-desktop-platinum-window-outer frame))
                 (visible (frame-visible-p frame)))
-      (set-frame-parameter frame 'minibuffer (minibuffer-window (lispm-desktop-coherence--minibuffer screen)))
-      (modify-frame-parameters frame `((parent-frame . nil) (lispm-desktop-out . ,screen)))
-      (lispm-desktop-coherence--move frame x y)
+      ;; The window and its frame alike: a message echoed with the frame
+      ;; selected would show the screen from the Dock.
+      (let ((minibuffer (minibuffer-window (lispm-desktop-coherence--minibuffer screen))))
+        (dolist (each (delete-dups (list frame outer)))
+          (set-frame-parameter each 'minibuffer minibuffer)))
+      (set-frame-parameter frame 'lispm-desktop-out screen)
+      (modify-frame-parameters outer `((parent-frame . nil) (lispm-desktop-out . ,screen)))
+      (lispm-desktop-coherence--move outer x y)
       (when visible
-        (make-frame-visible frame)
-        (raise-frame frame))
+        (lispm-desktop-platinum-show-window frame)
+        (lispm-desktop-platinum-raise-window frame))
       (lispm-desktop-apps--keep-on-screen frame))))
 
 (defun lispm-desktop-coherence-bring-in (frame)
-  "Bring FRAME, a window out, back over its screen, where it is now."
-  (when-let* ((screen (and (not (frame-parent frame)) (lispm-desktop-apps-out-p frame))))
+  "Bring FRAME, a window out, back over its screen, where it is now, the
+frame carrying it in again."
+  (when-let* ((screen (and (not (lispm-desktop-platinum-window-parent frame))
+                           (lispm-desktop-apps-out-p frame))))
     (pcase-let ((`(,x ,y . ,_) (lispm-desktop-coherence--outer-rectangle frame))
                 (`(,ox . ,oy) (lispm-desktop-apps--screen-origin screen))
+                (outer (lispm-desktop-platinum-window-outer frame))
                 (visible (frame-visible-p frame)))
-      (modify-frame-parameters frame `((parent-frame . ,screen) (lispm-desktop-out . nil)))
-      (set-frame-parameter frame 'minibuffer (minibuffer-window screen))
-      (lispm-desktop-coherence--move frame (- x ox) (- y oy))
+      (modify-frame-parameters outer `((parent-frame . ,screen) (lispm-desktop-out . nil)))
+      (set-frame-parameter frame 'lispm-desktop-out nil)
+      (dolist (each (delete-dups (list frame outer)))
+        (set-frame-parameter each 'minibuffer (minibuffer-window screen)))
+      (lispm-desktop-coherence--move outer (- x ox) (- y oy))
       (when visible
-        (make-frame-visible frame)
-        (raise-frame frame))
+        (lispm-desktop-platinum-show-window frame)
+        (lispm-desktop-platinum-raise-window frame))
       (lispm-desktop-apps-keep-on-desktop frame))))
 
 (defun lispm-desktop-coherence--dropped (frame)
-  "Take FRAME out, or bring it in, by where its title bar or grow box left
-it: mostly past its screen's edge, it goes out; mostly over the screen
-shown, it comes in.  This is a `lispm-desktop-platinum-frame-moved-functions'
-function, run before the window is kept in place."
+  "Take FRAME out, or bring it in, by where its outline was dropped, which
+is where it now is: mostly past its screen's edge, it goes out; mostly
+over the screen shown, it comes in.  This is a
+`lispm-desktop-platinum-frame-moved-functions' function, run before the
+window is kept in place."
   (when-let* (((frame-parameter frame 'lispm-desktop-window))
               (screen (lispm-desktop-apps-window-screen frame))
               ((frame-live-p screen))
@@ -345,10 +363,11 @@ function, run before the window is kept in place."
                          (lispm-desktop-coherence--outer-rectangle frame)
                          (lispm-desktop-coherence--screen-rectangle screen)))))
       (cond ((not inside))
-            ((and (frame-parent frame) lispm-desktop-coherence-drag-out
+            ((and (lispm-desktop-platinum-window-parent frame) lispm-desktop-coherence-drag-out
                   (< inside lispm-desktop-coherence-out-fraction))
              (lispm-desktop-coherence-take-out frame))
-            ((and (not (frame-parent frame)) (not (lispm-desktop-apps-hidden-p screen))
+            ((and (not (lispm-desktop-platinum-window-parent frame))
+                  (not (lispm-desktop-apps-hidden-p screen))
                   (>= inside lispm-desktop-coherence-out-fraction))
              (lispm-desktop-coherence-bring-in frame))))))
 
@@ -411,16 +430,15 @@ keyboard to SELECTED when it is one of them, else to the window in front."
                                    :height (frame-text-height screen) :front front :full full
                                    :undecorated (frame-parameter screen 'undecorated))))
       (dolist (window (lispm-desktop-apps-windows screen))
-        (when (and (frame-parent window) (frame-visible-p window))
+        (when (and (lispm-desktop-platinum-window-parent window) (frame-visible-p window))
           (lispm-desktop-coherence-take-out window)))
       (when (frame-parameter screen 'undecorated)
         (set-frame-parameter screen 'undecorated nil))
       (iconify-frame screen)
       (when-let* ((keyboard (if (and (frame-live-p selected) (lispm-desktop-apps-out-p selected))
                                 selected
-                              (seq-find (lambda (frame) (and (frame-visible-p frame)
-                                                             (memq frame (lispm-desktop-apps-windows screen))))
-                                        (frame-list-z-order)))))
+                              (seq-find #'frame-visible-p
+                                        (lispm-desktop-apps-windows-out-in-order screen)))))
         (select-frame-set-input-focus keyboard))
       (unless lispm-desktop-coherence--watch
         (setq lispm-desktop-coherence--watch (run-with-timer 0.5 0.5 #'lispm-desktop-coherence--watch))))))
@@ -443,7 +461,7 @@ front then comes in front."
         (set-frame-parameter screen 'lispm-desktop-hidden-fullscreen nil)
         (set-frame-parameter screen 'fullscreen fullscreen))
       (dolist (window (lispm-desktop-apps-windows screen))
-        (when (and (not (frame-parent window))
+        (when (and (not (lispm-desktop-platinum-window-parent window))
                    (>= (lispm-desktop-coherence-inside-fraction
                         (lispm-desktop-coherence--outer-rectangle window)
                         (lispm-desktop-coherence--screen-rectangle screen))

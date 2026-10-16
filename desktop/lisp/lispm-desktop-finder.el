@@ -625,9 +625,9 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
   (unless (frame-live-p lispm-desktop-finder--frame)
     (setq lispm-desktop-finder--frame (lispm-desktop-finder--make-frame (lispm-desktop-apps-screen))))
   (lispm-desktop-finder--go directory (lispm-desktop-finder--in (and lispm-desktop-finder--directory t)))
-  (make-frame-visible lispm-desktop-finder--frame)
+  (lispm-desktop-platinum-show-window lispm-desktop-finder--frame)
   (lispm-desktop-apps-keep-on-desktop lispm-desktop-finder--frame)
-  (raise-frame lispm-desktop-finder--frame)
+  (lispm-desktop-platinum-raise-window lispm-desktop-finder--frame)
   (select-frame-set-input-focus lispm-desktop-finder--frame)
   (setq lispm-desktop-finder--had-focus t)
   (lispm-desktop-finder--render))
@@ -663,18 +663,18 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
       (if zoomed
           (pcase-let ((`(,left ,top ,width ,height) zoomed))
             (set-frame-parameter frame 'lispm-desktop-finder-unzoom nil)
-            (set-frame-position frame left top)
+            (lispm-desktop-platinum-move-window frame left top)
             (set-frame-size frame width height t))
-        (pcase-let ((`(,left . ,top) (frame-position frame)))
+        (pcase-let ((`(,left . ,top) (lispm-desktop-platinum-window-position frame)))
           (set-frame-parameter frame 'lispm-desktop-finder-unzoom
                                (list left top (frame-text-width frame) (frame-text-height frame))))
         (if (lispm-desktop-apps-out-p frame)
             ;; Out on the computer's screen, it grows over the room there.
             (pcase-let ((`(,x ,y ,w ,h) (lispm-desktop-apps--workarea frame)))
-              (set-frame-position frame (+ x 12) (+ y 12))
+              (lispm-desktop-platinum-move-window frame (+ x 12) (+ y 12))
               (set-frame-size frame (- w 40) (- h 70) t))
           (let ((top (+ (tab-bar-height screen t) 12)))
-            (set-frame-position frame 12 top)
+            (lispm-desktop-platinum-move-window frame 12 top)
             ;; The desktop's icons stay in sight at the right.
             (set-frame-size frame (- (frame-inner-width screen) 140)
                             (- (frame-inner-height screen) top 30) t)))))))
@@ -711,15 +711,15 @@ This is one of `lispm-desktop-apps-frontmost-functions'."
                           (lispm-desktop-editor-floating-p))
                      (and (eq app 'browser) (bound-and-true-p lispm-desktop-browser-floating)))))
       (cond ((and shown (not (frame-visible-p lispm-desktop-finder--frame)))
-             (make-frame-visible lispm-desktop-finder--frame)
+             (lispm-desktop-platinum-show-window lispm-desktop-finder--frame)
              ;; The application in front stays over it.
              (when-let* ((front (pcase app
                                   ('editor (bound-and-true-p lispm-desktop-editor--frame))
                                   ('browser (bound-and-true-p lispm-desktop-browser--frame))))
                          ((frame-live-p front)))
-               (raise-frame front)))
+               (lispm-desktop-platinum-raise-window front)))
             ((and (not shown) (frame-visible-p lispm-desktop-finder--frame))
-             (make-frame-invisible lispm-desktop-finder--frame))))))
+             (lispm-desktop-platinum-hide-window lispm-desktop-finder--frame))))))
 
 (defun lispm-desktop-finder--note-selected (&rest _)
   "Note that the Finder window has the keyboard once it is selected; its
