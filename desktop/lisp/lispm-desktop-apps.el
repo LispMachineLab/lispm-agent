@@ -141,7 +141,9 @@ its screen, whether it floats there or is out."
     (when-let* ((screen (and (not (frame-parent frame)) (lispm-desktop-apps-out-p frame))))
       (pcase-let ((`(,x . ,y) (lispm-desktop-apps--screen-origin screen)))
         (setq left (- left x) top (- top y))))
-    (list left top (frame-text-width frame) (frame-text-height frame))))
+    ;; A window rolled up is remembered at the height it rolls down to.
+    (list left top (frame-text-width frame)
+          (or (lispm-desktop-platinum-rolled-up-height frame) (frame-text-height frame)))))
 
 (defun lispm-desktop-apps--workarea (frame)
   "Return the part of the computer's screen windows may use where FRAME is:
@@ -192,7 +194,10 @@ the desktop's edge would hang out of Emacs's frame over the screen."
                  (extra-width (- (frame-pixel-width frame) (frame-text-width frame)))
                  (extra-height (- (frame-pixel-height frame) (frame-text-height frame)))
                  (fit-width (max 200 (min width (- screen-width extra-width))))
-                 (fit-height (max 100 (min height (- screen-height top-min extra-height)))))
+                 ;; A window rolled up keeps to its title bar.
+                 (fit-height (if (lispm-desktop-platinum-rolled-up-height frame)
+                                 (frame-text-height frame)
+                               (max 100 (min height (- screen-height top-min extra-height))))))
       (unless (and (= fit-width (frame-text-width frame))
                    (= fit-height (frame-text-height frame)))
         (set-frame-size frame fit-width fit-height t))

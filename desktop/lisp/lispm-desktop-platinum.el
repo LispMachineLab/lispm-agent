@@ -2174,6 +2174,48 @@ Only a window sharing its column with another can roll up."
                              (window-total-height window))
                    nil t))))
 
+(defconst lispm-desktop-platinum--rolled-up-locals
+  '((window-min-height . 1) (window-safe-min-height . 0)
+    (window-resize-pixelwise . t) (window-scroll-functions . nil))
+  "The values the buffer of a rolled-up window holds as its own.
+A window keeps `window-min-height' lines and, under its tab line, a line
+of `window-safe-min-height', rounded up to whole lines unless resized
+pixelwise; with these, it may be as short as its tab line.  With no line
+of its text in sight, Emacs scrolls it at every redisplay, so no
+`window-scroll-functions' run on it: the scroll bars' would have Emacs
+redisplay again at once, and again.")
+
+(defun lispm-desktop-platinum-roll-up (frame height)
+  "Roll floating window FRAME up to HEIGHT pixels, as Mac OS 9's
+WindowShade rolled a window up into its title bar.  FRAME's one window
+may be as short as its title bar, its tab line: its buffer holds the
+values of `lispm-desktop-platinum--rolled-up-locals' until
+`lispm-desktop-platinum-roll-down'.  FRAME stays a pixel taller than a
+line of its font, as Emacs drops the tab line of a window no taller."
+  (let ((buffer (window-buffer (frame-root-window frame))))
+    (with-current-buffer buffer
+      (pcase-dolist (`(,variable . ,value) lispm-desktop-platinum--rolled-up-locals)
+        (set (make-local-variable variable) value)))
+    (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up
+                         (cons buffer (frame-text-height frame)))
+    (set-frame-height frame (max height (1+ (frame-char-height frame))) nil t)))
+
+(defun lispm-desktop-platinum-rolled-up-height (frame)
+  "Return the height in pixels of FRAME's text before it was rolled up, or
+nil when FRAME is not rolled up."
+  (cdr (frame-parameter frame 'lispm-desktop-platinum-rolled-up)))
+
+(defun lispm-desktop-platinum-roll-down (frame height)
+  "Roll floating window FRAME, rolled up by `lispm-desktop-platinum-roll-up',
+down again to HEIGHT pixels."
+  (when-let* ((buffer (car (frame-parameter frame 'lispm-desktop-platinum-rolled-up)))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (dolist (local lispm-desktop-platinum--rolled-up-locals)
+        (kill-local-variable (car local)))))
+  (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up nil)
+  (set-frame-height frame height nil t))
+
 (declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
 
 (declare-function lispm-desktop-sidebar-buffer-view "lispm-desktop-sidebar" (buffer))
@@ -2736,7 +2778,10 @@ where its frame is drawn for it, a pixel of outline where it is not."
         (with-current-buffer buffer
           (setq-local mode-line-format nil header-line-format nil tab-line-format nil
                       cursor-type nil cursor-in-non-selected-windows nil
-                      truncate-lines t auto-hscroll-mode nil)
+                      truncate-lines t auto-hscroll-mode nil
+                      ;; About a window rolled up, the frame is shorter than
+                      ;; the four lines Emacs otherwise keeps it to.
+                      window-min-height 1)
           (use-local-map lispm-desktop-platinum--frame-map))
         (let ((root (frame-root-window outer)))
           (set-window-buffer root buffer)
@@ -2758,7 +2803,11 @@ or not, shown when FRAME is, beneath it."
            (position (frame-position frame))
            (place (list (- (car position) (car inset)) (- (cdr position) (cdr inset)) width height))
            (key (list lispm-desktop-platinum--generation width height active)))
-      (unless (equal place (frame-parameter outer 'lispm-desktop-platinum-place))
+      (unless (and (equal place (frame-parameter outer 'lispm-desktop-platinum-place))
+                   ;; Emacs sizes a frame anew to whole lines as its fonts
+                   ;; change, as with a theme.
+                   (= (frame-pixel-width outer) width)
+                   (= (frame-pixel-height outer) height))
         (set-frame-parameter outer 'lispm-desktop-platinum-place place)
         (let ((window-min-width 1) (window-safe-min-width 1)
               (window-min-height 1) (window-safe-min-height 1)

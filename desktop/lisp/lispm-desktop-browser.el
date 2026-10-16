@@ -1449,7 +1449,7 @@ box does."
     (pcase-let ((`(,config . ,height) lispm-desktop-browser--shade))
       (setq lispm-desktop-browser--shade nil)
       (when (lispm-desktop-browser-floating-p)
-        (set-frame-height lispm-desktop-browser--frame height nil t)
+        (lispm-desktop-platinum-roll-down lispm-desktop-browser--frame height)
         (with-selected-frame lispm-desktop-browser--frame
           (set-window-configuration config))))))
 
@@ -1467,7 +1467,7 @@ again, as Mac OS 9 rolled a window up into its title bar."
             (setq lispm-desktop-browser--shade (cons (current-window-configuration)
                                                      (frame-text-height lispm-desktop-browser--frame)))
             (delete-other-windows address)
-            (set-frame-height lispm-desktop-browser--frame height nil t)))))))
+            (lispm-desktop-platinum-roll-up lispm-desktop-browser--frame height)))))))
 
 (defun lispm-desktop-browser--follow-frontmost (app)
   "Show the floating browser with the desktop and alongside the floating

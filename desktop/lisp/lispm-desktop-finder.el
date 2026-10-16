@@ -687,14 +687,14 @@ DIRECTORY is a directory's name, or a key of `lispm-desktop-finder-folders'."
           (progn (setq header-line-format '(:eval (lispm-desktop-finder--header))
                        mode-line-format '("" mode-line-format-right-align
                                           (:eval (lispm-desktop-platinum-mode-line-right))))
-                 (set-frame-height lispm-desktop-finder--frame lispm-desktop-finder--shade nil t)
+                 (lispm-desktop-platinum-roll-down lispm-desktop-finder--frame lispm-desktop-finder--shade)
                  (setq lispm-desktop-finder--shade nil))
         (setq lispm-desktop-finder--shade (frame-text-height lispm-desktop-finder--frame))
         (setq header-line-format nil
               mode-line-format nil)
-        (set-frame-height lispm-desktop-finder--frame
-                          (window-tab-line-height (frame-root-window lispm-desktop-finder--frame))
-                          nil t)))))
+        (lispm-desktop-platinum-roll-up
+         lispm-desktop-finder--frame
+         (window-tab-line-height (frame-root-window lispm-desktop-finder--frame)))))))
 
 ;;;; With the desktop
 
