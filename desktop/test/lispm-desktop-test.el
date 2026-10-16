@@ -1769,7 +1769,9 @@ the height it rolls down to."
     (cl-letf (((symbol-function 'frame-parent) (lambda (&optional _) frame))
               ((symbol-function 'set-frame-size)
                (lambda (_frame width height &optional _pixelwise) (push (cons width height) sizes)))
-              ((symbol-function 'set-frame-position) #'ignore))
+              ((symbol-function 'set-frame-position) #'ignore)
+              ;; CI's Emacs builds have no window system, and so no tab bar.
+              ((symbol-function 'tab-bar-height) (lambda (&rest _) 0)))
       (unwind-protect
           (progn
             (set-frame-parameter frame 'lispm-desktop-platinum-rolled-up (cons (current-buffer) 300))
