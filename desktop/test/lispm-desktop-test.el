@@ -171,7 +171,10 @@ before it draws; it is loaded all the same when no redisplay runs, and
 an error loading it is signalled once the redisplay is done."
   (lispm-desktop-test--with-themes
     (let ((events nil))
-      (cl-letf (((symbol-function 'window-system) (lambda (&rest _) 'ns))
+      ;; Only LispM Desktop is told it runs on NS: Emacs told so would treat
+      ;; the batch frame as a window-system frame as a theme is disabled,
+      ;; and CI's Emacs builds have no window system.
+      (cl-letf (((symbol-function 'lispm-desktop--theme-in-redisplay-p) (lambda () t))
                 ((symbol-function 'load-theme)
                  (lambda (theme &rest _) (push (list 'load theme) events) (enable-theme theme)))
                 ((symbol-function 'redisplay)

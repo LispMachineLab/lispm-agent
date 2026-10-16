@@ -112,6 +112,11 @@ This is advice before `pre-redisplay-function', which removes itself."
         (lispm-desktop--load-theme-now (car pending))
       (error (setq lispm-desktop--theme-error err)))))
 
+(defun lispm-desktop--theme-in-redisplay-p ()
+  "Return non-nil when a theme is loaded by a redisplay run for it: on
+macOS, once Emacs is set up.  See `lispm-desktop-load-theme'."
+  (and lispm-desktop--set-up (eq (window-system) 'ns)))
+
 (defun lispm-desktop-load-theme (theme)
   "Make THEME, by default Dracula, the only colour theme enabled.
 On macOS, once Emacs is set up, the theme is loaded by a redisplay run
@@ -122,7 +127,7 @@ frames hold on the screen whenever it looks for input, which every
 redisplay does first: a theme loaded before would show every window
 blank for as long as the redisplay takes to draw them all again, a
 third of a second on the desktop."
-  (if (not (and lispm-desktop--set-up (eq (window-system) 'ns)))
+  (if (not (lispm-desktop--theme-in-redisplay-p))
       (lispm-desktop--load-theme-now theme)
     (setq lispm-desktop--pending-theme (list theme)
           lispm-desktop--theme-error nil)
