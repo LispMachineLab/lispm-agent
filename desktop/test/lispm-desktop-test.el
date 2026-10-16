@@ -85,6 +85,124 @@ not a first start."
     (should (eq lispm-desktop-editing-style 'vim))
     (should (eq lispm-desktop-theme 'platinum))))
 
+(defmacro lispm-desktop-test--with-themes (&rest body)
+  "Run BODY with two empty themes, `lispm-desktop-test-light' enabled and
+saved with Customize as `lispm-desktop-theme', and
+`lispm-desktop-test-dark'; Emacs set up, the variable watched.  Themes
+loaded are pushed onto `loads', and timers onto `timers' instead of run:
+`lispm-desktop-test--run-timers' runs them, as Emacs would once the
+command is done."
+  (declare (indent 0))
+  `(let ((properties (list (get 'user 'theme-settings)
+                           (get 'lispm-desktop-theme 'theme-value)
+                           (get 'lispm-desktop-theme 'saved-value)
+                           (get 'lispm-desktop-theme 'customized-value)))
+         (lispm-desktop-theme nil)
+         (custom-enabled-themes nil)
+         (custom-known-themes custom-known-themes)
+         (enable-theme-functions nil)
+         (disable-theme-functions nil)
+         (lispm-desktop--set-up t)
+         (loads nil)
+         (timers nil))
+     (dolist (theme '(lispm-desktop-test-light lispm-desktop-test-dark))
+       (custom-declare-theme theme (intern (format "%s-theme" theme))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'load-theme)
+                    (lambda (theme &rest _) (push theme loads) (enable-theme theme)))
+                   ((symbol-function 'run-at-time)
+                    (lambda (_time _repeat function &rest args) (push (cons function args) timers)))
+                   ((symbol-function 'custom-save-all) #'ignore))
+           (customize-set-variable 'lispm-desktop-theme 'lispm-desktop-test-light)
+           (enable-theme 'lispm-desktop-test-light)
+           (add-variable-watcher 'lispm-desktop-theme #'lispm-desktop--theme-changed)
+           ,@body)
+       (remove-variable-watcher 'lispm-desktop-theme #'lispm-desktop--theme-changed)
+       (mapc #'disable-theme custom-enabled-themes)
+       (pcase-let ((`(,settings ,value ,saved ,customized) properties))
+         (put 'user 'theme-settings settings)
+         (put 'lispm-desktop-theme 'theme-value value)
+         (put 'lispm-desktop-theme 'saved-value saved)
+         (put 'lispm-desktop-theme 'customized-value customized)))))
+
+(defmacro lispm-desktop-test--run-timers (timers)
+  "Run the functions the variable TIMERS holds, (FUNCTION . ARGS) newest
+first, and those they leave in turn, ten rounds at most; return what is
+left after that."
+  `(let ((rounds 0))
+     (while (and ,timers (< (setq rounds (1+ rounds)) 10))
+       (let ((due (reverse ,timers)))
+         (setq ,timers nil)
+         (dolist (timer due)
+           (apply (car timer) (cdr timer)))))
+     ,timers))
+
+(ert-deftest lispm-desktop-test-theme-switch-loads-once ()
+  "Switching themes loads the new theme once, and only it, though the value
+saved with Customize names the old one until the switch saves the new:
+enabling a theme sets the variable back to that saved value meanwhile,
+which once loaded the old theme again and then the new one."
+  (lispm-desktop-test--with-themes
+    (lispm-desktop-set-theme 'lispm-desktop-test-dark)
+    (should-not (lispm-desktop-test--run-timers timers))
+    (should (equal loads '(lispm-desktop-test-dark)))
+    (should (equal custom-enabled-themes '(lispm-desktop-test-dark)))
+    (should (eq lispm-desktop-theme 'lispm-desktop-test-dark))))
+
+(ert-deftest lispm-desktop-test-theme-set-loads-it ()
+  "Setting `lispm-desktop-theme' once Emacs is set up loads that theme when
+the command is done, and the variable keeps the value set, though another
+was saved with Customize."
+  (lispm-desktop-test--with-themes
+    (setq lispm-desktop-theme 'lispm-desktop-test-dark)
+    (should-not loads)
+    (should-not (lispm-desktop-test--run-timers timers))
+    (should (equal loads '(lispm-desktop-test-dark)))
+    (should (equal custom-enabled-themes '(lispm-desktop-test-dark)))
+    (should (eq lispm-desktop-theme 'lispm-desktop-test-dark))
+    ;; Set to the theme enabled, nothing is loaded again.
+    (setq lispm-desktop-theme 'lispm-desktop-test-dark)
+    (should-not (lispm-desktop-test--run-timers timers))
+    (should (equal loads '(lispm-desktop-test-dark)))))
+
+(ert-deftest lispm-desktop-test-theme-loads-in-redisplay ()
+  "On NS, a theme is loaded by the redisplay run for it, as it starts and
+before it draws; it is loaded all the same when no redisplay runs, and
+an error loading it is signalled once the redisplay is done."
+  (lispm-desktop-test--with-themes
+    (let ((events nil))
+      ;; Only LispM Desktop is told it runs on NS: Emacs told so would treat
+      ;; the batch frame as a window-system frame as a theme is disabled,
+      ;; and CI's Emacs builds have no window system.
+      (cl-letf (((symbol-function 'lispm-desktop--theme-in-redisplay-p) (lambda () t))
+                ((symbol-function 'load-theme)
+                 (lambda (theme &rest _) (push (list 'load theme) events) (enable-theme theme)))
+                ((symbol-function 'redisplay)
+                 (lambda (&rest _)
+                   (push 'redisplay events)
+                   (funcall pre-redisplay-function t)
+                   (push 'drawn events))))
+        (lispm-desktop-load-theme 'lispm-desktop-test-dark)
+        (should (equal (reverse events) '(redisplay (load lispm-desktop-test-dark) drawn)))
+        (should (equal custom-enabled-themes '(lispm-desktop-test-dark)))
+        (should-not (advice-function-member-p #'lispm-desktop--load-pending-theme
+                                              pre-redisplay-function))
+        ;; A redisplay that does not run, as while a keyboard macro runs.
+        (setq events nil)
+        (cl-letf (((symbol-function 'redisplay) #'ignore))
+          (lispm-desktop-load-theme 'lispm-desktop-test-light))
+        (should (equal events '((load lispm-desktop-test-light))))
+        (should (equal custom-enabled-themes '(lispm-desktop-test-light)))
+        (should-not (advice-function-member-p #'lispm-desktop--load-pending-theme
+                                              pre-redisplay-function))
+        (cl-letf (((symbol-function 'load-theme)
+                   (lambda (&rest _) (error "No such theme"))))
+          (should (equal (should-error (lispm-desktop-load-theme 'lispm-desktop-test-dark))
+                         '(error "No such theme"))))
+        (should-not lispm-desktop--pending-theme)
+        (should-not (advice-function-member-p #'lispm-desktop--load-pending-theme
+                                              pre-redisplay-function))))))
+
 (ert-deftest lispm-desktop-test-lispm-requirements ()
   "Of a package's requirements, those not installed are returned; Emacs never."
   (let ((file (make-temp-file "lispm-desktop-test-" nil ".el"
@@ -3401,6 +3519,37 @@ whole meanwhile."
         (let ((unread-command-events (list ?\C-b ?\C-g)))
           (lispm-desktop-strip-select))
         (should-not opened)))))
+
+(ert-deftest lispm-desktop-test-strip-background-set-when-changed ()
+  "Drawing the strip again sets its frame's background only when the
+colour changed: NS Emacs clears a frame whenever its background is set."
+  (let ((lispm-desktop-strip--frame (selected-frame))
+        (color "#C0C0C0")
+        (background "#C0C0C0")
+        (sets nil))
+    (cl-letf (((symbol-function 'lispm-desktop-strip--live-p) #'always)
+              ((symbol-function 'lispm-desktop-strip--line) (lambda () "strip"))
+              ((symbol-function 'lispm-desktop-platinum--color) (lambda (_key) color))
+              ((symbol-function 'lispm-desktop-popup--size) #'ignore)
+              ((symbol-function 'lispm-desktop-strip--width) (lambda () 100))
+              ((symbol-function 'lispm-desktop-strip--place) #'ignore)
+              ((symbol-function 'frame-parameter)
+               (lambda (_frame parameter) (and (eq parameter 'background-color) background)))
+              ((symbol-function 'set-frame-parameter)
+               (lambda (_frame parameter value)
+                 (push (cons parameter value) sets)
+                 (when (eq parameter 'background-color) (setq background value)))))
+      (unwind-protect
+          (progn
+            (lispm-desktop-strip--render)
+            (lispm-desktop-strip--render)
+            (should-not sets)
+            (setq color "#1b1d24")
+            (lispm-desktop-strip--render)
+            (lispm-desktop-strip--render)
+            (should (equal sets '((background-color . "#1b1d24")))))
+        (when (get-buffer lispm-desktop-strip-buffer-name)
+          (kill-buffer lispm-desktop-strip-buffer-name))))))
 
 (ert-deftest lispm-desktop-test-strip-walks-menus ()
   "In a module's menu opened from the keyboard, Right and Left go on to the

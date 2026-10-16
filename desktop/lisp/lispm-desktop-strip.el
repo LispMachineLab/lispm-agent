@@ -398,8 +398,12 @@ tab alone while the strip is collapsed."
           (insert (lispm-desktop-strip--line))))
       (set-window-start window 1)
       (set-window-hscroll window 0))
-    (set-frame-parameter lispm-desktop-strip--frame 'background-color
-                         (lispm-desktop-platinum--color :strip))
+    ;; Only a new colour is set: NS Emacs clears a frame whenever its
+    ;; background is set, to the same colour too, and a strip cleared
+    ;; just before an update of the screen shows as an empty bar.
+    (let ((color (lispm-desktop-platinum--color :strip)))
+      (unless (equal (frame-parameter lispm-desktop-strip--frame 'background-color) color)
+        (set-frame-parameter lispm-desktop-strip--frame 'background-color color)))
     (lispm-desktop-popup--size lispm-desktop-strip--frame (lispm-desktop-strip--width)
                                lispm-desktop-platinum-strip-height)
     (lispm-desktop-strip--place)))
