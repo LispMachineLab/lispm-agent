@@ -379,8 +379,12 @@ tab alone while the strip is collapsed."
 (defun lispm-desktop-strip--place ()
   "Put the strip in its screen's bottom-left corner, over the echo area."
   (when (lispm-desktop-strip--live-p)
-    (let* ((root (frame-root-window (frame-parent lispm-desktop-strip--frame)))
-           (bottom (- (nth 3 (window-pixel-edges root)) (window-bottom-divider-width root))))
+    ;; The root window of a screen split in windows is not live, and
+    ;; only a live window has a divider: the bottom windows' is the one.
+    (let* ((screen (frame-parent lispm-desktop-strip--frame))
+           (root (frame-root-window screen))
+           (bottom (- (nth 3 (window-pixel-edges root))
+                      (window-bottom-divider-width (car (window-at-side-list screen 'bottom))))))
       (set-frame-position lispm-desktop-strip--frame 0
                           (- bottom lispm-desktop-platinum-strip-height)))))
 
