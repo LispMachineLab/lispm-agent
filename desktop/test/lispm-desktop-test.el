@@ -3523,6 +3523,9 @@ nothing saved or drawn."
   (declare (indent 0))
   `(let ((lispm-desktop-strip-modules '(appearance desktop keyboard internet battery load mail))
          (lispm-desktop-strip-collapsed nil)
+         (lispm-desktop-strip-edge 'left)
+         (lispm-desktop-strip-raised 0)
+         (lispm-desktop-strip-shown t)
          (lispm-desktop-strip-width nil)
          (lispm-desktop-strip--first 0)
          (lispm-desktop-strip--pressed nil)
@@ -3641,7 +3644,8 @@ its bottom two pixels into the strip, as Mac OS 9's did."
 
 (ert-deftest lispm-desktop-test-strip-place-split ()
   "The strip goes in its screen's bottom-left corner when the screen is
-split in windows too, whose root window is no live window."
+split in windows too, whose root window is no live window; never above
+the root window, under the menu bar."
   (lispm-desktop-test--with-strip
     (save-window-excursion
       (delete-other-windows)
@@ -3653,9 +3657,113 @@ split in windows too, whose root window is no live window."
                   ((symbol-function 'set-frame-position)
                    (lambda (_frame x y) (setq placed (cons x y)))))
           (lispm-desktop-strip--place)
-          (should (equal placed
-                         (cons 0 (- (nth 3 (window-pixel-edges (frame-root-window frame)))
-                                    lispm-desktop-platinum-strip-height)))))))))
+          (pcase-let ((`(,_ ,top ,_ ,bottom) (window-pixel-edges (frame-root-window frame))))
+            (should (equal placed
+                           (cons 0 (max top (- bottom lispm-desktop-platinum-strip-height)))))))))))
+
+(ert-deftest lispm-desktop-test-strip-right-edge-parts ()
+  "On the right edge the tab is the strip's left end and the collapse box
+its right end, as Mac OS 9 drew it; collapsed, the tab alone is left."
+  (lispm-desktop-test--with-strip
+    (let ((lispm-desktop-strip-edge 'right)
+          (lispm-desktop-strip-width 2))
+      (should (equal (lispm-desktop-strip--parts)
+                     '(tab left (module . appearance) (module . desktop) right collapse)))
+      (should (= (lispm-desktop-strip--x '(module . appearance)) (+ 17 14)))
+      (let ((lispm-desktop-strip-collapsed t))
+        (should (equal (lispm-desktop-strip--parts) '(tab)))))))
+
+(ert-deftest lispm-desktop-test-strip-position ()
+  "The strip lies on its edge, raised from the bottom, never above the
+bounds' top, under the menu bar."
+  (let ((bounds '(0 20 800 600))
+        (h lispm-desktop-platinum-strip-height))
+    (should (equal (lispm-desktop-strip--position bounds 200 'left 0) (cons 0 (- 600 h))))
+    (should (equal (lispm-desktop-strip--position bounds 200 'right 100) (cons 600 (- 600 h 100))))
+    (should (equal (lispm-desktop-strip--position bounds 200 'right 9999) '(600 . 20)))))
+
+(ert-deftest lispm-desktop-test-strip-moved ()
+  "Dragged by its tab, the strip goes to the edge whose half of the screen
+the mouse is in, as high as the mouse took it, kept on the screen."
+  (let* ((bounds '(0 20 800 600))
+         (h lispm-desktop-platinum-strip-height)
+         (start (- 600 h)))
+    (should (equal (lispm-desktop-strip--moved bounds start '(100 . -200)) '(left . 200)))
+    (should (equal (lispm-desktop-strip--moved bounds start '(400 . -200)) '(right . 200)))
+    (should (equal (lispm-desktop-strip--moved bounds start '(399 . 50)) '(left . 0)))
+    (should (equal (lispm-desktop-strip--moved bounds start '(700 . -9999)) (cons 'right (- 600 h 20))))))
+
+(ert-deftest lispm-desktop-test-strip-moves-and-hides-from-the-keyboard ()
+  "In the strip, C-p and C-n move it up and down its edge, C-a and C-e to
+the left and the right edge; C-c B hides it and shows it again, for the
+next start too."
+  (lispm-desktop-test--with-strip
+    (let ((frame (selected-frame))
+          (h lispm-desktop-platinum-strip-height))
+      (cl-letf (((symbol-function 'lispm-desktop-strip--live-p) #'always)
+                ((symbol-function 'lispm-desktop-strip--open) #'ignore)
+                ((symbol-function 'frame-parent) (lambda (&rest _) frame))
+                ((symbol-function 'lispm-desktop-strip--bounds) (lambda (_) '(0 20 800 600))))
+        (let ((unread-command-events (list ?\C-p ?\C-p ?\C-n ?\C-e ?\C-g)))
+          (lispm-desktop-strip-select))
+        (should (eq lispm-desktop-strip-edge 'right))
+        (should (= lispm-desktop-strip-raised h))
+        (let ((unread-command-events (list ?\C-n ?\C-n ?\C-a ?\C-g)))
+          (lispm-desktop-strip-select))
+        (should (eq lispm-desktop-strip-edge 'left))
+        (should (= lispm-desktop-strip-raised 0))
+        (should (equal (assq 'lispm-desktop-strip-edge saved) '(lispm-desktop-strip-edge . left))))
+      (let ((live t) (calls nil))
+        (cl-letf (((symbol-function 'lispm-desktop-strip--live-p) (lambda () live))
+                  ((symbol-function 'lispm-desktop-strip-show) (lambda () (push 'show calls) (setq live t)))
+                  ((symbol-function 'lispm-desktop-strip-hide) (lambda () (push 'hide calls) (setq live nil))))
+          (lispm-desktop-strip-toggle)
+          (should-not lispm-desktop-strip-shown)
+          (lispm-desktop-strip-toggle)
+          (should lispm-desktop-strip-shown)
+          (should (equal (reverse calls) '(hide show))))))))
+
+(ert-deftest lispm-desktop-test-strip-outline ()
+  "Moving the strip draws Mac OS 9's outline: a solid band two pixels thick
+round it, stepping round the tab's slanted end; on the right edge its
+mirror."
+  (let* ((width 200)
+         (tab (- width 17))
+         (left (lispm-desktop-platinum-strip-outline-lines 0 100 width 'left "#666633"))
+         (right (lispm-desktop-platinum-strip-outline-lines 0 100 width 'right "#666633")))
+    ;; Over and along its top, to the tab's top corner; down its left edge.
+    (should (member (list -1 99 (+ tab 8 2) 1 nil "#666633") left))
+    (should (member (list -1 100 (+ tab 8 3) 1 nil "#666633") left))
+    (should (member (list -1 101 22 2 t "#666633") left))
+    ;; The tab's straight end, rows 9 to 14, two pixels thick.
+    (should (member (list (+ tab 16) 109 6 2 t "#666633") left))
+    ;; Where it slants, four: its first slanted row.
+    (should (member (list (+ tab 7) 101 4 1 nil "#666633") left))
+    ;; The right edge's outline is the left's mirror.
+    (cl-flet ((mirror (line)
+                (pcase-let ((`(,x ,y ,length ,thickness ,vertical ,color) line))
+                  (list (- width 1 (+ x (if vertical thickness length) -1)) y length thickness vertical color))))
+      (should (equal (sort (mapcar #'mirror left) (lambda (a b) (string< (prin1-to-string a) (prin1-to-string b))))
+                     (sort (copy-sequence right) (lambda (a b) (string< (prin1-to-string a) (prin1-to-string b)))))))))
+
+(ert-deftest lispm-desktop-test-strip-tab-right ()
+  "The right edge's tab is the left one's outline mirrored, Mac OS 9's light
+kept: lit at its left, shaded at its right."
+  (let ((left lispm-desktop-platinum--strip-tab)
+        (right lispm-desktop-platinum--strip-tab-right))
+    (should (= (length left) (length right)))
+    (cl-loop for l in left for r in right
+             do (should (= (length l) (length r) 17))
+             do (dotimes (i 17)
+                  (should (eq (eq (aref l i) ?.) (eq (aref r (- 16 i)) ?.)))))
+    (should (equal (lispm-desktop-platinum--strip-tab-ends right) (make-list 24 16)))
+    (dolist (row (seq-subseq right 2 21))
+      (should (eq (aref row 15) ?8)))))
+
+(ert-deftest lispm-desktop-test-strip-inverse ()
+  "The outline is drawn in the inverse of what it lies on, as Mac OS 9's XOR."
+  (should (equal (lispm-desktop-platinum-inverse "#9999CC") "#666633"))
+  (should (equal (lispm-desktop-platinum-inverse "black") "#ffffff")))
 
 (ert-deftest lispm-desktop-test-strip-keyboard ()
   "C-c b goes to the strip: C-f and C-b move between the modules, Return or

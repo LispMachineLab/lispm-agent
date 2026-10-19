@@ -1268,6 +1268,19 @@ platinum face (f) lit along its top and left (w), dotted with a grip
 (w over g), shaded along its bottom (8, 4), and a pointed end holding a
 handle.")
 
+(defconst lispm-desktop-platinum--strip-tab-right
+  '("........#########" ".......##fffffff#" "......##fwwwwww8#" ".....##fwffffff8#"
+    "....##fwfffwfff8#" "...##fwfffffgff8#" "..##fwffwffffff8#" ".##fw##ffgfffff8#"
+    "##fw#w#ffffwfff8#" "#fw#ww#fffffgff8#" "#fw#ww#fwffffff8#" "#fw#ww#ffgfffff8#"
+    "#fw#ww#ffffwfff8#" "#fw#ww#fffffgff8#" "#ff#ww#fwffffff8#" "##ff#w#ffgfffff8#"
+    ".##ff##ffffwfff8#" "..##ffffffffgff8#" "...##ffffffffff8#" "....##fffffffff8#"
+    ".....##ffffffff8#" "......##88888884#" ".......##4444444#" "........#########")
+  "The Control Strip's tab on the screen's right edge, where it is the
+strip's left end, read off Mac OS 9.0.4 as `lispm-desktop-platinum--strip-tab'
+was.  Its outline is that tab's mirror, its light is not: still lit along
+the top and left (w) and shaded along the right and bottom (8, 4), and the
+grip's dots fall where Mac OS 9 put them.")
+
 (defun lispm-desktop-platinum-strip-segment-width (kind)
   "Return the width in pixels of a Control Strip segment of KIND, see
 `lispm-desktop-platinum-draw-strip-segment'."
@@ -1277,7 +1290,7 @@ handle.")
     ('module 28)
     ('tab 17)))
 
-(cl-defun lispm-desktop-platinum-draw-strip-segment (palette kind &key state icon menu focused behind)
+(cl-defun lispm-desktop-platinum-draw-strip-segment (palette kind &key state icon menu focused behind side)
   "Return an SVG of a segment of the Control Strip of KIND, in PALETTE.
 KIND is `collapse', the box at the strip's left end, which also draws the
 strip's left outline; `left' or `right', the arrows scrolling the
@@ -1287,7 +1300,10 @@ strip's right end.  Every segment but the tab ends in the black line
 parting it from the next.  STATE is nil, `pressed' (darkened, lit from
 below) or `disabled' (sunk, its arrow greyed); FOCUSED rings a module
 in the focus colour, as the keyboard reaches it.  BEHIND is the colour
-round the tab's pointed end, what the strip lies on.  The segment is
+round the tab's pointed end, what the strip lies on.  SIDE `right' draws
+the segment of a strip on the screen's right edge, where Mac OS 9 put the
+tab at its left end and the collapse box at its right end, that box then
+drawing the strip's right outline.  The segment is
 `lispm-desktop-platinum-strip-height' tall, its outline included, and
 drawn in the strip's own greys, :strip and its light and shades."
   (let* ((h lispm-desktop-platinum-strip-height)
@@ -1307,11 +1323,13 @@ drawn in the strip's own greys, :strip and its light and shades."
           (when behind
             (lispm-desktop-platinum--fill svg 0 0 w h behind))
           (lispm-desktop-platinum--draw-map
-           svg 0 0 lispm-desktop-platinum--strip-tab
+           svg 0 0 (if (eq side 'right) lispm-desktop-platinum--strip-tab-right
+                     lispm-desktop-platinum--strip-tab)
          `((?# . ,outline) (?f . ,(funcall grey #xCC)) (?w . ,light)
            (?g . ,(funcall grey #x55)) (?8 . ,(funcall grey #x88)) (?4 . ,(funcall grey #x44)))))
-      (let* ((left (if (eq kind 'collapse) 1 0))
-             (right (- w 2))
+      (let* ((outer (and (eq kind 'collapse) (if (eq side 'right) 'right 'left)))
+             (left (if (eq outer 'left) 1 0))
+             (right (- w (if (eq outer 'right) 3 2)))
              (pressed (eq state 'pressed))
              (sunk (or pressed (eq state 'disabled))))
         (lispm-desktop-platinum--fill svg 0 0 w h outline)
@@ -1332,7 +1350,7 @@ drawn in the strip's own greys, :strip and its light and shades."
         (pcase kind
           ('collapse
            (lispm-desktop-platinum--draw-map
-            svg 3 8 lispm-desktop-platinum--strip-collapse
+            svg (+ left 2) 8 lispm-desktop-platinum--strip-collapse
             `((?l . ,(funcall grey #x55)) (?c . ,(plist-get palette :thumb-light))
               (?r . ,(funcall grey #x88)) (?q . ,(funcall grey #x44)) (?b . ,light))))
           ((or 'left 'right)
@@ -3030,6 +3048,72 @@ round the grow box in the content's corner."
                (list (- right box) (- bottom box) box 1 nil)
                (list (- right box) (1+ (- bottom box)) (1- box) 1 t)))))))
 
+(defun lispm-desktop-platinum--strip-tab-ends (rows)
+  "Return the column of each of ROWS' last outline pixel, its last #."
+  (mapcar (lambda (row)
+            (let ((i (length row)))
+              (while (and (> i 0) (/= (aref row (1- i)) ?#))
+                (setq i (1- i)))
+              (1- i)))
+          rows))
+
+(defun lispm-desktop-platinum-strip-outline-lines (x y width side color)
+  "Return the lines of the outline Mac OS 9 drew to move the Control Strip
+by its tab, as `lispm-desktop-platinum-outline-lines' returns lines, each
+with COLOR last, the colour it is drawn in solid: Mac OS 9 inverted what
+was under it.  The outline is a band two pixels thick round the strip,
+the strip's own outline and the pixel outside it, widening to four where
+it steps round the tab's slanted end, as sampled from Mac OS 9.0.4.  The
+strip is at X, Y, WIDTH pixels wide and `lispm-desktop-platinum-strip-height'
+tall, its tab its last pixels, or its first when SIDE is `right', on the
+screen's right edge."
+  (let* ((h lispm-desktop-platinum-strip-height)
+         (tab (- width (lispm-desktop-platinum-strip-segment-width 'tab)))
+         (ends (vconcat (lispm-desktop-platinum--strip-tab-ends lispm-desktop-platinum--strip-tab)))
+         (runs nil))
+    ;; Each row's runs (ROW FROM TO) as on the left edge, the strip's top
+    ;; row 0 and its outside -1 to its left.
+    (push (list -1 -1 (+ tab (aref ends 0))) runs)
+    (push (list 0 -1 (+ tab (aref ends 0) 1)) runs)
+    (dotimes (i (- h 2))
+      (let* ((row (1+ i))
+             (end (aref ends row))
+             (slanted (or (/= end (aref ends (1- row))) (/= end (aref ends (1+ row))))))
+        (push (list row -1 0) runs)
+        (push (list row (+ tab (if slanted (- end 2) end)) (+ tab end 1)) runs)))
+    (push (list (1- h) -1 (+ tab (aref ends (1- h)) 1)) runs)
+    (push (list h -1 (+ tab (aref ends (1- h)))) runs)
+    (when (eq side 'right)
+      (setq runs (mapcar (pcase-lambda (`(,row ,from ,to)) (list row (- width 1 to) (- width 1 from)))
+                         runs)))
+    ;; Runs alike in rows one under the other make one line.
+    (let ((lines nil) (last nil))
+      (dolist (run (sort runs (lambda (p q) (or (< (nth 1 p) (nth 1 q))
+                                                (and (= (nth 1 p) (nth 1 q))
+                                                     (or (< (nth 2 p) (nth 2 q))
+                                                         (and (= (nth 2 p) (nth 2 q)) (< (car p) (car q)))))))))
+        (if (and last (= (nth 1 run) (nth 1 last)) (= (nth 2 run) (nth 2 last))
+                 (= (car run) (1+ (nth 3 last))))
+            (setcar (nthcdr 3 last) (car run))
+          (setq last (list (car run) (nth 1 run) (nth 2 run) (car run)))
+          (push last lines)))
+      (mapcar (pcase-lambda (`(,top ,from ,to ,bottom))
+                (if (= top bottom)
+                    (list (+ x from) (+ y top) (1+ (- to from)) 1 nil color)
+                  (list (+ x from) (+ y top) (1+ (- bottom top)) (1+ (- to from)) t color)))
+              (nreverse lines)))))
+
+(defun lispm-desktop-platinum-inverse (color)
+  "Return COLOR inverted, as Mac OS 9 drew over it with XOR.  A colour
+written #RRGGBB is read as written; Emacs without a display reads it
+only roughly."
+  (let ((values (if (string-match (concat "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)"
+                                          "\\([[:xdigit:]]\\{2\\}\\)\\'")
+                                  color)
+                    (mapcar (lambda (group) (string-to-number (match-string group color) 16)) '(1 2 3))
+                  (mapcar (lambda (value) (/ value 257)) (color-values color)))))
+    (apply #'format "#%02x%02x%02x" (mapcar (lambda (value) (- 255 value)) values))))
+
 (defun lispm-desktop-platinum-dots (width height parity)
   "Return the 50% grey pattern WIDTH by HEIGHT pixels as XBM data: a vector
 of rows, each a bool-vector, a pixel set where its column and row, PARITY
@@ -3047,6 +3131,20 @@ Mac OS 9's patterns did, wherever the line is."
 
 (defvar lispm-desktop-platinum--dots (make-hash-table :test #'equal)
   "Images of the outline's lines, by (WIDTH HEIGHT PARITY GENERATION).")
+
+(defun lispm-desktop-platinum--solid-image (width height color)
+  "Return an image WIDTH by HEIGHT all in COLOR, for a solid line."
+  (let ((key (list 'solid width height color)))
+    (or (gethash key lispm-desktop-platinum--dots)
+        (let ((rows (make-vector height nil)))
+          (dotimes (row height)
+            (aset rows row (make-bool-vector width t)))
+          (when (> (hash-table-count lispm-desktop-platinum--dots) 400)
+            (clrhash lispm-desktop-platinum--dots))
+          (puthash key
+                   (create-image rows 'xbm t :data-width width :data-height height :ascent 100
+                                 :foreground color :background color)
+                   lispm-desktop-platinum--dots)))))
 
 (defun lispm-desktop-platinum--dots-image (width height parity)
   "Return an image of the outline's dots WIDTH by HEIGHT, see
@@ -3123,12 +3221,13 @@ missing and kept for the next outline."
 (defun lispm-desktop-platinum--draw-line (frame line origin)
   "Draw LINE, a value of `lispm-desktop-platinum-outline-lines', in FRAME,
 placed in the coordinates of what FRAME is drawn over.  ORIGIN, (X . Y),
-is where those start on the computer's screen, which lines the dots up."
-  (pcase-let* ((`(,x ,y ,length ,thickness ,vertical) line)
+is where those start on the computer's screen, which lines the dots up.
+A line with a colour after its five values is drawn solid in it."
+  (pcase-let* ((`(,x ,y ,length ,thickness ,vertical ,color) line)
                (width (max 1 (if vertical thickness length)))
                (height (max 1 (if vertical length thickness)))
                (parity (mod (+ x y (car origin) (cdr origin)) 2))
-               (size (list width height parity lispm-desktop-platinum--generation)))
+               (size (list width height parity color lispm-desktop-platinum--generation)))
     (unless (equal size (frame-parameter frame 'lispm-desktop-platinum-line))
       (set-frame-parameter frame 'lispm-desktop-platinum-line size)
       (let ((window-min-width 1) (window-safe-min-width 1)
@@ -3138,7 +3237,10 @@ is where those start on the computer's screen, which lines the dots up."
       (with-current-buffer (window-buffer (frame-root-window frame))
         (let ((inhibit-read-only t))
           (erase-buffer)
-          (insert (propertize " " 'display (lispm-desktop-platinum--dots-image width height parity)))))
+          (insert (propertize " " 'display
+                              (if color
+                                  (lispm-desktop-platinum--solid-image width height color)
+                                (lispm-desktop-platinum--dots-image width height parity))))))
       (set-window-start (frame-root-window frame) 1))
     (set-frame-position frame x y)))
 
