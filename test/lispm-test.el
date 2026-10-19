@@ -1198,7 +1198,12 @@ The byte compiler checks only a file Emacs trusts, and the result says so."
                      (let ((trusted-content nil))
                        (lispm-test--call-async agent "flymake_diagnostics" '((path . "warn.el"))))))
           (should-not errorp)
-          (should (string-match-p "\\`warn\\.el: [0-9]+ notes?, from elisp-flymake-checkdoc\\.\n" text))
+          ;; Released Emacs 30 and 31 keep checkdoc off untrusted content
+          ;; too, so it may say so instead of reporting notes.
+          (should (string-match-p (concat "\\`warn\\.el: [0-9]+ notes?, from elisp-flymake-checkdoc\\.\n"
+                                          "\\|\\`warn\\.el: no diagnostics, from no checker\\.\n"
+                                          "\\[elisp-flymake-checkdoc did not run: .*untrusted")
+                                  text))
           (should-not (string-match-p "warning:" text))
           (should (string-match-p "^\\[The byte compiler did not check warn\\.el: .*`trusted-content'" text)))
         (should (buffer-live-p buffer))
