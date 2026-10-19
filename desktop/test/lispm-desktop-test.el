@@ -933,9 +933,16 @@ header and its bottom line put away, and down to its height again."
                      '(lispm-desktop-lambda lispm-desktop-menu-file lispm-desktop-menu-view lispm-desktop-menu-go
                                             lispm-desktop-menu-special))))
     (let ((lispm-desktop-apps--frontmost 'browser))
-      (should (equal (lispm-desktop-test--menu-bar-titles)
-                     '(lispm-desktop-lambda lispm-desktop-browser-file lispm-desktop-browser-view lispm-desktop-browser-go
-                                            lispm-desktop-browser-bookmarks lispm-desktop-browser-window))))))
+      (cl-letf (((symbol-function 'lispm-desktop-browser-extensions-supported-p) #'ignore))
+        (should (equal (lispm-desktop-test--menu-bar-titles)
+                       '(lispm-desktop-lambda lispm-desktop-browser-file lispm-desktop-browser-view lispm-desktop-browser-go
+                                              lispm-desktop-browser-bookmarks lispm-desktop-browser-window))))
+      ;; Where pages can run Chrome extensions, they have a menu.
+      (cl-letf (((symbol-function 'lispm-desktop-browser-extensions-supported-p) #'always))
+        (should (equal (lispm-desktop-test--menu-bar-titles)
+                       '(lispm-desktop-lambda lispm-desktop-browser-file lispm-desktop-browser-view lispm-desktop-browser-go
+                                              lispm-desktop-browser-bookmarks lispm-desktop-browser-extensions-menu
+                                              lispm-desktop-browser-window)))))))
 
 (ert-deftest lispm-desktop-test-application-follows-its-selected-window ()
   "Selecting a floating window puts its application in front; the screen,
@@ -3721,6 +3728,189 @@ menu of the module beside, as along the menu bar."
                    nil)))
         (should (equal (lispm-desktop-strip--walk (lispm-desktop-strip--modules) 0) '(nil . 0)))
         (should (equal opened '(appearance mail appearance)))))))
+
+;;;; Chrome extensions in the browser
+
+(ert-deftest lispm-desktop-test-extensions-only-on-a-mac-with-pages ()
+  "Pages run extensions only in the Mac build with xwidgets, on macOS 15.4
+or later."
+  (let ((system-type 'gnu/linux))
+    (should-not (lispm-desktop-browser-extensions-supported-p)))
+  (let ((system-type 'darwin))
+    (cl-letf (((symbol-function 'featurep) (lambda (feature &rest _) (memq feature '(ns xwidget-internal)))))
+      (let ((lispm-desktop-browser-extensions--macos-version "15.3.2"))
+        (should-not (lispm-desktop-browser-extensions-supported-p)))
+      (let ((lispm-desktop-browser-extensions--macos-version "15.4"))
+        (should (lispm-desktop-browser-extensions-supported-p)))
+      (let ((lispm-desktop-browser-extensions--macos-version "27.0"))
+        (should (lispm-desktop-browser-extensions-supported-p))))))
+
+(ert-deftest lispm-desktop-test-extensions-know-a-page-by-its-view ()
+  "A page is named to the module by its view's address, which Emacs prints
+with its xwidget; a killed xwidget names none."
+  (should (eql (lispm-desktop-browser-extensions--address-in "#<xwidget 3 0x600001c2a0f0>")
+               #x600001c2a0f0))
+  (should-not (lispm-desktop-browser-extensions--address-in "#<killed xwidget>"))
+  (should-not (lispm-desktop-browser-extensions--address-in "#<buffer *scratch*>")))
+
+(ert-deftest lispm-desktop-test-extensions-read-store-pages ()
+  "The extension of a Chrome Web Store page is read from its address, on the
+store itself over HTTPS only."
+  (let ((id "ddkjiahejlhfcafbddmgiahcphecmpfh"))
+    (should (equal (lispm-desktop-browser-extensions--store-id
+                    (concat "https://chromewebstore.google.com/detail/ublock-origin-lite/" id))
+                   id))
+    (should (equal (lispm-desktop-browser-extensions--store-id
+                    (concat "https://chromewebstore.google.com/detail/" id "?hl=en"))
+                   id))
+    (should (equal (lispm-desktop-browser-extensions--store-id
+                    (concat "https://chrome.google.com/webstore/detail/name/" id "/reviews"))
+                   id))
+    (should-not (lispm-desktop-browser-extensions--store-id
+                 (concat "http://chromewebstore.google.com/detail/name/" id)))
+    (should-not (lispm-desktop-browser-extensions--store-id
+                 (concat "https://evil.example/detail/name/" id)))
+    (should-not (lispm-desktop-browser-extensions--store-id
+                 (concat "https://chromewebstore.google.com/detail/name/" id "a")))
+    (should-not (lispm-desktop-browser-extensions--store-id nil))))
+
+(ert-deftest lispm-desktop-test-extensions-stale-module ()
+  "The module is stale when a source of it is newer than its library."
+  (let* ((source (make-temp-file "lispm-desktop-webext" t))
+         (lispm-desktop-browser-extensions-source-directory source)
+         (library (expand-file-name ".build/release/liblispm_desktop_webext.dylib" source))
+         (swift (expand-file-name "Sources/LispmDesktopWebext/Host.swift" source)))
+    (unwind-protect
+        (progn
+          (should-not (lispm-desktop-browser-extensions--module-file))
+          (make-directory (file-name-directory library) t)
+          (make-directory (file-name-directory swift) t)
+          (dolist (file (list (expand-file-name "Package.swift" source) swift))
+            (write-region "" nil file)
+            (set-file-times file (time-subtract nil 60)))
+          (write-region "" nil library)
+          (should (equal (lispm-desktop-browser-extensions--module-file) library))
+          (should-not (lispm-desktop-browser-extensions--stale-p))
+          (set-file-times swift (time-add nil 60))
+          (should (lispm-desktop-browser-extensions--stale-p)))
+      (delete-directory source t))))
+
+(ert-deftest lispm-desktop-test-extensions-events ()
+  "The module's events: a message shows, a change forgets the list and runs
+the hook, and a question is asked after the filter returns and answered,
+no when quit."
+  (let ((lispm-desktop-browser-extensions--installed '((:id "a")))
+        (changed nil)
+        (answers nil)
+        (later nil)
+        (reply 'yes))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat function &rest args) (push (cons function args) later)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (prompt)
+                 (should (string-match-p "Add “X 1”\\?\n  • Block\n  • Read\n" prompt))
+                 (pcase reply ('yes t) ('no nil) ('quit (signal 'quit nil)))))
+              ((symbol-function 'lispm-desktop-webext-module-answer)
+               (lambda (id value) (push (cons id value) answers))))
+      (let ((lispm-desktop-browser-extensions-changed-hook (list (lambda () (setq changed t)))))
+        (lispm-desktop-webext--event "changed" "null")
+        (should changed)
+        (should (eq lispm-desktop-browser-extensions--installed 'unread)))
+      (let ((shown nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format &rest args) (setq shown (apply #'format-message format args)))))
+          (lispm-desktop-webext--event "message" "\"X is installed\""))
+        (should (equal shown "X is installed")))
+      (let ((ask "{\"request\":7,\"question\":\"Add “X 1”?\",\"details\":[\"Block\",\"Read\"]}"))
+        (lispm-desktop-webext--event "ask" ask)
+        (should-not answers)
+        (pcase-let ((`(,function . ,args) (pop later)))
+          (apply function args))
+        (should (equal answers '((7 . 1))))
+        (setq reply 'no answers nil)
+        (lispm-desktop-webext--event "ask" ask)
+        (pcase-let ((`(,function . ,args) (pop later))) (apply function args))
+        (should (equal answers '((7))))
+        (setq reply 'quit answers nil)
+        (lispm-desktop-webext--event "ask" ask)
+        (pcase-let ((`(,function . ,args) (pop later)))
+          (should-error (apply function args) :type 'quit))
+        (should (equal answers '((7))))))))
+
+(ert-deftest lispm-desktop-test-extensions-open-tabs ()
+  "An extension's new tab opens in the browser, made for the extension's
+page when it is one, and the module is answered with its view."
+  (let ((calls nil)
+        (answers nil))
+    (cl-letf (((symbol-function 'lispm-desktop-browser--window) #'always)
+              ((symbol-function 'lispm-desktop-webext-module-expect-page)
+               (lambda (url)
+                 (push (list 'expect url) calls)
+                 (string-prefix-p "chrome-extension:" url)))
+              ((symbol-function 'lispm-desktop-browser-new-tab)
+               (lambda (url) (push (list 'tab url) calls)))
+              ((symbol-function 'xwidget-webkit-goto-uri)
+               (lambda (_xwidget url) (push (list 'go url) calls)))
+              ((symbol-function 'lispm-desktop-browser-extensions--address)
+               (lambda (_xwidget) 42))
+              ((symbol-function 'lispm-desktop-webext-module-answer)
+               (lambda (id value) (push (cons id value) answers))))
+      ;; The extension's page: the tab opens blank and is sent there, as
+      ;; `xwidget-webkit-browse-url' would take chrome-extension: for a host.
+      (lispm-desktop-browser-extensions--open
+       '(:url "chrome-extension://abc/welcome.html" :active t :request 3))
+      (should (equal (reverse calls) '((expect "chrome-extension://abc/welcome.html")
+                                       (tab "about:blank")
+                                       (go "chrome-extension://abc/welcome.html"))))
+      (should (equal answers '((3 . 42))))
+      ;; A website opens straight away; asked for nothing back, nothing is
+      ;; answered.
+      (setq answers nil calls nil)
+      (lispm-desktop-browser-extensions--open '(:url "https://example.com/" :active t))
+      (should (equal (reverse calls) '((expect "https://example.com/") (tab "https://example.com/"))))
+      (should-not answers))))
+
+(ert-deftest lispm-desktop-test-extensions-follow-the-page-in-front ()
+  "The module hears which page is in front, once it runs."
+  (let ((lispm-desktop-browser-extensions--started t)
+        (told nil)
+        (address 1))
+    (with-temp-buffer
+      (let ((page (current-buffer)))
+        (cl-letf (((symbol-function 'lispm-desktop-browser-extensions--front-buffer) (lambda () page))
+                  ((symbol-function 'xwidget-at) (lambda (_) 'xwidget))
+                  ((symbol-function 'lispm-desktop-browser-extensions--address) (lambda (_) address))
+                  ((symbol-function 'lispm-desktop-webext-module-activate) (lambda (a) (push a told))))
+          (lispm-desktop-browser-extensions--follow)
+          (setq address 2)
+          (lispm-desktop-browser-extensions--follow)
+          (should (equal told '(2 1)))
+          (let ((lispm-desktop-browser-extensions--started nil))
+            (lispm-desktop-browser-extensions--follow))
+          (should (equal told '(2 1))))))))
+
+(ert-deftest lispm-desktop-test-extensions-menu ()
+  "The Extensions menu has each running extension's button, its badge in
+the label, then adding them, from the page shown when it is a store page."
+  (let ((lispm-desktop-browser-extensions--started t)
+        (lispm-desktop-browser-extensions--installed
+         '((:id "a" :name "Blocker" :loaded t :badge "12" :actionEnabled t)
+           (:id "b" :name "Off" :enabled nil :loaded nil))))
+    (cl-letf (((symbol-function 'lispm-desktop-browser-extensions--shown-store-id) #'ignore))
+      (let ((items (lispm-desktop-browser-extensions--menu-items)))
+        (should (equal (plist-get (car items) :label) "Blocker [12]"))
+        (should (eq (nth 1 items) 'separator))
+        (should (equal (plist-get (nth 2 items) :label) "Add This Extension"))
+        (should-not (plist-get (nth 2 items) :enabled))
+        (should-not (seq-find (lambda (item) (equal (plist-get item :label) "Off"))
+                              (seq-filter #'consp items)))))
+    (cl-letf (((symbol-function 'lispm-desktop-browser-extensions--shown-store-id)
+               (lambda () "ddkjiahejlhfcafbddmgiahcphecmpfh")))
+      (should (plist-get (nth 2 (lispm-desktop-browser-extensions--menu-items)) :enabled))))
+  (let ((lispm-desktop-browser-extensions--started nil))
+    (cl-letf (((symbol-function 'lispm-desktop-browser-extensions--shown-store-id) #'ignore))
+      (should (equal (plist-get (car (lispm-desktop-browser-extensions--menu-items)) :label)
+                     "Add This Extension")))))
 
 (provide 'lispm-desktop-test)
 ;;; lispm-desktop-test.el ends here

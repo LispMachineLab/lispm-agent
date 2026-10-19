@@ -22,3 +22,5 @@
 .DS_Store
 # lispm-desktop-term's Rust build
 /native/lispm-desktop-term/target/
+# lispm-desktop-webext's Swift build
+/native/lispm-desktop-webext/.build/
