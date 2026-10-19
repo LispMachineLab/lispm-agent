@@ -105,14 +105,18 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   it (fill, fit, center, tile), and arranges its icons; Keyboard Vim or Emacs keys; Internet the
   browser's home page and search address, its history and its bookmarks.  Each choice takes
   effect at once where it can and is kept for the next start.
-- *The Control Strip*, as Mac OS 9's, floating in the desktop's bottom-left corner over the
-  windows: a collapse box, scroll arrows, a module each for Appearance, Desktop, Keyboard and
+- *The Control Strip*, as Mac OS 9's, floating over the windows along the desktop's edge, in its
+  bottom-left corner at first: a collapse box, scroll arrows, a module each for Appearance, Desktop, Keyboard and
   Internet, and Emacs's own battery, load average and mail flag, then a tab.  Pressing a module
   pops its menu up in the small system font: its panel's quick choices (the theme, the desktop's
   colour and picture, Vim or Emacs keys, the home page) and the panel itself, or the battery's
   charge, the load averages and the processes, reading, composing and checking mail.  The
   collapse box leaves the tab, the tab brings the strip back, and dragging the tab sets how many
-  modules show; both are kept for the next start.
+  modules show.  Dragging the tab with Command held moves the strip, as Mac OS 9's Option-drag
+  did (lispm-desktop leaves Option to macOS for typing): an outline follows the mouse up and down
+  the edge, and over to the right edge past the desktop's middle, where the strip turns round,
+  its tab to the left; the strip moves once the mouse is let go.  =C-c B= hides it and shows it
+  again, as the Control Strip control panel's hot key did.  All of it is kept for the next start.
 - *A browser*, when Emacs is built with xwidgets: an application of its own, opened from the
   desktop or the λ menu and brought forward from the Application menu.  Its window is laid out
   as Netscape Communicator's was, in the theme's colours: the navigation toolbar (Back,
@@ -355,7 +359,8 @@ Two things to know when both builds run:
 | =C-c o=                | the next application: the desktop, Emacs, the browser, Control Panels |
 | =C-c h=                | hide the desktop in the Dock, its windows out on the screen, or show it again |
 | =C-c m=                | the menu bar from the keyboard: =C-f=, =C-b= to the menu beside, =C-n=, =C-p= or a letter to an item, =RET= chooses |
-| =C-c b=                | the Control Strip from the keyboard: =C-f=, =C-b= to a module, =RET= or =SPC= opens its menu, =C-g= leaves |
+| =C-c b=                | the Control Strip from the keyboard: =C-f=, =C-b= to a module, =RET= or =SPC= opens its menu, =C-p=, =C-n= move it up and down, =C-a=, =C-e= to the left and the right edge, =C-g= leaves |
+| =C-c B=                | hide the Control Strip, or show it again                   |
 | =C-c a l=              | start a LispM agent in this project (=C-u= to pick a role) |
 | =C-c a c=, =x=, =h=    | start Claude Code, Codex or Hermes in this project         |
 | =C-c a s=              | resume any recorded session                                |

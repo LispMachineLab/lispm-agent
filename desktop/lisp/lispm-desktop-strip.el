@@ -42,13 +42,22 @@
 ;;
 ;; The collapse box leaves only the tab, and the tab brings the strip back.
 ;; Dragging the tab sets how many modules show, the arrows scrolling to the
-;; rest.  Both are kept for the next start.
+;; rest.  Dragging the tab with Command held moves the strip along the
+;; desktop's edge, as Mac OS 9 moved it with Option (which lispm-desktop
+;; leaves to macOS for typing): an outline follows the mouse, and the strip
+;; moves once the mouse is let go, to the left or the right edge, whichever
+;; half of the desktop the mouse is in.  On the right edge the tab is at the
+;; strip's left end and the collapse box at its right, as Mac OS 9 drew it.
+;; All of it is kept for the next start; C-c B hides the strip and shows it
+;; again, as the Control Strip control panel's hot key did.
 ;;
 ;; From the keyboard, C-c b goes to the strip: C-f and C-b move between its
 ;; modules, Return or Space pops the module's menu up, which then works as
-;; every menu does (C-f and C-b going on to the next module's), and C-g or
-;; Escape leaves.  The strip is a child frame that takes no focus, kept
-;; above the floating windows.
+;; every menu does (C-f and C-b going on to the next module's), C-p and C-n
+;; move the strip up and down, C-a and C-e to the left and the right edge,
+;; and C-g or Escape leaves.  The strip is a child frame that takes no
+;; focus, kept above the floating windows, as Mac OS 9 kept it above every
+;; window.
 
 ;;; Code:
 
@@ -80,8 +89,19 @@
   :prefix "lispm-desktop-strip-")
 
 (defcustom lispm-desktop-strip-shown t
-  "Non-nil shows the Control Strip in the desktop's bottom-left corner."
+  "Non-nil shows the Control Strip along the desktop's edge.
+C-c B (`lispm-desktop-strip-toggle') sets it, for the next start too."
   :type 'boolean)
+
+(defcustom lispm-desktop-strip-edge 'left
+  "The edge of the desktop the Control Strip lies along, `left' or `right'.
+Dragging its tab with Command held sets it, for the next start too."
+  :type '(choice (const left) (const right)))
+
+(defcustom lispm-desktop-strip-raised 0
+  "How far above the desktop's bottom the Control Strip lies, in pixels.
+Dragging its tab with Command held sets it, for the next start too."
+  :type 'natnum)
 
 (defcustom lispm-desktop-strip-collapsed nil
   "Non-nil when the Control Strip is collapsed to its tab.
@@ -239,21 +259,29 @@ given, decides whether it shows.")
   "Return how many of COUNT modules show at once."
   (max (min 1 count) (min count (or lispm-desktop-strip-width count))))
 
+(defun lispm-desktop-strip--side ()
+  "Return the edge the strip lies along, `left' or `right'."
+  (if (eq lispm-desktop-strip-edge 'right) 'right 'left))
+
 (defun lispm-desktop-strip--parts ()
   "Return the strip's parts, left to right: `collapse', `left', a
-\(module . KEY) each for the modules shown, `right' and `tab'; or the
-tab alone while the strip is collapsed."
+\(module . KEY) each for the modules shown, `right' and `tab'; on the
+right edge the tab first and the collapse box last, as Mac OS 9 had them;
+or the tab alone while the strip is collapsed."
   (if lispm-desktop-strip-collapsed
       '(tab)
     (let* ((modules (lispm-desktop-strip--modules))
-           (shown (lispm-desktop-strip--shown (length modules))))
+           (shown (lispm-desktop-strip--shown (length modules)))
+           (right (eq (lispm-desktop-strip--side) 'right)))
       (setq lispm-desktop-strip--first
             (max 0 (min lispm-desktop-strip--first (- (length modules) shown))))
-      `(collapse left
-                 ,@(mapcar (lambda (key) (cons 'module key))
-                           (seq-subseq modules lispm-desktop-strip--first
-                                       (+ lispm-desktop-strip--first shown)))
-                 right tab))))
+      `(,(if right 'tab 'collapse)
+        left
+        ,@(mapcar (lambda (key) (cons 'module key))
+                  (seq-subseq modules lispm-desktop-strip--first
+                              (+ lispm-desktop-strip--first shown)))
+        right
+        ,(if right 'collapse 'tab)))))
 
 (defun lispm-desktop-strip--kind (part)
   "Return the kind of segment PART is drawn as."
@@ -285,8 +313,8 @@ tab alone while the strip is collapsed."
     ('left "Scroll the modules to the left")
     ('right "Scroll the modules to the right")
     ('tab (if lispm-desktop-strip-collapsed
-              "Show the Control Strip"
-            "Drag to show more or fewer modules; click to collapse"))))
+              "Show the Control Strip; Command-drag to move it"
+            "Drag to show more or fewer modules, Command-drag to move the strip; click to collapse"))))
 
 (defun lispm-desktop-strip--segment (part)
   "Return the image of PART, memoized."
@@ -296,22 +324,34 @@ tab alone while the strip is collapsed."
          (focused (and (consp part) (eq (cdr part) lispm-desktop-strip--focus)))
          ;; The strip lies on the desktop: no frame shows what is behind
          ;; it, so the tab's end is set off against the desktop's colour.
-         (behind (and (eq kind 'tab) (fboundp 'lispm-desktop--color) (lispm-desktop--color))))
+         (behind (and (eq kind 'tab) (fboundp 'lispm-desktop--color) (lispm-desktop--color)))
+         (side (lispm-desktop-strip--side)))
     (lispm-desktop-platinum--image
-     (list 'strip kind state icon focused behind)
+     (list 'strip kind state icon focused behind side)
      (lambda ()
        (lispm-desktop-platinum-draw-strip-segment lispm-desktop-platinum--palette kind
                                                   :state state :icon icon :menu (consp part)
-                                                  :focused focused :behind behind)))))
+                                                  :focused focused :behind behind :side side)))))
 
 (defvar-keymap lispm-desktop-strip-part-map
-  :doc "Keymap of the Control Strip's parts."
+  :doc "Keymap of the Control Strip's parts.
+Command is Meta in lispm-desktop, and the strip moves by a drag with it;
+one with Option, Alt or Super moves it too, where a key gives those."
   "<down-mouse-1>" #'lispm-desktop-strip-press
   "<mouse-1>" #'ignore
   "<drag-mouse-1>" #'ignore
   "<double-mouse-1>" #'ignore
   "<down-mouse-3>" #'ignore
-  "<mouse-3>" #'ignore)
+  "<mouse-3>" #'ignore
+  "M-<down-mouse-1>" #'lispm-desktop-strip-move-press
+  "M-<mouse-1>" #'ignore
+  "M-<drag-mouse-1>" #'ignore
+  "A-<down-mouse-1>" #'lispm-desktop-strip-move-press
+  "A-<mouse-1>" #'ignore
+  "A-<drag-mouse-1>" #'ignore
+  "s-<down-mouse-1>" #'lispm-desktop-strip-move-press
+  "s-<mouse-1>" #'ignore
+  "s-<drag-mouse-1>" #'ignore)
 
 (defun lispm-desktop-strip--line ()
   "Return the strip's line: its parts' images, each knowing its part."
@@ -378,17 +418,31 @@ tab alone while the strip is collapsed."
       (set-window-fringes root 0 0))
     frame))
 
+(defun lispm-desktop-strip--bounds (screen)
+  "Return where the strip may lie on SCREEN, (LEFT TOP RIGHT BOTTOM) in
+pixels: under the menu bar, down to the bottom over the echo area."
+  ;; The root window of a screen split in windows is not live, and only a
+  ;; live window has a divider: the bottom windows' is the one.
+  (pcase-let ((`(,left ,top ,right ,bottom) (window-pixel-edges (frame-root-window screen))))
+    (list left top right
+          (- bottom (window-bottom-divider-width (car (window-at-side-list screen 'bottom)))))))
+
+(defun lispm-desktop-strip--position (bounds width side raised)
+  "Return where a strip WIDTH pixels wide lies within BOUNDS, as
+`lispm-desktop-strip--bounds' gives them, on edge SIDE and RAISED pixels
+above the bottom: (X . Y), kept within the bounds."
+  (pcase-let ((`(,left ,top ,right ,bottom) bounds))
+    (cons (if (eq side 'right) (- right width) left)
+          (max top (- bottom lispm-desktop-platinum-strip-height (max 0 raised))))))
+
 (defun lispm-desktop-strip--place ()
-  "Put the strip in its screen's bottom-left corner, over the echo area."
+  "Put the strip on its screen's edge, as high as it was put."
   (when (lispm-desktop-strip--live-p)
-    ;; The root window of a screen split in windows is not live, and
-    ;; only a live window has a divider: the bottom windows' is the one.
-    (let* ((screen (frame-parent lispm-desktop-strip--frame))
-           (root (frame-root-window screen))
-           (bottom (- (nth 3 (window-pixel-edges root))
-                      (window-bottom-divider-width (car (window-at-side-list screen 'bottom))))))
-      (set-frame-position lispm-desktop-strip--frame 0
-                          (- bottom lispm-desktop-platinum-strip-height)))))
+    (pcase-let ((`(,x . ,y) (lispm-desktop-strip--position
+                             (lispm-desktop-strip--bounds (frame-parent lispm-desktop-strip--frame))
+                             (lispm-desktop-strip--width) (lispm-desktop-strip--side)
+                             lispm-desktop-strip-raised)))
+      (set-frame-position lispm-desktop-strip--frame x y))))
 
 (defun lispm-desktop-strip--render ()
   "Draw the strip again, sized to its parts and placed in its corner."
@@ -466,6 +520,14 @@ This is a `window-size-change-functions' function."
     (delete-frame lispm-desktop-strip--frame))
   (setq lispm-desktop-strip--frame nil))
 
+(defun lispm-desktop-strip-toggle ()
+  "Hide the Control Strip, or show it again, for the next start too, as
+the hot key of Mac OS 9's Control Strip control panel did."
+  (interactive)
+  (let ((shown (not (lispm-desktop-strip--live-p))))
+    (lispm-desktop-settings--save 'lispm-desktop-strip-shown shown)
+    (if shown (lispm-desktop-strip-show) (lispm-desktop-strip-hide))))
+
 (defun lispm-desktop-strip-refresh (&rest _)
   "Draw the strip again, as its modules' state or the theme changed."
   (lispm-desktop-strip--render))
@@ -524,16 +586,18 @@ item chosen once the module is let go; return the item, or nil."
       (lispm-desktop-popup--run chosen))))
 
 (defun lispm-desktop-strip--drag-tab ()
-  "Follow the mouse dragging the tab: the modules shown follow it.
-A click that does not drag collapses the strip."
+  "Follow the mouse dragging the tab: the modules shown follow it, the tab
+going away from the strip's edge showing more.  A click that does not
+drag collapses the strip."
   (let* ((start (car (mouse-absolute-pixel-position)))
          (count (length (lispm-desktop-strip--modules)))
          (from (lispm-desktop-strip--shown count))
          (step (lispm-desktop-platinum-strip-segment-width 'module))
+         (away (if (eq (lispm-desktop-strip--side) 'right) -1 1))
          (moved nil))
     (track-mouse
       (while (mouse-movement-p (let ((echo-keystrokes 0)) (read-event)))
-        (let ((dx (- (car (mouse-absolute-pixel-position)) start)))
+        (let ((dx (* away (- (car (mouse-absolute-pixel-position)) start))))
           (when (> (abs dx) 3) (setq moved t))
           (let ((shown (max 1 (min count (+ from (round dx step))))))
             (unless (= shown (lispm-desktop-strip--shown count))
@@ -545,6 +609,83 @@ A click that does not drag collapses the strip."
                                    (and (< (lispm-desktop-strip--shown count) count)
                                         (lispm-desktop-strip--shown count)))
       (lispm-desktop-strip-collapse))))
+
+(defun lispm-desktop-strip--moved (bounds start pointer)
+  "Return where the strip moves within BOUNDS, as `lispm-desktop-strip--bounds'
+gives them, dragged from its top START with the mouse now at POINTER,
+\(X . DY) in the screen's pixels: X where the mouse is, DY how far it
+went down.  The value is (SIDE . RAISED): the edge whose half of the
+screen the mouse is in, and how far above the bottom the strip then lies,
+kept under the menu bar and above the bottom."
+  (pcase-let* ((`(,left ,top ,right ,bottom) bounds)
+               (side (if (>= (car pointer) (/ (+ left right) 2)) 'right 'left))
+               (y (max top (min (- bottom lispm-desktop-platinum-strip-height)
+                                (+ start (cdr pointer))))))
+    (cons side (- bottom lispm-desktop-platinum-strip-height y))))
+
+(defun lispm-desktop-strip--move-to (side raised)
+  "Put the strip on edge SIDE, RAISED pixels above the bottom, for the next
+start too."
+  (lispm-desktop-settings--save 'lispm-desktop-strip-edge side)
+  (lispm-desktop-settings--save 'lispm-desktop-strip-raised (max 0 raised))
+  (lispm-desktop-strip--render))
+
+(defun lispm-desktop-strip--drag-move ()
+  "Move the strip by an outline the mouse drags, as Mac OS 9 moved it by
+an Option-drag of its tab: the outline follows the mouse up and down the
+edge and over to the other edge past the screen's middle, and the strip
+moves once the mouse is let go.  Escape or C-g leaves it where it was.
+Return non-nil when it moved."
+  (let* ((frame lispm-desktop-strip--frame)
+         (screen (frame-parent frame))
+         (origin (lispm-desktop-platinum--origin screen))
+         (bounds (lispm-desktop-strip--bounds screen))
+         (width (frame-pixel-width frame))
+         (start (cdr (frame-position frame)))
+         (ink (lispm-desktop-platinum-inverse (lispm-desktop-platinum--desktop-color)))
+         (moved (lambda (delta)
+                  (lispm-desktop-strip--moved
+                   bounds start
+                   (cons (- (car (mouse-absolute-pixel-position)) (car origin)) (cdr delta)))))
+         (result
+          (unwind-protect
+              (lispm-desktop-platinum--track
+               (lambda (delta)
+                 (pcase-let* ((`(,side . ,raised) (funcall moved delta))
+                              (`(,x . ,y) (lispm-desktop-strip--position bounds width side raised)))
+                   (lispm-desktop-platinum--show-outline
+                    screen (lispm-desktop-platinum-strip-outline-lines x y width side ink) origin))))
+            (lispm-desktop-platinum--hide-outline))))
+    (when (and (car result) (lispm-desktop-platinum--moved-p (cdr result)))
+      (pcase-let ((`(,side . ,raised) (funcall moved (cdr result))))
+        (lispm-desktop-strip--move-to side raised))
+      t)))
+
+(defun lispm-desktop-strip-move-press (event)
+  "Move the Control Strip when EVENT pressed its tab with Command held,
+see `lispm-desktop-strip--drag-move'; elsewhere act as a press.  A press
+let go where it was does nothing."
+  (interactive "e")
+  (let* ((position (event-start event))
+         (part (and (windowp (posn-window position)) (posn-point position)
+                    (get-text-property (posn-point position) 'lispm-desktop-strip-part
+                                       (window-buffer (posn-window position))))))
+    (if (eq part 'tab)
+        (lispm-desktop-strip--drag-move)
+      (lispm-desktop-strip-press event))))
+
+(defconst lispm-desktop-strip-step lispm-desktop-platinum-strip-height
+  "How far C-p and C-n move the strip, in pixels: its own height.")
+
+(defun lispm-desktop-strip--nudge (step)
+  "Move the strip STEP pixels up the edge, down when STEP is negative."
+  (when (lispm-desktop-strip--live-p)
+    (pcase-let* ((screen (frame-parent lispm-desktop-strip--frame))
+                 (`(,_ ,top ,_ ,bottom) (lispm-desktop-strip--bounds screen)))
+      (lispm-desktop-strip--move-to
+       (lispm-desktop-strip--side)
+       (max 0 (min (- bottom top lispm-desktop-platinum-strip-height)
+                   (+ lispm-desktop-strip-raised step)))))))
 
 (defun lispm-desktop-strip-press (event)
   "Act on the part of the Control Strip EVENT pressed."
@@ -591,9 +732,10 @@ INDEX): the item chosen, or nil, and the module whose menu closed."
 (defun lispm-desktop-strip-select ()
   "Go to the Control Strip from the keyboard.
 The first module is ringed: C-f and C-b move between the modules, Return
-or Space pops the ringed one's menu up, and C-g or Escape leaves.  A
-collapsed strip shows whole meanwhile.  Any other key leaves the strip
-and does what it does."
+or Space pops the ringed one's menu up, C-p and C-n move the strip up and
+down its edge, C-a and C-e to the left and the right edge, and C-g or
+Escape leaves.  A collapsed strip shows whole meanwhile.  Any other key
+leaves the strip and does what it does."
   (interactive)
   (unless (lispm-desktop-strip--live-p)
     (lispm-desktop-strip-show))
@@ -613,6 +755,12 @@ and does what it does."
                          (setq index (mod (1+ index) (length modules))))
                         ((memq event '(left ?\C-b))
                          (setq index (mod (1- index) (length modules))))
+                        ((memq event '(up ?\C-p)) (lispm-desktop-strip--nudge lispm-desktop-strip-step))
+                        ((memq event '(down ?\C-n)) (lispm-desktop-strip--nudge (- lispm-desktop-strip-step)))
+                        ((eq event ?\C-a)
+                         (lispm-desktop-strip--move-to 'left lispm-desktop-strip-raised))
+                        ((eq event ?\C-e)
+                         (lispm-desktop-strip--move-to 'right lispm-desktop-strip-raised))
                         ((or (lispm-desktop-popup--confirm-p event) (eq event ?\s))
                          (pcase-let ((`(,chosen . ,at) (lispm-desktop-strip--walk modules index)))
                            (setq index at)
@@ -627,8 +775,8 @@ and does what it does."
 
 (defun lispm-desktop-setup-strip ()
   "Show the Control Strip once the first frame is up, keep it above the
-floating windows and in its corner, and go to it with C-c b, a C-c key,
-which terminals leave to Emacs too."
+floating windows and on its edge, go to it with C-c b, and hide it and
+show it again with C-c B, C-c keys, which terminals leave to Emacs too."
   (dolist (function '(raise-frame make-frame-visible))
     (advice-add function :after #'lispm-desktop-strip--follow))
   (add-hook 'window-selection-change-functions #'lispm-desktop-strip--selected)
@@ -638,6 +786,7 @@ which terminals leave to Emacs too."
   (add-hook 'battery-update-functions #'lispm-desktop-strip-refresh 90)
   (add-variable-watcher 'lispm-desktop-color #'lispm-desktop-strip--desktop-changed)
   (keymap-global-set "C-c b" #'lispm-desktop-strip-select)
+  (keymap-global-set "C-c B" #'lispm-desktop-strip-toggle)
   (when lispm-desktop-strip-shown
     (add-hook 'window-setup-hook #'lispm-desktop-strip-show 95)))
 
