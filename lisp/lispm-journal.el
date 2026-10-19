@@ -125,7 +125,9 @@ The commit's MESSAGE and AUTHOR name the turn, PARENT is the commit
 of its beginning, if it is its end; REF then points at it.  A tree
 equal to SAME, that of the beginning, makes no commit and removes REF.
 CALLBACK gets the tree and the commit, the commit nil if none was
-made, or nothing at all (nil) if the snapshot failed."
+made, or nil and nil if the snapshot failed.  An error in it, or in
+taking the snapshot, is reported, never signaled: it would be an
+error in a process sentinel, which ends a batch Emacs."
   (let ((files nil)
         (process-environment (lispm--git-environment))
         (default-directory top))
@@ -136,23 +138,24 @@ made, or nothing at all (nil) if the snapshot failed."
      :sentinel
      (lambda (process _event)
        (unless (process-live-p process)
-         (let ((ok (and (zerop (process-exit-status process)) (file-directory-p top)))
-               (buffer (process-buffer process)))
-           (when ok
-             (setq files (seq-filter
-                          (lambda (file)
-                            (let ((attributes (file-attributes (expand-file-name file top))))
-                              (and attributes (not (file-attribute-type attributes))
-                                   (<= (file-attribute-size attributes) lispm-journal-max-file-size))))
-                          (split-string (with-current-buffer buffer (buffer-string)) "\0" t))))
-           (kill-buffer buffer)
-           ;; A snapshot that fails, its project gone say, is no journal
-           ;; entry: never an error in a sentinel.
-           (if (not ok)
-               (funcall callback nil)
-             (condition-case nil
-                 (lispm-journal--commit top dir index files ref message author parent same callback)
-               (error (funcall callback nil))))))))))
+         (with-demoted-errors "LispM: taking a snapshot: %S"
+           (let ((ok (and (zerop (process-exit-status process)) (file-directory-p top)))
+                 (buffer (process-buffer process)))
+             (when ok
+               (setq files (seq-filter
+                            (lambda (file)
+                              (let ((attributes (file-attributes (expand-file-name file top))))
+                                (and attributes (not (file-attribute-type attributes))
+                                     (<= (file-attribute-size attributes) lispm-journal-max-file-size))))
+                            (split-string (with-current-buffer buffer (buffer-string)) "\0" t))))
+             (kill-buffer buffer)
+             ;; A snapshot that fails, its project gone say, is no journal
+             ;; entry: never an error in a sentinel.
+             (if (not ok)
+                 (funcall callback nil nil)
+               (condition-case nil
+                   (lispm-journal--commit top dir index files ref message author parent same callback)
+                 (error (funcall callback nil nil)))))))))))
 
 (defun lispm-journal--commit (top dir index files ref message author parent same callback)
   "Add FILES of TOP to the journal DIR, and commit them.
@@ -178,11 +181,12 @@ INDEX, REF, MESSAGE, AUTHOR, PARENT, SAME and CALLBACK are as for
            :sentinel
            (lambda (process _event)
              (unless (process-live-p process)
-               (let* ((buffer (process-buffer process))
-                      (words (and (zerop (process-exit-status process))
-                                  (split-string (with-current-buffer buffer (buffer-string))))))
-                 (kill-buffer buffer)
-                 (funcall callback (car words) (cadr words))))))))
+               (with-demoted-errors "LispM: taking a snapshot: %S"
+                 (let* ((buffer (process-buffer process))
+                        (words (and (zerop (process-exit-status process))
+                                    (split-string (with-current-buffer buffer (buffer-string))))))
+                   (kill-buffer buffer)
+                   (funcall callback (car words) (cadr words)))))))))
     (process-send-string process (mapconcat (lambda (file) (concat file "\0")) files ""))
     (process-send-eof process)
     process))

@@ -2172,6 +2172,23 @@ live in LispM's own repository, not the project's."
         (should (string-match-p "The user reverted the changes you made in assistant@project turn 1"
                                 (lispm-test--transcript revived)))))))
 
+(ert-deftest lispm-test-journal-snapshot-fails-quietly ()
+  "A snapshot whose project goes while it is taken fails, and says so to its callback.
+No error escapes into the process sentinels, where it would end a
+batch Emacs, as on CI when a test's directory went first."
+  (lispm-test-env
+    (let* ((top (file-name-as-directory (expand-file-name "gone/" project)))
+           (dir (lispm-journal--directory project))
+           (result 'pending))
+      (make-directory top t)
+      (lispm-test--git-repo top)
+      (lispm-journal--snapshot top dir :index (expand-file-name "index-test" dir)
+                               :ref "refs/turns/test/1" :message "m" :author "test"
+                               :callback (lambda (tree commit) (setq result (list tree commit))))
+      (delete-directory top t)
+      (should (lispm-test--wait (lambda () (not (eq result 'pending)))))
+      (should (equal result '(nil nil))))))
+
 ;;;; Conditions and restarts
 
 (defun lispm-test--failure (status type message)
