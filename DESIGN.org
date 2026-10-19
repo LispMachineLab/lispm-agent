@@ -24,6 +24,7 @@ implementation:
 | Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lisp/lispm-memory.el][lispm-memory.el]]                                         |
 | Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
+| Persistence               | the transcript, an inbox file, delegation records, git snapshots | [[file:lisp/lispm-inbox.el][lispm-inbox.el]], [[file:lisp/lispm-journal.el][lispm-journal.el]], ~lispm--resume-calls~ |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
 | Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
@@ -63,7 +64,8 @@ An agent holds:
   redefining a function changes what running code calls. Two things stay as a session started
   with them, since the request prefix is bound to them: its system prompt and the tool list
   offered to the model (section 2).
-- *Runtime state*: its session buffer, the request in flight, an inbox, the table of pending
+- *Runtime state*: its session buffer, the request in flight, an inbox (kept in the project's
+  ~inbox.org~ too, section 5), the table of pending
   tool calls, the edit snapshots of the current turn (the journal), the tools the user allowed
   for this Emacs session, the agents it is waiting on (~waiting-on~), its hook and timer
   subscriptions, and its token usage.
@@ -335,9 +337,38 @@ view in a window of LispM's choosing, never over a chat, where the approval is g
 *Approval survives restarts.* A call's heading holds all it needs (id, tool, input, state), so a
 session saved while calls await approval and opened again after Emacs restarted takes them up
 (~lispm--resume-calls~): WAITING calls await approval again, and once they are settled the turn
-goes on. Calls that were running are recorded as interrupted, their processes gone; if nothing
-awaits approval, the turn ends there without asking the model. The in-memory table of pending
-calls is only a cache of what the transcript says.
+goes on. Calls that were running are recorded as interrupted, their processes gone, unless
+something can still finish them (~lispm-resume-call-functions~: an ~ask_agent~ call whose
+helper can still reply, section 7). The in-memory table of pending calls is only a cache of
+what the transcript says.
+
+*The world persists.* A Lisp Machine's world is saved and comes back as it was; so does an
+agent's, for what Emacs holds of it in memory alone:
+
+- *Turns.* A session is saved as a turn starts, before each request and whenever calls are
+  recorded; a response streaming in is shown in the session but never saved (~lispm--unsaved~),
+  so the file holds what the next request is made from. A turn Emacs stopped in the middle of,
+  with nothing left to await, its calls interrupted or its request lost, waits at an
+  ~interrupted~ condition when its session opens again: ~continue~ asks the model again,
+  ~abort~ ends it as it would have ended.
+- *Inboxes.* What waits for an agent, and the input its turn under way handles, is kept in the
+  project's ~inbox.org~ as well as in memory (lispm-inbox.el): one heading per input, QUEUED,
+  then RUNNING while its turn is under way, removed once it is over and whoever waited has the
+  reply. A session opened again takes its queued inputs back and handles them next; a RUNNING
+  one says which turn was interrupted, and who waits for its reply. A standing agent, declared
+  again as Emacs starts, takes up at once what its inbox holds (~lispm-agent-declared-functions~);
+  ~lispm-resume-agents~ resumes every session an inbox holds inputs for.
+- *Delegations and ceilings* survive as section 7 says.
+- *The journal.* For a project in git, snapshots of the work tree as a turn begins and ends are
+  commits in a repository of LispM's own (~projects/<project>/journal.git~, the project's work
+  tree its work tree, so the project's own repository gets nothing), made asynchronously from
+  the files git lists, a turn's first request waiting for the first. ~lispm-revert-turn~ and
+  ~lispm-turn-diff~ take a turn's files from them, buffers and unsaved edits from memory: so
+  rollback covers what ~run_shell~ and ~eval_elisp~ changed, and turns from before Emacs
+  restarted.
+
+What is left to forget is right to forget: the calls allowed "for good" (~allowed~) last as
+long as the Emacs session they were allowed in.
 
 *Restarts: a stopped turn waits.* On a Lisp Machine an error does not end the computation: the
 debugger shows it and offers proceed options. In LispM a turn that stops early, because a request
@@ -359,6 +390,7 @@ it. Its restarts:
 | ~paused~            | the model pauses (~pause_turn~)                      | ~continue~; ~abort~                                       |
 | ~compaction-failed~ | a handover fails                                     | ~retry~; ~skip~: carry on in the long session; ~abort~    |
 | ~tool-error~        | a tool fails (~lispm-debug-tool-errors~)             | ~report~ it to the model; ~retry~; ~use-value~; ~abort~   |
+| ~interrupted~       | a session opens where Emacs stopped mid-turn         | ~continue~: ask the model again; ~abort~                  |
 
 They are chosen wherever approvals are given: the chat shows a box with the restarts numbered;
 in the org transcript ~C-c C-y~ offers them, and changing the heading's TODO state to ~DONE~
@@ -376,7 +408,8 @@ by another agent's message (a helper's) or by an event (a hook, a timer) go by
 event, waits for them: by default a failed request is tried again twice, a minute apart, then
 the turn stops, as one reaching the step limit or refused does at once; a response cut short is
 asked for again with twice the limit, or the session handed over, once; a paused one goes on; a
-failed handover is skipped. Dropping a response (~retry-larger~, ~refused~'s ~retry~,
+failed handover is skipped; a turn Emacs stopped in the middle of goes on, once its session
+opens again. Dropping a response (~retry-larger~, ~refused~'s ~retry~,
 ~compact~) tags its ~* Assistant~ section ~:ignore:~: it stays on record, no longer sent, and the
 chat says it was left out. A raised limit holds for the rest of the turn, unless the server
 refuses it: then it is lowered again, and the failed request says so. ~keep~ tells the model to
@@ -436,7 +469,8 @@ Agents do not only answer when asked. Any Emacs hook or timer can wake one up:
 (lispm-every 'planner 3600 "Look at your open tasks and move one of them forward.")
 #+end_src
 
-- A trigger produces an ~* Event: ...~ input in the agent's inbox; idle agents process their
+- A trigger produces an ~* Event: ...~ input in the agent's inbox, which outlives Emacs (section
+  5); idle agents process their
   inbox in order. Events of the same name are coalesced in the inbox, and bursts of hook runs
   are debounced.
 - *Hook runs an agent caused itself do not wake it* (~lispm-current-agent~ is bound while its
@@ -474,6 +508,13 @@ Concurrency:
   worktree of its own (the ~worktree~ skill, section 11). Delegation itself is
   ~lispm-delegate~, which ~ask_agent~ and the skill's ~worktree_ask~ share: same ceiling,
   same deadlock check, same retirement.
+- *Delegation outlives Emacs.* The caller's ~ask_agent~ call records on its heading whom it
+  asked (~:ASKED:~, the other session's id), and the request, in the other agent's inbox, whom to
+  reply to: the caller's session and call. Should Emacs stop before the reply, opening the
+  caller's session opens the other's again; the request is taken up there (queued, or its turn
+  interrupted and, unattended, gone on with), and the reply, when it comes, settles the call. A
+  helper's ceiling is recorded in its session (~#+lispm_ceiling:~), so a helper's session opened
+  again, by a restart or by hand, may still do no more than its caller.
 
 * 8. Handing over: long conversations
 
@@ -654,9 +695,11 @@ removed at once.
   arguments, so an object already in the image may run methods of its own. A program can
   still hold Emacs up, say with a huge ~make-list~; C-g stops loops. What the allowlist does
   not know, it refuses.
-- *Only Emacs-side changes can be rolled back*: side effects of ~run_shell~ and ~eval_elisp~
-  are not journaled. Next step: snapshot the project's git repository with ~git stash create~
-  at the start of each turn, extending rollback to any file change.
+- *A turn's snapshots show every change made meanwhile*: the journal in git compares the work
+  tree as a turn began with the tree as it ended, so changes the user or other agents made to
+  files of the project during the turn are counted as the turn's, and reverted with it (the
+  in-memory journal knows only the buffers the agent's tools changed). Projects outside git have
+  the in-memory journal only, which does not outlive Emacs.
 - *Handovers inside a turn wait for a response to fill the context*: a turn that outgrows the
   model's context hands over once a response stops with the window full (~context-full~), not
   before; a request whose input alone is too large fails instead (~request-failed~). Direction:

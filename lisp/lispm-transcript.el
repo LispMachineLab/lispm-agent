@@ -484,8 +484,9 @@ IMAGES are files the result holds besides TEXT."
 (defun lispm-transcript--parse-assistant (beg end)
   "Parse an assistant section body between BEG and END.
 Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
-call a plist (:id :name :input :state :pos), :pos being where its
-heading starts, and :stopped, the error it stopped at, for a call
+call a plist (:id :name :input :state :pos :properties), :pos being
+where its heading starts and :properties the alist of its heading's
+properties, and :stopped, the error it stopped at, for a call
 waiting at one (see `lispm-transcript-stopped')."
   (let* ((children (lispm-transcript--sections 2 beg end))
          (lead (string-trim (buffer-substring-no-properties
@@ -522,6 +523,7 @@ waiting at one (see `lispm-transcript-stopped')."
                    (push (list :id id :name (cdr (assoc "TOOL" props))
                                :input (if (consp input) input nil)
                                :state (plist-get heading :todo) :pos hbeg
+                               :properties props
                                :stopped (and (assoc "CONDITION" props)
                                              (cl-loop for (kbeg kbody kend) in kids
                                                       when (equal (plist-get (lispm-transcript--heading kbeg)

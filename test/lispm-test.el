@@ -1950,6 +1950,224 @@ started, after the session opened."
                              "late ok")))))
       (remhash "lispm_test_late" lispm-tools--registry))))
 
+;;;; Runtime state across restarts of Emacs
+
+(defun lispm-test--crash-all ()
+  "End every live agent as an Emacs crash would; return nothing.
+Their sessions are saved first, then every file under `lispm-directory'
+is put back as it was then, undoing on disk whatever stopping the
+agents wrote, and the agents are forgotten, standing ones too."
+  (dolist (agent (lispm-agents))
+    (when (buffer-live-p (lispm-agent-buffer agent))
+      (with-current-buffer (lispm-agent-buffer agent) (save-buffer))))
+  (let ((saved (mapcar (lambda (file)
+                         (cons file (with-temp-buffer (insert-file-contents file) (buffer-string))))
+                       (directory-files-recursively lispm-directory "" nil))))
+    (dolist (agent (lispm-agents))
+      (when (buffer-live-p (lispm-agent-buffer agent))
+        (kill-buffer (lispm-agent-buffer agent))))
+    (setq lispm--agents nil)
+    (pcase-dolist (`(,file . ,text) saved)
+      (unless (and (file-exists-p file)
+                   (equal text (with-temp-buffer (insert-file-contents file) (buffer-string))))
+        (let ((coding-system-for-write 'utf-8))
+          (write-region text nil file nil 'silent))))))
+
+(defun lispm-test--inbox (root)
+  "The text of the inbox file of the project at ROOT, or nil."
+  (let ((file (lispm-inbox-file root)))
+    (and (file-exists-p file) (lispm--file-text file))))
+
+(ert-deftest lispm-test-inbox-outlives-emacs ()
+  "Inputs queued for a busy agent, and the one its turn handles, outlive Emacs.
+Reopened, the session waits at an `interrupted' condition: going on
+answers the input the turn had, then the queued one."
+  (lispm-test-env
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (file (buffer-file-name (lispm-agent-buffer agent))))
+      (setq lispm-test--scripts '((assistant@project hang)))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'requesting))))
+      (lispm-tell agent "second" :from "reviewer")
+      (let ((inbox (lispm-test--inbox project)))
+        (should (string-match-p "^\\* RUNNING User$" inbox))
+        (should (string-match-p "^\\* QUEUED Message from reviewer\n\\(?:.*\n\\)*?:END:\nsecond$" inbox)))
+      (lispm-test--crash-all)
+      (setq lispm-test--requests nil
+            lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Answered first."))
+                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Answered second.")))))
+      (let ((revived (lispm-resume-file file)))
+        ;; The user's own turn waits for them to say whether to go on.
+        (should (eq (plist-get (lispm-agent-condition revived) :type) 'interrupted))
+        (should (equal (mapcar (lambda (e) (plist-get e :text)) (lispm-agent-inbox revived))
+                       '("second")))
+        (lispm-choose-restart-named revived 'continue)
+        (should (lispm-test--wait (lispm-test--idle-p revived)))
+        (should (= (length lispm-test--requests) 2))
+        (let ((first (car (last lispm-test--requests)))
+              (last (car lispm-test--requests)))
+          (should (equal (alist-get 'text (aref (alist-get 'content (car (last (append (alist-get 'messages first) nil))))
+                                                0))
+                         "first"))
+          (should (string-match-p "\\[Message from agent reviewer\\]\nsecond"
+                                  (format "%S" (alist-get 'messages last)))))
+        ;; Nothing waits any more.
+        (should-not (string-match-p "^\\* \\(?:QUEUED\\|RUNNING\\)" (or (lispm-test--inbox project) "")))))))
+
+(ert-deftest lispm-test-interrupted-turn-goes-on ()
+  "A turn an event started, which Emacs stopped, goes on once its session opens.
+Calls that were running are recorded as interrupted, and the model is
+asked again with their results; the response streaming in when Emacs
+stopped never reaches the file."
+  (lispm-test-env
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (file (buffer-file-name (lispm-agent-buffer agent))))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell" '((why . "w") (command . "sleep 30")))))))
+      (lispm-tell agent "the build failed" :event "compilation")
+      (should (lispm-test--wait (lambda () (equal (lispm-agent-status agent) "running run_shell"))))
+      (lispm-test--crash-all)
+      (setq lispm-test--requests nil
+            lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Looked again.")))))
+      (let ((revived (lispm-resume-file file)))
+        (should (lispm-test--wait (lispm-test--idle-p revived)))
+        (should (= (length lispm-test--requests) 1))
+        (should (string-match-p "interrupted" (format "%S" (alist-get 'messages (car lispm-test--requests)))))
+        (should (string-match-p "^\\* DONE Condition: Turn interrupted" (lispm-test--transcript revived)))
+        (should (string-match-p "Looked again\\." (lispm-test--transcript revived)))))
+    ;; A response streams into a session that stays unmodified meanwhile.
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (file (buffer-file-name (lispm-agent-buffer agent))))
+      (setq lispm-test--scripts '((assistant@project hang)))
+      (lispm-tell agent "think")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'requesting))))
+      (lispm--live-insert agent 'text "half an answer")
+      (should (string-match-p "half an answer" (lispm-test--transcript agent)))
+      (should-not (buffer-modified-p (lispm-agent-buffer agent)))
+      (lispm--save-sessions)
+      (should-not (string-match-p "half an answer" (lispm--file-text file))))))
+
+(ert-deftest lispm-test-delegation-outlives-emacs ()
+  "A helper's reply settles its caller's call after Emacs restarted.
+Opening the caller's session opens the helper's again, which goes on
+with the request, bounded still by its caller."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes." :policy '((write . auto)))
+    (let* ((default-directory project)
+           (boss (lispm-start))
+           (boss-file (buffer-file-name (lispm-agent-buffer boss))))
+      (setf (lispm-agent-policy boss) '((write . ask)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "tool_use"
+                                                   (lispm-test--tool "t1" "ask_agent"
+                                                                     '((agent . "reviewer")
+                                                                       (request . "Looks good?")))))
+              (reviewer@project hang)))
+      (lispm-tell boss "get a review")
+      (should (lispm-test--wait (lambda () (and (lispm-get-agent "reviewer@project" t)
+                                                (eq (lispm-agent-state (lispm-get-agent "reviewer@project"))
+                                                    'requesting)))))
+      (let* ((helper (lispm-get-agent "reviewer@project"))
+             (helper-id (lispm-agent-id helper)))
+        ;; The call records whom it asked, the helper its caller's ceiling.
+        (should (string-match-p (concat ":ASKED: " (regexp-quote helper-id))
+                                (lispm-test--transcript boss)))
+        (should (string-match-p "^#\\+lispm_ceiling: .*(write \\. ask)" (lispm-test--transcript helper)))
+        (lispm-test--crash-all)
+        (setq lispm-test--requests nil
+              lispm-test--scripts
+              `((reviewer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Yes, ship it.")))
+                (assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Approved.")))))
+        (let ((revived (lispm-resume-file boss-file)))
+          (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p revived))
+                                                    (= (length lispm-test--requests) 2)))))
+          (should (string-match-p "reviewer@project replied:\nYes, ship it\\."
+                                  (format "%S" (alist-get 'messages (car lispm-test--requests)))))
+          ;; The helper, bounded as before, retired once it had replied.
+          (should (lispm-test--wait (lambda () (null (cdr (lispm-agents))))))
+          (let ((again (lispm-resume-session helper-id)))
+            (should (eq (lispm-policy-action again 'write) 'ask))))))))
+
+(ert-deftest lispm-test-standing-agent-takes-up ()
+  "A standing agent declared again, as Emacs starts, handles what was queued for it.
+`lispm-resume-agents' resumes the other sessions Emacs stopped in."
+  (lispm-test-env
+    (let ((keeper (lispm-defagent keeper "Keeps going." :root project))
+          (other (let ((default-directory project)) (lispm-start))))
+      (setq lispm-test--scripts '((keeper hang) (assistant@project hang)))
+      (lispm-tell keeper "first")
+      (lispm-tell other "work")
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state keeper) 'requesting)
+                                                (eq (lispm-agent-state other) 'requesting)))))
+      (lispm-tell keeper "tick" :event "timer")
+      (lispm-test--crash-all)
+      (setq lispm-test--scripts
+            `((keeper ,(lispm-test--msg "end_turn" (lispm-test--text "Ticked.")))
+              (assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Worked.")))))
+      (let ((keeper (lispm-defagent keeper "Keeps going." :root project)))
+        ;; Its own turn waits for the user; the queued event comes after.
+        (should (lispm-test--wait (lambda () (lispm-agent-condition keeper))))
+        (should (equal (mapcar (lambda (e) (plist-get e :event)) (lispm-agent-inbox keeper)) '("timer")))
+        (lispm-stop-at-condition keeper)
+        (should (lispm-test--wait (lispm-test--idle-p keeper)))
+        (should (string-match-p "Ticked\\." (lispm-test--transcript keeper))))
+      (should (equal (mapcar #'lispm-agent-name (lispm-resume-agents)) '(assistant@project)))
+      (should (eq (plist-get (lispm-agent-condition (lispm-get-agent 'assistant@project)) :type)
+                  'interrupted)))))
+
+(ert-deftest lispm-test-journal-outlives-emacs ()
+  "In a git project, a turn's changes are reverted after Emacs restarted.
+Snapshots of the work tree cover what a shell command changed, and
+live in LispM's own repository, not the project's."
+  (lispm-test-env
+    (lispm-test--git-repo project)
+    (lispm-test--write (expand-file-name "a.txt" project) "a\n")
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (file (buffer-file-name (lispm-agent-buffer agent))))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell"
+                                                   '((why . "w")
+                                                     (command . "printf 'A\\n' > a.txt; printf 'new\\n' > b.txt"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Changed."))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t2" "run_shell"
+                                                   '((why . "w") (command . "printf 'AA\\n' > a.txt"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Changed again.")))))
+      ;; The second turn starts as the first ends: its snapshot waits.
+      (lispm-tell agent "change things")
+      (lispm-tell agent "change a again")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p agent))
+                                                (not (lispm-journal-busy-p agent))))))
+      (should (equal (lispm-test--file project "b.txt") "new\n"))
+      (should (= (length (lispm-journal-records agent)) 2))
+      ;; The project's repository has no ref of LispM's.
+      (should-not (string-match-p "turns" (lispm-test--git project "for-each-ref")))
+      (lispm-test--crash-all)
+      (let ((revived (lispm-resume-file file)))
+        (should-not (lispm-agent-journal revived))
+        (lispm-turn-diff revived)
+        (should (string-match-p "^-A\n\\+AA$" (with-current-buffer "*lispm-diff*" (buffer-string))))
+        (lispm-revert-turn revived)
+        (should (equal (lispm-test--file project "a.txt") "A\n"))
+        (lispm-revert-turn revived)
+        (should (equal (lispm-test--file project "a.txt") "a\n"))
+        (should-not (file-exists-p (expand-file-name "b.txt" project)))
+        (should-not (lispm-journal-records revived))
+        (should (string-match-p "The user reverted the changes you made in assistant@project turn 1"
+                                (lispm-test--transcript revived)))))))
+
 ;;;; Conditions and restarts
 
 (defun lispm-test--failure (status type message)

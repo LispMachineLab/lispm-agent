@@ -39,6 +39,14 @@
 ;; Delegating is `lispm-delegate', for other tools too: the worktree
 ;; skill's worktree_ask starts its helper in a git worktree of its own.
 ;;
+;; A delegation outlives Emacs.  The caller's call records whom it
+;; asked (:ASKED:, their session), and the request, in the inbox file
+;; until its turn ends, whom to reply to (its reply-to).  So when
+;; Emacs stops before the reply, opening either session again takes
+;; the delegation up: the one asked goes on with the request, or gets
+;; it, and its reply settles the call; a helper stays bounded by its
+;; caller, whose ceiling its session records.
+;;
 ;; Shared state needs no locks: the event loop is single-threaded, and
 ;; edits are exact-text replacements, which fail instead of clobbering
 ;; when someone else changed the text first (optimistic concurrency).
@@ -71,13 +79,16 @@ NAME is as for `lispm-get-agent'."
                         (seq-some #'reaches (lispm-agent-waiting-on agent))))))
       (reaches to))))
 
-(cl-defun lispm-delegate (caller agent request callback &key root)
+(cl-defun lispm-delegate (caller agent request callback &key root call)
   "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
 AGENT is a running agent or its name, or a role or the name of one no
 running agent has: a helper of that role then starts in ROOT (default:
 CALLER's root), may do no more than CALLER, and retires once it has
 replied.  CALLBACK gets the agent that replied and its final reply.
-Return that agent."
+CALL, the id of CALLER's call whose result the reply is, if it is the
+reply as `lispm-collab--replied' words it, makes the delegation outlive
+Emacs: should Emacs stop before the reply, it still settles the call.
+Return the agent asked."
   (let* ((role (cond ((lispm-role-p agent) agent)
                      ((and (stringp agent) (not (lispm-get-agent agent t)))
                       (lispm-get-role agent t))))
@@ -87,10 +98,13 @@ Return that agent."
       (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-agent-name target)))
     ;; Delegating must not widen what the caller may do.
     (when helper
-      (setf (lispm-agent-ceiling helper) (lispm-policy caller)))
+      (lispm-set-ceiling helper (lispm-policy caller)))
     (push target (lispm-agent-waiting-on caller))
+    (when call
+      (lispm-collab--record-asked caller call target))
     (lispm-tell target request
                 :from (lispm-agent-name caller)
+                :reply-to (and call (concat (lispm-agent-id caller) " " call (if helper " retire" "")))
                 :callback (lambda (reply)
                             (setf (lispm-agent-waiting-on caller)
                                   (cl-remove target (lispm-agent-waiting-on caller) :count 1))
@@ -98,6 +112,72 @@ Return that agent."
                               (run-at-time 0 nil #'lispm-collab--retire helper))
                             (funcall callback target reply)))
     target))
+
+(defun lispm-collab--replied (agent reply)
+  "What ask_agent returns when AGENT replied REPLY."
+  (format "%s replied:\n%s" (lispm-agent-name agent) reply))
+
+(defun lispm-collab--record-asked (caller call target)
+  "Record on the heading of CALLER's CALL that it asked TARGET."
+  (when-let* ((marker (plist-get (gethash call (lispm-agent-pending caller)) :marker))
+              ((marker-buffer marker)))
+    (lispm--in-session caller
+      (lispm-transcript-set-property marker "ASKED" (lispm-agent-id target)))))
+
+;;;; Delegations across restarts of Emacs
+
+(defun lispm-collab--deliver (caller-id call agent reply)
+  "Settle the call CALL of the session CALLER-ID with AGENT's REPLY.
+The caller's session is opened again if it is not open: Emacs stopped
+since it asked, and AGENT took the request up again."
+  (when-let* ((caller (lispm-resume-session caller-id)))
+    (setf (lispm-agent-waiting-on caller)
+          (cl-remove agent (lispm-agent-waiting-on caller) :count 1))
+    (when (eq (plist-get (gethash call (lispm-agent-pending caller)) :status) 'run)
+      (lispm--call-finished caller call (lispm-collab--replied agent reply) nil nil))))
+
+(defun lispm-collab--callback (agent reply-to)
+  "The callback of AGENT's input asked for by REPLY-TO, after Emacs restarted.
+REPLY-TO, as `lispm-delegate' wrote it, names the caller's session and
+call, and whether AGENT is a helper, to retire once it has replied."
+  (pcase (split-string reply-to)
+    (`(,caller-id ,call . ,flags)
+     (lambda (reply)
+       (lispm-collab--deliver caller-id call agent reply)
+       (when (member "retire" flags)
+         (run-at-time 0 nil #'lispm-collab--retire agent))))))
+
+(setq lispm-inbox-callback-function #'lispm-collab--callback)
+
+(defun lispm-collab--answering-p (agent caller call)
+  "Non-nil if AGENT has the request of CALLER's CALL, queued or under way."
+  (let ((prefix (concat (lispm-agent-id caller) " " call)))
+    (seq-some (lambda (entry)
+                (when-let* ((reply-to (plist-get entry :reply-to)))
+                  (or (equal reply-to prefix) (string-prefix-p (concat prefix " ") reply-to))))
+              (cons (lispm-agent-entry agent) (lispm-agent-inbox agent)))))
+
+(defun lispm-collab--follow (caller call id)
+  "Have CALLER's CALL, which asked the session ID, wait for its reply again.
+That session is opened again if it is not open, which takes the
+request up; if it holds the request no longer, the reply was lost with
+Emacs, and the call is recorded as interrupted."
+  (when (eq (plist-get (gethash call (lispm-agent-pending caller)) :status) 'run)
+    (let ((target (lispm-resume-session id)))
+      (if (and target (lispm-collab--answering-p target caller call))
+          (push target (lispm-agent-waiting-on caller))
+        (lispm--call-finished caller call lispm--interrupted-result t nil)))))
+
+(defun lispm-collab--take-up (caller call)
+  "Take up CALLER's CALL of ask_agent, left running when Emacs stopped.
+It is taken up if its heading records whom it asked: their reply,
+once they have taken the request up again, settles it."
+  (when-let* ((id (cdr (assoc "ASKED" (plist-get call :properties))))
+              ((not (string-empty-p id))))
+    (run-at-time 0 nil #'lispm-collab--follow caller (plist-get call :id) id)
+    t))
+
+(add-hook 'lispm-resume-call-functions #'lispm-collab--take-up)
 
 (defun lispm-collab--retire (helper)
   "Retire HELPER, which has replied, unless the user has since written to it.
@@ -171,7 +251,9 @@ helper retires once it has replied."
   :async t
   (lispm-delegate lispm-current-agent agent request
                   (lambda (target reply)
-                    (funcall done (format "%s replied:\n%s" (lispm-agent-name target) reply))))
+                    (funcall done (lispm-collab--replied target reply)))
+                  ;; A call the model made, not one a Lisp program does.
+                  :call lispm-current-call)
   nil)
 
 (provide 'lispm-collab)
