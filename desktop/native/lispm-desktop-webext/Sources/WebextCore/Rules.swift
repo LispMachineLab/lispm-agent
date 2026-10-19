@@ -58,7 +58,7 @@ public enum Rules {
     /// extension at it.
     public static let scheme = "chrome-extension"
     /// WebKit's own scheme for extension pages.
-    static let webkitScheme = "webkit-extension"
+    public static let webkitScheme = "webkit-extension"
 
     /// The application name every page view and extension view reports, so
     /// that they all report one user agent: WebKit gives workers the user
@@ -154,18 +154,46 @@ public enum Rules {
         }
     }
 
+    /// What the shim added to a prepared extension's manifest (its
+    /// .search-added, see ExtensionShims.prepare), which the extension
+    /// never asked for.
+    static func added(in folder: URL) -> Set<String> {
+        Set((try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent(".search-added")))) as? [String] ?? [])
+    }
+
+    /// The permissions its manifest names.
+    static func declared(in folder: URL) -> [String] {
+        ((try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("manifest.json")))) as? [String: Any])?["permissions"] as? [String] ?? []
+    }
+
+    /// Chrome's own APIs, which the shim answers itself, and what each lets
+    /// an extension do.
+    public static let shimAnswered: [(String, String)] = [
+        ("userScripts", "Run scripts you add to it on websites"),
+        ("privacy", "Change your privacy settings"),
+        ("browsingData", "Clear your browsing data"),
+        ("notifications", "Show notifications"),
+    ]
+
     /// What an extension was allowed, as it is written down and compared on
-    /// every update: WebKit's permissions and the sites it reaches; an update
-    /// that adds any of them is asked about again.
-    public static func grants(_ found: WKWebExtension) -> [String] {
-        var out = Set(found.requestedPermissions.map(\.rawValue))
+    /// every update: WebKit's permissions, the sites it reaches, and the
+    /// APIs the shim answers for it — an update that adds any of them is
+    /// asked about again. What the shim added to its manifest is left out.
+    public static func grants(_ found: WKWebExtension, in folder: URL) -> [String] {
+        let added = added(in: folder)
+        let ours = Set(shimAnswered.map(\.0))
+        var out = Set(found.requestedPermissions.map(\.rawValue).filter { !added.contains($0) })
         out.formUnion(found.allRequestedMatchPatterns.map { "site:" + $0.string })
+        out.formUnion(declared(in: folder).filter { ours.contains($0) && !added.contains($0) }.map { "shim:" + $0 })
         return out.sorted()
     }
 
-    /// What an extension wants, in words.
-    public static func describe(_ found: WKWebExtension) -> [String] {
+    /// What an extension wants, in words, leaving out what the shim added
+    /// to its manifest.
+    public static func describe(_ found: WKWebExtension, in folder: URL) -> [String] {
         var out: [String] = []
+        let added = added(in: folder)
+        let declared = Set(declared(in: folder))
         let patterns = found.allRequestedMatchPatterns
         if patterns.contains(where: { $0.matchesAllHosts || $0.matchesAllURLs }) {
             out.append("Read and change everything on every website")
@@ -184,7 +212,11 @@ public enum Rules {
             (.nativeMessaging, "Talk to apps on this Mac"),
             (.scripting, "Run scripts in pages"),
         ]
-        for (permission, sentence) in words where found.requestedPermissions.contains(permission) {
+        for (permission, sentence) in words
+        where found.requestedPermissions.contains(permission) && !added.contains(permission.rawValue) {
+            out.append(sentence)
+        }
+        for (name, sentence) in shimAnswered where declared.contains(name) && !added.contains(name) {
             out.append(sentence)
         }
         return out

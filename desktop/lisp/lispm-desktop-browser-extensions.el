@@ -30,8 +30,10 @@
 ;; (Swift, in native/lispm-desktop-webext) hands each one the controller as
 ;; it is made, and hosts the extensions: the browser's pages are their tabs,
 ;; their popups hang from the page in front, and their questions are asked
-;; here.  Much of the module is ported from Search, a WebKit browser for
-;; macOS.
+;; here.  Most of the module is ported from Search, a WebKit browser for
+;; macOS, with the script Search puts in every extension to fill in the
+;; Chrome APIs WebKit lacks, so that heavy ones such as the Rabby wallet run;
+;; a window an extension opens of its own is a Mac window.
 ;;
 ;;   Chrome Web Store link --install--> fetched, signature checked, asked, loaded
 ;;   M-e, an extension's button   --->  its popup, or its click
@@ -47,6 +49,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
+(require 'url-util)
 
 (declare-function xwidget-at "xwidget" (pos))
 (declare-function xwidget-buffer "xwidget.c" (xwidget))
@@ -283,7 +286,8 @@ for the user, or opens and closes pages, runs after it returns."
       ("ask" (run-at-time 0 nil #'lispm-desktop-browser-extensions--ask payload))
       ("open" (run-at-time 0 nil #'lispm-desktop-browser-extensions--open payload))
       ("close" (run-at-time 0 nil #'lispm-desktop-browser-extensions--close payload))
-      ("activate" (run-at-time 0 nil #'lispm-desktop-browser-extensions--activate payload)))))
+      ("activate" (run-at-time 0 nil #'lispm-desktop-browser-extensions--activate payload))
+      ("search" (run-at-time 0 nil #'lispm-desktop-browser-extensions--search payload)))))
 
 (defun lispm-desktop-browser-extensions--changed ()
   "Forget the list, and redraw what shows it."
@@ -339,6 +343,18 @@ its view.  A running extension's page is shown by a view made for it."
   "Close the tab of the page whose view PAYLOAD names."
   (when-let* ((buffer (lispm-desktop-browser-extensions--buffer (plist-get payload :view))))
     (lispm-desktop-browser-close-tab buffer)))
+
+(defvar lispm-desktop-xwidget-search-url)
+(declare-function lispm-desktop-browser-open-url "lispm-desktop-browser" (url &optional new-tab))
+
+(defun lispm-desktop-browser-extensions--search (payload)
+  "Search for the words in PAYLOAD with the browser's search engine, in a
+new tab when it asks for one (chrome.search.query)."
+  (let ((text (plist-get payload :text)))
+    (unless (string-empty-p (or text ""))
+      (lispm-desktop-browser-open-url
+       (format lispm-desktop-xwidget-search-url (url-hexify-string text))
+       (plist-get payload :newTab)))))
 
 (defun lispm-desktop-browser-extensions--activate (payload)
   "Bring the tab of the page whose view PAYLOAD names in front."

@@ -38,6 +38,18 @@ final class Popup: NSObject, WKUIDelegate, WKNavigationDelegate, NSPopoverDelega
     private var measuring: Timer?
     private(set) var extensionID: String?
 
+    /// The popup's web view, while one is up.
+    var view: WKWebView? { web }
+
+    /// On screen now.
+    var isUp: Bool { popover?.isShown == true }
+
+    /// The popup as its extension's worker finds it in clients.matchAll().
+    func client(of id: String) -> [String: Any]? {
+        guard extensionID == id, let url = web?.url else { return nil }
+        return ["id": "popup", "url": url.absoluteString, "visible": isUp, "focused": isUp && web?.window?.isKeyWindow == true]
+    }
+
     func show(_ url: URL, for context: WKWebExtensionContext, from anchor: NSView?) {
         close()
         guard let host = Host.shared, let configuration = context.webViewConfiguration else { return }

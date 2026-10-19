@@ -140,10 +140,17 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   one for the page in front: its popup hangs from the page's top right, or it is told it was
   clicked.  Manage Extensions lists them, to press, open the options of (in a tab of their own),
   turn on and off, reload or remove.  Their tabs are the browser's pages, their questions are
-  asked in the minibuffer, and they live in =lispm-desktop-browser-extensions-directory=.  Much of
+  asked in the minibuffer, and they live in =lispm-desktop-browser-extensions-directory=.  Most of
   the module is ported from [[https://github.com/driceroland/Search][Search]], a WebKit browser for
-  macOS; the Chrome APIs WebKit lacks, which Search fills in itself (bookmarks, history,
-  downloads, native messaging), are not there yet, so extensions needing them do less.
+  macOS, with the script Search puts in every extension to fill in the Chrome APIs WebKit lacks
+  (notifications, offscreen documents, a worker's WebSockets, user scripts, the side panel as a
+  tab…) and to mend where WebKit behaves otherwise, so heavy extensions such as the Rabby wallet
+  run: its worker, its page provider (=window.ethereum=), its popup.  A window an extension opens
+  of its own, a wallet's approval of a transaction, is a Mac window whose page takes the keyboard.
+  Bookmarks, history and downloads stay the browser's (an extension finds them empty), and no app
+  on the Mac is spoken to (native messaging).  An Emacs started with
+  =LISPM_DESKTOP_WEBEXT_VERBOSE= set lists what extensions write to their consoles as errors and
+  warnings with their errors, for finding out why one fails.
 - *Windows out on the screen*, on macOS (see [[*Mac OS and X][Mac OS and X]]), as a virtual machine's in Parallels' Coherence or
   VMware's Unity: drop a floating window, the Finder's, the editor's, the browser's or a control
   panel's, mostly past the desktop's edge, and it goes out among the computer's own windows,

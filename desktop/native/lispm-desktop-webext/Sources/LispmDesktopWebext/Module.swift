@@ -9,9 +9,12 @@
 // host inside Emacs: it gives Emacs's page views the controller as they are
 // made (Hooks.swift), tells WebKit which pages are open and which one is in
 // front (Tabs.swift), and installs, loads and runs the extensions (Host.swift,
-// Popup.swift).  Much of it is ported from Search, a WebKit browser for
-// macOS (https://github.com/driceroland/Search), whose license is in
-// LICENSE.Search.
+// Popup.swift, Windows.swift).  The Chrome APIs WebKit lacks are filled in by
+// a script put in every extension and answered here (ExtensionShims.swift,
+// ExtensionOffscreen.swift, ExtensionSocket.swift,
+// ExtensionWorkerRecovery.swift).  Most of it is ported from Search, a
+// WebKit browser for macOS (https://github.com/driceroland/Search), whose
+// license is in LICENSE.Search.
 //
 // Emacs calls the functions below; the module calls back only through one
 // pipe (EmacsSwiftModule's Channel), as `lispm-desktop-webext--event' with a

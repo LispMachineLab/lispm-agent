@@ -2,12 +2,14 @@
 //
 // From Search (https://github.com/driceroland/Search) at
 // 6294b6aed35299c7ab91399a4b2374dd726b1f39, Sources/Search/Extensions.swift:
-// the controller and its delegate, loading, the Chrome Web Store and folder
-// installs, reloading, removing, and starting a dead worker again.  What is
-// Search's own is left out: its windows, its settings and buttons, the APIs
-// it answers itself (ExtensionShims.swift), native messaging and updates.
-// Emacs stands where Search's windows and dialogs stood: it is told what
-// happens, opens tabs and asks the questions (see Module.swift).
+// the controller and its delegate, loading with the shim
+// (ExtensionShims.swift), the Chrome Web Store and folder installs,
+// reloading, removing, pressing a button, workers WebKit remembers or loses,
+// and starting a dead worker again.  What is Search's own is left out: its
+// windows, settings, buttons, native messaging to apps on the Mac, and
+// updates.  Emacs stands where Search's windows and dialogs stood: it is
+// told what happens, opens tabs and asks the questions (see Module.swift);
+// an extension's own windows are Mac windows (Windows.swift).
 //
 // Copyright (c) 2026 Office Commun
 // Copyright (C) 2026  Ryan.K
@@ -42,6 +44,12 @@ final class Host: NSObject {
     private var expected: WKWebExtensionContext?
     /// Ids being installed or reloaded.
     private var busy: Set<String> = []
+    /// Errors an extension's pages and worker ran into, newest last, a few
+    /// dozen at most per extension.
+    private var errors: [String: [String]] = [:]
+    /// Loaded at least once since Emacs started, and loaded again.
+    private var loadsThisRun: Set<String> = []
+    private(set) var loadedBefore: Set<String> = []
 
     private init(directory: URL, events: Events) {
         self.directory = directory
@@ -49,7 +57,9 @@ final class Host: NSObject {
         WKWebExtension.MatchPattern.registerCustomURLScheme(Rules.scheme)
         let configuration = WKWebExtensionController.Configuration.default()
         let views = configuration.webViewConfiguration ?? WKWebViewConfiguration()
+        // The same user agent as the pages, to the letter (see Rules.userAgentName).
         views.applicationNameForUserAgent = Rules.userAgentName
+        ExtensionWorkerRecovery.shared.attach(views.userContentController)
         configuration.webViewConfiguration = views
         controller = WKWebExtensionController(configuration: configuration)
         super.init()
@@ -57,11 +67,12 @@ final class Host: NSObject {
         controller.delegate = self
         controller.didOpenWindow(tabs.window)
         installed = (try? JSONDecoder().decode([Installed].self, from: Data(contentsOf: listFile))) ?? []
+        stored = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: storeFile))) as? [String: Any]) ?? [:]
     }
 
     private var listFile: URL { directory.appendingPathComponent("installed.json") }
 
-    private func folder(for id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
+    func folder(for id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
 
     private func stagingFolder(for id: String) -> URL {
         directory.appendingPathComponent(".staging-\(id)-\(UUID().uuidString)", isDirectory: true)
@@ -70,6 +81,31 @@ final class Host: NSObject {
     private func save() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? JSONEncoder().encode(installed).write(to: listFile, options: .atomic)
+    }
+
+    // MARK: - what the browser keeps for extensions
+
+    /// Optional permissions granted, chrome.privacy settings and which
+    /// workers WebKit was last given, kept beside the list of extensions as
+    /// Search keeps them in its settings.
+    private var storeFile: URL { directory.appendingPathComponent("browser.json") }
+    private var stored: [String: Any] = [:]
+
+    private func keep(_ value: Any?, at key: String) {
+        stored[key] = value
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? JSONSerialization.data(withJSONObject: stored).write(to: storeFile, options: .atomic)
+    }
+
+    func granted(_ id: String) -> [String] { stored["granted.\(id)"] as? [String] ?? [] }
+    func setGranted(_ list: [String], for id: String) { keep(list.isEmpty ? nil : list, at: "granted.\(id)") }
+    func settings(for id: String) -> [String: Any] { stored["settings.\(id)"] as? [String: Any] ?? [:] }
+    func setSettings(_ values: [String: Any], for id: String) { keep(values.isEmpty ? nil : values, at: "settings.\(id)") }
+
+    func noteError(_ text: String, for id: String) {
+        var list = errors[id] ?? []
+        list.append(text)
+        errors[id] = Array(list.suffix(40))
     }
 
     // MARK: - Emacs's page views
@@ -89,8 +125,11 @@ final class Host: NSObject {
 
     /// A page view Emacs has made.  It names an old Safari as its browser;
     /// every view reports the same one instead (see Rules.userAgentName).
+    /// Its scripts' controller, which Emacs made for it, hears the shim's
+    /// questions about the worker (ExtensionWorkerRecovery).
     func adopt(_ view: WKWebView) {
         view.customUserAgent = nil
+        ExtensionWorkerRecovery.shared.attach(view.configuration.userContentController)
         tabs.adopt(view)
     }
 
@@ -132,6 +171,7 @@ final class Host: NSObject {
                 "fromStore": item.fromStore, "loaded": contexts[item.id] != nil,
             ]
             if let source = item.source { entry["source"] = source }
+            var problems = errors[item.id] ?? []
             if let context = contexts[item.id] {
                 if let action = context.action(for: tabs.active) {
                     entry["label"] = action.label
@@ -140,8 +180,9 @@ final class Host: NSObject {
                     entry["popup"] = action.presentsPopup
                 }
                 entry["options"] = context.optionsPageURL != nil
-                entry["errors"] = context.errors.map(\.localizedDescription)
+                problems = context.errors.map(\.localizedDescription) + problems
             }
+            entry["errors"] = problems
             return entry
         }
         let data = try? JSONSerialization.data(withJSONObject: list)
@@ -194,10 +235,89 @@ final class Host: NSObject {
         await ask("\(context.webExtension.displayName ?? "An extension") \(question)", details: details)
     }
 
+    // MARK: - its button
+
+    /// When each extension's button was last pressed: a permissions.request
+    /// made from that press is one you asked for, even once WebKit no longer
+    /// sees it (see ExtensionShims, "permissions.afterClick").
+    static var clicked: [String: Date] = [:]
+    /// The same, kept: permissions.request uses up `clicked`.
+    static var pressed: [String: Date] = [:]
+    /// When you last clicked or typed in one of each extension's own pages —
+    /// its popup, its window, or a page of its in a tab. Real events only: a
+    /// page's script can dispatch one, but it never reaches here.
+    static var touched: [String: Date] = [:]
+    private static var touching: Any?
+
+    static func watchTouches() {
+        guard touching == nil else { return }
+        touching = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { event in
+            var view: NSView? = event.type == .keyDown
+                ? event.window?.firstResponder as? NSView
+                : event.window?.contentView?.superview?.hitTest(event.locationInWindow)
+            while let found = view, !(found is WKWebView) { view = found.superview }
+            if let url = (view as? WKWebView)?.url, url.scheme?.lowercased() == Rules.scheme, let id = url.host() {
+                Host.touched[id] = Date()
+            }
+            return event
+        }
+    }
+
+    /// You just did something in this extension — its button, a click or a
+    /// key in one of its pages — as Chrome's "user gesture" means: within
+    /// the last few seconds.
+    static func justUsed(_ id: String) -> Bool {
+        let latest = [clicked[id], touched[id]].compactMap { $0 }.max()
+        return latest.map { Date().timeIntervalSince($0) < 5 } ?? false
+    }
+
+    /// Presses extension `id`'s button for the page in front. A popup is
+    /// opened here, straight away: left to WebKit, it builds a popup of its
+    /// own first, and closing that one in favour of this one lost the new
+    /// popup's first messages to its worker.
+    func performAction(_ id: String) -> Bool {
+        guard let context = contexts[id] else { return false }
+        let tab = tabs.active
+        Host.clicked[id] = Date()
+        Host.pressed[id] = Date()
+        if let tab { context.userGesturePerformed(in: tab) }
+        // An extension that asked for its button to open its side panel,
+        // which is a tab of its own here.
+        if ExtensionShims.panelOnClick.contains(id), context.action(for: tab)?.presentsPopup != true {
+            guard !ExtensionShims.panelOff.contains(id),
+                  let path = ExtensionShims.panelPath[id] ?? ExtensionShims.defaultPanel(context),
+                  let url = ExtensionShims.page(path, in: context) else { return true }
+            events.send("open", ["url": url.absoluteString, "active": true])
+            return true
+        }
+        guard let action = context.action(for: tab) else { return false }
+        if action.presentsPopup, let url = popupURL(for: context) {
+            Popup.shared.show(url, for: context, from: tab?.view)
+            return true
+        }
+        context.performAction(for: tab)
+        return true
+    }
+
+    /// The page the button's popup is now: one the extension set for this
+    /// page or for all of them, else its manifest's.
+    private func popupURL(for context: WKWebExtensionContext) -> URL? {
+        let set = ExtensionShims.popups[context.uniqueIdentifier] ?? [:]
+        let path = tabs.active.flatMap { set[String($0.address)] } ?? set["*"]
+        guard let path else { return Rules.popupURL(for: context) }
+        guard !path.isEmpty else { return nil }
+        return URL(string: path, relativeTo: context.baseURL)?.absoluteURL
+    }
+
+    func optionsURL(_ id: String) -> String? {
+        contexts[id]?.optionsPageURL?.absoluteString
+    }
+
     // MARK: - loading
 
     private func loadAll() {
         Task { @MainActor in
+            await forgetWorkersIfChanged()
             // One after another, a moment apart: started all at once, WebKit
             // fails some of their workers and never tries them again.
             let enabled = installed.filter(\.enabled)
@@ -211,6 +331,32 @@ final class Host: NSObject {
         }
     }
 
+    /// WebKit keeps each extension's service worker registered from one
+    /// start to the next, with the scripts it fetched then, and may start
+    /// that copy rather than what is on disk now. A copy from another shim
+    /// or another version of the extension can leave the worker dead for
+    /// good. WebKit lists no records for extension origins, so there is no
+    /// clearing one extension's alone; clearing them all stops the workers
+    /// that run. So it is done at start, before any extension loads, and
+    /// only when what they would run has changed since. Websites' workers go
+    /// with them and are registered again on the next visit.
+    private var workers: String {
+        ([ExtensionShims.version] + installed.map { "\($0.id) \($0.version)" }.sorted()).joined(separator: "\n")
+    }
+
+    private func forgetWorkersIfChanged() async {
+        guard stored["workers"] as? String != workers else { return }
+        await WKWebsiteDataStore.default().removeData(ofTypes: [WKWebsiteDataTypeServiceWorkerRegistrations],
+                                                       modifiedSince: .distantPast)
+        keep(workers, at: "workers")
+    }
+
+    /// An extension put in again, reloaded or found with its worker dead:
+    /// the version alone doesn't tell, so the next start clears regardless.
+    private func workersChanged() {
+        keep(nil, at: "workers")
+    }
+
     @discardableResult
     private func load(_ item: Installed) async -> Bool {
         let folder = folder(for: item.id)
@@ -219,6 +365,13 @@ final class Host: NSObject {
             do { try await Task.detached(priority: .userInitiated) { try ExtensionFiles.unlinkOutside(folder) }.value }
             catch { return false }
         }
+        // The shim this module carries, in place of whatever was there —
+        // away from the main thread: preparing reads and rewrites every
+        // script and page an extension ships.
+        let generation = ExtensionWorkerRecovery.shared.generation(for: item.id)
+        try? await Task.detached(priority: .userInitiated) {
+            try ExtensionShims.prepare(folder, workerGeneration: generation)
+        }.value
         do {
             let found = try await WKWebExtension(resourceBaseURL: folder)
             let context = WKWebExtensionContext(for: found)
@@ -234,10 +387,17 @@ final class Host: NSObject {
             for permission in found.requestedPermissions {
                 context.setPermissionStatus(.grantedExplicitly, for: permission)
             }
+            // The shim's line to the browser (see ExtensionShims.prepare).
+            context.setPermissionStatus(.grantedExplicitly, for: .nativeMessaging)
             Rules.grantSites(context)
             Rules.fence(context)
-            try controller.load(context)
+            Host.watchTouches()
+            let undoRecovery = ExtensionWorkerRecovery.shared.register(context)
+            do { try controller.load(context) }
+            catch { undoRecovery(); throw error }
             watch(context)
+            if contexts[item.id] == nil, loadsThisRun.contains(item.id) { loadedBefore.insert(item.id) }
+            loadsThisRun.insert(item.id)
             contexts[item.id] = context
             changed()
             return true
@@ -247,12 +407,22 @@ final class Host: NSObject {
         }
     }
 
+    /// Unloads extension `id` and what it kept going outside WebKit.
+    /// `replacingContext` false keeps its context for loading again, as
+    /// `revive` does. Whether WebKit unloaded it.
     @discardableResult
-    private func unload(_ id: String) -> Bool {
+    private func unload(_ id: String, replacingContext: Bool = true) -> Bool {
         guard let context = contexts[id] else { return false }
         var unloaded = false
         do { try controller.unload(context); unloaded = true } catch {}
+        if unloaded { ExtensionWorkerRecovery.shared.restarted(id, replacingContext: replacingContext) }
+        if replacingContext || !unloaded { ExtensionWorkerRecovery.shared.unregister(id) }
         if Popup.shared.extensionID == id { Popup.shared.close() }
+        for window in ExtensionWindows.shared.open where window.extensionID == id { window.window.close() }
+        ExtensionOffscreen.close(for: id)
+        ExtensionShims.panelTabs[id] = nil
+        ExtensionShims.panelOff.remove(id)
+        if let held = ExtensionShims.awake.removeValue(forKey: id) { IOPMAssertionRelease(held) }
         if let watcher = errorWatchers.removeValue(forKey: id) { NotificationCenter.default.removeObserver(watcher) }
         contexts[id] = nil
         changed()
@@ -275,6 +445,7 @@ final class Host: NSObject {
         ) { [weak self, weak context] _ in
             MainActor.assumeIsolated {
                 guard let self, let context, self.contexts[id] === context else { return }
+                self.changed()
                 let failed = context.errors.contains { error in
                     let e = error as NSError
                     return e.domain == WKWebExtensionContext.errorDomain
@@ -284,7 +455,7 @@ final class Host: NSObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                     MainActor.assumeIsolated {
                         guard let self, self.contexts[id] === context else { return }
-                        self.revive(id)
+                        self.revive(id, because: "its worker failed to start")
                     }
                 }
             }
@@ -293,20 +464,35 @@ final class Host: NSObject {
 
     /// An extension whose worker won't start again: unloaded and loaded,
     /// as a restart would — at most once a minute, so one that can never
-    /// start doesn't go round in circles. The same context is loaded again,
-    /// as the pages already holding it address it.
-    private func revive(_ id: String) {
-        guard let context = contexts[id], Date().timeIntervalSince(revived[id] ?? .distantPast) > 60 else { return }
-        do { try controller.unload(context) } catch { return }
+    /// start doesn't go round in circles. The same context is loaded again:
+    /// the pages already holding it address it.
+    @discardableResult
+    func revive(_ id: String, because reason: String) -> Bool {
+        guard let item = installed.first(where: { $0.id == id }), item.enabled,
+              let context = contexts[id],
+              Date().timeIntervalSince(revived[id] ?? .distantPast) > 60 else { return false }
+        let popup = Popup.shared.extensionID == id ? Popup.shared.view?.url : nil
+        guard unload(id, replacingContext: false) else { return false }
         revived[id] = Date()
+        workersChanged()
+        noteError("restarted the extension: \(reason)", for: id)
         do {
+            loadedBefore.insert(id)
             try controller.load(context)
+            contexts[id] = context
             watch(context)
+            changed()
+            if let popup {
+                Task { [weak self] in
+                    guard let self, self.contexts[id] === context, context.isLoaded else { return }
+                    Popup.shared.show(popup, for: context, from: self.tabs.active?.view)
+                }
+            }
         } catch {
-            contexts[id] = nil
-            events.message("\(context.webExtension.displayName ?? id) couldn't start again: \(error.localizedDescription)")
+            if contexts[id] == nil, !context.isLoaded { ExtensionWorkerRecovery.shared.unregister(id) }
+            noteError("couldn't reload the extension: \(error.localizedDescription)", for: id)
         }
-        changed()
+        return true
     }
 
     // MARK: - installing
@@ -332,7 +518,10 @@ final class Host: NSObject {
                 events.message("Fetching the extension from the Chrome Web Store…")
                 let crx = try await Crx.fetch(id)
                 let zip = try Crx.verifiedZip(crx, id: id)
-                try await Task.detached(priority: .userInitiated) { try Crx.unpack(zip, into: staged) }.value
+                try await Task.detached(priority: .userInitiated) {
+                    try Crx.unpack(zip, into: staged)
+                    try ExtensionShims.prepare(staged, fresh: true)
+                }.value
                 try await admit(staged, as: id, fromStore: true)
             } catch {
                 events.message(error.localizedDescription)
@@ -355,16 +544,20 @@ final class Host: NSObject {
         }
         guard busy.insert(id).inserted else { return }
         let staged = stagingFolder(for: id)
+        let directory = directory
         Task { @MainActor in
             defer {
                 busy.remove(id)
                 try? FileManager.default.removeItem(at: staged)
             }
             do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                // The folder itself, wherever a link to it leads.
-                try FileManager.default.copyItem(at: source.resolvingSymlinksInPath(), to: staged)
-                try ExtensionFiles.unlinkOutside(staged)
+                try await Task.detached(priority: .userInitiated) {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    // The folder itself, wherever a link to it leads.
+                    try FileManager.default.copyItem(at: source.resolvingSymlinksInPath(), to: staged)
+                    try ExtensionFiles.unlinkOutside(staged)
+                    try ExtensionShims.prepare(staged, fresh: true)
+                }.value
                 try await admit(staged, as: id, fromStore: false, source: source)
             } catch {
                 events.message("Couldn't install the extension: \(error.localizedDescription)")
@@ -378,15 +571,18 @@ final class Host: NSObject {
         let found = try await WKWebExtension(resourceBaseURL: staged)
         let name = found.displayName ?? id
         let version = found.version ?? "?"
-        guard await ask(install: "\(name) \(version)", wants: Rules.describe(found)),
+        guard await ask(install: "\(name) \(version)", wants: Rules.describe(found, in: staged)),
               !installed.contains(where: { $0.id == id }) else {
             events.message("\(name) wasn't added")
             return
         }
+        let permissions = Rules.grants(found, in: staged)
         try ExtensionFiles.replace(staged, at: folder(for: id))
         unload(id)
+        errors[id] = nil
+        workersChanged()
         let item = Installed(id: id, name: name, version: version, enabled: true, fromStore: fromStore,
-                             permissions: Rules.grants(found), source: source?.path)
+                             permissions: permissions, source: source?.path)
         installed.removeAll { $0.id == id }
         installed.append(item)
         save()
@@ -416,21 +612,25 @@ final class Host: NSObject {
                     return
                 }
                 do {
-                    try FileManager.default.copyItem(at: source.resolvingSymlinksInPath(), to: staged)
-                    try ExtensionFiles.unlinkOutside(staged)
+                    try await Task.detached(priority: .userInitiated) {
+                        try FileManager.default.copyItem(at: source.resolvingSymlinksInPath(), to: staged)
+                        try ExtensionFiles.unlinkOutside(staged)
+                        try ExtensionShims.prepare(staged, fresh: true)
+                    }.value
                 } catch {
                     events.message("Couldn't copy \(original.name) again: \(error.localizedDescription)")
                     return
                 }
             }
-            guard let found = try? await WKWebExtension(resourceBaseURL: staged ?? target) else {
+            let resource = staged ?? target
+            guard let found = try? await WKWebExtension(resourceBaseURL: resource) else {
                 events.message("\(original.name) wasn't reloaded: its manifest couldn't be read")
                 return
             }
-            let wants = Rules.grants(found)
+            let wants = Rules.grants(found, in: resource)
             if !Set(wants).isSubset(of: Set(original.permissions)) {
                 let name = [found.displayName ?? original.name, found.version].compactMap { $0 }.joined(separator: " ")
-                guard await ask(install: name, wants: Rules.describe(found)) else {
+                guard await ask(install: name, wants: Rules.describe(found, in: resource)) else {
                     events.message("\(original.name) wasn't reloaded: it asks for more than before")
                     return
                 }
@@ -445,6 +645,8 @@ final class Host: NSObject {
                 }
             }
             unload(id)
+            errors[id] = nil
+            workersChanged()
             if let index = installed.firstIndex(where: { $0.id == id }) {
                 installed[index].name = found.displayName ?? installed[index].name
                 installed[index].version = found.version ?? installed[index].version
@@ -471,6 +673,11 @@ final class Host: NSObject {
     func remove(_ id: String) {
         guard installed.contains(where: { $0.id == id }) else { return }
         unload(id)
+        errors[id] = nil
+        setGranted([], for: id)
+        setSettings([:], for: id)
+        loadsThisRun.remove(id)
+        loadedBefore.remove(id)
         installed.removeAll { $0.id == id }
         save()
         try? FileManager.default.removeItem(at: folder(for: id))
@@ -516,32 +723,20 @@ final class Host: NSObject {
         }
         for (const key of await caches.keys()) await caches.delete(key);
         """
-
-    // MARK: - its button and pages
-
-    /// Presses extension `id`'s button for the page in front.
-    func performAction(_ id: String) -> Bool {
-        guard let context = contexts[id], context.action(for: tabs.active) != nil else { return false }
-        context.performAction(for: tabs.active)
-        return true
-    }
-
-    func optionsURL(_ id: String) -> String? {
-        contexts[id]?.optionsPageURL?.absoluteString
-    }
 }
 
 // MARK: - WebKit asking the browser
 
 extension Host: WKWebExtensionControllerDelegate {
+    /// Emacs's window, then the extensions' own, oldest first.
     func webExtensionController(_ controller: WKWebExtensionController,
                                 openWindowsFor extensionContext: WKWebExtensionContext) -> [any WKWebExtensionWindow] {
-        [tabs.window]
+        [tabs.window] + ExtensionWindows.shared.open
     }
 
     func webExtensionController(_ controller: WKWebExtensionController,
                                 focusedWindowFor extensionContext: WKWebExtensionContext) -> (any WKWebExtensionWindow)? {
-        tabs.window
+        ExtensionWindows.shared.key ?? tabs.window
     }
 
     /// tabs.create: a browser tab, opened by Emacs, which answers with its view.
@@ -554,9 +749,10 @@ extension Host: WKWebExtensionControllerDelegate {
         return address.flatMap { tabs.tab(address: $0) }
     }
 
-    /// windows.create: the browser has one window, Emacs's, so its pages
-    /// open as tabs there.  A private window isn't something an extension
-    /// can have here: refused, as Chrome refuses when incognito isn't allowed.
+    /// windows.create: a popup, or a window of the extension's own pages, is
+    /// a Mac window of its own (Windows.swift); websites open as Emacs's tabs.
+    /// A private window isn't something an extension can have here: refused,
+    /// as Chrome refuses when incognito isn't allowed.
     func webExtensionController(_ controller: WKWebExtensionController,
                                 openNewWindowUsing configuration: WKWebExtension.WindowConfiguration,
                                 for extensionContext: WKWebExtensionContext) async throws -> (any WKWebExtensionWindow)? {
@@ -565,6 +761,21 @@ extension Host: WKWebExtensionControllerDelegate {
                           userInfo: [NSLocalizedDescriptionKey: "Private windows can't be opened by extensions."])
         }
         for url in configuration.tabURLs { try Rules.mayOpen(url) }
+        if ExtensionWindows.wanted(configuration, by: extensionContext) {
+            // A popup has no address bar, only the site over the page: a
+            // website, or this extension's own page. Not a data: or blob:
+            // page, which could draw anything and name no site, nor another
+            // extension's.
+            for url in configuration.tabURLs {
+                let scheme = url.scheme?.lowercased() ?? ""
+                guard scheme == "https" || scheme == "http" || ExtensionWindows.own(url, of: extensionContext)
+                        || url.absoluteString == "about:blank" else {
+                    throw NSError(domain: "lispm-desktop-webext", code: 3,
+                                  userInfo: [NSLocalizedDescriptionKey: "A popup window shows a website or the extension's own page."])
+                }
+            }
+            return ExtensionWindows.shared.make(configuration, for: extensionContext, host: self)
+        }
         for (index, url) in configuration.tabURLs.enumerated() {
             _ = await request("open", ["url": url.absoluteString, "active": index == 0 && configuration.shouldBeFocused])
         }
@@ -623,24 +834,42 @@ extension Host: WKWebExtensionControllerDelegate {
     /// WebKit's view is only asked which page it would show.
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action,
                                 for context: WKWebExtensionContext) async throws {
-        let url = action.popupWebView?.url ?? Rules.popupURL(for: context)
+        let url = action.popupWebView?.url ?? popupURL(for: context)
         action.closePopup()
         guard let url else { return }
         Popup.shared.show(url, for: context, from: tabs.active?.view)
     }
 
-    /// runtime.sendNativeMessage: no app on this Mac is spoken to.
+    // WebKit supplies this before loading each new background view, including
+    // a worker woken inside the same extension context.
+    @objc(_webExtensionController:didCreateBackgroundWebView:forExtensionContext:)
+    func createdBackground(_ controller: WKWebExtensionController, webView: WKWebView, context: WKWebExtensionContext) {
+        ExtensionWorkerRecovery.shared.created(webView, in: context)
+    }
+
+    /// runtime.sendNativeMessage: to "search", the APIs WebKit doesn't have,
+    /// answered by the shim's other half; no app on this Mac is spoken to.
     func webExtensionController(_ controller: WKWebExtensionController, sendMessage message: Any,
                                 toApplicationWithIdentifier applicationIdentifier: String?,
                                 for extensionContext: WKWebExtensionContext) async throws -> Any? {
-        throw NSError(domain: "lispm-desktop-webext", code: 3,
-                      userInfo: [NSLocalizedDescriptionKey: "Native messaging is not available in this browser."])
+        if applicationIdentifier == nil || applicationIdentifier == ExtensionShims.application {
+            return try await ExtensionShims.answer(message, from: extensionContext, owner: self)
+        }
+        throw NSError(domain: "lispm-desktop-webext", code: 4,
+                      userInfo: [NSLocalizedDescriptionKey: "Native messaging to apps is not available in this browser."])
     }
 
+    /// A worker's WebSocket, made here (ExtensionSocket); the port the
+    /// worker's shim opens only to learn what ports share; nothing else.
     func webExtensionController(_ controller: WKWebExtensionController, connectUsing port: WKWebExtension.MessagePort,
                                 for extensionContext: WKWebExtensionContext) async throws {
-        throw NSError(domain: "lispm-desktop-webext", code: 3,
-                      userInfo: [NSLocalizedDescriptionKey: "Native messaging is not available in this browser."])
+        if port.applicationIdentifier == ExtensionSocket.name {
+            ExtensionSocket.connect(port, from: extensionContext.uniqueIdentifier)
+            return
+        }
+        if port.applicationIdentifier == ExtensionShims.application { return }
+        throw NSError(domain: "lispm-desktop-webext", code: 4,
+                      userInfo: [NSLocalizedDescriptionKey: "Native messaging to apps is not available in this browser."])
     }
 }
 

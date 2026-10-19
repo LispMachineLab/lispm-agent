@@ -34,12 +34,12 @@ final class RulesTests: XCTestCase {
              "host_permissions": ["<all_urls>"]}
             """)
         let found = try await WKWebExtension(resourceBaseURL: folder)
-        XCTAssertEqual(Rules.describe(found), [
+        XCTAssertEqual(Rules.describe(found, in: folder), [
             "Read and change everything on every website",
             "See your open tabs and their addresses",
             "Block or change requests pages make",
         ])
-        let grants = Rules.grants(found)
+        let grants = Rules.grants(found, in: folder)
         XCTAssertTrue(grants.contains("declarativeNetRequest"))
         XCTAssertTrue(grants.contains("tabs"))
         XCTAssertTrue(grants.contains { $0.hasPrefix("site:") })
@@ -52,7 +52,20 @@ final class RulesTests: XCTestCase {
              "host_permissions": ["https://example.com/*"]}
             """)
         let found = try await WKWebExtension(resourceBaseURL: folder)
-        XCTAssertEqual(Rules.describe(found), ["Read and change what's on example.com"])
+        XCTAssertEqual(Rules.describe(found, in: folder), ["Read and change what's on example.com"])
+    }
+
+    func testWhatTheShimAddedIsNotSaid() async throws {
+        let folder = try extensionFolder("""
+            {"manifest_version": 3, "name": "Wallet", "version": "1",
+             "permissions": ["storage", "notifications", "nativeMessaging"]}
+            """)
+        try Data(#"["nativeMessaging"]"#.utf8).write(to: folder.appendingPathComponent(".search-added"))
+        let found = try await WKWebExtension(resourceBaseURL: folder)
+        XCTAssertEqual(Rules.describe(found, in: folder), ["Show notifications"])
+        let grants = Rules.grants(found, in: folder)
+        XCTAssertFalse(grants.contains("nativeMessaging"))
+        XCTAssertTrue(grants.contains("shim:notifications"))
     }
 
     func testExtensionPagesAndFilesAreWithheld() throws {

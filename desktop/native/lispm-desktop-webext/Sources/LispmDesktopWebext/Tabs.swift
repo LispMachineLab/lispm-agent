@@ -54,6 +54,22 @@ final class Tabs {
         order.first { $0.address == address }
     }
 
+    /// The browser's pages and the pages of the extensions' own windows.
+    var everyTab: [any ShimTab] { order + ExtensionWindows.shared.open.map(\.tab) }
+
+    /// Whether `tab` is the one in front of its window.
+    func isFront(_ tab: any ShimTab) -> Bool {
+        tab is PopupWindowTab || tab === active
+    }
+
+    /// The tab at `index` of the window an extension sees with this frame —
+    /// `left, top, width, height` from windows.getAll(). An extension's own
+    /// window has its one page; any other frame is the browser's.
+    func tab(windowFrame frame: CGRect, index: Int) -> (any ShimTab)? {
+        if let window = ExtensionWindows.shared.window(frame: frame) { return index == 0 ? window.tab : nil }
+        return order.indices.contains(index) ? order[index] : nil
+    }
+
     func activate(address: Int) {
         if let tab = tab(address: address) { activate(tab) }
     }
@@ -74,7 +90,7 @@ final class Tabs {
 }
 
 @MainActor
-final class ExtensionTab: NSObject, WKWebExtensionTab {
+final class ExtensionTab: NSObject, WKWebExtensionTab, ShimTab {
     weak var view: WKWebView?
     /// The view's address, as Emacs prints its xwidget.
     let address: Int
@@ -155,6 +171,10 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
 
     /// Brought in front by Emacs, which then says so (see Tabs.activate).
     func activate(for context: WKWebExtensionContext) async throws {
+        bringForward()
+    }
+
+    func bringForward() {
         host.events.send("activate", ["view": address])
     }
 
