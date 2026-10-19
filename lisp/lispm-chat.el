@@ -42,6 +42,12 @@
 ;; asked about as Claude Code asks: 1 yes, 2 yes and don't ask again
 ;; (for a command or any Lisp: again for that exact one), 3 no and say
 ;; what to do instead.  /transcript shows the org document.
+;;
+;; What the chat shows are objects, not only text (see
+;; lispm-inspect.el): the file a call read, the file:line places and
+;; org links in replies and results, the agents named, the symbols
+;; written as code.  RET or a click on one acts on it: the file is
+;; visited at the line, the agent inspected, the symbol described.
 
 ;;; Code:
 
@@ -49,6 +55,7 @@
 (require 'lispm-transcript)
 (require 'lispm-runtime)
 (require 'lispm-memory)
+(require 'lispm-inspect)
 
 (declare-function lispm--read-session "lispm" (prompt))
 (declare-function lispm-dashboard "lispm" ())
@@ -360,8 +367,17 @@ Lines that wrap are indented by PREFIX too."
                         (mapconcat (lambda (line) (concat "\n" prefix line)) (cdr lines) ""))
                 'wrap-prefix (make-string (string-width prefix) ?\s))))
 
+(defun lispm-chat--root ()
+  "The directory file names in the chat are relative to: its agent's root."
+  (if lispm-chat-agent (lispm-agent-root lispm-chat-agent) default-directory))
+
+(defun lispm-chat--present (text)
+  "TEXT with the objects it names presented, to act on with RET or a click."
+  (lispm-present-text text (lispm-chat--root)))
+
 (defun lispm-chat--inline (line)
-  "LINE of a reply with its Markdown headings, bold and code shown as faces."
+  "LINE of a reply with its Markdown headings, bold and code shown as faces.
+Code naming a symbol or a file is presented as the object."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
                 line)))
@@ -370,7 +386,9 @@ Lines that wrap are indented by PREFIX too."
                 (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
     (replace-regexp-in-string
      "`\\([^`\n]+\\)`"
-     (lambda (m) (propertize (match-string 1 m) 'face 'lispm-chat-code)) line t t)))
+     (lambda (m) (lispm-present-code (propertize (match-string 1 m) 'face 'lispm-chat-code)
+                                     (lispm-chat--root)))
+     line t t)))
 
 (defun lispm-chat--markdown (text)
   "TEXT of a reply, its Markdown shown as faces.
@@ -405,8 +423,28 @@ Code blocks lose their fences and keep their lines as they are."
          (format "%s:%s" (match-string 1 name) (match-string 2 name)))
         (t name)))
 
+(defun lispm-chat--argument-object (item)
+  "The object the main argument of the tool call ITEM names, or nil."
+  (let ((input (plist-get item :input))
+        (root (lispm-chat--root)))
+    (cond ((stringp (alist-get 'path input))
+           (when-let* ((file (lispm-present--file (car (lispm-tools-reference (alist-get 'path input)))
+                                                  root)))
+             (list 'file file (let ((offset (alist-get 'offset input)))
+                                (and (integerp offset) offset)))))
+          ((stringp (alist-get 'buffer input))
+           (list 'buffer (lispm-tools-buffer-name (alist-get 'buffer input))))
+          ((and (equal (plist-get item :name) "describe_symbol") (stringp (alist-get 'name input))
+                (intern-soft (alist-get 'name input)))
+           (list 'symbol (intern-soft (alist-get 'name input))))
+          ((when-let* ((name (seq-find #'stringp (list (alist-get 'agent input) (alist-get 'to input))))
+                       ((lispm-get-agent name t)))
+             (list 'agent name))))))
+
 (defun lispm-chat--tool-title (item)
-  "Name(argument) of the tool call ITEM."
+  "Name(argument) of the tool call ITEM.
+The name presents the tool, and the argument the object it names, if
+it names one."
   (let* ((input (plist-get item :input))
          (argument (if (and (equal (plist-get item :name) "search_files")
                             (stringp (alist-get 'pattern input)))
@@ -418,8 +456,14 @@ Code blocks lose their fences and keep their lines as they are."
                                    (format ", %s" (alist-get 'glob input))
                                  ""))
                      (lispm-transcript--summary input))))
-    (concat (propertize (lispm-chat--tool-name (plist-get item :name)) 'face 'lispm-chat-tool)
-            (if argument (format "(%s)" (lispm--oneline argument 70)) ""))))
+    (concat (lispm-present (propertize (lispm-chat--tool-name (plist-get item :name))
+                                       'face 'lispm-chat-tool)
+                           (list 'tool (plist-get item :name)))
+            (if argument
+                (let ((shown (lispm--oneline argument 70))
+                      (object (lispm-chat--argument-object item)))
+                  (format "(%s)" (if object (lispm-present shown object) shown)))
+              ""))))
 
 (defun lispm-chat--input-diff (input)
   "A diff of the edit described by INPUT, for edits that were not previewed."
@@ -534,9 +578,15 @@ Code blocks lose their fences and keep their lines as they are."
                 (_ 'lispm-chat-pending)))
         (lines (append (lispm-chat--result-lines item (plist-get item :expanded))
                        (lispm-chat--image-lines item))))
-    (concat "\n" (propertize "⏺ " 'face face) (lispm-chat--tool-title item)
+    (concat "\n"
+            (let ((bullet (propertize "⏺" 'face face)))
+              (if (and (plist-get item :key) lispm-chat-agent)
+                  (lispm-present bullet (list 'call (symbol-name (lispm-agent-name lispm-chat-agent))
+                                              (plist-get item :key)))
+                bullet))
+            " " (lispm-chat--tool-title item)
             (if lines
-                (concat "\n" (lispm-chat--indent (string-join lines "\n") "     "
+                (concat "\n" (lispm-chat--indent (lispm-chat--present (string-join lines "\n")) "     "
                                                  (propertize "  ⎿  " 'face 'lispm-chat-dim)))
               "")
             "\n")))
@@ -545,16 +595,18 @@ Code blocks lose their fences and keep their lines as they are."
   "Text of the display ITEM."
   (pcase (plist-get item :kind)
     ('user
-     (concat "\n"
-             (propertize (lispm-chat--prompted
-                          (concat (if (plist-get item :from)
-                                      (format "[from %s] " (plist-get item :from))
-                                    "")
-                                  (plist-get item :text)))
-                         'face 'lispm-chat-user)
-             "\n"))
+     (let* ((from (plist-get item :from))
+            (shown (propertize (lispm-chat--prompted
+                                (concat (if from (format "[from %s] " from) "")
+                                        (plist-get item :text)))
+                               'face 'lispm-chat-user)))
+       (when (and from (lispm-get-agent from t))
+         (let ((at (+ (string-search "[from " shown) 6)))
+           (lispm-present-in shown at (+ at (length from)) (list 'agent from))))
+       (concat "\n" (lispm-chat--present shown) "\n")))
     ('text
-     (concat "\n" (lispm-chat--indent (lispm-chat--markdown (plist-get item :text)) "  " "⏺ ")
+     (concat "\n" (lispm-chat--indent (lispm-chat--present (lispm-chat--markdown (plist-get item :text)))
+                                      "  " "⏺ ")
              "\n"))
     ('thought
      (let ((text (plist-get item :text)))
@@ -582,8 +634,8 @@ Code blocks lose their fences and keep their lines as they are."
                          'face 'lispm-chat-dim)
              "\n"))
     ('note
-     (concat (propertize (lispm-chat--indent (plist-get item :text) "     " "  ⎿  ")
-                         'face 'lispm-chat-dim)
+     (concat (lispm-chat--present (propertize (lispm-chat--indent (plist-get item :text) "     " "  ⎿  ")
+                                              'face 'lispm-chat-dim))
              "\n"))
     ('tool (lispm-chat--tool item))))
 
@@ -1073,12 +1125,13 @@ ITEMS are the session's items, where the call's preview is."
 
 (defun lispm-chat-return ()
   "Send what is written, or answer the approval prompt if nothing is.
-Outside the input, show the item at point in full."
+Outside the input, act on the object at point (see lispm-inspect.el),
+or show the item at point in full."
   (interactive)
   (cond ((not (lispm-chat--in-input-p))
-         (if (get-text-property (point) 'lispm-chat-key)
-             (lispm-chat-toggle)
-           (goto-char (point-max))))
+         (cond ((lispm-object-at) (lispm-act-at-point))
+               ((get-text-property (point) 'lispm-chat-key) (lispm-chat-toggle))
+               (t (goto-char (point-max)))))
         ((and (string-blank-p (lispm-chat--input)) (lispm-chat--prompting-p))
          (lispm-chat-choose))
         (t (lispm-chat-send))))
@@ -1182,6 +1235,7 @@ Outside the input, show the item at point in full."
     ("memory" lispm-chat-memory "Open this project's memory")
     ("cost" lispm-chat-cost "Show the tokens used")
     ("agents" lispm-chat-agents "Show every agent")
+    ("inspect" lispm-chat-inspect "Inspect this agent, or /inspect NAME another")
     ("transcript" lispm-chat-transcript "Open the org transcript of this conversation")
     ("exit" lispm-chat-exit "End this agent"))
   "The / commands: name, function of the agent and the argument, description.")
@@ -1201,7 +1255,8 @@ Outside the input, show the item at point in full."
     (pcase-dolist (`(,name ,_ ,doc) lispm-chat-commands)
       (princ (format "  /%-11s %s\n" name doc)))
     (princ (concat "\nKeys\n\n"
-                   "  RET         send; on an item, show it in full\n"
+                   "  RET         send; on an object (a file, an agent...), act on it;\n"
+                   "              on an item, show it in full\n"
                    "  S-RET, C-j  new line\n"
                    "  TAB         show the item at point in full; complete a / command\n"
                    "  M-p, M-n    previous and next messages sent\n"
@@ -1295,6 +1350,10 @@ Return the chat of the new conversation."
     (with-current-buffer buffer
       (rename-buffer (file-name-nondirectory buffer-file-name) t))
     (pop-to-buffer buffer)))
+
+(defun lispm-chat-inspect (agent argument)
+  "Inspect AGENT, or the agent ARGUMENT names."
+  (lispm-inspect (if (string-empty-p argument) agent (lispm-get-agent argument))))
 
 (defun lispm-chat-exit (agent _argument)
   "End AGENT."

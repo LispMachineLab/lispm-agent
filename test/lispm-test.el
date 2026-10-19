@@ -3800,6 +3800,148 @@ Its policy is the stricter of its role's and its caller's."
       (should-not (buffer-live-p session))
       (should-not (lispm-get-agent name t)))))
 
+;;;; Presentations and the inspector
+
+(defun lispm-test--object (text part)
+  "The object presented where PART first appears in TEXT."
+  (get-text-property (string-search part text) 'lispm-object text))
+
+(ert-deftest lispm-test-presentations ()
+  "Text names objects one acts on: files at a line, buffers, agents, symbols.
+Tools take the places and buffers agents name as org links."
+  (lispm-test-env
+    (lispm-test--write (expand-file-name "lisp/a.el" project) "(defun a ())\n(defun b ())\n")
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (a (expand-file-name "lisp/a.el" project))
+           (text (lispm-present-text
+                  "See lisp/a.el:2, [[file:lisp/a.el::1][a]], [[buffer:*scratch*]] and assistant@project; not.this, nofile.el:3."
+                  project)))
+      (should (equal (lispm-test--object text "lisp/a.el:2") (list 'file a 2)))
+      (should (= (length (substring-no-properties text (string-search "lisp/a.el:2" text)
+                                                  (next-single-property-change
+                                                   (string-search "lisp/a.el:2" text) 'lispm-object text)))
+                 (length "lisp/a.el:2")))
+      (should (equal (lispm-test--object text "[[file:") (list 'file a 1)))
+      (should (equal (lispm-test--object text "[[buffer:") '(buffer "*scratch*")))
+      (should (equal (lispm-test--object text "assistant@project") '(agent "assistant@project")))
+      (should-not (lispm-test--object text "not.this"))
+      (should-not (lispm-test--object text "nofile.el"))
+      (should (equal (get-text-property 0 'lispm-object (lispm-present-code "car")) '(symbol car)))
+      (should (equal (get-text-property 0 'lispm-object (lispm-present-code "lisp/a.el:2" project))
+                     (list 'file a 2)))
+      ;; Acting on a place visits the file there.
+      (save-window-excursion
+        (lispm-act (list 'file a 2))
+        (should (equal (buffer-file-name) a))
+        (should (= (line-number-at-pos) 2)))
+      ;; Tools resolve the references agents pass each other.
+      (should (equal (lispm-tools-reference "[[file:lisp/a.el::2][a]]") '("lisp/a.el" . 2)))
+      (should (equal (lispm-tools-reference "lisp/a.el") '("lisp/a.el")))
+      (should (string-prefix-p "     2\t(defun b ())"
+                               (car (lispm-test--call agent "read_file" '((path . "[[file:lisp/a.el::2]]"))))))
+      (should (string-match-p "lisp-interaction-mode\\|fundamental-mode\\|point at"
+                              (car (lispm-test--call agent "read_buffer" '((buffer . "[[buffer:*scratch*]]"))))))
+      ;; A write outside the root asks, a link naming it or not.
+      (setf (lispm-agent-policy agent) '((write . auto)))
+      (should (eq (lispm-tool-action agent (lispm-get-tool "write_file")
+                                     '((path . "[[file:/tmp/lispm-elsewhere.txt]]") (content . "x")))
+                  'ask)))))
+
+(ert-deftest lispm-test-chat-presentations ()
+  "The chat shows objects: RET or a click on one acts on it."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "one\ntwo\n"))
+    (let* ((agent (lispm-start 'assistant project))
+           (chat (lispm-chat agent)))
+      (setq lispm-test--scripts
+            `((,(lispm-agent-name agent)
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Look at a.txt:2 and `car`.")))))
+      (lispm-test--chat-type chat "Read a.txt")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((a (expand-file-name "a.txt" project)))
+        (lispm-chat-redraw chat)
+        (with-current-buffer chat
+          (goto-char (point-min))
+          (search-forward "Read(a.txt)")
+          (should (equal (lispm-object-at (- (point) 3)) (list 'file a nil)))
+          (should (equal (lispm-object-at (- (point) 9)) '(tool "read_file")))
+          (beginning-of-line)
+          (should (equal (lispm-object-at) (list 'call (symbol-name (lispm-agent-name agent)) "t1")))
+          (search-forward "car")
+          (should (equal (lispm-object-at (1- (point))) '(symbol car)))
+          (goto-char (point-min))
+          (search-forward "a.txt:2")
+          (goto-char (match-beginning 0))
+          (should (equal (lispm-object-at) (list 'file a 2)))
+          (save-window-excursion
+            (lispm-chat-return)
+            (should (equal (buffer-file-name) a))
+            (should (= (line-number-at-pos) 2))))))))
+
+(ert-deftest lispm-test-inspector ()
+  "The inspector shows an agent whole, for the user and for agents."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes.")
+    (let* ((default-directory project)
+           (boss (lispm-start)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "tool_use"
+                                                   (lispm-test--tool "t1" "ask_agent"
+                                                                     '((agent . "reviewer")
+                                                                       (request . "Looks good?")))))
+              (reviewer@project hang)))
+      (lispm-tell boss "get a review")
+      (should (lispm-test--wait (lambda () (lispm-get-agent "reviewer@project" t))))
+      (let ((reviewer (lispm-get-agent "reviewer@project")))
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state reviewer) 'requesting))))
+        (let ((text (lispm-inspect-text boss)))
+          (should (string-match-p "^# Pending calls\nask_agent reviewer  run$" text))
+          (should (string-match-p "^waits on +reviewer@project$" text))
+          (should (string-match-p "^policy +read auto, " text)))
+        ;; Agents inspect each other with a tool.
+        (let ((result (lispm-test--call boss "inspect_agent" '((agent . "reviewer@project")))))
+          (should-not (cdr result))
+          (should (string-match-p "^waited on by +assistant@project$" (car result)))
+          (should (string-match-p "^ceiling +read auto" (car result)))
+          (should (string-match-p "^handling +\\[from assistant@project\\] Looks good\\?$" (car result))))
+        ;; In the inspector, the agents named are objects too.
+        (with-current-buffer (lispm-inspect boss)
+          (goto-char (point-min))
+          (search-forward "waits on")
+          (search-forward "reviewer@project")
+          (should (equal (lispm-object-at (1- (point))) '(agent "reviewer@project")))
+          (goto-char (1- (point)))
+          (lispm-act-at-point)
+          (should (equal (buffer-name) "*lispm inspect reviewer@project*")))
+        (lispm-abort boss)))))
+
+(ert-deftest lispm-test-return-value ()
+  "A helper returns a value with its reply; ask_agent gives it as JSON."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes.")
+    (let* ((default-directory project)
+           (boss (lispm-start)))
+      (setq lispm-test--scripts
+            `((assistant@project ,(lispm-test--msg "tool_use"
+                                                   (lispm-test--tool "t1" "ask_agent"
+                                                                     '((agent . "reviewer")
+                                                                       (request . "Where is b?"))))
+                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Thanks.")))
+              (reviewer@project ,(lispm-test--msg "tool_use"
+                                                  (lispm-test--tool "r1" "return_value"
+                                                                    '((value . ["[[file:a.el::3]]"]))))
+                                ,(lispm-test--msg "end_turn" (lispm-test--text "Found one.")))))
+      (lispm-tell boss "find b")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (= (length lispm-test--requests) 4)))))
+      (should (string-match-p (regexp-quote "reviewer@project replied:\nFound one.\n\nValue:\n[\"[[file:a.el::3]]\"]")
+                              (format "%s" (alist-get 'content (aref (alist-get 'content (car (last (append (alist-get 'messages (car lispm-test--requests)) nil)))) 0)))))
+      ;; Nobody waits for the reply of a turn the user started.
+      (should (string-match-p "Nobody waits"
+                              (car (lispm-test--call boss "return_value" '((value . 1)))))))))
+
 (ert-deftest lispm-test-chat-approval-answers ()
   "2 approves a command for good, 3 denies with what to do instead."
   (lispm-test-env

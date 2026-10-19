@@ -223,6 +223,7 @@ Each is called with the buffer, its old text and its new text;
   process                    ; request in flight
   inbox                      ; FIFO of pending inputs (plists)
   entry                      ; the input the turn under way handles
+  value                      ; a value the turn returns with its reply (return_value)
   (pending (make-hash-table :test #'equal)) ; tool-use id -> call plist
   dispatching                ; non-nil while a response's calls are dispatched
   turn-callbacks             ; called with the final reply when the turn ends

@@ -28,13 +28,19 @@
 ;;                 inbox and becomes a "* Message from X" turn;
 ;;   ask_agent     delegation: the caller's call stays pending (other
 ;;                 agents and the user keep working) until the other
-;;                 agent's turn ends; its final reply is the result.
+;;                 agent's turn ends; its final reply is the result,
+;;                 with a value it returned (return_value), if any.
 ;;                 Asking a role rather than an agent starts a helper
 ;;                 of that role in the caller's project, which retires
 ;;                 once it has replied: a subagent.  A helper may do no
 ;;                 more than its caller: for each permission class it
 ;;                 gets the stricter of its role's and its caller's
 ;;                 policy.
+;;
+;; inspect_agent (lispm-inspect.el) shows another agent in depth.
+;; Places and buffers pass between agents as org links,
+;; [[file:PATH::LINE]] and [[buffer:NAME]], which tools resolve (see
+;; `lispm-tools-reference').
 ;;
 ;; Delegating is `lispm-delegate', for other tools too: the worktree
 ;; skill's worktree_ask starts its helper in a git worktree of its own.
@@ -114,8 +120,12 @@ Return the agent asked."
     target))
 
 (defun lispm-collab--replied (agent reply)
-  "What ask_agent returns when AGENT replied REPLY."
-  (format "%s replied:\n%s" (lispm-agent-name agent) reply))
+  "What ask_agent returns when AGENT replied REPLY.
+A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
+  (concat (format "%s replied:\n%s" (lispm-agent-name agent) (substring-no-properties reply))
+          (if-let* ((value (lispm-reply-value reply)))
+              (concat "\n\nValue:\n" (lispm--json-pretty value))
+            "")))
 
 (defun lispm-collab--record-asked (caller call target)
   "Record on the heading of CALLER's CALL that it asked TARGET."
@@ -209,7 +219,9 @@ Then it stays, to answer them, as an agent of its own."
                                    others "\n")
                         "\n")
               "")
-            "Roles:\n" (lispm-collab--roles))))
+            "Roles:\n" (lispm-collab--roles)
+            "\nName places as [[file:PATH::LINE]] and buffers as [[buffer:NAME]]:"
+            " the tools of whoever reads them take these as files and buffers.")))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-collab--prompt)
 
@@ -230,7 +242,7 @@ helpers can be started from."
 
 (lispm-deftool send_message
     ((to string "Name of the receiving agent.")
-     (text string "The message, self-contained: they cannot see your transcript."))
+     (text string "The message, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Send a message to another agent without waiting for an answer.  It
 reaches them as a new turn as soon as they are free.  Use ask_agent
 when you need the answer to continue."
@@ -242,11 +254,13 @@ when you need the answer to continue."
 
 (lispm-deftool ask_agent
     ((agent string "A running agent, or a role to start a helper from (see list_agents).")
-     (request string "What you need, self-contained: they cannot see your transcript."))
+     (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Delegate a request and wait for the final reply, which becomes the
 result of this call.  Ask a running agent better placed for it, or
 name a role to start a helper of that role in your project; the
-helper retires once it has replied."
+helper retires once it has replied.  When you need data back, such
+as a list of places, ask for it: they can return a value with their
+reply (return_value), which follows it as JSON."
   :permission comm
   :async t
   (lispm-delegate lispm-current-agent agent request
@@ -255,6 +269,23 @@ helper retires once it has replied."
                   ;; A call the model made, not one a Lisp program does.
                   :call lispm-current-call)
   nil)
+
+(lispm-register-tool
+ (lispm-tool--create
+  :name "return_value"
+  :description
+  "Return a value with your reply to the agent waiting for it, who asked you for something \(a [Message from agent X] request): data it can use as it is, such as a list of places as [[file:PATH::LINE]] links, the text of an org subtree, or any JSON.  Your reply still says what it is; a later call replaces the value."
+  :input-schema '((type . "object")
+                  (properties (value (description . "The value, any JSON.")))
+                  (required . ["value"]))
+  :permission 'comm
+  :function
+  (lambda (input)
+    (let ((agent lispm-current-agent))
+      (unless (lispm-agent-turn-callbacks agent)
+        (error "Nobody waits for your reply in this turn; just reply"))
+      (setf (lispm-agent-value agent) (alist-get 'value input))
+      "The value will go with your reply."))))
 
 (provide 'lispm-collab)
 ;;; lispm-collab.el ends here
