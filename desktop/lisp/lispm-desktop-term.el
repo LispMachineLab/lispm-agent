@@ -386,7 +386,9 @@ blocked on an answer, then failed, then done.  Terminals of a state are in
 (defun lispm-desktop-term--tell-colors ()
   "Tell the terminal the colours it answers programs asking: the palette,
 then the default foreground and background, by which Claude Code and
-Codex choose a light or a dark look."
+Codex choose a light or a dark look.  A program that asked to hear of it
+\(DEC mode 2031) is told when the background turns from dark to light or
+back, as it does with the theme; Claude Code then looks again."
   (when lispm-desktop-term--terminal
     (let ((hex (lambda (color fallback)
                  (if (and color (color-defined-p color))

@@ -97,6 +97,9 @@ struct Shared {
     /// The colours answered when a program asks: the palette, then the
     /// default foreground and background.
     palette: Mutex<Vec<Rgb>>,
+    /// The program asked to be told when the background turns from dark to
+    /// light or back: DEC mode 2031, see status.rs.
+    scheme_reports: AtomicBool,
     size: Mutex<WindowSize>,
     /// What the terminal's programs said of themselves.
     status: Mutex<status::Records>,
@@ -145,8 +148,20 @@ impl Shared {
                 None => {}
             },
             status::Found::Prompt => self.change_status(status::Records::end_command),
-            status::Found::Reset => self.change_status(status::Records::reset),
+            status::Found::Reset => {
+                self.scheme_reports.store(false, Ordering::Release);
+                self.change_status(status::Records::reset);
+            }
+            status::Found::SchemeReports(on) => self.scheme_reports.store(on, Ordering::Release),
+            // Answered in turn, as a status query is.
+            status::Found::SchemeQuery => self.write(status::scheme_report(self.dark()).to_vec()),
         }
+    }
+
+    /// Whether the default background is dark.
+    fn dark(&self) -> bool {
+        let Rgb { r, g, b } = self.color(NamedColor::Background as usize);
+        status::is_dark(r, g, b)
     }
 
     fn write(&self, bytes: Vec<u8>) {
@@ -301,6 +316,7 @@ fn spawn(
         happenings: Mutex::new(Vec::new()),
         sender: OnceLock::new(),
         palette: Mutex::new(Vec::new()),
+        scheme_reports: AtomicBool::new(false),
         size: Mutex::new(size),
         status: Mutex::new(status::Records::default()),
     });
@@ -407,8 +423,12 @@ fn set_visible(terminal: &Terminal, visible: Option<Value>) -> Result<()> {
 
 /// Set the colours TERMINAL answers programs asking: COLORS, a vector of 18
 /// "#RRGGBB" strings, the 16 of the palette then foreground and background.
+/// A program that asked is told when the background turns from dark to
+/// light or back.
 #[defun]
 fn set_colors(terminal: &Terminal, colors: Vector) -> Result<()> {
+    let shared = &terminal.shared;
+    let was_dark = shared.dark();
     let parse = |s: &str| -> Option<Rgb> {
         let hex = s.strip_prefix('#')?;
         if hex.len() != 6 {
@@ -422,8 +442,12 @@ fn set_colors(terminal: &Terminal, colors: Vector) -> Result<()> {
         .enumerate()
         .map(|(i, s)| parse(s).unwrap_or_else(|| xterm_color(i.min(255) as u8)))
         .collect();
-    if let Ok(mut current) = terminal.shared.palette.lock() {
+    if let Ok(mut current) = shared.palette.lock() {
         *current = palette;
+    }
+    let dark = shared.dark();
+    if dark != was_dark && shared.scheme_reports.load(Ordering::Acquire) {
+        shared.write(status::scheme_report(dark).to_vec());
     }
     Ok(())
 }

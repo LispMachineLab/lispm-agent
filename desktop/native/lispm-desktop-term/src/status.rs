@@ -13,6 +13,11 @@
 // the prompts a shell starts (OSC 133 A) and full resets (RIS), and
 // `Records' keeps what they say.  A report is untrusted: one that breaks a
 // rule of the protocol changes nothing.
+//
+// alacritty ignores a program's asking for the colour scheme too, see
+// https://contour-terminal.org/vt-extensions/color-palette-update-notifications/:
+// DSR 996 asks whether the background is dark or light, and DEC mode 2031
+// asks to be told whenever that changes.  The scanner picks them out alike.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +27,8 @@ use base64::Engine;
 
 /// The longest sequence taken, from ESC ] to its terminator.
 const MAX_SEQUENCE: usize = 4096;
+/// The most parameter and intermediate bytes of a control sequence taken.
+const MAX_CONTROL: usize = 64;
 const MAX_KEY: usize = 16;
 const MAX_MSG: (usize, usize) = (2732, 2048);
 const MAX_TITLE: (usize, usize) = (256, 192);
@@ -60,6 +67,11 @@ pub enum Found<'a> {
     Prompt,
     /// A full reset: RIS.
     Reset,
+    /// The program asks to be told when the colour scheme changes, or no
+    /// longer: DEC mode 2031 set or reset.
+    SchemeReports(bool),
+    /// The program asks the colour scheme: DSR 996.
+    SchemeQuery,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,18 +84,22 @@ enum Mode {
     Osc,
     /// In an OSC, after an ESC that may begin its terminator.
     OscEscape,
+    /// In a control sequence, after ESC [.
+    Csi,
 }
 
-/// Finds OSC 7501, OSC 133 A and RIS in a stream of output, however it is
-/// cut into reads.  It follows alacritty's parser (vte): an OSC starts at
-/// ESC ] wherever it appears and drops C0 controls, so both see the same
-/// sequences.  Only BEL or ESC \ ends a sequence that counts; CAN, SUB or
-/// another escape abandons it.
+/// Finds OSC 7501, OSC 133 A, RIS, DEC mode 2031 and DSR 996 in a stream of
+/// output, however it is cut into reads.  It follows alacritty's parser
+/// (vte): an OSC starts at ESC ] wherever it appears and drops C0 controls,
+/// and a control sequence runs them, so both see the same sequences.  Only
+/// BEL or ESC \ ends an OSC that counts, and a final byte a control
+/// sequence; CAN, SUB or another escape abandons either.
 #[derive(Default)]
 pub struct Scanner {
     mode: Mode,
+    /// The OSC's text, or the control sequence's bytes before its final one.
     body: Vec<u8>,
-    /// The OSC is longer than any sequence taken.
+    /// The sequence is longer than any taken.
     overflow: bool,
 }
 
@@ -110,6 +126,11 @@ impl Scanner {
                     self.body.clear();
                     self.overflow = false;
                     Mode::Osc
+                }
+                (Mode::Escape | Mode::OscEscape, b'[') => {
+                    self.body.clear();
+                    self.overflow = false;
+                    Mode::Csi
                 }
                 (Mode::Escape, b'c') => {
                     found(Found::Reset);
@@ -148,8 +169,42 @@ impl Scanner {
                 }
                 (Mode::OscEscape, 0x00..=0x17 | 0x19 | 0x1c..=0x1f) => Mode::Escape,
                 (Mode::OscEscape, _) => Mode::Ground,
+                (Mode::Csi, 0x1b) => Mode::Escape,
+                (Mode::Csi, 0x18 | 0x1a) => Mode::Ground,
+                (Mode::Csi, 0x20..=0x3f) => {
+                    if self.body.len() < MAX_CONTROL {
+                        self.body.push(byte);
+                    } else {
+                        self.overflow = true;
+                    }
+                    Mode::Csi
+                }
+                (Mode::Csi, 0x40..=0x7e) => {
+                    self.end_control(byte, found);
+                    Mode::Ground
+                }
+                // C0 controls run inside a control sequence; DEL and
+                // non-ASCII bytes are ignored.
+                (Mode::Csi, _) => Mode::Csi,
                 (Mode::Ground, _) => Mode::Ground,
             };
+        }
+    }
+
+    /// Take in the control sequence ending in LAST.
+    fn end_control(&self, last: u8, found: &mut impl FnMut(Found)) {
+        if self.overflow {
+            return;
+        }
+        let Some(params) = self.body.strip_prefix(b"?") else {
+            return;
+        };
+        match last {
+            b'h' | b'l' if params.split(|&b| b == b';').any(|mode| mode == b"2031") => {
+                found(Found::SchemeReports(last == b'h'))
+            }
+            b'n' if params == b"996" => found(Found::SchemeQuery),
+            _ => {}
         }
     }
 
@@ -164,6 +219,21 @@ impl Scanner {
                 found(Found::Prompt);
             }
         }
+    }
+}
+
+/// Whether a background of R, G and B is dark, as the programs asking judge
+/// it: its luma is at most half the brightest.
+pub fn is_dark(r: u8, g: u8, b: u8) -> bool {
+    0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b) <= 127.5
+}
+
+/// The report of a colour scheme, DARK or light: DSR 997.
+pub fn scheme_report(dark: bool) -> &'static [u8] {
+    if dark {
+        b"\x1b[?997;1n"
+    } else {
+        b"\x1b[?997;2n"
     }
 }
 
@@ -441,6 +511,8 @@ mod tests {
                     Found::Status(text, t) => format!("{}{:?}", String::from_utf8_lossy(text), t),
                     Found::Prompt => "prompt".into(),
                     Found::Reset => "reset".into(),
+                    Found::SchemeReports(on) => format!("reports {on}"),
+                    Found::SchemeQuery => "scheme?".into(),
                 })
             });
         }
@@ -480,6 +552,39 @@ mod tests {
         // C0 controls are dropped from the text, as alacritty drops them.
         assert_eq!(found(&[b"\x1b]7501;state=\nidle\x07"]), ["state=idleBel"]);
         assert_eq!(found(&[b"\x1b]133;AB\x07\x1b]133;A;cl=m\x07"]), ["prompt"]);
+    }
+
+    #[test]
+    fn scanner_finds_colour_scheme_requests_however_cut() {
+        let stream = b"\x1b[?2031h\x1b[1;31mx\x1b[?996n\x1b]7501;state=idle\x07\x1b[?1004;2031;2004l\x1b[?2031$p";
+        let whole = found(&[stream]);
+        assert_eq!(whole, ["reports true", "scheme?", "state=idleBel", "reports false"]);
+        for cut in 1..stream.len() {
+            assert_eq!(found(&[&stream[..cut], &stream[cut..]]), whole, "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn scanner_takes_control_sequences_as_alacritty_does() {
+        // Other modes and sequences, and modes not private, ask nothing.
+        assert!(found(&[b"\x1b[?20310h\x1b[?12031h\x1b[2031h\x1b[>2031h\x1b[?2031 h\x1b[?996;1n\x1b[996n"]).is_empty());
+        // C0 controls run inside; DEL and non-ASCII bytes are ignored.
+        assert_eq!(found(&[b"\x1b[?20\n31\x7f\xc3h"]), ["reports true"]);
+        // CAN cancels; an ESC begins the next sequence.
+        assert!(found(&[b"\x1b[?2031\x18h\x1b[?2031\x1ah"]).is_empty());
+        assert_eq!(found(&[b"\x1b[?2031\x1b[?996n"]), ["scheme?"]);
+        // An ESC abandoning an OSC may begin a control sequence.
+        assert_eq!(found(&[b"\x1b]7501;state=done\x1b[?2031h"]), ["reports true"]);
+        let long = format!("\x1b[?{}2031h\x1b[?2031l", "0;".repeat(MAX_CONTROL));
+        assert_eq!(found(&[long.as_bytes()]), ["reports false"]);
+    }
+
+    #[test]
+    fn colour_scheme_is_judged_by_luma() {
+        assert!(is_dark(0, 0, 0) && is_dark(0x1e, 0x1e, 0x1e) && is_dark(0, 0, 255) && is_dark(127, 127, 127));
+        assert!(!is_dark(255, 255, 255) && !is_dark(0xe8, 0xe8, 0xe8) && !is_dark(0, 255, 0) && !is_dark(128, 128, 128));
+        assert_eq!(scheme_report(true), b"\x1b[?997;1n");
+        assert_eq!(scheme_report(false), b"\x1b[?997;2n");
     }
 
     #[test]
