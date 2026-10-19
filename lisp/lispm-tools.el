@@ -85,10 +85,12 @@ MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist,
 or a function returning one) and a FUNCTION taking the whole input.
 A DEFERRED tool is not offered to an agent until search_tools has
 found it for that agent.  CHANGES, for a tool that changes a buffer,
-tells what a call would make of it (see `lispm-deftool').  FILE is the
-file a tool defined with `lispm-deftool' was loaded from, if any."
+tells what a call would make of it; TARGETS, for a tool whose
+arguments do not name the files it writes, tells which (see
+`lispm-deftool').  FILE is the file a tool defined with `lispm-deftool'
+was loaded from, if any."
   name description params input-schema permission function async preview deferred
-  changes file)
+  changes targets file)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -123,13 +125,19 @@ BODY may start with keyword options:
                      the call would change and the text it would leave
                      there; the change is then shown in BUFFER while the
                      call is written and while it awaits approval
+  :targets FUNCTION  for a tool of class write whose `path' or `buffer'
+                     argument does not name what it writes: called with
+                     the same arguments before the call runs, returns the
+                     files it would change, for the rule that writes
+                     outside the agent's root always ask (see
+                     `lispm-tool-action'); it changes nothing
   :deferred t        offered only once search_tools finds it (see
                      `lispm-tool-sources'): for tools seldom needed
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview changes deferred
+  (let ((permission 'read) async preview changes targets deferred
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -137,6 +145,7 @@ is printed.  Signal an error to report a failure to the model."
         (:async (setq async (pop body)))
         (:preview (setq preview (pop body)))
         (:changes (setq changes (pop body)))
+        (:targets (setq targets (pop body)))
         (:deferred (setq deferred (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
@@ -147,6 +156,7 @@ is printed.  Signal an error to report a failure to the model."
        :async ,async
        :preview ,preview
        :changes ,changes
+       :targets ,targets
        :deferred ,deferred
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
@@ -591,29 +601,42 @@ would put the agent past its policy, which such a call can change."
     (or (member name allowed)
         (member (cons name (lispm-tools--call-key input)) allowed))))
 
-(defun lispm-tools--targets (input)
-  "Files a call with INPUT changes, as far as its arguments tell.
-Those its `path' names, and the file of the buffer its `buffer' names,
-either of them a reference (see `lispm-tools-reference')."
-  (when (listp input)
-    (let ((path (alist-get 'path input))
-          (buffer (and (stringp (alist-get 'buffer input))
-                       (get-buffer (lispm-tools-buffer-name (alist-get 'buffer input))))))
-      (delq nil (list (and (stringp path) (car (lispm-tools-reference path)))
-                      (and buffer (buffer-file-name buffer)))))))
+(defun lispm-tools--targets (agent tool input)
+  "Files AGENT's call of TOOL with INPUT changes, as far as can be told before.
+Those TOOL's targets function returns, if it has one (see
+`lispm-deftool'); else those a `path' argument names, and the file of
+the buffer a `buffer' argument names, either of them a reference (see
+`lispm-tools-reference').  t if the targets function fails: the call may
+change any file."
+  (if-let* ((targets (lispm-tool-targets tool)))
+      (condition-case nil
+          (let ((lispm-current-agent agent)
+                (default-directory (lispm-agent-root agent)))
+            (apply targets (lispm-tools--arguments tool input)))
+        (error t))
+    (when (listp input)
+      (let ((path (alist-get 'path input))
+            (buffer (and (stringp (alist-get 'buffer input))
+                         (get-buffer (lispm-tools-buffer-name (alist-get 'buffer input))))))
+        (delq nil (list (and (stringp path) (car (lispm-tools-reference path)))
+                        (and buffer (buffer-file-name buffer))))))))
 
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
 Calls the user allowed for this Emacs session run at once (see
 `lispm-tools-allowance').  Writes outside the agent's root always ask,
-whatever the policy says: to files named by a `path' argument, or
-visited by a buffer a `buffer' argument names."
+whatever the policy says: to files named by a `path' argument, visited
+by a buffer a `buffer' argument names, or that the tool's targets
+function returns (see `lispm-deftool'), as a write whose files that
+function cannot tell does."
   (let ((action (lispm-policy-action agent (lispm-tool-permission tool))))
     (cond ((lispm-tools--allowed-p agent tool input) 'auto)
           ((and (eq action 'auto)
                 (eq (lispm-tool-permission tool) 'write)
-                (seq-some (lambda (file) (not (lispm-tools--in-root-p agent file)))
-                          (lispm-tools--targets input)))
+                (let ((targets (lispm-tools--targets agent tool input)))
+                  (or (eq targets t)
+                      (seq-some (lambda (file) (not (lispm-tools--in-root-p agent file)))
+                                targets))))
            'ask)
           (t action))))
 

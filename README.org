@@ -299,7 +299,8 @@ room in requests until needed. Using one takes two steps: the model finds it wit
 (~"select:NAME,NAME"~), which loads what it finds; from its next step on, those tools are
 offered like the others, for the rest of the session, and again when it is resumed. The tools
 of MCP servers are deferred by default; a tool of your own is when its ~lispm-deftool~ says
-~:deferred t~.
+~:deferred t~. So are LispM's tools for developing Lisp in the running Emacs (the source
+~lisp~, below).
 
 * Emacs is the operating system
 
@@ -326,6 +327,18 @@ functions Emacs declares free of side effects and pass around lambdas of its own
 its own variables and changes only buffers it made. Anything else is refused, with the
 reason. A program waiting for a call is run again once the call is decided; the calls it
 made before keep their results.
+
+Agents develop Lisp as on a Lisp Machine: a definition at a time, in the running Emacs.
+~edit_definition~ replaces the form that defines a function, macro, variable or face, in the
+file Emacs has it from, so the model writes the new form and never copies the old one;
+~eval_definition~ evaluates it as C-M-x does, a ~defvar~ or ~defcustom~ reset to what it now
+says; ~ert_run~ runs the tests in Emacs and reports each failure with its condition and the
+innermost calls of its backtrace. ~xref_definitions~, ~xref_references~ and
+~flymake_diagnostics~ work for any language Emacs has xref or flymake for: Emacs Lisp by
+default, a language server's answers with eglot. The byte compiler checks only files you trust
+(~trusted-content~), which LispM never changes, and the result says when it did not. An edit
+is a ~write~: wherever the definition is, Emacs's own sources say, one outside the project
+asks you; evaluating and testing run code, under ~exec~.
 
 A tool's failure goes to the model, which usually knows what to do about it. Set
 ~lispm-debug-tool-errors~ (t, or a list of tool names) and it stops the call instead, as
@@ -414,6 +427,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
+| lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |
 | lisp/lispm-skills.el     | skills: loading them, their code and tools                       |
 | lisp/lispm-inspect.el    | presentations (objects in text to act on), the agent inspector   |
 | lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |

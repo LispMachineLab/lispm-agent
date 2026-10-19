@@ -30,6 +30,7 @@ implementation:
 | Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
 | Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lisp/lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
+| Lisp development          | definitions edited, evaluated and tested in the running image    | [[file:lisp/lispm-develop.el][lispm-develop.el]]: ~edit_definition~, ~ert_run~          |
 | Model APIs                | two API shapes behind one internal format                        | [[file:lisp/lispm-api.el][lispm-api.el]], [[file:lisp/lispm-openai.el][lispm-openai.el]], [[file:lisp/lispm-anthropic.el][lispm-anthropic.el]]   |
 
 The name comes from the Lisp Machines (CONS, CADR, Symbolics Genera, ...): environments where
@@ -223,7 +224,9 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
   ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
   ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ (exec); ~run_lisp~ (lisp); memory, task and
-  collaboration tools are described below.
+  collaboration tools are described below. Deferred, for Lisp in the image (below):
+  ~xref_definitions~ ~xref_references~ ~flymake_diagnostics~ (read); ~edit_definition~
+  (write); ~eval_definition~ ~ert_run~ (exec).
 - *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
   ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
   what an agent lacks is knowing what there is. It finds out as a person would: ~apropos~
@@ -268,6 +271,34 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
   replays the one before; if what it reads has changed and it makes other calls, those are
   new calls, under the policy like the first. Its result lists the calls it made (those
   denied or failed marked), then what it printed and its value.
+- *Lisp in the image* (lispm-develop.el). On a Lisp Machine a program grew in the world it
+  ran in: one definition edited, evaluated into the image, tried, with an editor that knew
+  where each definition was and who used it. Agents work so on Emacs Lisp with deferred tools
+  (section 10, the source ~lisp~). ~edit_definition~ replaces the form that defines a
+  function, macro, variable or face, found as ~find-function~ finds it: its file from
+  ~find-function-library~ or ~symbol-file~, or a file given, for a definition not evaluated
+  yet; the form in it by the searches of ~find-function-regexp-alist~. The model writes the
+  new form only, which must read as one form defining that symbol, and the edit is made as
+  ~edit_file~'s are: one undo step, journaled, saved, previewed as a diff and shown in place.
+  The search is made in the text the tool goes by, never through ~find-file-noselect~, which
+  would ask about a buffer out of date, and never as find-function's last resort, by
+  expanding every macro of the file, which would run its code. ~eval_definition~ (~exec~)
+  evaluates the definition from its file's buffer as C-M-x does, by ~eval-defun~'s own means:
+  with the file's ~lexical-binding~, a ~defvar~, ~defcustom~ or ~defface~ reset to what it
+  now says, and the file recorded as where the definition comes from; but its value is the
+  result, not a message. ~ert_run~ (~exec~) runs ERT tests in the image, loading a file of
+  them first if asked, and returns a summary, then each failure with its condition and the
+  innermost calls of its backtrace, up to the test's body; a test C-g quits stops the run.
+
+  Two tools serve code in any language: ~xref_definitions~ and ~xref_references~ ask the
+  xref backend of the code's buffer, Emacs Lisp's own by default, a language server's with
+  eglot, which answers about a position, so point is put on the identifier first (on the
+  line given); ~flymake_diagnostics~ runs a buffer's flymake backends and waits for their
+  reports without blocking (~:async~), the byte compiler and checkdoc for Emacs Lisp.
+  Flymake is turned off again where it was off, and a file visited only to be read is closed
+  again. The byte compiler runs the code it compiles, so Emacs lets it check only a file the
+  user trusts (~trusted-content~); LispM never trusts one on its own, and when the compiler
+  did not run, the result says so rather than reporting no warnings.
 - Asynchronous tools (~:async t~, such as ~run_shell~ and ~ask_agent~) receive a ~done~
   callback; meanwhile Emacs and the other agents keep running.
 - *C-g interrupts a call* while Emacs runs it. Calls run from the process sentinels and timers
@@ -310,8 +341,10 @@ the audit log of what each agent learned and did, and a wrong memory is one ~git
 policy maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval.
 ~lisp~, the class of ~run_lisp~, implies ~read~: a program reads Emacs as it computes, so an
 agent that may not read may not run one either. One extra rule: *writes outside the agent's
-root always ask*, whatever the policy says, whether a ~path~ argument names the file or a
-~buffer~ argument a buffer visiting it.
+root always ask*, whatever the policy says, whether a ~path~ argument names the file, a
+~buffer~ argument a buffer visiting it, or the tool says which files a call changes
+(~:targets~ in ~lispm-deftool~): ~edit_definition~ finds its file from a symbol, which may be
+anywhere, Emacs's own sources included. A write whose files cannot be told asks too.
 
 *Unrestricted code is outside the permission model.* ~eval_elisp~ and ~run_shell~ (~exec~)
 reach all of Emacs and the system: what they run can change the policy of the agent running
@@ -646,7 +679,7 @@ its next request on, for the rest of the session (~lispm-agent-loaded-tools~); t
 changes then, which costs the cached request prefix once. A resumed session loads them again
 from its transcript, which records the searches and the calls. Sources register through
 ~lispm-tool-sources~, so deferred tools need not be MCP tools: ~lispm-deftool~ takes
-~:deferred t~.
+~:deferred t~, and LispM's own tools for Lisp in the image (section 3) are such a source.
 
 *Images.* A tool result can hold images: Peekaboo's ~see~ returns a screenshot with its map of
 the screen. The transcript cannot hold image data, and should not: base64 would swamp it. So
@@ -729,7 +762,18 @@ removed at once.
   model's context hands over once a response stops with the window full (~context-full~), not
   before; a request whose input alone is too large fails instead (~request-failed~). Direction:
   server-side compaction with the first-party API.
-- *More Emacs-native tools*: xref/LSP queries, magit operations, org-babel execution, window
-  layout: each is just a ~lispm-deftool~ away.
+- *A definition is found by its text*: ~edit_definition~ and ~eval_definition~ find a form
+  by the searches find-function makes, but not by its last resort of expanding macros, so a
+  definition a macro makes without a form naming it (a ~cl-defstruct~ accessor) is not found,
+  and ~edit_file~ is the way to change it; of several definitions of a symbol in a file, the
+  first is meant, as with find-function. The file an ~edit_definition~ call writes is found
+  when the call is decided and again when it runs: Lisp evaluated in between that moves the
+  definition to another file takes the edit with it, unasked. Only ~exec~ calls evaluate
+  Lisp, and they are outside the permission model (section 5).
+- *Emacs waits for xref*: xref's backends answer synchronously, and the references of Emacs
+  Lisp are found by xref's default means, find and grep over the project's files (with
+  ~everywhere~, over all of ~load-path~ as well), as M-? finds them; Emacs is held meanwhile.
+- *More Emacs-native tools*: magit operations, org-babel execution, window layout: each is
+  just a ~lispm-deftool~ away.
 - *A shared blackboard*: an org file every agent can read and write, as a collaboration
   medium more durable than messages.

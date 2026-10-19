@@ -2,7 +2,7 @@ EMACS ?= emacs
 # The sources, in lisp/, in the order they require each other.
 ELS = $(addprefix lisp/,lispm-core.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el \
-      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-emacs.el lispm-skills.el lispm-inspect.el \
+      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-inspect.el \
       lispm-chat.el lispm.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))"
