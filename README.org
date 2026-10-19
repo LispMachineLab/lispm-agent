@@ -1,8 +1,8 @@
-#+title: LispM — a Lisp Machine for agents
+#+title: LispM Agent — a Lisp Machine for agents
 #+startup: content
 
 #+HTML: <p align="center"><img src="assets/logo/lispm-lambda-rainbow.png" alt="LispM logo" width="200" /></p>
-#+HTML: <p align="center"><a href="https://github.com/RyanKung/lispm/actions/workflows/test.yml"><img src="https://github.com/RyanKung/lispm/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
+#+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-agent/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-agent/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
 
 LispM runs AI agents inside Emacs rather than beside it. You talk to an agent in a chat
 laid out like Claude Code's; underneath, the conversation is stored as an org document that is
@@ -12,7 +12,8 @@ org files under git, and agents are woken by Emacs hooks and delegate work to ea
 
 The name comes from the Lisp Machine (LispM): an environment where everything was a live Lisp
 object and the editor and the system were one. Back then its inhabitants were programs; here
-they are agents. In code, the package name and prefix are all lowercase: ~lispm~.
+they are agents. This repository is lispm-agent, LispM's agents; in code, the package name and
+prefix are all lowercase: ~lispm~.
 
 #+HTML: <p align="center"><img src="assets/demo/lispm-demo.gif" alt="An agent fixes a failing test in Emacs, its conversation is shown as an org document, and it opens a diff window by evaluating Emacs Lisp" /></p>
 
@@ -31,7 +32,7 @@ LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA,
 ~package-archives~); installing LispM as a package installs it too:
 
 #+begin_src emacs-lisp
-(package-vc-install "https://github.com/RyanKung/lispm")
+(package-vc-install '(lispm :url "https://github.com/LispMachineLab/lispm-agent"))
 ;; or, from a checkout of your own: (package-vc-install-from-checkout "~/src/lispm")
 (require 'lispm)
 (lispm-mode-line-mode 1)          ; show busy agents and pending approvals in the mode line
@@ -41,28 +42,32 @@ or, with ~use-package~:
 
 #+begin_src emacs-lisp
 (use-package lispm
-  :vc (:url "https://github.com/RyanKung/lispm" :rev :newest)
+  :vc (:url "https://github.com/LispMachineLab/lispm-agent" :rev :newest)
   :config (lispm-mode-line-mode 1))
 #+end_src
 
-Either way the package is =lisp/= alone; [[*LispM Desktop][LispM Desktop]], in =desktop/=, is not part of it.
+Either way the package is =lisp/=: its package name is ~lispm~, the repository's ~lispm-agent~.
 
 Then give it a model. With ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment,
 nothing more is needed; for any other server, local or hosted, see [[*Backends][Backends]].
 
-* LispM Desktop
+* The LispM projects
 
-=desktop/= holds LispM Desktop, an Emacs distribution built around LispM: Emacs laid out as Mac OS
-9's desktop, with its applications (the editor, a browser, Control Panels), agents' terminals
-emulated off Emacs's thread, and every part of it reached from the keyboard too.  It runs the
-LispM beside it, from a clone of this repository:
+LispM is three projects, each a repository of its own under
+[[https://github.com/LispMachineLab][LispMachineLab]]:
+
+| *lispm-agent*     | LispM Agent, this repository: AI agents that run inside Emacs, their conversations org documents, their tools Elisp |
+| [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]]   | LispM Desktop: Emacs laid out as Mac OS 9's desktop, a workspace for agents, ready from the first start |
+| [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]]   | LispM Browser: a WebKit browser in Emacs, with tabs, keyboard hints and Chrome extensions |
+
+The agents need neither of the others. LispM Desktop, an Emacs distribution built around them,
+runs them in its sidebar beside Claude Code, Codex and Hermes, with LispM Browser as one of its
+applications; it installs both at its first start:
 
 #+begin_src sh
-git clone https://github.com/RyanKung/lispm ~/lispm
-emacs --init-directory ~/lispm/desktop
+git clone https://github.com/LispMachineLab/lispm-desktop ~/lispm-desktop
+emacs --init-directory ~/lispm-desktop
 #+end_src
-
-See [[file:desktop/README.org][desktop/README.org]].
 
 * Getting started
 
@@ -413,8 +418,7 @@ make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers 
 make compile   # warnings are errors; make deps, which both run first, installs mcp.el into .deps/
 #+end_src
 
-CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request,
-and LispM Desktop's tests, =make -C desktop test=, with 30.1 and 31.1.
+CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request.
 
 ~make demo~ records the demo above again (~assets/demo/~) in your own Emacs, with your
 configuration but none of its state, a real model through the backend it chooses, and ffmpeg
@@ -449,7 +453,6 @@ configuration but none of its state, a real model through the backend it chooses
 | test/                    | ERT suite, fake model, SSE and MCP servers                       |
 | demo/                    | the demo: its script, recorder and sample project                |
 | assets/                  | logo, social card, the demo's video                              |
-| desktop/                 | LispM Desktop, the Emacs distribution built around LispM         |
 
 * License
 
