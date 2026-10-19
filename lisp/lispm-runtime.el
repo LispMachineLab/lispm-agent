@@ -758,7 +758,8 @@ takes it up (see `lispm--resume-calls')."
       (lispm--newline)
       (insert (lispm-transcript-section (lispm--entry-title entry) (plist-get entry :text)))))
   (lispm-inbox-save agent)
-  (lispm-journal-begin agent)
+  (with-demoted-errors "LispM: taking a snapshot: %S"
+    (lispm-journal-begin agent))
   (lispm--request agent))
 
 (defun lispm--journal-wait (agent)
@@ -1185,7 +1186,8 @@ result holds besides TEXT."
       (insert "* User\n"))
     (lispm-set-state agent 'idle)
     (lispm--save-session agent)
-    (lispm-journal-end agent)
+    (with-demoted-errors "LispM: taking a snapshot: %S"
+      (lispm-journal-end agent))
     (let ((answer (string-trim (concat reply (if note (concat "\n\n" note) "")))))
       (dolist (callback callbacks)
         (with-demoted-errors "lispm turn callback: %S"
@@ -1465,7 +1467,8 @@ condition it waits at, if any; see `lispm--resume-calls'."
         ;; Whoever started it, the user is the one reopening it, unless
         ;; another agent or an event did: then someone waits for it.
         (lispm-agent-attended agent) (not (or (plist-get entry :from) (plist-get entry :event))))
-  (lispm-journal-begin agent t)
+  (with-demoted-errors "LispM: taking a snapshot: %S"
+    (lispm-journal-begin agent t))
   (cond
    ((and condition (not calls))
     (lispm--wait-at agent (append (list :marker (copy-marker (plist-get condition :pos)))

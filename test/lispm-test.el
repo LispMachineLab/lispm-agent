@@ -96,6 +96,10 @@ BODY can use `project', a scratch directory for agents to work in."
      (unwind-protect
          (progn ,@body)
        (dolist (a (lispm-agents)) (lispm-unwatch a))
+       ;; Snapshots still being taken would outlive their project.
+       (dolist (p (process-list))
+         (when (string-prefix-p "lispm-journal" (process-name p))
+           (delete-process p)))
        (dolist (b (buffer-list))
          (when (and (buffer-file-name b) (file-in-directory-p (buffer-file-name b) tmp))
            (with-current-buffer b (set-buffer-modified-p nil))
@@ -2046,7 +2050,7 @@ stopped never reaches the file."
     (let* ((default-directory project)
            (agent (lispm-start))
            (file (buffer-file-name (lispm-agent-buffer agent))))
-      (setq lispm-test--scripts '((assistant@project hang)))
+      (setq lispm-test--scripts `((,(lispm-agent-name agent) hang)))
       (lispm-tell agent "think")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'requesting))))
       (lispm--live-insert agent 'text "half an answer")

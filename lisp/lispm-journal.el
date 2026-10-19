@@ -127,7 +127,8 @@ equal to SAME, that of the beginning, makes no commit and removes REF.
 CALLBACK gets the tree and the commit, the commit nil if none was
 made, or nothing at all (nil) if the snapshot failed."
   (let ((files nil)
-        (process-environment (lispm--git-environment)))
+        (process-environment (lispm--git-environment))
+        (default-directory top))
     (make-process
      :name "lispm-journal-files" :buffer (generate-new-buffer " *lispm-journal*") :noquery t
      :connection-type 'pipe
@@ -135,7 +136,7 @@ made, or nothing at all (nil) if the snapshot failed."
      :sentinel
      (lambda (process _event)
        (unless (process-live-p process)
-         (let ((ok (zerop (process-exit-status process)))
+         (let ((ok (and (zerop (process-exit-status process)) (file-directory-p top)))
                (buffer (process-buffer process)))
            (when ok
              (setq files (seq-filter
@@ -145,9 +146,13 @@ made, or nothing at all (nil) if the snapshot failed."
                                    (<= (file-attribute-size attributes) lispm-journal-max-file-size))))
                           (split-string (with-current-buffer buffer (buffer-string)) "\0" t))))
            (kill-buffer buffer)
+           ;; A snapshot that fails, its project gone say, is no journal
+           ;; entry: never an error in a sentinel.
            (if (not ok)
                (funcall callback nil)
-             (lispm-journal--commit top dir index files ref message author parent same callback))))))))
+             (condition-case nil
+                 (lispm-journal--commit top dir index files ref message author parent same callback)
+               (error (funcall callback nil))))))))))
 
 (defun lispm-journal--commit (top dir index files ref message author parent same callback)
   "Add FILES of TOP to the journal DIR, and commit them.
