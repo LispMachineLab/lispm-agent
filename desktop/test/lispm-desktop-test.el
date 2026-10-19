@@ -44,6 +44,49 @@
     (should-error (lispm-desktop-agent--launch 'claude temporary-file-directory "x" nil)
                   :type 'user-error)))
 
+(ert-deftest lispm-desktop-test-claude-follows-emacs-theme ()
+  "Claude Code starts with its theme \"auto\", asking the terminal for
+Emacs's colours, unless its user chose a theme: in its user, project or
+local settings, or in its old global configuration other than the default
+\"dark\".  Settings it cannot read choose nothing."
+  (let* ((home (make-temp-file "lispm-desktop-test-home" t))
+         (project (expand-file-name "project/" home))
+         (process-environment (cons (concat "HOME=" home) process-environment))
+         (auto '("--settings" "{\"theme\":\"auto\"}")))
+    (cl-flet ((put-json (file text)
+                (make-directory (file-name-directory file) t)
+                (with-temp-file file (insert text))))
+      (unwind-protect
+          (progn
+            (make-directory project)
+            (should (equal (lispm-desktop-agent--theme-arguments 'claude project) auto))
+            (should-not (lispm-desktop-agent--theme-arguments 'codex project))
+            (should-not (lispm-desktop-agent--theme-arguments 'hermes project))
+            (put-json (expand-file-name ".claude.json" home) "{\"numStartups\":3,\"theme\":\"dark\"}")
+            (put-json (expand-file-name ".claude/settings.json" home) "{\"theme\":")
+            (should (equal (lispm-desktop-agent--theme-arguments 'claude project) auto))
+            (dolist (file (list (expand-file-name ".claude.json" home)
+                                (expand-file-name ".claude/settings.json" home)
+                                (expand-file-name ".claude/settings.json" project)
+                                (expand-file-name ".claude/settings.local.json" project)))
+              (put-json file "{\"permissions\":{},\"theme\":\"light-daltonized\"}")
+              (should-not (lispm-desktop-agent--theme-arguments 'claude project))
+              (put-json file "[]"))
+            ;; Launched, Claude gets the arguments before its own.
+            (let (command)
+              (cl-letf (((symbol-function 'lispm-desktop-agent--check-installed) #'ignore)
+                        ((symbol-function 'lispm-desktop-agent-ide-start) #'ignore)
+                        ((symbol-function 'lispm-desktop-terminal-make)
+                         (lambda (_name &rest program)
+                           (setq command program)
+                           (get-buffer-create " *lispm-desktop-test-launch*"))))
+                (unwind-protect
+                    (lispm-desktop-agent--launch 'claude project "lispm-desktop-test-launch"
+                                                 '("--session-id" "x"))
+                  (kill-buffer " *lispm-desktop-test-launch*")))
+              (should (equal command `("claude" ,@auto "--session-id" "x")))))
+        (delete-directory home t)))))
+
 (ert-deftest lispm-desktop-test-sessions-skip-missing-agents ()
   "No record of an agent whose CLI is missing is read or listed."
   (let ((lispm-desktop-agent-emacs-agents nil)
@@ -3101,6 +3144,28 @@ before the answer to what it asks next."
       (should (string-match-p
                (regexp-quote "E]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,authE\\E[?")
                text)))))
+
+(ert-deftest lispm-desktop-test-term-colour-scheme ()
+  "A program asking whether the background is dark (DSR 996) is answered,
+and one that asked to hear of it (DEC mode 2031) is told when the colours
+Emacs gives turn the background from light to dark, and only then."
+  (lispm-desktop-test--with-term
+      ((term "lispm-desktop-test-scheme" "/bin/sh"
+             '("-c" "read go; stty -icanon -echo min 0 time 30; printf '\\033[?996n\\033[?2031h'; a=$(dd bs=64 count=1 2>/dev/null); echo ready; b=$(dd bs=64 count=1 2>/dev/null); printf '[%s][%s]\\n' \"$a\" \"$b\" | tr '\\033' E")))
+    (with-current-buffer term
+      (let ((colours (lambda (background)
+                       (lispm-desktop-term-module-set-colors
+                        lispm-desktop-term--terminal
+                        (vconcat (make-vector 16 "#808080") (list "#000000" background)))))
+            (text (lambda ()
+                    (string-replace "\n" "" (lispm-desktop-term-module-text lispm-desktop-term--terminal nil)))))
+        (funcall colours "#ffffff")
+        (lispm-desktop-term-send-string "\r")
+        (should (lispm-desktop-test--term-until term (lambda () (string-match-p "ready" (funcall text)))))
+        (funcall colours "#e8e8e8")
+        (funcall colours "#1e1e1e")
+        (lispm-desktop-test--term-wait term)
+        (should (string-match-p (regexp-quote "[E[?997;2n][E[?997;1n]") (funcall text)))))))
 
 (ert-deftest lispm-desktop-test-term-status-picks-what-matters ()
   "A terminal's status is the record that matters most to the user, and

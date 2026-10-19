@@ -607,14 +607,44 @@ Agents started from Emacs are independent top-level sessions."
   (seq-remove (lambda (entry) (string-match-p lispm-desktop-agent-session-marker-regexp entry))
               environment))
 
+(defun lispm-desktop-agent--claude-chosen-theme (directory)
+  "Return the theme the user chose for Claude Code run in DIRECTORY, or nil.
+It is chosen in Claude's user, project or local settings, or in its global
+configuration of old, where the default \"dark\" means none was chosen."
+  (let ((theme (lambda (file)
+                 (when (file-readable-p file)
+                   (when-let* ((theme (ignore-errors
+                                        (with-temp-buffer
+                                          (insert-file-contents file)
+                                          (plist-get (json-parse-buffer :object-type 'plist) :theme))))
+                               ((stringp theme))
+                               ((not (string-empty-p theme))))
+                     theme)))))
+    (or (seq-some theme (list (expand-file-name "~/.claude/settings.json")
+                              (expand-file-name ".claude/settings.json" directory)
+                              (expand-file-name ".claude/settings.local.json" directory)))
+        (let ((legacy (funcall theme (expand-file-name "~/.claude.json"))))
+          (unless (equal legacy "dark") legacy)))))
+
+(defun lispm-desktop-agent--theme-arguments (agent directory)
+  "Return the arguments that make AGENT, run in DIRECTORY, look light or dark
+as Emacs does.  The terminal answers a program asking its colours with
+Emacs's, see `lispm-desktop-term--tell-colors'.  Codex and Hermes ask by
+themselves; Claude Code asks only with its theme \"auto\", which it is given
+unless its user chose a theme: its default is dark whatever the terminal."
+  (and (eq agent 'claude)
+       (not (lispm-desktop-agent--claude-chosen-theme directory))
+       (list "--settings" "{\"theme\":\"auto\"}")))
+
 (defun lispm-desktop-agent--launch (agent directory name args &optional id title)
   "Run AGENT with ARGS in DIRECTORY inside the terminal NAME; return it.
 The terminal is a lispm-desktop-term once its module is built, see
 `lispm-desktop-terminal-make', else an Eat terminal.
 The terminal records the session ID and TITLE for labels and the sidebar.
 The agent runs as an independent session whatever environment Emacs itself
-inherited.  A running terminal with the same NAME is returned instead of
-restarted."
+inherited, and looks light or dark as Emacs does, see
+`lispm-desktop-agent--theme-arguments'.  A running terminal with the same
+NAME is returned instead of restarted."
   (lispm-desktop-agent--check-installed agent)
   (unless (file-directory-p directory)
     (user-error "Working directory no longer exists: %s" directory))
@@ -628,7 +658,9 @@ restarted."
          (process-environment (append (and server (lispm-desktop-agent-context-environment server))
                                       (lispm-desktop-agent--independent-environment process-environment)))
          (buffer (apply #'lispm-desktop-terminal-make name (alist-get agent lispm-desktop-agent-programs)
-                        (append (and server (lispm-desktop-agent-context-arguments server)) args))))
+                        (append (and server (lispm-desktop-agent-context-arguments server))
+                                (lispm-desktop-agent--theme-arguments agent default-directory)
+                                args))))
     (when server
       (lispm-desktop-agent-context-bind server buffer)
       (when (and (eq agent 'hermes) (not (lispm-desktop-agent-mcp-hermes-configured-p)))
