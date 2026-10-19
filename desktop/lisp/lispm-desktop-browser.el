@@ -395,12 +395,19 @@ windows."
                         :checked (eq buffer shown)))
                 (lispm-desktop-browser--buffers)))))
 
+(declare-function lispm-desktop-browser-extensions-supported-p "lispm-desktop-browser-extensions" ())
+(declare-function lispm-desktop-browser-extensions--menu-items "lispm-desktop-browser-extensions" ())
+
 (defun lispm-desktop-browser-menus ()
-  "Return the browser's menus, for the menu bar while it is in front."
-  '((lispm-desktop-browser-file "File" lispm-desktop-browser--file-items)
+  "Return the browser's menus, for the menu bar while it is in front.
+Extensions is among them where pages can run Chrome extensions."
+  `((lispm-desktop-browser-file "File" lispm-desktop-browser--file-items)
     (lispm-desktop-browser-view "View" lispm-desktop-browser--view-items)
     (lispm-desktop-browser-go "Go" lispm-desktop-browser--go-items)
     (lispm-desktop-browser-bookmarks "Bookmarks" lispm-desktop-browser--bookmark-items)
+    ,@(when (and (fboundp 'lispm-desktop-browser-extensions-supported-p)
+                 (lispm-desktop-browser-extensions-supported-p))
+        '((lispm-desktop-browser-extensions-menu "Extensions" lispm-desktop-browser-extensions--menu-items)))
     (lispm-desktop-browser-window "Window" lispm-desktop-browser--window-items)))
 
 ;;;;; Drawing Netscape's chrome
@@ -884,13 +891,15 @@ others, moving, selecting, killing, do as they always do."
     ("M-y" . lispm-desktop-browser-show-history)
     ("M-t" . lispm-desktop-browser-new-tab)
     ("M-}" . lispm-desktop-browser-next-tab)
-    ("M-{" . lispm-desktop-browser-previous-tab))
+    ("M-{" . lispm-desktop-browser-previous-tab)
+    ("M-e" . lispm-desktop-browser-extensions-press))
   "The browser's keys, Command keys as Netscape's were where Command is
 Meta: Command-[ and ] go back and forward, Command-D bookmarks the page,
 Command-B edits the bookmarks.  History is Command-Y, as macOS keeps
 Command-H for hiding.  Command-T opens a tab and Command-} and Command-{
 go to the next and the previous, as browsers with tabs do; on the page,
-Command-W closes the tab, see `lispm-desktop-setup-interface'.")
+Command-W closes the tab, see `lispm-desktop-setup-interface'.  Command-E
+presses an extension's button, see `lispm-desktop-browser-extensions-press'.")
 
 (defun lispm-desktop-browser-bind-keys (map)
   "Bind `lispm-desktop-browser-keys' in keymap MAP."

@@ -62,6 +62,7 @@
 (require 'lispm-desktop-browser)
 (require 'lispm-desktop-browser-places)
 (require 'lispm-desktop-browser-hints)
+(require 'lispm-desktop-browser-extensions)
 (require 'lispm-desktop-surface)
 (require 'lispm-desktop-editor)
 (require 'lispm-desktop-buffer-manager)
@@ -178,6 +179,9 @@ Customize.  A batch Emacs asks nothing: Emacs keys, Dracula."
     (lispm-desktop-setup-lispm)
     ;; After init, so personal.el can still set `lispm-desktop-window-manager'.
     (add-hook 'window-setup-hook #'lispm-desktop-setup-exwm)
+    ;; After init too, so personal.el can still turn extensions off, and
+    ;; before anything opens a page, which would run none.
+    (add-hook 'window-setup-hook #'lispm-desktop-setup-browser-extensions -10)
     (add-hook 'window-setup-hook #'lispm-desktop--show-startup-view)
     (when first
       (lispm-desktop--offer-fonts)

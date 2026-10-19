@@ -131,6 +131,19 @@ and Platinum, Mac OS 9's own greys with black on white and the Lavender accent.
   typing a label follows it; in a field, characters go in and Emacs's keys move and delete,
   Return submits, Tab goes on and Escape leaves.  Emacs on macOS cannot hand keys to a page,
   so they reach it through JavaScript.
+- *Chrome extensions in the browser*, on macOS 15.4 and later: WebKit runs them itself, as Safari
+  runs its own (WKWebExtension), in every page whose view carries its extension controller, and a
+  dynamic module in Swift hands Emacs's page views that controller as they are made.  The
+  Extensions menu adds one from the Chrome Web Store (the store page shown, a link or an id), its
+  signature checked and what it will be able to do asked first, or an unpacked one from a folder,
+  as Chrome's developer mode does; it lists the running extensions' buttons, and =M-e= presses
+  one for the page in front: its popup hangs from the page's top right, or it is told it was
+  clicked.  Manage Extensions lists them, to press, open the options of (in a tab of their own),
+  turn on and off, reload or remove.  Their tabs are the browser's pages, their questions are
+  asked in the minibuffer, and they live in =lispm-desktop-browser-extensions-directory=.  Much of
+  the module is ported from [[https://github.com/driceroland/Search][Search]], a WebKit browser for
+  macOS; the Chrome APIs WebKit lacks, which Search fills in itself (bookmarks, history,
+  downloads, native messaging), are not there yet, so extensions needing them do less.
 - *Windows out on the screen*, on macOS (see [[*Mac OS and X][Mac OS and X]]), as a virtual machine's in Parallels' Coherence or
   VMware's Unity: drop a floating window, the Finder's, the editor's, the browser's or a control
   panel's, mostly past the desktop's edge, and it goes out among the computer's own windows,
@@ -222,6 +235,9 @@ Optional, and picked up when present:
   (~hermes~) on ~PATH~;
 - [[https://rustup.rs][Rust]] (~cargo~), to build the terminals' module (=make native= builds it by
   hand);
+- Swift (Xcode or its command line tools), on macOS 15.4 and later, to build the module that runs
+  Chrome extensions in the browser, the first time one is added (=make webext= builds it by
+  hand);
 - the Maple Mono NF CN font, whose glyphs keep terminal columns aligned, CJK included
   (=brew install --cask font-maple-mono-nf-cn= on macOS);
 - a spell checker (aspell, hunspell or ispell) for Flyspell;
@@ -251,7 +267,9 @@ what it was built with.
   outline over the desktop's colour where Mac OS 9 inverted the screen.  A dragged icon's copy
   is translucent where frames can be (macOS, X with a compositing manager), opaque elsewhere.
 - *The browser* needs an Emacs built with xwidgets (on X, with GTK and WebKitGTK); without, its
-  icon and menu items are not shown.
+  icon and menu items are not shown.  Its pages run Chrome extensions in the Mac build only, on
+  macOS 15.4 and later: WebKitGTK has no extension engine, so elsewhere there is no Extensions
+  menu.
 - *Tree-sitter modes* are used when Emacs is built with tree-sitter.
 - *Modifier keys*: Command is Meta in the Mac build; an X build takes its modifiers from the X
   server's keyboard map.
@@ -346,6 +364,7 @@ Two things to know when both builds run:
 | =M-[=, =M-]=, =M-r=, =M-.= | in the browser: back, forward, reload, stop            |
 | =M-l=, =M-d=, =M-b=, =M-y= | the location field, add a bookmark, the bookmarks, the history (=n=, =p=, =RET=, =q= in the pane) |
 | =M-t=, =M-}=, =M-{=, =M-w= | in the browser: a new tab, the next, the previous, close the tab |
+| =M-e=                  | in the browser: an extension's button, its popup or its click |
 | =f=, =F=, =i=           | on a page: label links, buttons and fields and follow the one typed (=F= in a new tab); the first field |
 
 In the Mac OS build the Command key is Meta, so Command-C and Command-V copy and paste
