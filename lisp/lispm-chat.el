@@ -412,7 +412,8 @@ Code blocks lose their fences and keep their lines as they are."
     ("remember" . "Remember") ("recall" . "Recall") ("forget" . "Forget")
     ("task_add" . "Task") ("task_update" . "Task") ("task_list" . "Tasks")
     ("ask_agent" . "Ask") ("send_message" . "Message") ("list_agents" . "Agents")
-    ("search_tools" . "ToolSearch") ("skill" . "Skill") ("apropos" . "Apropos")
+    ("search_tools" . "ToolSearch") ("skill" . "Skill") ("write_skill" . "WriteSkill")
+    ("apropos" . "Apropos")
     ("read_info" . "Info") ("web_search" . "WebSearch") ("web_fetch" . "WebFetch")
     ("edit_definition" . "Redefine") ("eval_definition" . "Evaluate") ("ert_run" . "Test")
     ("xref_definitions" . "Definitions") ("xref_references" . "References")
@@ -486,6 +487,10 @@ it names one."
             ((string-prefix-p "-" line) (push (propertize line 'face 'lispm-chat-removed) lines))
             ((string-prefix-p " " line) (push (propertize line 'face 'lispm-chat-dim) lines))))
     (nreverse lines)))
+
+(defun lispm-chat--diff-file (diff)
+  "The file the unified DIFF changes, as its +++ line names it, or nil."
+  (and diff (string-match "^\\+\\+\\+ b/\\(.+\\)$" diff) (match-string 1 diff)))
 
 (defun lispm-chat--diff-summary (diff path)
   "What DIFF does to PATH, in a sentence."
@@ -819,12 +824,17 @@ ITEMS are the session's items, where the call's preview is."
            (path (or (alist-get 'path input) (alist-get 'buffer input)))
            (why (alist-get 'why input))
            (item (seq-find (lambda (i) (equal (plist-get i :key) id)) items))
+           (preview (plist-get item :preview))
            (body (pcase name
                    ((or "edit_file" "write_file" "edit_buffer" "edit_definition")
-                    (lispm-chat--diff-lines (or (plist-get item :preview)
-                                                (lispm-chat--input-diff input))))
+                    (lispm-chat--diff-lines (or preview (lispm-chat--input-diff input))))
                    ;; The definition, as the preview quotes it from its file.
-                   ("eval_definition" (split-string (or (plist-get item :preview) "") "\n"))
+                   ("eval_definition" (split-string (or preview "") "\n"))
+                   ;; The file a skill would be, or a project's skill's code;
+                   ;; a preview that failed says why.
+                   ((or "write_skill" "trust_skill")
+                    (or (lispm-chat--diff-lines preview)
+                        (and preview (split-string (string-trim preview) "\n"))))
                    ("run_shell" (split-string (or (alist-get 'command input) "") "\n"))
                    ((or "eval_elisp" "run_lisp") (split-string (or (alist-get 'code input) "") "\n"))
                    (_ (split-string (lispm--json-pretty input) "\n"))))
@@ -833,11 +843,14 @@ ITEMS are the session's items, where the call's preview is."
                             ("edit_definition" "Edit definition")
                             ("eval_definition" "Evaluate a definition")
                             ("write_file" "Write file")
+                            ("write_skill" (format "Write the skill %s" (alist-get 'name input)))
+                            ("trust_skill" (format "Run the code of the project's skill %s"
+                                                   (alist-get 'name input)))
                             ("run_shell" "Bash command")
                             ("eval_elisp" "Evaluate Emacs Lisp")
                             ("run_lisp" "Run a Lisp program")
                             (_ (format "Use %s" shown)))
-                          (if (plist-get call :asking)
+                          (if (and (plist-get call :asking) (not (equal name "trust_skill")))
                               (format " · in the program %s runs" (lispm-chat--tool-name
                                                                    (plist-get call :name)))
                             "")))
@@ -848,16 +861,30 @@ ITEMS are the session's items, where the call's preview is."
                         (format "Do you want to make this edit to %s?" (alist-get 'name input)))
                        ("eval_definition" "Do you want to evaluate this?")
                        ("write_file" (format "Do you want to write %s?" path))
+                       ("write_skill"
+                        (format "Do you want to save it%s?"
+                                (if-let* ((file (lispm-chat--diff-file preview))) (concat " as " file) "")))
+                       ("trust_skill"
+                        (format "Do you want to evaluate this code%s?"
+                                (if-let* ((file (lispm-chat--diff-file preview))) (concat " from " file) "")))
                        ("eval_elisp" "Do you want to evaluate this?")
                        ("run_lisp" "Do you want to run this?")
                        (_ "Do you want to proceed?")))
+           ;; What saying yes leads to, beyond the call itself.
+           (note (pcase name
+                   ("write_skill" "Its code runs whenever an agent loads the skill, from now on.")
+                   ("trust_skill"
+                    (and (> (length (alist-get 'files input)) 0)
+                         (format "It may load the files beside it: %s."
+                                 (mapconcat #'identity (alist-get 'files input) ", "))))))
            (options (list "Yes"
-                          (if (and (plist-get asked :tool)
-                                   (consp (lispm-tools-allowance (plist-get asked :tool) input)))
-                              (format "Yes, and don't ask again for this exact %s"
-                                      (pcase name ("run_shell" "command") ("eval_elisp" "code")
-                                             (_ "call")))
-                            (format "Yes, and don't ask again for %s calls by this agent" shown))
+                          (cond ((plist-get asked :always))
+                                ((and (plist-get asked :tool)
+                                      (consp (lispm-tools-allowance (plist-get asked :tool) input)))
+                                 (format "Yes, and don't ask again for this exact %s"
+                                         (pcase name ("run_shell" "command") ("eval_elisp" "code")
+                                                ("write_skill" "skill") (_ "call"))))
+                                (t (format "Yes, and don't ask again for %s calls by this agent" shown)))
                           "No, and tell it what to do differently")))
       (propertize
        (concat
@@ -869,6 +896,7 @@ ITEMS are the session's items, where the call's preview is."
                       (list (propertize (format "  … +%d lines" (- (length body) 30))
                                         'face 'lispm-chat-dim)))
                  (and (stringp why) (list "" (propertize (concat "  " why) 'face 'lispm-chat-dim)))
+                 (and note (list "" (propertize (concat "  " note) 'face 'lispm-chat-dim)))
                  (list "" question)
                  (cl-loop for option in options
                           for i from 0

@@ -159,7 +159,8 @@ invalidate the model's cached prefix.")
 
 (defvar lispm-tools-changed-functions nil
   "Abnormal hook run with an agent whose tools changed in mid-session.
-That happens when search_tools loads deferred tools for it.")
+That happens when deferred tools are loaded for it: tools search_tools
+found, or tools its own code or a skill it loaded defined.")
 
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
@@ -233,7 +234,7 @@ Each is called with the buffer, its old text and its new text;
   journal                    ; alist TURN -> edit snapshots
   snapshots                  ; alist TURN -> snapshots of its project (lispm-journal.el)
   allowed                    ; tool names approved for this Emacs session
-  loaded-tools               ; deferred tools loaded by search_tools, by name
+  loaded-tools               ; deferred tools loaded for it, by name
   waiting-on                 ; agents this one awaits (ask_agent)
   condition                  ; condition its turn stopped at, awaiting a restart
   auto-restarts              ; alist TYPE or (TYPE . CALL) -> restarts chosen by handlers this turn

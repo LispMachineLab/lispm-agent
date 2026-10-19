@@ -792,9 +792,9 @@ then.  Tools whose descriptions depend on the agent see it as
 (defun lispm--extend-session-tools (agent)
   "Offer AGENT's session the tools it gained, after those it had.
 Run from `lispm-tools-changed-functions' when an agent's tools grow in
-the middle of a session, as when it turns on a toolset it was offered
-on demand.  The earlier tools keep their place; the request prefix
-changes once."
+the middle of a session, as when it finds deferred tools, loads a
+skill or defines a tool itself.  The earlier tools keep their place;
+the request prefix changes once."
   (let ((buffer (lispm-agent-buffer agent)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -1347,7 +1347,9 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
   "Settle AGENT's call ID awaiting approval: DECISION is `approve' or `deny'.
 REASON, for a denial, is passed on to the model.  For a call that
 awaits approval of a call it makes (see `lispm-call-ask'), that call
-is approved or denied, and the call that made it goes on."
+is approved or denied, and the call that made it goes on.  DECISION
+may also be `allow', from `lispm-allow': approved for good, which the
+call that made such a call learns."
   (let ((call (gethash id (lispm-agent-pending agent))))
     (when (and call (eq (plist-get call :status) 'ask))
       (if-let* ((asking (plist-get call :asking)))
@@ -1360,30 +1362,34 @@ is approved or denied, and the call that made it goes on."
             (funcall (plist-get asking :continue) decision
                      (and (eq decision 'deny) (lispm--denial reason))))
         (pcase decision
-          ('approve (lispm--run-tool agent id))
+          ((or 'approve 'allow) (lispm--run-tool agent id))
           ('deny (lispm--tool-done agent id (lispm--denial reason) t "DENIED")))))))
 
 (defun lispm--asked (call)
   "What CALL awaits approval for, as a plist (:tool :name :input).
 The call itself; or for a call that makes calls in turn, as a Lisp
-program does, the call of its that waits (see `lispm-call-ask')."
+program does, the call of its that waits (see `lispm-call-ask'), with
+:always, what approving it for good means, if it says."
   (or (plist-get call :asking)
       (list :tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))
             :name (plist-get call :name)
             :input (plist-get call :input))))
 
-(defun lispm-call-ask (agent id tool input continue)
+(defun lispm-call-ask (agent id tool input continue &optional always)
   "Have AGENT's running call ID await approval of a call of TOOL on INPUT.
 The running call makes that call in turn, as a Lisp program does; it
 waits meanwhile, and the call is shown, approved and denied as if the
 model had made it, the transcript recording it under the running
 call's heading.  Once the user decides, CONTINUE is called with
-`approve', or with `deny' and what the denial results in.  Return nil,
-and ask nothing, if ID is not running."
+`approve', `allow' if they approved it for good, or `deny' and what
+the denial results in.  Approving it for good allows AGENT calls like
+it, as `lispm-allow' says, unless ALWAYS is non-nil: a sentence saying
+what it means instead, shown with the choice, which CONTINUE then
+carries out.  Return nil, and ask nothing, if ID is not running."
   (when-let* ((call (gethash id (lispm-agent-pending agent)))
               ((eq (plist-get call :status) 'run)))
     (plist-put call :asking (list :tool tool :name (lispm-tool-name tool) :input input
-                                  :continue continue))
+                                  :continue continue :always always))
     (plist-put call :status 'ask)
     (when-let* ((marker (plist-get call :marker))
                 ((marker-buffer marker)))
@@ -1399,12 +1405,16 @@ and ask nothing, if ID is not running."
   "Approve AGENT's call ID, and calls like it for the rest of the Emacs session.
 Like it are later calls of its tool, or for a tool of class `exec',
 calls with the same input (see `lispm-tools-allowance').  AGENT's
-other calls awaiting approval that this allows are approved too."
+other calls awaiting approval that this allows are approved too.  A
+call that a call makes may mean something else by it (see
+`lispm-call-ask'): then the call that made it is told, and nothing
+more is allowed."
   (when-let* ((call (gethash id (lispm-agent-pending agent)))
               (asked (lispm--asked call))
               (tool (plist-get asked :tool)))
-    (push (lispm-tools-allowance tool (plist-get asked :input)) (lispm-agent-allowed agent))
-    (lispm-resolve agent id 'approve)
+    (unless (plist-get asked :always)
+      (push (lispm-tools-allowance tool (plist-get asked :input)) (lispm-agent-allowed agent)))
+    (lispm-resolve agent id 'allow)
     (dolist (other (lispm--waiting-calls agent))
       (let ((asked (lispm--asked (gethash other (lispm-agent-pending agent)))))
         (when (and (plist-get asked :tool)
@@ -1651,9 +1661,9 @@ waits at, choose a restart."
                  (format "%s wants to run %s" (lispm-agent-name agent) (plist-get asked :name))
                  `((?y "yes" "Run this call")
                    (?n "no" "Deny it; you may give a reason")
-                   (?a "always" ,(if exact
-                                     "Run it, and this exact call again, this Emacs session"
-                                   "Run it, and every later call of this tool, this Emacs session"))
+                   (?a "always" ,(cond ((plist-get asked :always))
+                                       (exact "Run it, and this exact call again, this Emacs session")
+                                       (t "Run it, and every later call of this tool, this Emacs session")))
                    (?q "later" "Decide later"))))
       (?y (lispm-resolve agent id 'approve))
       (?n (lispm-resolve agent id 'deny (read-string "Reason (optional): ")))

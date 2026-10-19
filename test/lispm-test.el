@@ -1268,7 +1268,8 @@ This runs ERT inside the ERT run of this suite."
   (with-temp-file file (insert text)))
 
 (ert-deftest lispm-test-skills ()
-  "Skills are listed, loaded with their code and tools, and restored on resume."
+  "Skills are listed, loaded with their code and tools, and restored on resume.
+A project's skill asks before its code runs; refused, its text is loaded alone."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "user-skills/" project))
            (lispm-skill-directories (list user-skills))
@@ -1295,6 +1296,11 @@ This runs ERT inside the ERT run of this suite."
       (unwind-protect
           (progn
             (lispm-tell agent "Greet Lisp")
+            ;; Whatever the policy, the project's code waits for the user.
+            (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+            (should (equal (plist-get (lispm--asked (gethash "t3" (lispm-agent-pending agent))) :name)
+                           "trust_skill"))
+            (lispm-resolve agent "t3" 'deny "not now")
             (should (lispm-test--wait (lispm-test--idle-p agent)))
             (let ((requests (reverse lispm-test--requests)))
               (let ((skill (seq-find (lambda (tool) (equal (alist-get 'name tool) "skill"))
@@ -1307,7 +1313,9 @@ This runs ERT inside the ERT run of this suite."
               (should (string-match-p "^Skill greet loaded; tools now available: greet_tool\\.$" transcript))
               (should (string-match-p "^Use greet_tool\\.$" transcript))
               (should (string-match-p "^Hello, Lisp!$" transcript))
-              (should (string-match-p "^Skill local loaded (a project's skill: its code was not evaluated)\\.$"
+              (should (string-match-p (concat "^Skill local loaded (a project's skill: the user did not let "
+                                              "its code run, so it was not evaluated)\\. "
+                                              "The user's reason: not now$")
                                       transcript)))
             (should (fboundp 'lispm-test-greet-helper))
             (should-not (fboundp 'lispm-test-local-helper))
@@ -1321,6 +1329,363 @@ This runs ERT inside the ERT run of this suite."
                 (should (member "greet_tool" (mapcar #'lispm-tool-name (lispm-agent-tools* revived)))))))
         (remhash "greet_tool" lispm-tools--registry)
         (fmakunbound 'lispm-test-greet-helper)))))
+
+(defun lispm-test--tool-names (request)
+  "Names of the tools REQUEST offers."
+  (mapcar (lambda (tool) (alist-get 'name tool)) (alist-get 'tools request)))
+
+(defun lispm-test--asked (agent)
+  "Name of the tool of the first call AGENT awaits approval for."
+  (when-let* ((id (car (lispm--waiting-calls agent))))
+    (plist-get (lispm--asked (gethash id (lispm-agent-pending agent))) :name)))
+
+(defmacro lispm-test-with-trust (&rest body)
+  "Run BODY with no trusted skills, Customize saving to a scratch file.
+The init and custom files are beside `project', so that the user's
+own are never written."
+  (declare (indent 0))
+  `(let ((lispm-trusted-skills nil)
+         (user-init-file (expand-file-name "../init.el" project))
+         (custom-file (expand-file-name "../custom.el" project)))
+     (unwind-protect
+         (progn ,@body)
+       (put 'lispm-trusted-skills 'saved-value nil)
+       (put 'lispm-trusted-skills 'theme-value nil))))
+
+(defconst lispm-test--local-skill
+  (concat "#+title: Local\n#+description: A project's own skill.\n\n"
+          "#+begin_src emacs-lisp :lispm load\n"
+          "(defun lispm-test-local-helper () 1)\n"
+          "(lispm-deftool local_tool () \"A project's tool.\" \"local\")\n"
+          "#+end_src\n")
+  "A project's skill with code, for the tests of trust.")
+
+(ert-deftest lispm-test-skill-trust ()
+  "A project's skill code runs once the user lets it: once, or for good, pinned by its hash.
+Trusted for good, it runs unasked until it, or a file beside it,
+changes; the trust is saved with Customize."
+  (lispm-test-env
+    (lispm-test-with-trust
+      (let* ((lispm-skill-directories (list (expand-file-name "user-skills/" project)))
+             (skill (expand-file-name ".lispm/skills/local/SKILL.org" project))
+             (beside (expand-file-name ".lispm/skills/local/data.el" project))
+             (agent (lispm-defagent tester :root project :policy '((exec . auto)))))
+        (lispm-test--write skill lispm-test--local-skill)
+        (lispm-test--write beside "(setq lispm-test-data 1)\n")
+        (setq lispm-test--scripts
+              `((tester ,@(mapcan (lambda (id)
+                                    (list (lispm-test--msg "tool_use"
+                                                           (lispm-test--tool id "skill" '((name . "local"))))
+                                          (lispm-test--msg "end_turn" (lispm-test--text "ok"))))
+                                  '("t1" "t2" "t3" "t4")))))
+        (unwind-protect
+            (progn
+              ;; Once: the code runs, the user having seen it.
+              (lispm-tell agent "load")
+              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (should (equal (lispm-test--asked agent) "trust_skill"))
+              (let ((transcript (lispm-test--transcript agent)))
+                (should (string-match-p "^\\*\\*\\* Asks: trust_skill  local$" transcript))
+                (should (string-match-p "^\"files\": \\[\"data\\.el\"\\]$"
+                                        (replace-regexp-in-string "^ +" "" transcript)))
+                (should (string-match-p "^\\*\\*\\* Preview\n#\\+begin_src diff\n\\(?:.*\n\\)*\\+(lispm-deftool local_tool"
+                                        transcript)))
+              (lispm-resolve agent "t1" 'approve)
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should (fboundp 'lispm-test-local-helper))
+              (should (string-match-p "^Skill local loaded; tools now available: local_tool\\.$"
+                                      (lispm-test--transcript agent)))
+              (should (lispm-tool-deferred (lispm-get-tool "local_tool")))
+              (should-not lispm-trusted-skills)
+              ;; Asked again; for good, the code is pinned, and saved.
+              (lispm-tell agent "load again")
+              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (lispm-allow agent "t2")
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should (equal lispm-trusted-skills
+                             (list (cons (abbreviate-file-name skill) (lispm-skills--hash skill)))))
+              (should (string-match-p "lispm-trusted-skills" (lispm-test--file project "../custom.el")))
+              (should-not (lispm-agent-allowed agent))
+              ;; Then it runs unasked ...
+              (fmakunbound 'lispm-test-local-helper)
+              (lispm-tell agent "and again")
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should (fboundp 'lispm-test-local-helper))
+              ;; ... until a file beside it, which its code may load, changes.
+              (lispm-test--write beside "(setq lispm-test-data 2)\n")
+              (fmakunbound 'lispm-test-local-helper)
+              (lispm-tell agent "once more")
+              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (lispm-resolve agent "t4" 'deny)
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should-not (fboundp 'lispm-test-local-helper)))
+          (fmakunbound 'lispm-test-local-helper)
+          (remhash "local_tool" lispm-tools--registry))))))
+
+(ert-deftest lispm-test-skill-trust-resume ()
+  "A resumed session evaluates a project's skill again only while its code is trusted.
+`lispm-trust-skill' trusts the code as it is then; with DISTRUST, no
+longer.  Code changed while the user is asked is not evaluated."
+  (lispm-test-env
+    (lispm-test-with-trust
+      (let* ((lispm-skill-directories (list (expand-file-name "user-skills/" project)))
+             (skill (expand-file-name ".lispm/skills/local.org" project))
+             (default-directory project)
+             (agent (lispm-start)))
+        (lispm-test--write skill lispm-test--local-skill)
+        (lispm-trust-skill skill)
+        (should (equal (mapcar #'car lispm-trusted-skills) (list (abbreviate-file-name skill))))
+        (setq lispm-test--scripts
+              `((assistant@project
+                 ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "skill" '((name . "local"))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+        (unwind-protect
+            (let ((file (buffer-file-name (lispm-agent-buffer agent))))
+              (lispm-tell agent "load")
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should (fboundp 'lispm-test-local-helper))
+              (with-current-buffer (lispm-agent-buffer agent) (save-buffer))
+              ;; Trusted as it is: evaluated again.
+              (lispm-retire agent)
+              (fmakunbound 'lispm-test-local-helper)
+              (let ((revived (lispm-resume-file file)))
+                (should (fboundp 'lispm-test-local-helper))
+                (should (member "local_tool" (mapcar #'lispm-tool-name (lispm-agent-tools* revived))))
+                (lispm-retire revived))
+              ;; Changed since: not.
+              (lispm-test--write skill (string-replace "() 1)" "() 2)" lispm-test--local-skill))
+              (fmakunbound 'lispm-test-local-helper)
+              (lispm-retire (lispm-resume-file file))
+              (should-not (fboundp 'lispm-test-local-helper))
+              (lispm-trust-skill skill t)
+              (should-not lispm-trusted-skills))
+          (fmakunbound 'lispm-test-local-helper)
+          (remhash "local_tool" lispm-tools--registry))))
+    ;; The code the user is asked about is the code that runs.
+    (lispm-test-with-trust
+      (let* ((lispm-skill-directories (list (expand-file-name "user-skills/" project)))
+             (skill (expand-file-name ".lispm/skills/late.org" project))
+             (agent (lispm-defagent tester :root project)))
+        (lispm-test--write skill (string-replace "local" "late" lispm-test--local-skill))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "skill" '((name . "late"))))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+        (lispm-tell agent "load")
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+        (lispm-test--write skill (string-replace "() 1)" "() 2)" (string-replace "local" "late" lispm-test--local-skill)))
+        (lispm-allow agent "t1")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (string-match-p "^Skill late loaded (a project's skill: its code changed while the user was asked"
+                                (lispm-test--transcript agent)))
+        (should-not (fboundp 'lispm-test-late-helper))
+        (should-not lispm-trusted-skills)))))
+
+(ert-deftest lispm-test-skill-trust-chat ()
+  "The chat shows the code of a project's skill it asks about; 2 trusts it for good."
+  (lispm-test-env
+    (lispm-test-with-trust
+      (let* ((lispm-skill-directories (list (expand-file-name "user-skills/" project)))
+             (skill (expand-file-name ".lispm/skills/local.org" project))
+             (agent (lispm-defagent tester "Test agent." :root project))
+             (chat (lispm-chat agent)))
+        (lispm-test--write skill lispm-test--local-skill)
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "skill" '((name . "local"))))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+        (unwind-protect
+            (progn
+              (lispm-test--chat-type chat "load it")
+              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (let ((text (lispm-test--chat-text chat)))
+                (should (string-match-p "│ Run the code of the project's skill local" text))
+                (should (string-match-p "│   \\+(defun lispm-test-local-helper () 1)" text))
+                (should (string-match-p "Do you want to evaluate this code from \\.lispm/skills/local\\.org\\?" text))
+                (should (string-match-p "2\\. Yes, and trust this code until it changes" text)))
+              (lispm-test--chat-key chat "2")
+              (should (lispm-test--wait (lispm-test--idle-p agent)))
+              (should (fboundp 'lispm-test-local-helper))
+              (should (equal (mapcar #'car lispm-trusted-skills) (list (abbreviate-file-name skill)))))
+          (fmakunbound 'lispm-test-local-helper)
+          (remhash "local_tool" lispm-tools--registry))))))
+
+(ert-deftest lispm-test-write-skill ()
+  "An agent writes a skill: always asked, previewed as its file, then evaluated and saved.
+Its tools are the agent's at once, deferred; a resumed session loads it again."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "user-skills/" project))
+           (lispm-skill-directories (list user-skills))
+           (default-directory project)
+           (agent (lispm-start))
+           (code "(defun lispm-test-shout (text) (upcase text))
+(lispm-deftool shout_tool ((text string \"What to shout.\")) \"Shout TEXT.\"
+  (lispm-test-shout text))"))
+      (setf (lispm-agent-policy agent) '((exec . auto) (write . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "write_skill"
+                                                             `((name . "shout")
+                                                               (description . "Shout things.\nLoudly.")
+                                                               (instructions . "Use shout_tool.\n\n* Care\nNot too often.")
+                                                               (code . ,code)
+                                                               (why . "To keep the tool."))))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "shout_tool" '((text . "hi"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (unwind-protect
+          (let ((file (expand-file-name "shout.org" user-skills)))
+            (lispm-tell agent "Keep the shout tool")
+            ;; Asked, whatever the policy says, with the file it would be.
+            (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+            (should-not (file-exists-p file))
+            (should (string-match-p "^\\*\\*\\* Preview\n#\\+begin_src diff\n\\(?:.*\n\\)*\\+#\\+description: Shout things\\. Loudly\\.$"
+                                    (lispm-test--transcript agent)))
+            (lispm-resolve agent "t1" 'approve)
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (should (equal (lispm-test--file user-skills "shout.org")
+                           (concat "#+title: shout\n#+description: Shout things. Loudly.\n\n"
+                                   "Use shout_tool.\n\n* Care\nNot too often.\n\n* The code\n\n"
+                                   "#+begin_src emacs-lisp :lispm load\n" code "\n#+end_src\n")))
+            (let ((transcript (lispm-test--transcript agent)))
+              (should (string-match-p "^Skill shout loaded; tools now available: shout_tool\\.$" transcript))
+              (should (string-match-p "^Saved as .*/user-skills/shout\\.org: " transcript))
+              (should (string-match-p "^HI$" transcript)))
+            (let ((requests (reverse lispm-test--requests)))
+              (should (member "write_skill" (lispm-test--tool-names (nth 0 requests))))
+              (should-not (member "shout_tool" (lispm-test--tool-names (nth 0 requests))))
+              (should (member "shout_tool" (lispm-test--tool-names (nth 1 requests)))))
+            ;; Deferred: another agent does not carry it until it loads the skill.
+            (should (lispm-tool-deferred (lispm-get-tool "shout_tool")))
+            (should-not (member "shout_tool" (mapcar #'lispm-tool-name
+                                                     (lispm-agent-tools* (lispm-defagent other :root project)))))
+            (should (equal (plist-get (lispm-skills--find "shout" agent) :file) file))
+            ;; A resumed session loads it again.
+            (let ((session (buffer-file-name (lispm-agent-buffer agent))))
+              (with-current-buffer (lispm-agent-buffer agent) (save-buffer))
+              (lispm-retire agent)
+              (fmakunbound 'lispm-test-shout)
+              (remhash "shout_tool" lispm-tools--registry)
+              (let ((revived (lispm-resume-file session)))
+                (should (fboundp 'lispm-test-shout))
+                (should (member "shout_tool" (mapcar #'lispm-tool-name (lispm-agent-tools* revived)))))))
+        (remhash "shout_tool" lispm-tools--registry)
+        (fmakunbound 'lispm-test-shout)))))
+
+(ert-deftest lispm-test-write-skill-checks ()
+  "write_skill always asks, refuses bad names and skills it would not replace,
+and saves nothing whose code fails or does not read; a skill whose code does
+not read is loaded without it."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "user-skills/" project))
+           (lispm-skill-directories (list lispm-skills--builtin user-skills))
+           (agent (lispm-defagent tester :root project :policy '((exec . auto))))
+           (tool (lispm-get-tool "write_skill"))
+           (input (lambda (name &optional code)
+                    `((name . ,name) (description . "Does things.") (instructions . "How.")
+                      ,@(and code `((code . ,code))))))
+           (write (lambda (name &optional code)
+                    (lispm-test--call agent "write_skill" (funcall input name code)))))
+      (unwind-protect
+          (progn
+            ;; No policy lets it run unasked, nor does approving one call the next.
+            (should (eq (lispm-tool-action agent tool (funcall input "x")) 'ask))
+            (should (equal (lispm-tools-allowance tool '((name . "x") (why . "y")))
+                           '("write_skill" (name . "x"))))
+            (should (eq (lispm-tool-action (lispm-defagent t2 :root project :policy '((exec . deny)))
+                                           tool (funcall input "x"))
+                        'deny))
+            (dolist (name '("../evil" "a/b" "Web" "" ".hidden"))
+              (let ((result (funcall write name)))
+                (should (cdr result))
+                (should (string-match-p "\\`The name of a skill is" (car result)))))
+            (should-not (directory-files-recursively (expand-file-name "../" user-skills) "evil"))
+            ;; One of LispM's own, or of the project, is not replaced.
+            (should (string-match-p "\\`There is a skill named web already" (car (funcall write "web"))))
+            (lispm-test--write (expand-file-name ".lispm/skills/mine.org" project) "#+title: Mine\n")
+            (should (string-match-p "\\`There is a skill named mine already" (car (funcall write "mine"))))
+            ;; Code that fails is not saved; what it defined first is the agent's, deferred.
+            (let ((result (funcall write "broken" "(lispm-deftool lispm_test_half () \"Half.\" 1)\n(error \"Boom\")")))
+              (should (cdr result))
+              (should (string-match-p "\\`The code of skill broken failed, so the skill was not saved: Boom"
+                                      (car result)))
+              (should-not (file-exists-p (expand-file-name "broken.org" user-skills)))
+              (should (lispm-tool-deferred (lispm-get-tool "lispm_test_half")))
+              (should (member "lispm_test_half" (lispm-agent-loaded-tools agent))))
+            ;; Nor code that does not read, which is not evaluated at all.
+            (let ((result (funcall write "open" "(defun lispm-test-first () 1)\n(defun lispm-test-open ()")))
+              (should (string-match-p "\\`Skill open was not saved: The code does not read: the form at its line 2"
+                                      (car result)))
+              (should-not (fboundp 'lispm-test-first))
+              (should-not (file-exists-p (expand-file-name "open.org" user-skills))))
+            ;; A skill found so, written by hand, is loaded without its code.
+            (lispm-test--write (expand-file-name "unread.org" user-skills)
+                               (concat "#+title: Unread\n#+description: Does things.\n\nText.\n\n"
+                                       "#+begin_src emacs-lisp :lispm load\n(defun lispm-test-first () 1)\n"
+                                       "(defun lispm-test-unread ()\n#+end_src\n"))
+            (should (string-match-p (concat "\\`Skill unread loaded (its code was not evaluated: The code "
+                                            "does not read: the form at its line 2 is not closed)\\.\n\nText\\.")
+                                    (car (lispm-test--call agent "skill" '((name . "unread"))))))
+            (should-not (fboundp 'lispm-test-first))
+            ;; Written again, a skill is replaced, previewed against what it was.
+            (should-not (cdr (funcall write "twice" "(defun lispm-test-twice () 1)")))
+            (should (string-match-p "^-(defun lispm-test-twice () 1)\n\\+(defun lispm-test-twice () 2)$"
+                                    (let ((lispm-current-agent agent))
+                                      (lispm-tool-preview-text
+                                       tool (funcall input "twice" "(defun lispm-test-twice () 2)")))))
+            (should-not (cdr (funcall write "twice" "(defun lispm-test-twice () 2)")))
+            (should (= (lispm-test-twice) 2)))
+        (remhash "lispm_test_half" lispm-tools--registry)
+        (fmakunbound 'lispm-test-twice)))))
+
+(ert-deftest lispm-test-eval-defines-tools ()
+  "A tool an agent defines with eval_elisp is its own at once, deferred: in no other's core layer.
+Defined before an error, it is too; a core tool defined again stays core."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project :policy '((exec . auto))))
+          (code "(lispm-deftool lispm_test_made () \"Made by an agent.\" \"made\") :defined"))
+      (unwind-protect
+          (progn
+            (setq lispm-test--scripts
+                  `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "eval_elisp" `((code . ,code))))
+                            ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "lispm_test_made" nil))
+                            ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+                    (other ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "search_tools"
+                                                                         '((query . "select:lispm_test_made"))))
+                           ,(lispm-test--msg "end_turn" (lispm-test--text "Found.")))))
+            (lispm-tell agent "Make a tool")
+            (should (lispm-test--wait (lispm-test--idle-p agent)))
+            (let ((requests (reverse lispm-test--requests)))
+              (should-not (member "lispm_test_made" (lispm-test--tool-names (nth 0 requests))))
+              ;; Added after the others: the request prefix changes once.
+              (should (equal (seq-take (lispm-test--tool-names (nth 1 requests))
+                                       (length (lispm-test--tool-names (nth 0 requests))))
+                             (lispm-test--tool-names (nth 0 requests))))
+              (should (member "lispm_test_made" (lispm-test--tool-names (nth 1 requests)))))
+            (let ((transcript (lispm-test--transcript agent)))
+              (should (string-match-p "^=> :defined\n\nTools now available: lispm_test_made\\.$" transcript))
+              (should (string-match-p "^made$" transcript)))
+            (should (lispm-tool-deferred (lispm-get-tool "lispm_test_made")))
+            ;; Another agent does not carry it, but finds it.
+            (let ((other (lispm-defagent other :root project)))
+              (should-not (member "lispm_test_made" (mapcar #'lispm-tool-name (lispm-agent-tools* other))))
+              (lispm-tell other "Find it")
+              (should (lispm-test--wait (lispm-test--idle-p other)))
+              (should (member "lispm_test_made" (lispm-test--tool-names (car lispm-test--requests)))))
+            ;; Defined before an error, it is the agent's all the same.
+            (let ((result (lispm-test--call agent "eval_elisp"
+                                            '((code . "(lispm-deftool lispm_test_half () \"Half.\" 1) (error \"Boom\")")))))
+              (should (cdr result))
+              (should (string-match-p "\\`Boom\n" (car result)))
+              (should (string-match-p "^Tools now available: lispm_test_half\\.$" (car result)))
+              (should (lispm-tool-deferred (lispm-get-tool "lispm_test_half")))
+              (should (member "lispm_test_half" (lispm-agent-loaded-tools agent))))
+            ;; A tool of the core layer, defined again, stays there.
+            (lispm-deftool lispm_test_core () "A tool of the user's." "one")
+            (should (equal (car (lispm-test--call agent "eval_elisp"
+                                                  '((code . "(lispm-deftool lispm_test_core () \"Again.\" \"two\")
+                                                             (funcall (lispm-tool-function (lispm-get-tool \"lispm_test_core\")))"))))
+                           "=> two"))
+            (should-not (lispm-tool-deferred (lispm-get-tool "lispm_test_core"))))
+        (dolist (name '("lispm_test_made" "lispm_test_half" "lispm_test_core"))
+          (remhash name lispm-tools--registry))))))
 
 (ert-deftest lispm-test-agent-aware-schemas ()
   "A tool's description computed for the request sees the agent, also when loaded later.

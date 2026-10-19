@@ -734,7 +734,7 @@ Once approved it runs, once denied it fails, and the program runs again."
                   (lispm-lisp--run-agent run) (lispm-lisp--run-id run) tool input
                   (lambda (decision denial)
                     (when (lispm-lisp--live-p run)
-                      (if (eq decision 'approve)
+                      (if (memq decision '(approve allow))
                           (lispm-lisp--invoke run tool input
                                               (lambda (text errorp)
                                                 (lispm-lisp--settle run index name input

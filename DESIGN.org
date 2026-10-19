@@ -138,8 +138,10 @@ prefix-matched as well. Therefore:
   point too) and never rewritten afterwards. So is the tool list, as long as the session is
   open (~lispm-session-tools~): tools defined later, or a role redefined with other tools,
   reach the next session or the next handover. The exception is an agent whose tools grow on
-  purpose mid-session (~lispm-tools-changed-functions~): the new tools are added after the
-  others, and the prefix changes once.
+  purpose mid-session (~lispm-tools-changed-functions~), as when it finds deferred tools,
+  loads a skill or defines a tool itself (section 10): the new tools are added after the
+  others, and the prefix changes once. A tool defined again runs its new body at once, but
+  keeps in a session the schema the session first offered.
 - If the user edits history, requests to the first-party API carry
   ~prefix_mismatch_behavior: "drop_block"~: the thinking after the edit point is dropped and the
   cache is rebuilt from there, but the request succeeds. *Editing history is allowed; it costs
@@ -223,17 +225,19 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
 - Built-in tools, the core layer every agent carries (section 10 explains the deferred others
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
   ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
-  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ (exec); ~run_lisp~ (lisp); memory, task and
-  collaboration tools are described below. Deferred, for Lisp in the image (below):
-  ~xref_definitions~ ~xref_references~ ~flymake_diagnostics~ (read); ~edit_definition~
-  (write); ~eval_definition~ ~ert_run~ (exec).
+  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ ~write_skill~ (exec); ~run_lisp~ (lisp);
+  memory, task and collaboration tools are described below. Deferred, for Lisp in the image
+  (below): ~xref_definitions~ ~xref_references~ ~flymake_diagnostics~ (read);
+  ~edit_definition~ (write); ~eval_definition~ ~ert_run~ (exec).
 - *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
   ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
   what an agent lacks is knowing what there is. It finds out as a person would: ~apropos~
   finds the functions, commands and variables named after something, ~describe_symbol~
   documents one, ~read_info~ reads the manuals of Emacs and its packages, by node or through
   their indexes. Asynchronous work (a process, a page loading) ends with
-  ~(lispm-async (lambda (resolve) ...))~, and eval_elisp waits for the value. eval_elisp
+  ~(lispm-async (lambda (resolve) ...))~, and eval_elisp waits for the value. A tool the
+  code defines with ~lispm-deftool~ is the agent's from its next step on (section 10), until
+  Emacs exits, unless the agent keeps it in a skill (section 11). eval_elisp
   needs approval by default. An error in the evaluated code comes back with its backtrace,
   innermost call first: the frames of that code alone, from where the error was signaled
   (caught with ~handler-bind~, before the stack unwinds) up to the ~eval~ of the form, at
@@ -344,7 +348,10 @@ agent that may not read may not run one either. One extra rule: *writes outside 
 root always ask*, whatever the policy says, whether a ~path~ argument names the file, a
 ~buffer~ argument a buffer visiting it, or the tool says which files a call changes
 (~:targets~ in ~lispm-deftool~): ~edit_definition~ finds its file from a symbol, which may be
-anywhere, Emacs's own sources included. A write whose files cannot be told asks too.
+anywhere, Emacs's own sources included. A write whose files cannot be told asks too. So does
+every call of a tool declared ~:always-ask~, such as ~write_skill~ (section 11), whose effect
+outlasts the session: what it saves is code that later sessions evaluate, which no policy should
+let an agent decide alone. A policy that denies the tool's class still denies it.
 
 *Unrestricted code is outside the permission model.* ~eval_elisp~ and ~run_shell~ (~exec~)
 reach all of Emacs and the system: what they run can change the policy of the agent running
@@ -352,8 +359,8 @@ it, lift a helper's ceiling, or call a tool's function past its checks. The poli
 mediate what such a call does, only whether it runs: it runs if the user approves it, or if
 the policy lets ~exec~ run unasked, which gives the agent everything. So approving one "for
 good" (~2~ in the chat, ~a~ in the review) allows that exact call again, with the same input,
-never every later one (~lispm-tools-allowance~). Lisp the policy should mediate is what
-~run_lisp~ is for.
+never every later one (~lispm-tools-allowance~), and so does approving a call of a tool that
+always asks. Lisp the policy should mediate is what ~run_lisp~ is for.
 
 *Approval is an org TODO state.* A call that needs approval is recorded as
 ~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
@@ -681,6 +688,16 @@ from its transcript, which records the searches and the calls. Sources register 
 ~lispm-tool-sources~, so deferred tools need not be MCP tools: ~lispm-deftool~ takes
 ~:deferred t~, and LispM's own tools for Lisp in the image (section 3) are such a source.
 
+*Tools an agent defines.* On a Lisp Machine a command written in the running world was part of
+the system at once. An agent defines a tool the same way, with ~lispm-deftool~ in the code
+~eval_elisp~ runs or in a skill's code, and the tool is deferred whatever its definition says,
+and loaded for that agent at once (~lispm-tools--adopt~): the agent has it from its next step
+on, as if it had found it with ~search_tools~, and the result of the call says so. Left as its
+definition made it, in the core layer, it would reach no running session, the agent's own
+included, and every agent's next one. Other agents find it with ~search_tools~. Only tools new
+to the registry are deferred so: one defined again keeps its place, so that an agent reloading
+LispM's own code leaves the core layer as it was. Tools the user defines are not touched.
+
 *Images.* A tool result can hold images: Peekaboo's ~see~ returns a screenshot with its map of
 the screen. The transcript cannot hold image data, and should not: base64 would swamp it. So
 an image is a file next to the session (~SESSION-ID.images/0001.png~, kept out of git) and
@@ -703,14 +720,41 @@ which steps, with which pitfalls. It is an org file, ~NAME.org~ or ~NAME/SKILL.o
 ~:lispm load~ whose code defines helper functions, and tools if the skill wants them (they
 become deferred tools of the agent that loads it). Skills come from ~lispm-skill-directories~:
 LispM's own ~skills/~, the user's ~~/.lispm/skills/~, then the agent's project's
-~.lispm/skills/~, a later skill replacing an earlier one of the same name.
+~.lispm/skills/~, a later skill replacing an earlier one of the same name. For an agent working
+in the home directory, ~~/.lispm/skills/~ is the user's, not a project's.
 
 Skills are loaded in two steps too. The ~skill~ tool's description lists every skill's name
 and description; when a request calls for one, the model loads it, its text becomes the
 call's result, so the conversation holds it from then on without changing the request's tool
-list, and its code is evaluated. A project's skills may come from anywhere, so their code is
-not evaluated; their text still is read. A resumed session evaluates again the code of the
-skills it loaded.
+list, and its code is evaluated. A resumed session evaluates again the code of the skills it
+loaded.
+
+*A project's skills* may come from anywhere, as a cloned repository does, so their code runs
+only once the user has seen it and agreed. Loading one asks, through the call of ~skill~, as a
+Lisp program asks for the calls it makes (~lispm-call-ask~): the chat shows the code, the
+transcript records the question under the call (~*** Asks: trust_skill~) with the code as its
+preview. ~1~ runs it this once; ~2~ trusts it for good, pinned by a hash: the sha256 of the
+~:lispm load~ blocks and, for a skill that is a directory, of the other files in it, which the
+code may load. The pins are a Customize variable, ~lispm-trusted-skills~, saved as the user's
+other settings are; ~M-x lispm-trust-skill~ shows a project's skill's code and pins it, or with
+a prefix argument unpins it. While the hash matches, the code runs unasked, in a resumed session
+too; once the code changes, it is asked about again. What runs is what the user saw: the hash
+is computed again when they answer, and code changed meanwhile does not run. Refused, the skill
+is loaded without its code, and the model is told so.
+
+*Agents write skills.* What an agent defines in the running Emacs lasts until Emacs exits, and
+what it found out about doing a thing, until its conversation ends. ~write_skill~ keeps both,
+the way a Lisp Machine user saved a new command into the system: the agent proposes a name, a
+description, instructions and code, and the user reviews the org file they make, as a diff
+against the skill of that name it would replace. It is of class ~exec~, since its code is
+evaluated in every later session that loads the skill, and it always asks (section 5), so that
+only the user decides what joins their skills. Approved, the code is evaluated first, and
+the file is saved in ~lispm-write-skill-directory~ (the user's ~~/.lispm/skills/~) only if that
+succeeds: a skill whose code fails, or does not read, is not saved, and the model is told why.
+Its tools are the agent's at once, deferred; the result says the skill was loaded, so a resumed
+session loads it again, and from then on it is listed for every agent. A name is lowercase
+letters, digits, ~-~ and ~_~; one that LispM's own skills or the project's have is refused,
+since a skill saved under it would not replace theirs.
 
 The first skill is ~web~: searching the web and reading pages. Pages are rendered by Emacs's
 own WebKit (xwidgets) out of sight, scripts and all, with the cookies of the user's own
@@ -773,6 +817,10 @@ removed at once.
 - *Emacs waits for xref*: xref's backends answer synchronously, and the references of Emacs
   Lisp are found by xref's default means, find and grep over the project's files (with
   ~everywhere~, over all of ~load-path~ as well), as M-? finds them; Emacs is held meanwhile.
+- *Trust covers what a skill ships*: a project's skill is pinned with its code and the files
+  beside it, not with what that code reaches beyond them, such as a package it requires.
+- *A redefined tool keeps its old schema in running sessions*: its new body runs at once, but a
+  new parameter reaches the model in the next session, or the next handover.
 - *More Emacs-native tools*: magit operations, org-babel execution, window layout: each is
   just a ~lispm-deftool~ away.
 - *A shared blackboard*: an org file every agent can read and write, as a collaboration
