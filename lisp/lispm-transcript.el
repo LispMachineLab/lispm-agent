@@ -44,7 +44,8 @@
 ;;   *** Asks: write_file  b.el     a call the call makes in turn, as a
 ;;                                  Lisp program does, awaiting approval
 ;;   *** Preview                    diff shown while awaiting approval
-;;   *** Result                     the tool's output (or *** Error)
+;;   *** Result                     the tool's output (or *** Error); tagged
+;;                                  :cleared:, it is no longer sent
 ;;   *** Stopped                    an error the call stopped at, awaiting a
 ;;                                  restart (:CONDITION: tool-error)
 ;;   * Message from reviewer        input from another agent
@@ -59,7 +60,9 @@
 ;; Any other top-level heading (say "* Notes") is the user's own and is
 ;; not sent; neither is any message tagged :ignore:, nor reasoning text
 ;; from Chat Completions servers (a "reasoning" block), which is shown
-;; but never sent back.
+;; but never sent back.  A tool result tagged :cleared: is sent as a
+;; line saying it was cleared: the runtime tags old results so when a
+;; session grows long (see `lispm-compact-keep-results').
 ;;
 ;; Text written by the model round-trips byte for byte: models bind
 ;; their reasoning to the exact conversation prefix, so a transcript
@@ -374,6 +377,16 @@ The property goes in the drawer right under the heading, if it has one."
               (insert (format ":%s: %s\n" name value))))
           (set-marker end nil))))))
 
+(defun lispm-transcript-tag (pos tag)
+  "Add TAG to the heading at POS, unless it has it."
+  (let ((tags (plist-get (lispm-transcript--heading pos) :tags)))
+    (unless (member tag tags)
+      (save-excursion
+        (goto-char pos)
+        (end-of-line)
+        (skip-chars-backward " \t")
+        (insert (if tags (concat tag ":") (concat " :" tag ":")))))))
+
 (defun lispm-transcript-subtree-end (pos level)
   "End of the LEVEL subtree whose heading starts at POS."
   (save-excursion
@@ -471,6 +484,10 @@ own notes."
   "A text content block holding TEXT."
   `((type . "text") (text . ,text)))
 
+(defconst lispm-transcript-cleared-text
+  "[This output was cleared to save context. Make the call again if you need it.]"
+  "What requests carry in place of a tool result tagged :cleared:.")
+
 (defun lispm-transcript--tool-result (id text errorp &optional images)
   "A tool_result block for the call ID with TEXT; ERRORP marks failure.
 IMAGES are files the result holds besides TEXT."
@@ -506,12 +523,15 @@ waiting at one (see `lispm-transcript-stopped')."
                  (json (lispm-transcript--block bbeg own-end))
                  (input (and json (ignore-errors (lispm--json-decode json))))
                  (result (cl-loop for (kbeg kbody kend) in kids
-                                  for title = (plist-get (lispm-transcript--heading kbeg)
-                                                         :title)
+                                  for kid = (lispm-transcript--heading kbeg)
+                                  for title = (plist-get kid :title)
                                   when (member title '("Result" "Error"))
-                                  return (list (or (lispm-transcript--block kbody kend) "")
-                                               (equal title "Error")
-                                               (lispm-transcript--images kbody kend)))))
+                                  return (if (member "cleared" (plist-get kid :tags))
+                                             (list lispm-transcript-cleared-text
+                                                   (equal title "Error"))
+                                           (list (or (lispm-transcript--block kbody kend) "")
+                                                 (equal title "Error")
+                                                 (lispm-transcript--images kbody kend))))))
             (push `((type . "tool_use") (id . ,id)
                     (name . ,(cdr (assoc "TOOL" props)))
                     (input . ,(if (consp input) input nil)))
@@ -583,6 +603,30 @@ one chosen, once it is) and :value (the value it was given, if any),
     (while (and out (not (equal (alist-get 'role (car out)) "user")))
       (pop out))
     out))
+
+(defun lispm-transcript-results ()
+  "The tool results of the current session, oldest first.
+Each is a list (POS BYTES CLEARED): where its heading starts, the size
+in bytes of the output under it, and whether it is tagged :cleared:.
+Results in responses that are not sent (tagged :ignore:) are left out."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let (results)
+        (pcase-dolist (`(,hbeg ,bbeg ,end) (lispm-transcript--sections 1 (point-min) (point-max)))
+          (let ((heading (lispm-transcript--heading hbeg)))
+            (when (and heading
+                       (not (member "ignore" (plist-get heading :tags)))
+                       (eq (lispm-transcript--role (plist-get heading :title)) 'assistant))
+              (pcase-dolist (`(,_ ,cbeg ,cend) (lispm-transcript--sections 2 bbeg end))
+                (pcase-dolist (`(,kbeg ,kbody ,kend) (lispm-transcript--sections 3 cbeg cend))
+                  (let ((kid (lispm-transcript--heading kbeg)))
+                    (when (member (plist-get kid :title) '("Result" "Error"))
+                      (push (list kbeg
+                                  (- (position-bytes kend) (position-bytes kbody))
+                                  (and (member "cleared" (plist-get kid :tags)) t))
+                            results))))))))
+        (nreverse results)))))
 
 (defun lispm-transcript-parse ()
   "Parse the current session buffer.

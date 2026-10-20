@@ -69,17 +69,47 @@
   :group 'lispm)
 
 (defcustom lispm-compact-threshold 120000
-  "Estimated size, in tokens, past which a session is handed over.
-Before the next turn starts, the agent saves what should outlive the
-conversation to memory and tasks, writes a summary, and the
-conversation goes on in a continuation file holding only the summary.
-nil hands over only on \\[lispm-compact]."
+  "Size, in tokens, past which a session makes room or is handed over.
+The size is the one the model's latest response reported, plus an
+estimate of what was written since.  Past it, the output of older
+tool calls is cleared first (see `lispm-compact-keep-results').  If
+that is not enough, then before the next turn starts the agent saves
+what should outlive the conversation to memory and tasks, writes a
+summary, and the conversation goes on in a continuation file holding
+the summary and the latest turns (see `lispm-compact-keep-turns').
+nil does neither, and hands over only on \\[lispm-compact]."
   :type '(choice (const :tag "Only on demand" nil) integer)
   :group 'lispm)
 
 (defcustom lispm-compact-save-memory t
   "Whether an agent saves memory and tasks before its session is handed over."
   :type 'boolean
+  :group 'lispm)
+
+(defcustom lispm-compact-keep-results 10
+  "How many of a session's latest tool results are never cleared.
+When a session grows past `lispm-compact-threshold', the output of
+older calls is cleared before the session is handed over: requests
+carry a line saying so in its place, and the result's heading is
+tagged :cleared: (remove the tag to send it again).  nil never clears."
+  :type '(choice (const :tag "Never clear" nil) integer)
+  :group 'lispm)
+
+(defcustom lispm-compact-clear-at-least 10000
+  "Fewest tokens clearing old tool results must free to be done.
+Clearing changes an early part of the conversation, so the model's
+cache of it is built again; a small gain is not worth that, and the
+session is handed over instead."
+  :type 'integer
+  :group 'lispm)
+
+(defcustom lispm-compact-keep-turns 2
+  "How many of the latest turns a handover keeps as they were.
+They follow the summary in the continuation, unless they would take
+more than a quarter of `lispm-compact-threshold'; then fewer are
+kept.  The turn that saved memory for the handover is never kept, and
+at least one turn is always left to the summary.  0 keeps none."
+  :type 'integer
   :group 'lispm)
 
 (defcustom lispm-approval-functions nil
@@ -384,9 +414,10 @@ image goes to a temporary file."
     (make-directory dir t)
     dir))
 
-(defun lispm--create-session-file (agent &optional previous summary)
+(defun lispm--create-session-file (agent &optional previous summary kept)
   "Write a new session file for AGENT and return its name.
-PREVIOUS is the file this one continues, SUMMARY what it hands over;
+PREVIOUS is the file this one continues, SUMMARY what it hands over,
+and KEPT the text of the latest turns there, which follow SUMMARY;
 the continuation keeps the title the conversation is listed under."
   (let* ((dir (lispm--sessions-directory (lispm-agent-root agent)))
          (id (lispm-agent-id agent))
@@ -411,6 +442,7 @@ the continuation keeps the title the conversation is listed under."
                     `(("title" . ,(lispm--oneline title 200))))))
              (lispm-transcript-section "System" (lispm-system-prompt agent))
              (if summary (lispm-transcript-section "Summary" summary) "")
+             (or kept "")
              "* User\n")
      nil file nil 'silent)
     file))
@@ -733,11 +765,14 @@ Not once AGENT has ended: input left for it then is dropped."
 
 (defun lispm--begin-turn (agent &optional entry)
   "Start a turn of AGENT on inbox ENTRY, or on what the user typed.
-A session grown past `lispm-compact-threshold' is handed over to a
-continuation first, and the turn starts there."
+A session grown past `lispm-compact-threshold' first makes room by
+clearing the output of older calls; if that is not enough, it is
+handed over to a continuation, and the turn starts there."
   (if (and lispm-compact-threshold
            (not (plist-get entry :no-compact))
            (> (lispm--estimated-tokens agent) lispm-compact-threshold)
+           (not (and (lispm--clear-results agent)
+                     (<= (lispm--estimated-tokens agent) lispm-compact-threshold)))
            (lispm--has-history-p agent))
       (progn
         (push (or entry (list :id (lispm-inbox-new-id) :text (lispm--take-input agent)))
@@ -876,12 +911,19 @@ starting hold requests back so that their tools are there.")
     (lispm-signal agent 'step-limit
                   (format "Stopped after %d model requests (`lispm-max-steps')." lispm-max-steps)))
    (t
+    ;; A turn can outgrow the threshold in the middle: before handing
+    ;; the session over, which waits for the turn's end, the output of
+    ;; older calls makes room.
+    (when (and lispm-compact-threshold
+               (> (lispm--estimated-tokens agent) lispm-compact-threshold))
+      (lispm--clear-results agent))
     (pcase (condition-case err
                (lispm-request-body agent)
              (error (error-message-string err)))
       ((and (pred stringp) problem) (lispm-signal agent 'request-failed problem))
       (`(,body . ,betas)
        (cl-incf (lispm-agent-steps agent))
+       (setf (lispm-agent-request-bytes agent) (lispm--session-bytes agent))
        ;; What the request carries is on disk, should Emacs stop now.
        (lispm--save-session agent)
        (lispm--send agent body betas 0))))))
@@ -960,6 +1002,17 @@ what a session opened again after Emacs stopped takes up."
              for n = (alist-get key usage)
              when (numberp n) do (cl-incf (nth i totals) n))))
 
+(defun lispm--note-context (agent usage)
+  "Record the size of AGENT's session that the USAGE of a response reports.
+Every token of the request counts, cached or not; the size is paired
+with the session's size in bytes when the request was made."
+  (let ((tokens (cl-loop for key in '(input_tokens cache_creation_input_tokens
+                                                   cache_read_input_tokens)
+                         for n = (alist-get key usage)
+                         when (numberp n) sum n)))
+    (when (and (> tokens 0) (lispm-agent-request-bytes agent))
+      (setf (lispm-agent-context agent) (cons tokens (lispm-agent-request-bytes agent))))))
+
 (defun lispm--reply-text (content)
   "Text blocks of CONTENT joined."
   (string-trim
@@ -1013,6 +1066,7 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE)."
   (when (eq (lispm-agent-state agent) 'requesting)
     (setf (lispm-agent-process agent) nil)
     (lispm--add-usage agent (alist-get 'usage message))
+    (lispm--note-context agent (alist-get 'usage message))
     (lispm--live-delete agent)
     (let* ((content (append (alist-get 'content message) nil))
            (stop (alist-get 'stop_reason message))
@@ -2327,23 +2381,101 @@ NAME identifies the trigger for `lispm-unwatch'."
 ;;;; Handing over: compaction
 
 (defconst lispm--save-memory-prompt
-  "Your context is long and will be compacted: this conversation will be replaced by a summary. Before that, save what should outlive it: durable knowledge with `remember`, unfinished work with `task_add` or `task_update`. Do not summarize the conversation now. Reply in one sentence when done."
+  "Your context is long and will be compacted: most of this conversation will be replaced by a summary. Before that, save what should outlive it: durable knowledge with `remember`, unfinished work with `task_add` or `task_update`. Do not summarize the conversation now. Reply in one sentence when done."
   "Asked of an agent before its session is handed over.")
 
 (defconst lispm--resumed-memory-prompt
-  "Your context filled up in the middle of this turn and was compacted: the summary above is all that is left of the conversation. Save what should outlive it, if you have not already: durable knowledge with `remember`, unfinished work with `task_add` or `task_update`. Then go on with the turn."
+  "Your context filled up in the middle of this turn and was compacted: the summary above is all that is left of the earlier conversation. Save what should outlive it, if you have not already: durable knowledge with `remember`, unfinished work with `task_add` or `task_update`. Then go on with the turn."
   "Told an agent whose session was handed over in the middle of a turn.")
 
 (defconst lispm--summary-prompt
-  "Write a handoff summary of this conversation for yourself: a fresh session will hold only this summary and continue from it. Cover the user's goals and requests, the decisions made and why, the current state of the work (files changed, what was verified), and the open questions and next steps. Be specific: names, paths, values. Leave out what is already saved in memory or tasks. Reply with the summary only."
+  "Write a handoff summary of this conversation for yourself: a fresh session will hold this summary in place of the conversation and continue from it. Cover the user's goals and requests, the decisions made and why, the current state of the work (files changed, what was verified), and the open questions and next steps. Be specific: names, paths, values. Leave out what is already saved in memory or tasks. Reply with the summary only."
   "Asked of an agent to summarize its session for the continuation.")
 
-(defun lispm--estimated-tokens (agent)
-  "Rough number of tokens of AGENT's session."
+(defconst lispm--summary-kept-prompt
+  "The latest turns, from the input that begins \"%s\", will follow the summary as they are: summarize what comes before them, and say little about them."
+  "Added to `lispm--summary-prompt' when a handover keeps the latest turns.")
+
+(defun lispm--session-bytes (agent)
+  "Size in bytes of AGENT's session."
   (let ((buffer (lispm-agent-buffer agent)))
     (if (buffer-live-p buffer)
-        (/ (buffer-size buffer) 3)
+        (with-current-buffer buffer
+          (save-restriction
+            (widen)
+            (1- (position-bytes (point-max)))))
       0)))
+
+(defun lispm--estimated-tokens (agent)
+  "Size in tokens of AGENT's session, as its next request would carry it.
+That is the size the latest response reported, plus a token for every
+three bytes written since; before any response, the whole session's
+bytes by three.  Bytes, not characters: a token is about four
+characters of English text, but about one character of Chinese, which
+takes three bytes."
+  (let ((bytes (lispm--session-bytes agent))
+        (known (lispm-agent-context agent)))
+    (if known
+        (+ (car known) (/ (max 0 (- bytes (cdr known))) 3))
+      (/ bytes 3))))
+
+(defun lispm--clear-results (agent)
+  "Clear the output of AGENT's older tool calls, if that frees enough.
+All results but the latest `lispm-compact-keep-results' are tagged
+:cleared:, provided that frees `lispm-compact-clear-at-least' tokens.
+Return the number of tokens freed, or nil."
+  (when lispm-compact-keep-results
+    (let* ((old (seq-remove (lambda (result) (nth 2 result))
+                            (butlast (lispm--in-session agent (lispm-transcript-results))
+                                     lispm-compact-keep-results)))
+           (freed (/ (apply #'+ (mapcar #'cadr old)) 3)))
+      (when (and old (>= freed lispm-compact-clear-at-least))
+        (let ((tokens (- (lispm--estimated-tokens agent) freed)))
+          (lispm--in-session agent
+            ;; The latest first: tags move what comes after them.
+            (dolist (result (reverse old))
+              (lispm-transcript-tag (car result) "cleared")))
+          (setf (lispm-agent-context agent) (cons tokens (lispm--session-bytes agent)))
+          freed)))))
+
+(defun lispm--kept-turns (agent)
+  "The latest turns of AGENT's session that a handover keeps, or nil.
+Return (TEXT . INPUT): the text of their sections, conditions left
+out, and the beginning of the input the first of them handled.  See
+`lispm-compact-keep-turns'."
+  (lispm--in-session agent
+    (let* ((end (or (lispm--input-heading-p) (point-max)))
+           (sections (seq-filter (lambda (section) (< (car section) end))
+                                 (lispm-transcript--sections 1 (point-min) (point-max))))
+           (title (lambda (section)
+                    (or (plist-get (lispm-transcript--heading (car section)) :title) "")))
+           (inputs (seq-filter (lambda (section)
+                                 (string-match-p "\\`\\(?:User\\|Message from .+\\|Event: .+\\)\\'"
+                                                 (funcall title section)))
+                               sections))
+           ;; A quarter of the threshold, in bytes; with none, of its default.
+           (limit (* 3 (/ (or lispm-compact-threshold
+                              (eval (car (get 'lispm-compact-threshold 'standard-value)) t))
+                          4))))
+      ;; The turn that saved memory for this handover goes with the rest.
+      (when (and inputs (equal (funcall title (car (last inputs))) "Event: compaction"))
+        (setq end (caar (last inputs))
+              inputs (butlast inputs)))
+      (cl-loop for n from (min lispm-compact-keep-turns (1- (length inputs))) downto 1
+               for first = (nth (- (length inputs) n) inputs)
+               for text = (mapconcat
+                           (lambda (section)
+                             (if (or (< (car section) (car first))
+                                     (>= (car section) end)
+                                     (string-prefix-p "Condition: " (funcall title section)))
+                                 ""
+                               (buffer-substring-no-properties (car section)
+                                                               (min (nth 2 section) end))))
+                           sections "")
+               when (<= (string-bytes text) limit)
+               return (cons (if (string-suffix-p "\n" text) text (concat text "\n"))
+                            (lispm--oneline (lispm-transcript--text (nth 1 first) (nth 2 first))
+                                            60))))))
 
 (defun lispm--has-history-p (agent)
   "Non-nil if AGENT's session holds a response: something to hand over."
@@ -2377,16 +2509,23 @@ Interactively, the agent of the current session."
 
 (defun lispm--summarize (agent &optional resume)
   "Ask the model for a summary of AGENT's session, then continue from it.
-RESUME non-nil goes on with the turn in the continuation."
+The continuation holds the summary and the latest turns, which the
+summary need not cover (see `lispm-compact-keep-turns').  RESUME
+non-nil goes on with the turn in the continuation."
   (when (lispm-agent-compacting agent)
     (lispm-set-state agent 'compacting "writing a summary")
     (condition-case err
         (let* ((parsed (with-current-buffer (lispm-agent-buffer agent) (lispm-transcript-parse)))
+               (kept (lispm--kept-turns agent))
+               (prompt (if kept
+                           (concat lispm--summary-prompt " "
+                                   (format lispm--summary-kept-prompt (cdr kept)))
+                         lispm--summary-prompt))
                (messages (lispm-transcript--normalize
                           (append (plist-get parsed :messages)
                                   (list `((role . "user")
                                           (content . [((type . "text")
-                                                       (text . ,lispm--summary-prompt))]))))))
+                                                       (text . ,prompt))]))))))
                (request (lispm-api-request (lispm-agent-backend* agent) (lispm-agent-model* agent)
                                            (lispm-agent-effort* agent) (plist-get parsed :system)
                                            nil messages))
@@ -2395,7 +2534,7 @@ RESUME non-nil goes on with the turn in the continuation."
                               :on-done (lambda (message)
                                          (lispm--continue agent (lispm--reply-text
                                                                  (append (alist-get 'content message) nil))
-                                                          resume))
+                                                          resume (car kept)))
                               :on-error (lambda (err)
                                           (lispm--compaction-failed
                                            agent (format "%s: %s" (plist-get err :type)
@@ -2404,15 +2543,16 @@ RESUME non-nil goes on with the turn in the continuation."
           (when (processp proc) (process-put proc 'lispm-agent agent)))
       (error (lispm--compaction-failed agent (error-message-string err) resume)))))
 
-(defun lispm--continue (agent summary &optional resume)
+(defun lispm--continue (agent summary &optional resume kept)
   "Carry AGENT's conversation on in a new session file holding SUMMARY.
+KEPT, if non-nil, is the text of the latest turns, which follow it.
 RESUME non-nil goes on with the turn there."
   (when (lispm-agent-compacting agent)
     (if (string-blank-p summary)
         (lispm--compaction-failed agent "the summary came back empty" resume)
       (let* ((old (lispm-agent-buffer agent))
              (old-file (buffer-file-name old))
-             (file (lispm--create-session-file agent old-file summary)))
+             (file (lispm--create-session-file agent old-file summary kept)))
         (lispm--in-session agent
           (let ((input (lispm--input-heading-p)))
             (when input (delete-region input (point-max))))
@@ -2426,6 +2566,8 @@ RESUME non-nil goes on with the turn there."
             (set-window-point window (with-current-buffer new (point-max))))
           (with-current-buffer old (setq lispm-session-agent nil))
           (kill-buffer old))
+        ;; Sizes reported for the old session say nothing of this one.
+        (setf (lispm-agent-context agent) nil)
         (lispm--save-session agent)
         (when (fboundp 'lispm-git-commit)
           (lispm-git-commit agent (format "%s: hand over to %s" (lispm-agent-name agent)

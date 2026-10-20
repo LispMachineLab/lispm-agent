@@ -497,7 +497,7 @@ BODY can use `port' and `log', the file the server records requests in."
           (should (equal (alist-get 'stop_reason message) "tool_use"))
           (should (equal (alist-get 'lispm-invalid message) '("c2")))
           (should (equal (alist-get 'usage message)
-                         '((input_tokens . 9) (output_tokens . 4) (cache_read_input_tokens . 2))))
+                         '((input_tokens . 7) (output_tokens . 4) (cache_read_input_tokens . 2))))
           (should (equal (seq-remove (lambda (d) (eq (car d) 'tool-input)) (reverse deltas))
                          '((thinking . "Think") (text . "Hel") (text . "lo")
                            (tool . "read_file") (tool . "x"))))
@@ -513,8 +513,9 @@ BODY can use `port' and `log', the file the server records requests in."
       (with-temp-file (expand-file-name "a.txt" project) (insert "hello\n"))
       (let ((lispm-api-function #'lispm-api-stream)
             (url (format "http://127.0.0.1:%d/v1" port)))
+        ;; Input tokens are those not read from the cache, as in Messages.
         (pcase-dolist (`(,name ,features ,usage)
-                       '((streamer (streaming reasoning-effort stream-usage) (40 14 10))
+                       '((streamer (streaming reasoning-effort stream-usage) (30 14 10))
                          (whole (reasoning-effort) (40 14 0))))
           (push `(,name :api openai :url ,url :model "fake" :key "sk-test" :features ,features)
                 lispm-backends)
@@ -4632,6 +4633,184 @@ is one badly named; interactively, it asks first."
                                  (lispm-sessions))
                          (list (list new "Plan a trip"))))
           (should-not (lispm-agent-compacting agent)))))))
+
+(defun lispm-test--sized (message tokens)
+  "MESSAGE, reporting that its request held TOKENS input tokens."
+  (cons `(usage (input_tokens . ,tokens) (output_tokens . 5))
+        (assq-delete-all 'usage (copy-alist message))))
+
+(defun lispm-test--results (request)
+  "The tool results REQUEST carries, as an alist (ID . CONTENT)."
+  (cl-loop for message across (alist-get 'messages request)
+           append (cl-loop for block across (alist-get 'content message)
+                           when (equal (alist-get 'type block) "tool_result")
+                           collect (cons (alist-get 'tool_use_id block)
+                                         (alist-get 'content block)))))
+
+(ert-deftest lispm-test-context-size ()
+  "A session's size is the one the model reported, plus bytes written since."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(cons '(usage (input_tokens . 100) (cache_creation_input_tokens . 20)
+                                     (cache_read_input_tokens . 3000) (output_tokens . 5))
+                             (lispm-test--msg "end_turn" (lispm-test--text "One."))))))
+      ;; Before any response, a token for every three bytes: here a
+      ;; character, where the old count by characters said a third.
+      (lispm-session-buffer agent)
+      (let ((before (lispm--estimated-tokens agent)))
+        (lispm--in-session agent (insert (make-string 300 ?∀)))
+        (should (= (- (lispm--estimated-tokens agent) before) 300))
+        (lispm--in-session agent (delete-char -300)))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      ;; Cached tokens count too; what was written since is estimated.
+      (pcase-let ((`(,tokens . ,bytes) (lispm-agent-context agent)))
+        (should (= tokens 3120))
+        (should (= (lispm--estimated-tokens agent)
+                   (+ 3120 (/ (- (lispm--session-bytes agent) bytes) 3))))))))
+
+(ert-deftest lispm-test-context-size-hands-over ()
+  "A session the model reports as large is handed over, though its text is short."
+  (lispm-test-env
+    (let ((lispm-compact-threshold 3000)
+          (lispm-compact-save-memory nil)
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "Small."))
+                      ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Large.")) 5000)
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Three.")))))
+      (lispm-tell agent "first")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((old (lispm-agent-buffer agent)))
+        (lispm-tell agent "second")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        ;; Reported as small, the session went on.
+        (should (eq (lispm-agent-buffer agent) old))
+        (lispm-tell agent "third")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should-not (eq (lispm-agent-buffer agent) old))
+        (should (string-match-p "^\\* Summary\nThe summary\\.\n" (lispm-test--transcript agent)))
+        ;; The sizes reported for the old session went with it.
+        (should (< (car (lispm-agent-context agent)) 3000))))))
+
+(ert-deftest lispm-test-clear-results ()
+  "Past the threshold, older tool output is cleared first; the session is
+handed over once nothing more can be."
+  (lispm-test-env
+    (let ((lispm-compact-threshold 3000)
+          (lispm-compact-save-memory nil)
+          (lispm-compact-keep-results 1)
+          (lispm-compact-clear-at-least 1000)
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (dolist (name '("a" "b"))
+        (with-temp-file (expand-file-name (concat name ".txt") project)
+          (dotimes (i 100) (insert (format "%s-line %d %s\n" name i (make-string 80 ?x))))))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file"
+                                                                     '((why . "look") (path . "a.txt"))))
+                      ,(lispm-test--sized (lispm-test--msg "tool_use"
+                                                           (lispm-test--tool "t2" "read_file"
+                                                                             '((why . "look") (path . "b.txt"))))
+                                          5000)
+                      ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Read both.")) 5000)
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Next.")))))
+      (lispm-tell agent "Read a and b")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((requests (reverse lispm-test--requests)))
+        ;; The request after the first result carried it whole; the one
+        ;; after the second, grown past the threshold, only the newest.
+        (should (string-match-p "a-line 99" (cdr (assoc "t1" (lispm-test--results (nth 1 requests))))))
+        (let ((results (lispm-test--results (nth 2 requests))))
+          (should (equal (cdr (assoc "t1" results)) lispm-transcript-cleared-text))
+          (should (string-match-p "b-line 99" (cdr (assoc "t2" results))))))
+      ;; The output stays in the session, tagged so that the user sees it.
+      (let ((text (lispm-test--transcript agent)))
+        (should (= (cl-count-if (lambda (line) (string-match-p "^\\*\\*\\* Result" line))
+                                (split-string text "\n"))
+                   2))
+        (should (string-match-p "^\\*\\*\\* Result :cleared:\n#\\+begin_example\n *1\ta-line 0" text)))
+      ;; Still past it, with nothing more to clear: handed over.
+      (let ((old (lispm-agent-buffer agent)))
+        (lispm-tell agent "Go on")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should-not (eq (lispm-agent-buffer agent) old))
+        (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* User\nGo on\n"
+                                (lispm-test--transcript agent))))
+      ;; Too small a gain is not worth the cache: nothing is cleared.
+      (with-temp-buffer
+        (insert "* Assistant\n** DONE read_file\n:PROPERTIES:\n:TOOL_ID:  t1\n:TOOL:     read_file\n:END:\n"
+                "*** Result\n#+begin_example\nshort\n#+end_example\n"
+                "** DONE read_file\n:PROPERTIES:\n:TOOL_ID:  t2\n:TOOL:     read_file\n:END:\n"
+                "*** Result\n#+begin_example\nshort\n#+end_example\n")
+        (setf (lispm-agent-buffer agent) (current-buffer))
+        (should-not (lispm--clear-results agent))
+        (should-not (string-match-p ":cleared:" (buffer-string)))
+        (let ((lispm-compact-clear-at-least 0))
+          (should (lispm--clear-results agent)))
+        (should (equal (mapcar #'caddr (lispm-transcript-results)) '(t nil)))))))
+
+(ert-deftest lispm-test-transcript-tag ()
+  "Tags are added to a heading's own, once."
+  (with-temp-buffer
+    (insert "*** Result\n** Reply :keep:\n")
+    (lispm-transcript-tag 12 "cleared")
+    (lispm-transcript-tag 1 "cleared")
+    (lispm-transcript-tag 1 "cleared")
+    (should (equal (buffer-string) "*** Result :cleared:\n** Reply :keep:cleared:\n"))
+    (should (equal (plist-get (lispm-transcript--heading 22) :tags) '("keep" "cleared")))))
+
+(ert-deftest lispm-test-compaction-keeps-turns ()
+  "A handover keeps the latest turns after the summary, if they are small enough."
+  (lispm-test-env
+    (let ((lispm-compact-threshold 3000)
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "One."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Two."))
+                      ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Three.")) 5000)
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Saved."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Four.")))))
+      (dolist (input '("first" "second" "third"))
+        (lispm-tell agent input)
+        (should (lispm-test--wait (lispm-test--idle-p agent))))
+      (lispm-tell agent "fourth")
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p agent))
+                                                (= (length lispm-test--requests) 6)))))
+      (let* ((requests (reverse lispm-test--requests))
+             (summary-request (nth 4 requests))
+             (final (nth 5 requests)))
+        ;; The summary covers what comes before the turns kept.
+        (should (equal (alist-get 'text (aref (alist-get 'content (car (last (append (alist-get 'messages summary-request) nil)))) 0))
+                       (concat lispm--summary-prompt " "
+                               (format lispm--summary-kept-prompt "second"))))
+        (should (equal (mapcar (lambda (m) (mapconcat (lambda (b) (alist-get 'text b))
+                                                      (alist-get 'content m) "|"))
+                               (alist-get 'messages final))
+                       '("[Summary of the earlier conversation, handed over to this session]\nThe summary.|second"
+                         "Two." "third" "Three." "fourth"))))
+      ;; The turn that saved memory for the handover is not kept.
+      (should (string-match-p "^\\* Summary\nThe summary\\.\n\\* User\nsecond\n\\* Assistant\n\\*\\* Reply\nTwo\\.\n\\* User\nthird\n\\* Assistant\n\\*\\* Reply\nThree\\.\n\\* User\nfourth\n\\* Assistant\n\\*\\* Reply\nFour\\.\n\\* User\n\\'"
+                              (lispm-test--transcript agent)))
+      ;; Turns that would take more than a quarter of the threshold are
+      ;; left to the summary, and so are conditions; one turn always is.
+      (with-temp-buffer
+        (insert "* System\nYou.\n* User\none\n* Assistant\nOne.\n"
+                "* User\n" (make-string 3000 ?y) "\n* Assistant\nTwo.\n"
+                "* User\nthree\n* Assistant\nThree.\n"
+                "* DONE Condition: Response paused\n:PROPERTIES:\n:CONDITION: paused\n:END:\nPaused.\n"
+                "* User\n")
+        (setf (lispm-agent-buffer agent) (current-buffer))
+        (should (equal (lispm--kept-turns agent)
+                       '("* User\nthree\n* Assistant\nThree.\n" . "three")))
+        (let ((lispm-compact-keep-turns 5)
+              (lispm-compact-threshold 100000))
+          (should (equal (cdr (lispm--kept-turns agent)) (concat (make-string 59 ?y) "…"))))
+        (let ((lispm-compact-keep-turns 0))
+          (should-not (lispm--kept-turns agent)))))))
 
 ;;;; Collaboration
 

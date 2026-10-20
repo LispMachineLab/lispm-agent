@@ -249,6 +249,8 @@ A role defined again in Lisp is no longer one of them.")
   max-tokens                 ; output limit for the rest of the turn, if raised
   continuing                 ; non-nil: the next request resumes a paused response
   compacting                 ; non-nil while the session is handed over
+  context                    ; (TOKENS . BYTES): session size the latest response reported, bytes then
+  request-bytes              ; session size in bytes the request in flight was made from
   triggers                   ; hook and timer subscriptions
   (usage (list 0 0 0)))      ; input, output, cache-read tokens
 

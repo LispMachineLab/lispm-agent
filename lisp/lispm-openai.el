@@ -168,13 +168,16 @@ of alists in Messages shape."
   (and (stringp value) (not (string-empty-p value)) value))
 
 (defun lispm-openai--usage (usage)
-  "Chat Completions USAGE as Messages usage."
+  "Chat Completions USAGE as Messages usage.
+Prompt tokens count the cached ones; Messages input tokens do not."
   (when (consp usage)
-    (let ((details (alist-get 'prompt_tokens_details usage)))
-      `((input_tokens . ,(alist-get 'prompt_tokens usage))
+    (let* ((details (alist-get 'prompt_tokens_details usage))
+           (prompt (alist-get 'prompt_tokens usage))
+           (cached (and (consp details) (alist-get 'cached_tokens details)))
+           (cached (and (numberp cached) cached)))
+      `((input_tokens . ,(if (and cached (numberp prompt)) (- prompt cached) prompt))
         (output_tokens . ,(alist-get 'completion_tokens usage))
-        ,@(and (consp details) (numberp (alist-get 'cached_tokens details))
-               `((cache_read_input_tokens . ,(alist-get 'cached_tokens details))))))))
+        ,@(and cached `((cache_read_input_tokens . ,cached)))))))
 
 (defun lispm-openai--message (reasoning text calls finish usage)
   "A Messages-shape message from the parts of a Chat Completions response.
