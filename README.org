@@ -53,16 +53,18 @@ nothing more is needed; for any other server, local or hosted, see [[*Backends][
 
 * The LispM projects
 
-LispM is three projects, each a repository of its own under
+LispM is four projects, each a repository of its own under
 [[https://github.com/LispMachineLab][LispMachineLab]]:
 
 | *lispm-agent*     | LispM Agent, this repository: AI agents that run inside Emacs, their conversations org documents, their tools Elisp |
 | [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]]   | LispM Desktop: Emacs laid out as Mac OS 9's desktop, a workspace for agents, ready from the first start |
 | [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]]   | LispM Browser: a WebKit browser in Emacs, with tabs, keyboard hints and Chrome extensions |
+| [[https://github.com/LispMachineLab/lispm-store][lispm-store]]     | LispM Store: the catalog of applications, agents and skills LispM Desktop's App Store installs |
 
-The agents need neither of the others. LispM Desktop, an Emacs distribution built around them,
+The agents need none of the others. LispM Desktop, an Emacs distribution built around them,
 runs them in its sidebar beside Claude Code, Codex and Hermes, with LispM Browser as one of its
-applications; it installs both at its first start:
+applications, and its App Store installs more from LispM Store. It installs the agents and the
+browser at its first start:
 
 #+begin_src sh
 git clone https://github.com/LispMachineLab/lispm-desktop ~/lispm-desktop
@@ -172,7 +174,7 @@ from one that sends it whole, the change shows once it is complete.
 * Agents, roles and sessions
 
 - A *role* is a kind of agent: instructions, tools, permission policy, model. ~assistant~ is
-  built in; define more with ~lispm-defrole~.
+  built in; define more with ~lispm-defrole~, or in role files (below).
 - An *agent* is one conversation carried on by a role in one project: agent and session are
   the same thing. Its name is ~ROLE@PROJECT~ (~assistant@lispm~, ~assistant@lispm<2>~, ...).
 - A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, so a project set up
@@ -222,6 +224,31 @@ asks:
 commands for good (~2~ in the chat) allows them all, since they run on the other machine; that
 holds only while the machine cannot write your files, so don't mount your home directory into
 the container. Its turns are journaled in memory only, without git snapshots.
+
+** Role files
+
+A role can also be written in an org file, ~NAME.org~ in ~~/.lispm/roles/~
+(~lispm-role-directories~), which defines the role ~NAME~ whenever LispM loads:
+
+#+begin_example
+#+title: Reviewer
+#+description: Reviews changes for bugs; never edits.
+#+tools: (read_file search_files list_directory read_buffer recall remember send_message)
+#+policy: ((write . deny) (exec . deny))
+#+effort: high
+
+Point out bugs with file:line. Do not edit.
+#+end_example
+
+The values of ~#+tools~, ~#+policy~ and ~#+effort~ are Lisp data, as for ~lispm-defrole~; without
+~#+tools~ the role has every tool. The text after the keywords is its instructions. A role file
+names no backend or model: its agents use yours, so a role file can be passed on as it is.
+
+~M-x lispm-install-role~ installs a role file from elsewhere: it shows you the file, or the diff
+against the role file it replaces, and asks first. ~M-x lispm-delete-role~ deletes one, and
+~M-x lispm-load-roles~ reads the directories again. A role defined in Lisp, such as ~assistant~,
+is neither replaced by a role file nor deleted. Live agents of a role that is replaced take the
+new role on; those of a role that is deleted keep what they had from it.
 
 * Standing agents
 
@@ -406,6 +433,15 @@ was left uncommitted, the changes against the base; a helper that changed nothin
 worktree or branch behind. ~worktree_list~ and ~worktree_remove~ manage the rest. Making a
 worktree is a ~write~, so it asks by default.
 
+** Installing
+
+~M-x lispm-install-skill~ installs a skill from elsewhere, ~NAME.org~ or a directory holding
+~SKILL.org~, among yours in ~~/.lispm/skills/~ (~lispm-write-skill-directory~). Agents that load
+it then run its code without asking, as they do your own skills', so installing a skill is
+trusting it: you see its code first, or the diff against the skill it replaces, files beside it
+included, and are asked. Its code must read, and its name must not be that of one of LispM's own
+skills. ~M-x lispm-delete-skill~ deletes a skill from there, and from nowhere else.
+
 * MCP servers and computer use
 
 Agents use the tools of [[https://modelcontextprotocol.io][Model Context Protocol]] servers as
@@ -451,6 +487,7 @@ configuration but none of its state, a real model through the backend it chooses
 |--------------------------+------------------------------------------------------------------|
 | lisp/lispm.el            | entry commands, dashboard, mode line                             |
 | lisp/lispm-core.el       | agent object model, registry, configuration                      |
+| lisp/lispm-roles.el      | role files: loading, installing and deleting them                |
 | lisp/lispm-transcript.el | byte-exact round trip between org sessions and the Messages API  |
 | lisp/lispm-api.el        | curl transport, the table of API shapes, API keys                |
 | lisp/lispm-openai.el     | the OpenAI Chat Completions shape                                |
@@ -467,7 +504,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
 | lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |
-| lisp/lispm-skills.el     | skills: loading them, trusting a project's, writing them         |
+| lisp/lispm-skills.el     | skills: loading, trusting a project's, writing, installing them  |
 | lisp/lispm-inspect.el    | presentations (objects in text to act on), the agent inspector   |
 | lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |
 | skills/                  | the skills LispM comes with: web, worktree                       |

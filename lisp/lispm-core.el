@@ -207,6 +207,10 @@ Each is called with the buffer, its old text and its new text;
 (defvar lispm--roles nil
   "Alist of (NAME . ROLE) in definition order.")
 
+(defvar lispm--role-files nil
+  "Alist of (NAME . FILE): the roles read from role files (lispm-roles.el).
+A role defined again in Lisp is no longer one of them.")
+
 (cl-defstruct (lispm-agent (:constructor lispm-agent--create)
                            (:copier nil))
   "An agent: one conversation, in one project, carried on by a role."
@@ -293,8 +297,9 @@ Signal an error if there is none, unless NOERROR."
 (defun lispm-register-role (name &rest props)
   "Define or redefine the role NAME from PROPS.
 PROPS are :description, :instructions, :tools (a list of tool names,
-or t for all), :policy, :backend, :model and :effort.  Live agents of
-the role take on the new definition at once."
+or t for all), :policy, :backend, :model and :effort, and :file, the
+role file it was read from, if it was (see `lispm-role-file').  Live
+agents of the role take on the new definition at once."
   (let ((role (or (alist-get name lispm--roles)
                   (let ((new (lispm-role--create :name name)))
                     (setq lispm--roles (append lispm--roles (list (cons name new))))
@@ -306,10 +311,34 @@ the role take on the new definition at once."
           (lispm-role-backend role) (plist-get props :backend)
           (lispm-role-model role) (plist-get props :model)
           (lispm-role-effort role) (plist-get props :effort))
+    (setq lispm--role-files (append (and (plist-get props :file)
+                                         (list (cons name (plist-get props :file))))
+                                    (seq-remove (lambda (entry) (eq (car entry) name))
+                                                lispm--role-files)))
     (dolist (agent (lispm-agents))
       (when (eq (lispm-agent-role agent) name)
         (lispm--apply-role agent role)))
     role))
+
+(defun lispm-unregister-role (name)
+  "Remove the role NAME, a symbol or a string; return it, or nil if there was none.
+Live agents of the role keep what they had from it and go on.  A
+session of the role is resumed only once a role of that name is
+defined again."
+  (let* ((name (if (stringp name) (intern name) name))
+         (role (alist-get name lispm--roles))
+         (other (lambda (entry) (not (eq (car entry) name)))))
+    (setq lispm--roles (seq-filter other lispm--roles)
+          lispm--role-files (seq-filter other lispm--role-files))
+    role))
+
+(defun lispm-role-file (role)
+  "The role file ROLE was read from, or nil if it was defined in Lisp.
+ROLE is a role, or the name of one: a symbol or a string."
+  (alist-get (cond ((lispm-role-p role) (lispm-role-name role))
+                   ((stringp role) (intern role))
+                   (t role))
+             lispm--role-files))
 
 (defmacro lispm-defrole (name &rest props)
   "Define a role NAME.

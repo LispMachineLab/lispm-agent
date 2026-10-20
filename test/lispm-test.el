@@ -92,6 +92,7 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm-backend 'test)
           (lispm--agents nil)
           (lispm--roles (copy-sequence lispm--roles))
+          (lispm--role-files (copy-sequence lispm--role-files))
           (lispm-api-function #'lispm-test--fake-api)
           (lispm-test--scripts nil)
           (lispm-test--requests nil)
@@ -4090,6 +4091,346 @@ Its policy is the stricter of its role's and its caller's."
                                        lispm-test--requests))
              (results (alist-get 'content (aref (alist-get 'messages helper-request) 2))))
         (should (string-match-p "Denied by policy" (alist-get 'content (aref results 0))))))))
+
+;;;; Role files
+
+(ert-deftest lispm-test-role-files ()
+  "A role file defines a role: its keywords Lisp data, the text after them its instructions.
+An earlier directory's file hides a later one's.  A file that is no role file, names
+a backend or a model, or names a role defined in Lisp is left out; a role whose file
+is gone is removed."
+  (lispm-test-env
+    (let* ((first (expand-file-name "../roles/" project))
+           (second (expand-file-name "../more-roles/" project))
+           (lispm-role-directories (list first second (expand-file-name "../nowhere/" project)))
+           (reviewer (expand-file-name "reviewer.org" first))
+           (problem (lambda (file text)
+                      (cadr (should-error (lispm-roles--read (expand-file-name file first) text)
+                                          :type 'user-error)))))
+      ;; No directory is no error.
+      (should-not (lispm-load-roles))
+      (lispm-test--write reviewer
+                         (concat "#+title: Reviewer\n#+description: Reviews changes.\n"
+                                 "#+tools: (read_file \"search_files\")\n#+policy: ((write . deny))\n"
+                                 "#+effort: high\n\nPoint out bugs.\n\n* Style\nBe brief.\n"))
+      (lispm-test--write (expand-file-name "reviewer.org" second) "#+description: Hidden.\n")
+      (lispm-test--write (expand-file-name "helper.org" second) "#+DESCRIPTION: Helps.\n#+effort: \"max\"\n")
+      (lispm-test--write (expand-file-name "broken.org" first) "#+tools: (read_file\n")
+      (lispm-test--write (expand-file-name "modeled.org" first) "#+model: \"some-model\"\n\nText.\n")
+      (lispm-test--write (expand-file-name "assistant.org" first) "#+description: Not this one.\n")
+      (lispm-test--write (expand-file-name "Shout.org" first) "#+description: Not this name.\n")
+      (lispm-test--write (expand-file-name "notes.txt" first) "No role.\n")
+      (should (equal (lispm-load-roles) '(reviewer helper)))
+      (let ((role (lispm-get-role 'reviewer)))
+        (should (equal (lispm-role-description role) "Reviews changes."))
+        (should (equal (lispm-role-instructions role) "Point out bugs.\n\n* Style\nBe brief."))
+        (should (equal (lispm-role-tools role) '(read_file "search_files")))
+        (should (equal (lispm-role-policy role) '((write . deny))))
+        (should (equal (lispm-role-effort role) "high"))
+        (should-not (or (lispm-role-backend role) (lispm-role-model role)))
+        (should (equal (lispm-role-file role) reviewer)))
+      (let ((helper (lispm-get-role 'helper)))
+        (should (equal (lispm-role-description helper) "Helps."))
+        (should (eq (lispm-role-tools helper) t))
+        (should (equal (lispm-role-effort helper) "max"))
+        (should-not (lispm-role-instructions helper)))
+      (should-not (seq-some (lambda (name) (lispm-get-role name t)) '(broken modeled Shout)))
+      (should-not (lispm-role-file 'assistant))
+      (should (equal (lispm-role-description (lispm-get-role 'assistant))
+                     "A general assistant for whatever the user is doing in Emacs."))
+      (should (string-match-p "#\\+tools: is not Lisp data" (funcall problem "x.org" "#+tools: (read_file\n")))
+      (should (string-match-p "#\\+tools: is more than one Lisp object" (funcall problem "x.org" "#+tools: (a) (b)\n")))
+      (should (string-match-p "#\\+tools: is t, for every tool, or a list" (funcall problem "x.org" "#+tools: 3\n")))
+      (should (string-match-p "#\\+policy: is an alist" (funcall problem "x.org" "#+policy: ((write . maybe))\n")))
+      (should (string-match-p "#\\+effort: is an effort level" (funcall problem "x.org" "#+effort: 3\n")))
+      (should (string-match-p "#\\+backend: a role file names no backend or model"
+                              (funcall problem "x.org" "#+backend: openai\n")))
+      (should (string-match-p "#\\+title: is there twice" (funcall problem "x.org" "#+title: A\n#+title: B\n")))
+      (should (string-match-p "\\`The name of a role is" (funcall problem "Shout.org" "")))
+      (should (string-match-p "\\`A role file is NAME\\.org" (funcall problem "notes.txt" "")))
+      ;; Its agents have what it says, and the user's model.
+      (let ((agent (lispm-make-agent 'reviewer project)))
+        (should (equal (lispm-agent-effort* agent) "high"))
+        (should (equal (lispm-agent-model* agent) "test-model"))
+        (should (equal (mapcar #'lispm-tool-name (lispm-agent-tools* agent)) '("read_file" "search_files")))
+        (should (eq (lispm-policy-action agent 'write) 'deny))
+        ;; Defined again in Lisp, the role is no longer its file's, nor loaded from it again.
+        (lispm-defrole reviewer "In Lisp.")
+        (should-not (lispm-role-file 'reviewer))
+        (should (equal (lispm-load-roles) '(helper)))
+        (should (equal (lispm-role-description (lispm-get-role 'reviewer)) "In Lisp."))
+        (should (equal (lispm-agent-description agent) "In Lisp.")))
+      ;; A role whose file is gone is removed.
+      (delete-file (expand-file-name "helper.org" second))
+      (should-not (lispm-load-roles))
+      (should-not (lispm-get-role 'helper t))
+      ;; Set with Customize, the directories are loaded again.
+      (let ((third (expand-file-name "../third-roles/" project)))
+        (lispm-test--write (expand-file-name "tester.org" third) "#+description: Tests.\n")
+        (funcall (get 'lispm-role-directories 'custom-set) 'lispm-role-directories (list third))
+        (should (equal (lispm-role-file 'tester) (expand-file-name "tester.org" third)))))))
+
+(ert-deftest lispm-test-install-role ()
+  "A role file is installed in the first role directory, and registered at once.
+It is shown first, or the diff against the role file it replaces, and asked about;
+with NOCONFIRM it is not.  What is installed is the text shown.  A role defined in
+Lisp is not replaced, nor is a file that is no role file installed."
+  (lispm-test-env
+    (let* ((roles (expand-file-name "../roles/" project))
+           (lispm-role-directories (list roles (expand-file-name "../more-roles/" project)))
+           (download (expand-file-name "../download/" project))
+           (source (expand-file-name "reviewer.org" download))
+           (target (expand-file-name "reviewer.org" roles))
+           (text "#+title: Reviewer\n#+description: Reviews changes.\n#+tools: (read_file)\n\nPoint out bugs.\n")
+           (better (string-replace "Point out bugs." "Point out every bug." text))
+           (answer nil)
+           asked shown)
+      (lispm-test--write source text)
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (prompt)
+                   (push prompt asked)
+                   (setq shown (with-current-buffer "*LispM role*"
+                                 (buffer-substring-no-properties (point-min) (point-max))))
+                   (if (functionp answer) (funcall answer) answer))))
+        ;; Refused, nothing is installed.
+        (should (string-match-p "\\`The role reviewer was not installed"
+                                (cadr (should-error (lispm-install-role source) :type 'user-error))))
+        (should (equal asked '("Install the role reviewer, as shown? ")))
+        (should (equal shown text))
+        (should-not (file-exists-p target))
+        (should-not (lispm-get-role 'reviewer t))
+        (setq answer t)
+        (should (eq (lispm-install-role source) 'reviewer))
+        (should (equal (lispm-test--disk target) text))
+        (should (equal (lispm-role-file 'reviewer) target))
+        (should (equal (lispm-role-instructions (lispm-get-role 'reviewer)) "Point out bugs."))
+        ;; Replacing it shows the diff; its live agents take the new role on.
+        (let ((agent (lispm-make-agent 'reviewer project)))
+          (lispm-test--write source better)
+          (setq asked nil)
+          (should (eq (lispm-install-role source) 'reviewer))
+          (should (equal asked '("Replace the role reviewer, as shown? ")))
+          (should (string-match-p "^-Point out bugs\\.\n\\+Point out every bug\\.$" shown))
+          (should (equal (lispm-test--disk target) better))
+          (should (equal (lispm-agent-instructions agent) "Point out every bug.")))
+        ;; What is installed is what was shown, whatever the file holds meanwhile.
+        (lispm-test--write source text)
+        (setq answer (lambda () (lispm-test--write source "#+description: Changed.\n") t))
+        (lispm-install-role source)
+        (should (equal (lispm-test--disk target) text)))
+      ;; With NOCONFIRM nothing is asked.
+      (lispm-test--write (expand-file-name "helper.org" download) "#+description: Helps.\n")
+      (lispm-test--never-asking
+        (should (eq (lispm-install-role (expand-file-name "helper.org" download) t) 'helper)))
+      (should (file-exists-p (expand-file-name "helper.org" roles)))
+      ;; A role defined in Lisp is not replaced.
+      (lispm-defrole coder "In Lisp.")
+      (dolist (name '("coder" "assistant"))
+        (let ((file (expand-file-name (concat name ".org") download)))
+          (lispm-test--write file "#+description: A role file.\n")
+          (should (string-match-p (format "\\`There is a role named %s already, defined in Lisp" name)
+                                  (cadr (should-error (lispm-test--never-asking (lispm-install-role file t))
+                                                      :type 'user-error))))
+          (should-not (file-exists-p (expand-file-name (concat name ".org") roles)))))
+      (should (equal (lispm-role-description (lispm-get-role 'coder)) "In Lisp."))
+      (lispm-test--write (expand-file-name "notes.txt" download) "#+description: No role.\n")
+      (should-error (lispm-install-role (expand-file-name "notes.txt" download) t) :type 'user-error)
+      ;; An installed role is loaded again whenever LispM loads.
+      (lispm-unregister-role 'reviewer)
+      (should-not (lispm-get-role 'reviewer t))
+      (should (equal (lispm-load-roles) '(helper reviewer)))
+      (should (equal (lispm-role-instructions (lispm-get-role 'reviewer)) "Point out bugs.")))))
+
+(ert-deftest lispm-test-delete-role ()
+  "Deleting a role deletes its file from every role directory, and unregisters it.
+Live agents of the role keep what they had from it.  A role defined in Lisp, the
+default role and one there is none of are not deleted; interactively, it asks first."
+  (lispm-test-env
+    (let* ((roles (expand-file-name "../roles/" project))
+           (later (expand-file-name "../more-roles/" project))
+           (lispm-role-directories (list roles later))
+           (problem (lambda (name)
+                      (cadr (should-error (lispm-test--never-asking (lispm-delete-role name))
+                                          :type 'user-error)))))
+      (lispm-test--write (expand-file-name "reviewer.org" roles) "#+description: Reviews.\n\nPoint out bugs.\n")
+      (lispm-test--write (expand-file-name "reviewer.org" later) "#+description: Hidden.\n")
+      (lispm-test--write (expand-file-name "helper.org" roles) "#+description: Helps.\n")
+      (should (equal (lispm-load-roles) '(helper reviewer)))
+      (let ((agent (lispm-make-agent 'reviewer project)))
+        ;; Asked interactively; refused, nothing is deleted.
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+          (should-error (funcall-interactively #'lispm-delete-role 'reviewer) :type 'user-error))
+        (should (file-exists-p (expand-file-name "reviewer.org" roles)))
+        (should (lispm-get-role 'reviewer t))
+        (lispm-test--never-asking
+          (should (eq (lispm-delete-role "reviewer") 'reviewer)))
+        (should-not (lispm-get-role 'reviewer t))
+        (should-not (lispm-role-file 'reviewer))
+        (should-not (file-exists-p (expand-file-name "reviewer.org" roles)))
+        (should-not (file-exists-p (expand-file-name "reviewer.org" later)))
+        (should (equal (lispm-agent-description agent) "Reviews."))
+        (should (equal (lispm-agent-instructions agent) "Point out bugs."))
+        (should-error (lispm-make-agent 'reviewer project) :type 'user-error))
+      (lispm-defrole coder "In Lisp.")
+      (should (string-match-p "\\`The role assistant is LispM" (funcall problem 'assistant)))
+      (should (string-match-p "\\`The role coder is defined in Lisp" (funcall problem 'coder)))
+      (should (string-match-p "\\`No role named nobody" (funcall problem 'nobody)))
+      (let ((lispm-default-role 'helper))
+        (should (string-match-p "\\`The role helper is .lispm-default-role" (funcall problem 'helper))))
+      (should (lispm-get-role 'coder t))
+      (should (equal (lispm-role-file 'helper) (expand-file-name "helper.org" roles)))
+      (should (file-exists-p (expand-file-name "helper.org" roles))))))
+
+;;;; Installing skills
+
+(defun lispm-test--shown (name)
+  "The text of the buffer NAME, which is then killed; nil if there is none."
+  (when-let* ((buffer (get-buffer name)))
+    (prog1 (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max)))
+      (kill-buffer buffer))))
+
+(ert-deftest lispm-test-install-skill ()
+  "A skill, a file or a directory, is installed among the user's skills, and so trusted.
+Its code is shown first, or the diff against the skill it replaces, and asked about;
+with NOCONFIRM it is not.  Code changed meanwhile is not installed, nor is code that
+does not read, a skill named as one of LispM's own, or one badly named."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "../user-skills/" project))
+           (lispm-skill-directories (list lispm-skills--builtin user-skills))
+           (lispm-write-skill-directory nil)
+           (download (expand-file-name "../download/" project))
+           (greet (expand-file-name "greet.org" download))
+           (greet-text (concat "#+title: Greet\n#+description: Greet people.\n\nUse it.\n\n"
+                               "#+begin_src emacs-lisp :lispm load\n"
+                               "(defun lispm-test-installed-greet () \"hi\")\n#+end_src\n"))
+           (tools (expand-file-name "tools/" download))
+           (installed (expand-file-name "tools/" user-skills))
+           (agent (lispm-defagent tester :root project))
+           (answer nil)
+           asked)
+      (lispm-test--write greet greet-text)
+      (lispm-test--write (expand-file-name "SKILL.org" tools)
+                         "#+description: Tools.\n\n#+begin_src emacs-lisp :lispm load\n(load \"helper\")\n#+end_src\n")
+      (lispm-test--write (expand-file-name "helper.el" tools) "(setq lispm-test-x 1)\n")
+      (lispm-test--write (expand-file-name "old.el" tools) "(setq lispm-test-y 1)\n")
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt)
+                         (push prompt asked)
+                         (if (functionp answer) (funcall answer) answer))))
+              ;; Asked, showing its code; refused, nothing is installed.
+              (should (string-match-p "\\`Skill greet was not installed"
+                                      (cadr (should-error (lispm-install-skill greet) :type 'user-error))))
+              (should (equal asked '("Install the skill greet, as shown? ")))
+              (should (string-match-p "^(defun lispm-test-installed-greet () \"hi\")$"
+                                      (lispm-test--shown "*LispM skill code*")))
+              (should-not (file-exists-p (expand-file-name "greet.org" user-skills)))
+              ;; Agreed, it is the user's skill, whose code agents evaluate unasked.
+              (setq answer t)
+              (should (equal (lispm-install-skill greet) "greet"))
+              (should (equal (lispm-test--disk (expand-file-name "greet.org" user-skills)) greet-text))
+              (let ((skill (lispm-skills--find "greet" agent)))
+                (should (equal (plist-get skill :file) (expand-file-name "greet.org" user-skills)))
+                (should (lispm-skill-trusted-p skill)))
+              (should (string-prefix-p "Skill greet loaded."
+                                       (car (lispm-test--call agent "skill" '((name . "greet"))))))
+              (should (fboundp 'lispm-test-installed-greet))
+              ;; A directory, with NOCONFIRM: nothing is asked.
+              (lispm-test--never-asking
+                (should (equal (lispm-install-skill tools t) "tools")))
+              (should (equal (lispm-test--disk (expand-file-name "helper.el" installed)) "(setq lispm-test-x 1)\n"))
+              (should (file-exists-p (expand-file-name "old.el" installed)))
+              ;; Replacing it shows the diff, files beside it too, and replaces it whole.
+              (lispm-test--write (expand-file-name "helper.el" tools) "(setq lispm-test-x 2)\n")
+              (lispm-test--write (expand-file-name "data/new.txt" tools) "New.\n")
+              (delete-file (expand-file-name "old.el" tools))
+              (setq asked nil)
+              (should (equal (lispm-install-skill tools) "tools"))
+              (should (equal asked '("Replace the skill tools, as shown? ")))
+              (let ((diff (lispm-test--shown "*LispM skill diff*")))
+                (should (string-match-p "^\\+\\+\\+ b/tools/helper\\.el\n.*\n-(setq lispm-test-x 1)\n\\+(setq lispm-test-x 2)$"
+                                        diff))
+                (should (string-match-p "^\\+\\+\\+ b/tools/data/new\\.txt$" diff))
+                (should (string-match-p "^-(setq lispm-test-y 1)$" diff))
+                (should-not (string-match-p "SKILL\\.org" diff)))
+              (should (equal (lispm-test--disk (expand-file-name "helper.el" installed)) "(setq lispm-test-x 2)\n"))
+              (should (file-exists-p (expand-file-name "data/new.txt" installed)))
+              (should-not (file-exists-p (expand-file-name "old.el" installed)))
+              ;; Nothing is left of the copy it was put in place from.
+              (should-not (directory-files user-skills nil "\\`\\.[^.]"))
+              ;; Code changed while the user was asked is not installed.
+              (setq answer (lambda ()
+                             (lispm-test--write (expand-file-name "helper.el" tools) "(setq lispm-test-x 3)\n")
+                             t))
+              (should (string-match-p "\\`The code of skill tools changed while you were asked"
+                                      (cadr (should-error (lispm-install-skill tools) :type 'user-error))))
+              (should (equal (lispm-test--disk (expand-file-name "helper.el" installed)) "(setq lispm-test-x 2)\n")))
+            ;; A skill installed as a directory replaces the file of that name.
+            (lispm-test--write (expand-file-name "again/greet/SKILL.org" download) "#+description: Greet again.\n")
+            (lispm-test--never-asking
+              (should (equal (lispm-install-skill (expand-file-name "again/greet/" download) t) "greet")))
+            (should-not (file-exists-p (expand-file-name "greet.org" user-skills)))
+            (should (equal (plist-get (lispm-skills--find "greet" agent) :description) "Greet again."))
+            ;; What is not installed.
+            (let ((problem (lambda (name text)
+                             (let ((file (expand-file-name name download)))
+                               (lispm-test--write file text)
+                               (prog1 (cadr (should-error (lispm-test--never-asking (lispm-install-skill file t))))
+                                 (should-not (file-exists-p (expand-file-name (file-name-nondirectory file)
+                                                                              user-skills))))))))
+              (should (string-match-p "\\`Skill open was not installed: The code does not read"
+                                      (funcall problem "open.org" (concat "#+description: Open.\n\n"
+                                                                          "#+begin_src emacs-lisp :lispm load\n"
+                                                                          "(defun lispm-test-open ()\n#+end_src\n"))))
+              (should (string-match-p "\\`There is a skill named web already"
+                                      (funcall problem "web.org" "#+description: Mine.\n")))
+              (should (string-match-p "\\`The name of a skill is" (funcall problem "Bad.org" "#+description: Bad.\n")))
+              (should (string-match-p "\\`A skill is NAME\\.org" (funcall problem "notes.txt" "Notes.\n"))))
+            (lispm-test--write (expand-file-name "empty/README.org" download) "#+description: None.\n")
+            (should (string-match-p "holds no SKILL\\.org"
+                                    (cadr (should-error (lispm-install-skill (expand-file-name "empty/" download) t)
+                                                        :type 'user-error))))
+            (should-not (file-exists-p (expand-file-name "empty" user-skills))))
+        (fmakunbound 'lispm-test-installed-greet)))))
+
+(ert-deftest lispm-test-delete-skill ()
+  "Deleting a skill deletes it from the user's skills, a file or a directory.
+One of LispM's own, of a project or of another skill directory is not deleted, nor
+is one badly named; interactively, it asks first."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "../user-skills/" project))
+           (other-skills (expand-file-name "../other-skills/" project))
+           (lispm-skill-directories (list lispm-skills--builtin other-skills user-skills))
+           (lispm-write-skill-directory nil)
+           (agent (lispm-defagent tester :root project))
+           (problem (lambda (name)
+                      (cadr (should-error (lispm-test--never-asking (lispm-delete-skill name)))))))
+      (lispm-test--write (expand-file-name "greet.org" user-skills) "#+description: Greet.\n")
+      (lispm-test--write (expand-file-name "tools/SKILL.org" user-skills) "#+description: Tools.\n")
+      (lispm-test--write (expand-file-name "tools/helper.el" user-skills) "(setq lispm-test-x 1)\n")
+      (lispm-test--write (expand-file-name "theirs.org" other-skills) "#+description: Theirs.\n")
+      (lispm-test--write (expand-file-name ".lispm/skills/mine.org" project) "#+description: Mine.\n")
+      ;; Asked interactively; refused, nothing is deleted.
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+        (should-error (funcall-interactively #'lispm-delete-skill "greet") :type 'user-error))
+      (should (file-exists-p (expand-file-name "greet.org" user-skills)))
+      (lispm-test--never-asking
+        (should (equal (lispm-delete-skill "greet") "greet"))
+        (should (equal (lispm-delete-skill "tools") "tools")))
+      (should-not (file-exists-p (expand-file-name "greet.org" user-skills)))
+      (should-not (file-exists-p (expand-file-name "tools/" user-skills)))
+      (should-not (lispm-skills--find "greet" agent))
+      (should (string-match-p "\\`Skill web is one of LispM" (funcall problem "web")))
+      (should (string-match-p "\\`Skill theirs is in .*/other-skills/, not among" (funcall problem "theirs")))
+      (should (string-match-p "\\`No skill named mine in" (funcall problem "mine")))
+      (with-temp-buffer
+        (setq-local lispm-chat-agent agent)
+        (should (string-match-p "\\`Skill mine is the project" (funcall problem "mine"))))
+      (should (string-match-p "\\`The name of a skill is" (funcall problem "../other-skills/theirs")))
+      (should (lispm-skills--find "web" agent))
+      (should (file-exists-p (expand-file-name "theirs.org" other-skills)))
+      (should (file-exists-p (expand-file-name ".lispm/skills/mine.org" project))))))
 
 ;;;; Worktrees
 
