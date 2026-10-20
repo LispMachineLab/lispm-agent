@@ -5130,6 +5130,24 @@ handed over once nothing more can be."
       (should (equal (plist-get (nth 3 items) :state) "WRITING"))
       (should (equal (plist-get (nth 3 items) :name) "edit_file")))))
 
+(ert-deftest lispm-test-chat-tools ()
+  "Each tool's calls are shown as the chat's table says: under their name,
+an MCP server's as SERVER:TOOL, a tool the table does not know by its own
+name; long results are cut to a few lines and say how many more there are."
+  (should (equal (lispm-chat--tool-name "read_file") "Read"))
+  (should (equal (lispm-chat--tool-name "mcp__fake__echo") "fake:echo"))
+  (should (equal (lispm-chat--tool-name "made_up") "made_up"))
+  (should (equal (lispm-chat--tool-text "edit_definition" :question '((name . "foo")) nil "foo")
+                 "Do you want to make this edit to foo?"))
+  (should (equal (lispm-chat--tool-text "write_skill" :title '((name . "web")) nil nil)
+                 "Write the skill web"))
+  (should-not (lispm-chat--tool-text "read_file" :title nil nil nil))
+  (should (equal (lispm-chat--preview '("a" "b") 3 nil) '("a" "b")))
+  (let ((cut (lispm-chat--preview '("a" "b" "c" "d") 2 nil)))
+    (should (equal (seq-take cut 2) '("a" "b")))
+    (should (string-match-p "+2 lines" (nth 2 cut))))
+  (should (equal (lispm-chat--preview '("a" "b" "c" "d") 2 t) '("a" "b" "c" "d"))))
+
 (ert-deftest lispm-test-chat-streaming ()
   "A response streams into the chat; an edit before it still shows."
   (lispm-test-env

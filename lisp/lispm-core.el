@@ -598,6 +598,10 @@ way: `thinking', `retry' or `waiting' (for what STATUS names), or
   "Non-nil if AGENT is in the middle of a turn."
   (not (eq (lispm-agent-state agent) 'idle)))
 
+(defun lispm-agent-working-p (agent)
+  "Non-nil while AGENT works: in a turn, and not waiting for an answer."
+  (not (memq (lispm-agent-state agent) '(idle waiting))))
+
 ;;;; Utilities
 
 (defun lispm--json-encode (object)
