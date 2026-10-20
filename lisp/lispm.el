@@ -34,6 +34,7 @@
 ;;
 ;;   agents         one session of a role in a project (lispm-core.el);
 ;;                  long ones are handed over to a summary (lispm-runtime.el);
+;;                  roles can be org files too (lispm-roles.el);
 ;;   context        an org buffer (lispm-transcript.el), read on every
 ;;                  request, so editing the buffer edits the context;
 ;;   interface      a chat laid out like Claude Code's, drawn from that
@@ -73,6 +74,7 @@
 
 (require 'tabulated-list)
 (require 'lispm-core)
+(require 'lispm-roles)
 (require 'lispm-transcript)
 (require 'lispm-api)
 (require 'lispm-tools)
@@ -97,6 +99,9 @@
 
 (lispm-defrole assistant
   "A general assistant for whatever the user is doing in Emacs.")
+
+;; And those of the user's role files.
+(lispm-load-roles)
 
 ;;;; Starting, resuming and switching
 

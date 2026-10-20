@@ -54,6 +54,10 @@
 ;; it, which the user reviews as the org file it would be.  Approved,
 ;; its code is evaluated and the file saved in the user's skills
 ;; (`lispm-write-skill-directory'), from where later sessions load it.
+;;
+;; Skills from elsewhere join the user's with `lispm-install-skill',
+;; once the user has seen their code, and `lispm-delete-skill' deletes
+;; them again.
 
 ;;; Code:
 
@@ -394,7 +398,8 @@ asked only in a turn, or M-x lispm-trust-skill"))))
   "Show the code of the skill in FILE, and the files beside it, in a buffer."
   (with-current-buffer (get-buffer-create "*LispM skill code*")
     (let ((inhibit-read-only t)
-          (beside (lispm-skills--beside file)))
+          (beside (lispm-skills--beside file))
+          (blocks (lispm-skills--blocks (lispm-skills--file-text file))))
       (erase-buffer)
       ;; Lisp data mode, not Emacs Lisp mode: no hook of the user's,
       ;; such as one byte-compiling the buffer, runs on code not trusted.
@@ -406,8 +411,9 @@ asked only in a turn, or M-x lispm-trust-skill"))))
                                        (file-relative-name other (file-name-directory file)))
                                      beside ", "))
                 "")
+              (if blocks "" ";; It has none: the skill is its text alone.\n")
               "\n"
-              (string-join (lispm-skills--blocks (lispm-skills--file-text file)) "\n"))
+              (string-join blocks "\n"))
       (goto-char (point-min))
       (setq buffer-read-only t))
     (display-buffer (current-buffer))))
@@ -494,16 +500,21 @@ is shown before you decide."
 
 ;;;; Writing skills
 
+(defun lispm-skills--check-name (name)
+  "Signal an error unless NAME is a name for a skill.
+That is lowercase letters, digits, - and _, at most 64 of them."
+  (unless (and (stringp name)
+               (let ((case-fold-search nil))
+                 (string-match-p "\\`[a-z0-9][a-z0-9_-]\\{0,63\\}\\'" name)))
+    (error "The name of a skill is lowercase letters, digits, - and _, at most 64: not %S" name)))
+
 (defun lispm-skills--target (name agent)
   "The file write_skill saves the skill NAME in, for AGENT.
 An error if NAME is no name for a skill (lowercase letters, digits, -
 and _), or if the skill of that name AGENT would load is not in
 `lispm-write-skill-directory': one of LispM's own, say, or of AGENT's
 project, which the skill saved would not replace."
-  (unless (and (stringp name)
-               (let ((case-fold-search nil))
-                 (string-match-p "\\`[a-z0-9][a-z0-9_-]\\{0,63\\}\\'" name)))
-    (error "The name of a skill is lowercase letters, digits, - and _, at most 64: not %S" name))
+  (lispm-skills--check-name name)
   (let ((directory (lispm-skills--write-directory))
         (existing (lispm-skills--find name agent)))
     (cond ((null existing) (expand-file-name (concat name ".org") directory))
@@ -581,6 +592,186 @@ write the skill again"
                       (if tools (format "; tools now available: %s" (string-join tools ", ")) ""))
               (format "Saved as %s: agents load it from now on, in later sessions too."
                       (abbreviate-file-name file))))))
+
+;;;; Installing skills
+
+(defun lispm-skills--source (source)
+  "The skill file of SOURCE: NAME.org, or SKILL.org in the directory NAME/.
+A file SKILL.org stands for its directory.  An error if SOURCE is
+neither."
+  (let ((source (expand-file-name source)))
+    (cond ((file-directory-p source)
+           (let ((file (expand-file-name "SKILL.org" source)))
+             (unless (file-regular-p file)
+               (user-error "%s holds no SKILL.org: it is no skill" (abbreviate-file-name source)))
+             file))
+          ((not (file-regular-p source))
+           (user-error "No skill file %s" (abbreviate-file-name source)))
+          ((string-suffix-p ".org" source) source)
+          (t (user-error "A skill is NAME.org, or a directory holding SKILL.org: not %s"
+                         (abbreviate-file-name source))))))
+
+(defun lispm-skills--label (name file)
+  "FILE, a file of the skill NAME, as shown in diffs."
+  (if (equal (file-name-nondirectory file) "SKILL.org")
+      (concat name "/SKILL.org")
+    (concat name ".org")))
+
+(defun lispm-skills--install-diff (name old new text)
+  "The diff from the skill NAME installed in OLD to the one in NEW.
+OLD and NEW are skill files, and TEXT is NEW's text; the files beside
+them are compared too."
+  (let* ((beside (lambda (file)
+                   (mapcar (lambda (other) (cons (file-relative-name other (file-name-directory file)) other))
+                           (lispm-skills--beside file))))
+         (old-beside (funcall beside old))
+         (new-beside (funcall beside new))
+         (text-of (lambda (files relative)
+                    (if-let* ((file (cdr (assoc relative files))))
+                        (lispm-skills--file-text file)
+                      "")))
+         (diffs (delete "(no changes)"
+                        (cons (lispm--diff (lispm-skills--file-text old) text (lispm-skills--label name new))
+                              (mapcar (lambda (relative)
+                                        (lispm--diff (funcall text-of old-beside relative)
+                                                     (funcall text-of new-beside relative)
+                                                     (concat name "/" relative)))
+                                      (sort (seq-uniq (mapcar #'car (append old-beside new-beside)))
+                                            #'string<))))))
+    (if diffs (string-join diffs) "(no changes)")))
+
+(defun lispm-skills--show-diff (diff)
+  "Show DIFF, what installing a skill would change, in a buffer."
+  (with-current-buffer (get-buffer-create "*LispM skill diff*")
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert diff)
+      (diff-mode)
+      (goto-char (point-min))
+      (setq buffer-read-only t))
+    (display-buffer (current-buffer))))
+
+;;;###autoload
+(defun lispm-install-skill (source &optional noconfirm)
+  "Install the skill SOURCE among the user's skills, and return its name.
+SOURCE is a skill file, NAME.org, or a skill directory, NAME/ holding
+SKILL.org and files of its own.  It is copied into
+`lispm-write-skill-directory', where write_skill saves skills, and so
+its code is evaluated, unasked, by every agent that loads it:
+installing a skill is trusting it.  Unless NOCONFIRM, its code is
+shown, or the diff against the skill it replaces, and you are asked
+first; what is installed is what was shown.  An error if SOURCE is no
+skill, if its code does not read, or if NAME is no name for a skill
+or one that another skill has, such as one of LispM's own, which the
+skill installed would not replace."
+  (interactive (list (read-file-name "Install the skill (NAME.org, or a directory with SKILL.org): "
+                                     nil nil t)))
+  (let* ((file (lispm-skills--source source))
+         (directory-p (equal (file-name-nondirectory file) "SKILL.org"))
+         (name (plist-get (lispm-skills--read file) :name))
+         (text (lispm-skills--file-text file))
+         (hash (lispm-skills--hash file text))
+         (installed (let ((existing (lispm-skills--target name nil)))
+                      (and (file-exists-p existing) existing)))
+         (directory (lispm-skills--write-directory))
+         (target (expand-file-name (concat name (if directory-p "/" ".org")) directory))
+         (target-file (if directory-p (expand-file-name "SKILL.org" target) target))
+         (other (expand-file-name (concat name (if directory-p ".org" "/")) directory)))
+    (condition-case err
+        (lispm-skills--forms text)
+      (error (user-error "Skill %s was not installed: %s" name (error-message-string err))))
+    (cond
+     ((lispm-skills--same-file-p file target-file))
+     ((and directory-p (or (file-in-directory-p target (file-name-directory file))
+                           (file-in-directory-p (file-name-directory file) target)))
+      (user-error "Skill %s is not installed in %s from inside it, nor from a directory holding it"
+                  name (abbreviate-file-name target)))
+     (t
+      (dolist (location (list target-file (if directory-p other (expand-file-name "SKILL.org" other))))
+        (when-let* ((open (find-buffer-visiting location)))
+          (when (buffer-modified-p open)
+            (user-error "%s is open in Emacs with unsaved changes; save or discard them first"
+                        (abbreviate-file-name location)))))
+      (unless noconfirm
+        (save-window-excursion
+          (if installed
+              (lispm-skills--show-diff (lispm-skills--install-diff name installed file text))
+            (lispm-skills--show-code file))
+          (unless (yes-or-no-p (format "%s the skill %s, as shown? " (if installed "Replace" "Install") name))
+            (user-error "Skill %s was not installed" name)))
+        (unless (equal (lispm-skills--hash file) hash)
+          (user-error "The code of skill %s changed while you were asked; install it again to see it \
+as it is now" name)))
+      (make-directory directory t)
+      (let ((coding-system-for-write 'utf-8))
+        (if (not directory-p)
+            (write-region text nil target nil 'silent)
+          ;; Copied whole beside it first, then put in place.
+          (let ((copy (file-name-as-directory
+                       (make-temp-file (expand-file-name (concat "." name "-") directory) t))))
+            (condition-case err
+                (progn
+                  (copy-directory (file-name-directory file) copy nil nil t)
+                  (write-region text nil (expand-file-name "SKILL.org" copy) nil 'silent)
+                  (when (file-directory-p target)
+                    (delete-directory target t))
+                  (rename-file (directory-file-name copy) (directory-file-name target)))
+              (error (when (file-directory-p copy)
+                       (delete-directory copy t))
+                     (signal (car err) (cdr err)))))))
+      ;; The skill as it was, if it was the other kind.
+      (cond ((and directory-p (file-regular-p other))
+             (delete-file other))
+            ((and (not directory-p) (file-exists-p (expand-file-name "SKILL.org" other)))
+             (delete-directory other t)))
+      (when-let* ((open (find-buffer-visiting target-file)))
+        (lispm-tools--sync open))
+      (when (called-interactively-p 'any)
+        (message "LispM: skill %s installed in %s" name (abbreviate-file-name directory)))))
+    name))
+
+;;;###autoload
+(defun lispm-delete-skill (name)
+  "Delete the skill NAME from the user's skills.
+Those are the skills in `lispm-write-skill-directory'; one of LispM's
+own, of a project or of another of `lispm-skill-directories' is not
+deleted.  Agents that loaded it keep what its code defined until Emacs
+exits.  Interactively, you are asked first."
+  (interactive
+   (list (completing-read "Delete the skill: "
+                          (or (mapcar (lambda (skill) (plist-get skill :name))
+                                      (lispm-skills--in (lispm-skills--write-directory)))
+                              (user-error "No skills in %s"
+                                          (abbreviate-file-name (lispm-skills--write-directory))))
+                          nil t)))
+  (lispm-skills--check-name name)
+  (let* ((directory (lispm-skills--write-directory))
+         (file (expand-file-name (concat name ".org") directory))
+         (skill-directory (expand-file-name (concat name "/") directory))
+         (dir-p (file-regular-p (expand-file-name "SKILL.org" skill-directory))))
+    (when (or (file-in-directory-p directory lispm-skills--builtin)
+              (not (or (file-regular-p file) dir-p)))
+      (let ((other (lispm-skills--find name (or (bound-and-true-p lispm-session-agent)
+                                                (bound-and-true-p lispm-chat-agent)))))
+        (cond ((null other)
+               (user-error "No skill named %s in %s" name (abbreviate-file-name directory)))
+              ((file-in-directory-p (plist-get other :file) lispm-skills--builtin)
+               (user-error "Skill %s is one of LispM's own; it is not deleted" name))
+              ((plist-get other :project)
+               (user-error "Skill %s is the project's, in %s; it is not deleted" name
+                           (abbreviate-file-name (file-name-directory (plist-get other :file)))))
+              (t
+               (user-error "Skill %s is in %s, not among the skills installed in %s; it is not deleted"
+                           name (abbreviate-file-name (file-name-directory (plist-get other :file)))
+                           (abbreviate-file-name directory))))))
+    (when (and (called-interactively-p 'any)
+               (not (yes-or-no-p (format "Delete the skill %s? " name))))
+      (user-error "Skill %s was not deleted" name))
+    (when (file-regular-p file)
+      (delete-file file t))
+    (when dir-p
+      (delete-directory skill-directory t t))
+    name))
 
 ;;;; Resumed sessions
 

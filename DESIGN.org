@@ -88,6 +88,15 @@ properties) are the long-lived collaborators of the vision: each keeps one conve
 resumed after Emacs restarts, and hooks and timers wake it up (section 6). Long life comes from
 memory, tasks and that continued conversation, which handovers keep within bounds (section 8).
 
+*Role files.* A role can be an org file too, ~NAME.org~ in ~lispm-role-directories~
+([[file:lisp/lispm-roles.el][lispm-roles.el]]): a ~#+description~, ~#+tools~, ~#+policy~ and ~#+effort~ whose values are Lisp
+data, and its instructions as the text. It names no backend or model, so that it can be passed
+on: its agents use the user's. The files are read when LispM loads (~lispm-load-roles~);
+~lispm-install-role~ copies one in once the user has seen it, and ~lispm-delete-role~ deletes
+one, its live agents keeping what they copied. Roles defined in Lisp are neither replaced by a
+file nor deleted, and a role read from a file and defined again in Lisp is a Lisp role from then
+on (~lispm-role-file~).
+
 * 2. Context: the buffer is the context
 
 This is the central decision: *the session org buffer is the single source of truth for the
@@ -755,6 +764,13 @@ Its tools are the agent's at once, deferred; the result says the skill was loade
 session loads it again, and from then on it is listed for every agent. A name is lowercase
 letters, digits, ~-~ and ~_~; one that LispM's own skills or the project's have is refused,
 since a skill saved under it would not replace theirs.
+
+*Installing skills.* ~lispm-install-skill~ copies a skill from elsewhere, a file or a directory,
+into the same directory, under the same rules for names. A skill there is the user's, its code
+evaluated unasked, so installing one is trusting it: the user sees its code first, or the diff
+against the skill it replaces, the files beside it included, and what is installed is what they
+saw, a skill whose code changed meanwhile not at all. ~lispm-delete-skill~ deletes only skills
+of that directory.
 
 The first skill is ~web~: searching the web and reading pages. Pages are rendered by Emacs's
 own WebKit (xwidgets) out of sight, scripts and all, with the cookies of the user's own
