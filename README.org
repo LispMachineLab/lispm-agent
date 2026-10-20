@@ -118,8 +118,9 @@ conversation per agent, and you can run several and come back to any of them.
 | ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
 | ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
 | ~lispm-review~         | review pending calls, or choose a restart (~C-c C-y~ in org)       |
-| ~lispm-turn-diff~      | show what an agent changed in its last turn                        |
-| ~lispm-revert-turn~    | undo every edit an agent made in its last turn                     |
+| ~lispm-turn-diff~      | show what an agent changed in its last turn (~C-u~: in another)    |
+| ~lispm-revert-turn~    | undo what an agent changed in its last turn (~C-u~: in another)    |
+| ~lispm-resume-agents~  | resume every agent that was at work when Emacs last stopped        |
 | ~lispm-show-request~   | show the full request that will be sent to the model next          |
 | ~lispm-history~        | git history of memory, tasks and sessions                          |
 
@@ -168,7 +169,10 @@ from one that sends it whole, the change shows once it is complete.
   (~lispm-compact-threshold~; ~M-x lispm-compact~ does it on demand).
 - Everything lives under ~lispm-directory~ (~/.emacs.d/lispm/~), a git repository:
   ~projects/<project>/sessions/~, ~projects/<project>/memory.org~ and ~tasks.org~ (shared by
-  the project's agents), and ~roles/<role>/memory.org~ (what a role learns everywhere).
+  the project's agents), and ~roles/<role>/memory.org~ (what a role learns everywhere). Two
+  things there are kept out of its history: ~projects/<project>/inbox.org~, what waits for the
+  project's agents, and ~journal.git~, the snapshots of the project their turns take (see
+  below).
 - A linked git worktree (~git worktree add~) is the same project as its main checkout: its
   agents share the main one's sessions, memory and tasks.
 
@@ -210,6 +214,33 @@ same project, which retires once it has replied (a subagent) and may do no more 
 that asked for it. With the ~worktree~ skill (see Skills), a helper works in a git worktree of
 its own instead, so that several can change the same files at once. Project task lists can
 join your agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
+
+* When Emacs stops
+
+Agents carry on where they were. A session is saved as each turn starts, before every request
+and whenever calls are recorded; what waits for an agent (a message, an event, what you wrote
+while it was busy) is in its project's ~inbox.org~ until its turn is over. Opening a session
+again takes all of it up:
+
+- calls awaiting approval await it again; calls that were running are recorded as interrupted;
+- a turn Emacs stopped in the middle of waits at a condition, /Turn interrupted/: ~1~ goes on
+  with it, asking the model again, ~2~ stops there. A turn another agent or an event started
+  goes on by itself (~lispm-unattended-condition-handlers~), since someone waits for it;
+- what was queued for the agent is handled next.
+
+A standing agent takes up what it was doing as soon as your configuration declares it again;
+~M-x lispm-resume-agents~ resumes every other agent that was at work. A delegation survives
+too: the caller's ~ask_agent~ call records whom it asked, and the helper's request whom to
+reply to, so opening either session brings the other back, the helper goes on with the request
+(bounded by its caller still, whose ceiling its session records), and its reply settles the
+call.
+
+In a project under git, each turn's changes outlive Emacs as well: snapshots of the work tree
+as a turn begins and ends are kept in a repository of LispM's own, beside the project's memory,
+never in the project's. ~lispm-revert-turn~ and ~lispm-turn-diff~ use them, so they cover what
+shell commands and Lisp changed, and turns from before Emacs restarted; ~C-u~ chooses the turn.
+Files git ignores are left out, and untracked ones larger than ~lispm-journal-max-file-size~;
+~lispm-journal-git~ turns snapshots off.
 
 * Backends
 
@@ -363,6 +394,8 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-tools.el      | ~lispm-deftool~, permissions, built-in tools, edit journal       |
 | lisp/lispm-edits.el      | edits shown where they happen: streamed, proposed, typed in      |
 | lisp/lispm-memory.el     | memory.org and tasks.org, git audit trail                        |
+| lisp/lispm-inbox.el      | inbox.org: what waits for agents, kept across restarts           |
+| lisp/lispm-journal.el    | snapshots of a project's work tree, turn by turn, in git         |
 | lisp/lispm-runtime.el    | execution loop, approvals, inbox, triggers, rollback             |
 | lisp/lispm-lisp.el       | run_lisp: Lisp programs whose effects are calls under the policy |
 | lisp/lispm-collab.el     | multi-agent collaboration tools                                  |

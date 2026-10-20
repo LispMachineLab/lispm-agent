@@ -1,0 +1,271 @@
+;;; lispm-inbox.el --- Inboxes that outlive Emacs  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026  Ryan.K
+
+;; This file is not part of GNU Emacs.
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; An agent's inbox holds the inputs waiting for it: messages from
+;; other agents, events of hooks and timers, what the user wrote while
+;; it was busy.  In memory it is a list of plists; on disk it is an org
+;; file per project, projects/<project>/inbox.org under
+;; `lispm-directory', which the runtime keeps in step with every agent
+;; of the project, so a restart of Emacs loses none of it:
+;;
+;;   #+title: Inbox of ~/src/lispm/
+;;   #+todo: QUEUED RUNNING | DONE
+;;   * QUEUED Message from reviewer@lispm   waiting for the agent
+;;   :PROPERTIES:
+;;   :ENTRY:    i20261019-182000-ab12      the entry's id
+;;   :AGENT:    coder@lispm                to whom, and to which session
+;;   :SESSION:  20261019-120000-9f3a
+;;   :FROM:     reviewer@lispm             who sent it, or :EVENT:
+;;   :REPLY_TO: ...                        who waits for the reply, if anyone
+;;   :QUEUED:   [2026-10-19 Mon 18:20]
+;;   :END:
+;;   The message.
+;;   * RUNNING User                         the input the turn under way
+;;   :PROPERTIES:                           handles; its text is in the
+;;   ...                                    session
+;;
+;; An entry is QUEUED until its turn starts, RUNNING while the turn is
+;; under way, and gone once it ends.  A session opened again takes its
+;; queued entries back into the agent's inbox; a RUNNING one tells that
+;; Emacs stopped in the middle of that turn.  Whoever waits for the
+;; reply is told by REPLY_TO, a string `lispm-inbox-callback-function'
+;; turns back into the callback the entry had: delegation uses it, so
+;; that a helper's reply still reaches its caller after a restart.
+
+;;; Code:
+
+(require 'lispm-core)
+(require 'lispm-transcript)
+(require 'lispm-tools)
+
+(defvar lispm-inhibit-triggers)
+
+(defvar lispm-inbox-callback-function nil
+  "Function turning a persisted entry's reply-to back into its callback.
+Called with the agent the entry is for and the entry's :reply-to
+string; returns a function of the agent's final reply, or nil.  An
+entry taken back after a restart of Emacs gets that callback, its own
+having been lost with Emacs.")
+
+(defun lispm-inbox-file (root)
+  "The inbox file of the project at ROOT."
+  (expand-file-name "inbox.org" (lispm-project-directory root)))
+
+(defun lispm-inbox-new-id ()
+  "A fresh id for an inbox entry."
+  (concat "i" (lispm--new-id)))
+
+(defun lispm-inbox--title (entry)
+  "Heading of ENTRY, as a section of the session it starts would be titled."
+  (cond ((plist-get entry :from) (format "Message from %s" (plist-get entry :from)))
+        ((plist-get entry :event) (format "Event: %s" (plist-get entry :event)))
+        (t "User")))
+
+(defun lispm-inbox--render (agent entry state)
+  "Section of AGENT's inbox ENTRY in STATE, `queued' or `running'.
+A running entry's text is in the session already, and is left out."
+  (concat "* " (upcase (symbol-name state)) " " (lispm-inbox--title entry) "\n"
+          ":PROPERTIES:\n"
+          ":ENTRY:    " (plist-get entry :id) "\n"
+          ":AGENT:    " (symbol-name (lispm-agent-name agent)) "\n"
+          ":SESSION:  " (lispm-agent-id agent) "\n"
+          (if (plist-get entry :from) (format ":FROM:     %s\n" (plist-get entry :from)) "")
+          (if (plist-get entry :event) (format ":EVENT:    %s\n" (plist-get entry :event)) "")
+          (if (plist-get entry :reply-to) (format ":REPLY_TO: %s\n" (plist-get entry :reply-to)) "")
+          ":QUEUED:   " (or (plist-get entry :queued) (format-time-string "[%Y-%m-%d %a %H:%M]")) "\n"
+          ":END:\n"
+          (if (and (eq state 'queued) (plist-get entry :text))
+              (lispm-transcript--body (plist-get entry :text))
+            "")))
+
+(defun lispm-inbox--parse ()
+  "The entries of the inbox file in the current buffer, as plists.
+Each has :state (`queued' or `running'), :id, :agent, :session, :from,
+:event, :reply-to, :queued, :text and :beg and :end, its bounds."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let (entries)
+        (pcase-dolist (`(,beg ,body ,end) (lispm-transcript--sections 1 (point-min) (point-max)))
+          (let ((line (buffer-substring-no-properties beg (progn (goto-char beg) (line-end-position))))
+                (case-fold-search nil))
+            (when (string-match "\\`\\* \\(QUEUED\\|RUNNING\\) " line)
+              (let* ((state (if (equal (match-string 1 line) "QUEUED") 'queued 'running))
+                     (props (lispm-transcript--properties body end))
+                     (get (lambda (name)
+                            (let ((value (cdr (assoc name props))))
+                              (and value (not (string-empty-p value)) value))))
+                     (text-start (save-excursion
+                                   (goto-char body)
+                                   (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) body))))
+                (push (list :state state
+                            :id (funcall get "ENTRY")
+                            :agent (funcall get "AGENT")
+                            :session (funcall get "SESSION")
+                            :from (funcall get "FROM")
+                            :event (funcall get "EVENT")
+                            :reply-to (funcall get "REPLY_TO")
+                            :queued (funcall get "QUEUED")
+                            :text (and (< text-start end) (lispm-transcript--text text-start end))
+                            :beg beg :end end)
+                      entries)))))
+        (nreverse entries)))))
+
+(defun lispm-inbox-entries (root)
+  "The entries of the inbox of the project at ROOT; see `lispm-inbox--parse'."
+  (let ((file (lispm-inbox-file root)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (lispm-inbox--parse)))))
+
+(defun lispm-inbox--for-p (agent entry)
+  "Non-nil if the inbox ENTRY is for AGENT.
+It is if it names AGENT's session, or for a standing agent, which
+keeps its conversation across sessions, its name."
+  (or (equal (plist-get entry :session) (lispm-agent-id agent))
+      (and (lispm-agent-standing agent)
+           (equal (plist-get entry :agent) (symbol-name (lispm-agent-name agent))))))
+
+(defun lispm-inbox--rewrite (root function)
+  "Rewrite the inbox file of the project at ROOT with FUNCTION.
+FUNCTION is called in a buffer holding the file, created with a header
+if need be, and changes it; the file is written only if it changed.
+A buffer the user visits the file in is brought up to date; if it has
+unsaved changes, the file is left as it is, and a message says so."
+  (let* ((file (lispm-inbox-file root))
+         (visiting (find-buffer-visiting file)))
+    (if (and visiting (buffer-modified-p visiting))
+        (message "LispM: %s not updated: its buffer has unsaved changes"
+                 (abbreviate-file-name file))
+      (with-temp-buffer
+        (if (file-exists-p file)
+            (insert-file-contents file)
+          (insert (format "#+title: Inbox of %s\n#+todo: QUEUED RUNNING | DONE\n"
+                          (abbreviate-file-name root))))
+        (let ((old (buffer-string)))
+          (funcall function)
+          (unless (equal old (buffer-string))
+            (let ((coding-system-for-write 'utf-8)
+                  (lispm-inhibit-triggers t))
+              (write-region nil nil file nil 'silent)))))
+      (when visiting
+        (lispm-tools--sync visiting)))))
+
+(defun lispm-inbox--delete (predicate)
+  "Delete the entries of the inbox in the current buffer that PREDICATE holds for."
+  (dolist (entry (reverse (lispm-inbox--parse)))
+    (when (funcall predicate entry)
+      (delete-region (plist-get entry :beg) (plist-get entry :end)))))
+
+(defun lispm-inbox-save (agent)
+  "Write AGENT's inbox to its project's inbox file.
+That is the entries queued for it and the one its turn under way
+handles, if any, in place of what the file held for it (see
+`lispm-inbox--for-p'), which it took back as its session opened.
+Nothing is written for an agent without a session buffer, nor when
+`lispm-save-sessions' is nil: then sessions are not kept either.
+Failing to write is reported, never signaled: the inbox in memory goes
+on working."
+  (when (and (bound-and-true-p lispm-save-sessions)
+             (buffer-live-p (lispm-agent-buffer agent)))
+    (let ((root (lispm-agent-root agent))
+          (running (lispm-agent-entry agent))
+          (queued (lispm-agent-inbox agent)))
+      (when (or running queued (file-exists-p (lispm-inbox-file root)))
+        (with-demoted-errors "LispM: saving an inbox: %S"
+          (lispm-inbox--rewrite
+           root
+           (lambda ()
+             (lispm-inbox--delete (lambda (entry) (lispm-inbox--for-p agent entry)))
+             (goto-char (point-max))
+             (unless (bolp) (insert "\n"))
+             (when running
+               (insert (lispm-inbox--render agent running 'running)))
+             (dolist (entry queued)
+               (insert (lispm-inbox--render agent entry 'queued))))))))))
+
+(defun lispm-inbox-forget (agent &optional id)
+  "Remove from the inbox file the entries of AGENT's session ID (default: its own)."
+  (let ((id (or id (lispm-agent-id agent)))
+        (root (lispm-agent-root agent)))
+    (when (file-exists-p (lispm-inbox-file root))
+      (with-demoted-errors "LispM: saving an inbox: %S"
+        (lispm-inbox--rewrite
+         root
+         (lambda ()
+           (lispm-inbox--delete (lambda (entry) (equal (plist-get entry :session) id)))))))))
+
+(defun lispm-inbox--entry (entry)
+  "The inbox entry, as the runtime holds it, that the persisted ENTRY records."
+  (list :id (plist-get entry :id)
+        :text (plist-get entry :text)
+        :from (plist-get entry :from)
+        :event (plist-get entry :event)
+        :reply-to (plist-get entry :reply-to)
+        :queued (plist-get entry :queued)))
+
+(defun lispm-inbox-take (agent)
+  "The entries of the inbox file for AGENT, as the runtime holds entries.
+Return (QUEUED . RUNNING): the entries queued for it, oldest first,
+and the one its last turn handled when Emacs stopped, if any.  An
+entry with a :reply-to gets its callback again (see
+`lispm-inbox-callback-function')."
+  (let (queued running)
+    (dolist (persisted (lispm-inbox-entries (lispm-agent-root agent)))
+      (when (lispm-inbox--for-p agent persisted)
+        (let ((entry (lispm-inbox--entry persisted)))
+          (when-let* ((reply-to (plist-get entry :reply-to))
+                      (callback (and lispm-inbox-callback-function
+                                     (funcall lispm-inbox-callback-function agent reply-to))))
+            (setq entry (plist-put entry :callback callback)))
+          (if (eq (plist-get persisted :state) 'running)
+              (setq running entry)
+            (push entry queued)))))
+    (cons (nreverse queued) running)))
+
+(defun lispm-inbox-pending (agent)
+  "Non-nil if the inbox file holds entries for AGENT."
+  (seq-some (lambda (entry) (lispm-inbox--for-p agent entry))
+            (lispm-inbox-entries (lispm-agent-root agent))))
+
+(defun lispm-inbox-sessions ()
+  "The sessions the inbox files hold entries for, one each, as plists.
+Their keys are :session, :agent and :root; the files are those of
+every project under `lispm-directory'."
+  (let (sessions)
+    (dolist (file (file-expand-wildcards (expand-file-name "projects/*/inbox.org" lispm-directory)))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (let ((root (expand-file-name
+                     (or (when (re-search-forward "^#\\+title: Inbox of \\(.*\\)$" nil t)
+                           (match-string 1))
+                         "~"))))
+          (dolist (entry (lispm-inbox--parse))
+            (unless (seq-find (lambda (s) (equal (plist-get s :session) (plist-get entry :session)))
+                              sessions)
+              (push (list :session (plist-get entry :session) :agent (plist-get entry :agent)
+                          :root root)
+                    sessions))))))
+    (nreverse sessions)))
+
+(provide 'lispm-inbox)
+;;; lispm-inbox.el ends here

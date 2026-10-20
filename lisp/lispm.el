@@ -57,8 +57,12 @@
 ;;   skills         how to do things with Emacs, such as browse the
 ;;                  web, loaded when needed (lispm-skills.el, skills/);
 ;;   audit, undo    every edit is an undo step and a journal entry
-;;                  (`lispm-turn-diff', `lispm-revert-turn'); every turn
-;;                  is a git commit.
+;;                  (`lispm-turn-diff', `lispm-revert-turn'), and a
+;;                  project in git is snapshotted turn by turn
+;;                  (lispm-journal.el); every turn is a git commit;
+;;   persistence    what agents were doing outlives Emacs: turns,
+;;                  inboxes (lispm-inbox.el), delegations, snapshots
+;;                  (`lispm-resume-agents').
 ;;
 ;; Start with M-x lispm.  See README.org and DESIGN.org.
 
@@ -71,6 +75,8 @@
 (require 'lispm-tools)
 (require 'lispm-edits)
 (require 'lispm-memory)
+(require 'lispm-inbox)
+(require 'lispm-journal)
 (require 'lispm-runtime)
 (require 'lispm-lisp)
 (require 'lispm-collab)
@@ -149,6 +155,28 @@ ROLE.  DIRECTORY defaults to the current project's root."
   "Resume a recorded SESSION, sessions of the current project first."
   (interactive (list (lispm--read-session "Resume session: ")))
   (lispm-show (lispm-resume-file (plist-get session :file))))
+
+(defun lispm-resume-agents ()
+  "Resume every agent that was at work when Emacs last stopped.
+Those are the agents the projects' inbox files hold inputs for: the
+input of a turn under way, or inputs queued.  Each one's session is
+opened again, which takes up what it was doing (see
+`lispm--resume-calls'): a turn the user started waits for them to
+say whether to go on, others go on.  Return the agents resumed."
+  (interactive)
+  (let ((resumed (delq nil (mapcar (lambda (session)
+                                     (unless (seq-find (lambda (agent)
+                                                         (equal (lispm-agent-id agent)
+                                                                (plist-get session :session)))
+                                                       (lispm-agents))
+                                       (lispm-resume-session (plist-get session :session))))
+                                   (lispm-inbox-sessions)))))
+    (when (called-interactively-p 'any)
+      (message (if resumed
+                   (format "Resumed %s" (mapconcat (lambda (agent) (symbol-name (lispm-agent-name agent)))
+                                                   resumed ", "))
+                 "No agent was at work when Emacs last stopped")))
+    resumed))
 
 (defun lispm--age (time)
   "A short age for TIME, float seconds."

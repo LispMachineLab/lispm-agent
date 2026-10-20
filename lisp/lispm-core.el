@@ -164,6 +164,11 @@ That happens when search_tools loads deferred tools for it.")
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
 
+(defvar lispm-agent-declared-functions nil
+  "Abnormal hook run with a standing agent once it is declared.
+Declarations come from the user's configuration, as Emacs starts:
+what the agent was doing when Emacs last stopped can be taken up.")
+
 (defvar lispm-tool-input-functions nil
   "Abnormal hook run while the model writes a tool call.
 Each is called with the agent and a plist: the call's :id and :name,
@@ -217,6 +222,7 @@ Each is called with the buffer, its old text and its new text;
   view                       ; chat buffer showing the session, if any
   process                    ; request in flight
   inbox                      ; FIFO of pending inputs (plists)
+  entry                      ; the input the turn under way handles
   (pending (make-hash-table :test #'equal)) ; tool-use id -> call plist
   dispatching                ; non-nil while a response's calls are dispatched
   turn-callbacks             ; called with the final reply when the turn ends
@@ -224,6 +230,7 @@ Each is called with the buffer, its old text and its new text;
   (steps 0)                  ; model requests in the current turn
   (turn 0)                   ; turn counter
   journal                    ; alist TURN -> edit snapshots
+  snapshots                  ; alist TURN -> snapshots of its project (lispm-journal.el)
   allowed                    ; tool names approved for this Emacs session
   loaded-tools               ; deferred tools loaded by search_tools, by name
   waiting-on                 ; agents this one awaits (ask_agent)
@@ -367,7 +374,9 @@ role NAME.  Redeclaring a live agent keeps its runtime state."
                     (lispm-make-agent role root :name name :standing t))))
     (setf (lispm-agent-root agent) root
           (lispm-agent-standing agent) t)
-    (lispm--apply-role agent role)))
+    (lispm--apply-role agent role)
+    (run-hook-with-args 'lispm-agent-declared-functions agent)
+    agent))
 
 (defmacro lispm-defagent (name &rest props)
   "Declare a standing agent NAME: one conversation that goes on.

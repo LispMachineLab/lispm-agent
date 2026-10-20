@@ -335,9 +335,12 @@ calls of one response, become one commit listing each of them."
                :command
                (list "sh" "-c"
                      (concat "{ [ -d .git ] || git init -q; } && "
-                             ;; Images of sessions stay out of the history.
-                             "{ grep -qxF '*.images/' .git/info/exclude 2>/dev/null"
-                             " || { mkdir -p .git/info && echo '*.images/' >> .git/info/exclude; }; } && "
+                             ;; Images of sessions stay out of the history, and
+                             ;; so do the state of inboxes and the snapshots of
+                             ;; projects, a repository of their own.
+                             "for p in '*.images/' 'journal.git/' 'inbox.org'; do"
+                             " grep -qxF \"$p\" .git/info/exclude 2>/dev/null"
+                             " || { mkdir -p .git/info && echo \"$p\" >> .git/info/exclude; }; done && "
                              "git add -A && "
                              "{ git diff --cached --quiet || git"
                              " -c user.name=" (shell-quote-argument author)
