@@ -27,7 +27,7 @@ implementation:
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
 | Persistence               | the transcript, an inbox file, delegation records, git snapshots | [[file:lisp/lispm-inbox.el][lispm-inbox.el]], [[file:lisp/lispm-journal.el][lispm-journal.el]], ~lispm--resume-calls~ |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
-| Long conversations        | handover: memory first, then a summary that starts a new file    | ~lispm-compact~                                         |
+| Long conversations        | clear old tool output; else memory, summary, then a new file     | ~lispm-compact~                                         |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
 | Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lisp/lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
 | Lisp development          | definitions edited, evaluated and tested in the running image    | [[file:lisp/lispm-develop.el][lispm-develop.el]]: ~edit_definition~, ~ert_run~          |
@@ -625,23 +625,37 @@ Concurrency:
 
 * 8. Handing over: long conversations
 
-A conversation cannot grow forever, least of all a standing agent's. When a session's estimated
-size passes ~lispm-compact-threshold~ (default 120k tokens), the next turn first hands it over:
+A conversation cannot grow forever, least of all a standing agent's. A session's size is the
+one the model's latest response reported (every input token, cached or not), plus a token for
+every three bytes written since; bytes, not characters, since a token is about four characters
+of English but about one of Chinese, three bytes. When the size passes ~lispm-compact-threshold~
+(default 120k tokens), the session first makes room the cheap way: the output of all tool calls
+but the latest ~lispm-compact-keep-results~ (default 10) is cleared. It stays in the file, its
+~*** Result~ heading tagged ~:cleared:~ (remove the tag to send it again); requests carry a line
+saying it was cleared, and the model can make the call again. Clearing changes an early part of
+the conversation, so the prompt cache is built again: it is done only if it frees
+~lispm-compact-clear-at-least~ tokens (default 10k). It can happen before any request, in the
+middle of a turn too.
+
+If that does not bring the session under the threshold, the next turn first hands it over:
 
 1. the agent gets one turn to save what should outlive the conversation: durable knowledge with
    ~remember~, unfinished work with ~task_add~ (~lispm-compact-save-memory~);
 2. it writes a handoff summary (goals, decisions, state of the work, next steps), in a request
-   without tools;
+   without tools, told which of the latest turns follow it, so that it says little about them;
 3. the conversation continues in a new file of the same session (same agent, same id), whose
    first section, ~* Summary~, holds the summary and whose header links back to the old file;
-   the old file ends with a link forward, and the system prompt is rebuilt, so memory saved in
-   step 1 is in it; the session keeps its title in session lists;
+   the latest ~lispm-compact-keep-turns~ turns (default 2) follow it as they were, fewer if
+   they would take more than a quarter of the threshold, never the turn that saved memory, and
+   never all of them; the old file ends with a link forward, and the system prompt is rebuilt,
+   so memory saved in step 1 is in it; the session keeps its title in session lists;
 4. the input that triggered the handover starts the first turn there.
 
 ~M-x lispm-compact~ hands over on demand, like Claude Code's ~/compact~. This is the "simple
-compaction" model vendors recommend: nothing of the old conversation is replayed but the
-summary, so no stale reasoning is sent and the prompt cache restarts once, at the handover.
-Handovers happen only between turns, and only for sessions that hold a response.
+compaction" model vendors recommend, with the latest turns kept so that the work under way
+goes on from what was actually said: nothing older is replayed but the summary, so little stale
+reasoning is sent and the prompt cache restarts once, at the handover. Handovers happen only
+between turns, and only for sessions that hold a response.
 
 * 9. Model backends: two API shapes
 
@@ -860,10 +874,11 @@ removed at once.
   a shell TRAMP keeps for the connection, with a terminal, unless TRAMP's direct asynchronous
   processes are on for that machine (~tramp-direct-async-process~). TRAMP sets ~PAGER=cat~
   there, so git and the like do not wait at a pager.
-- *Handovers inside a turn wait for a response to fill the context*: a turn that outgrows the
-  model's context hands over once a response stops with the window full (~context-full~), not
-  before; a request whose input alone is too large fails instead (~request-failed~). Direction:
-  server-side compaction with the first-party API.
+- *Handovers inside a turn wait for a response to fill the context*: a turn that outgrows
+  ~lispm-compact-threshold~ clears old tool output before its requests, but a turn that
+  outgrows the model's context hands over once a response stops with the window full
+  (~context-full~), not before; a request whose input alone is too large fails instead
+  (~request-failed~). Direction: server-side compaction with the first-party API.
 - *A definition is found by its text*: ~edit_definition~ and ~eval_definition~ find a form
   by the searches find-function makes, but not by its last resort of expanding macros, so a
   definition a macro makes without a form naming it (a ~cl-defstruct~ accessor) is not found,

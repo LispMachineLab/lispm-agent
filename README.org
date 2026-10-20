@@ -179,9 +179,11 @@ from one that sends it whole, the change shows once it is complete.
   the same thing. Its name is ~ROLE@PROJECT~ (~assistant@lispm~, ~assistant@lispm<2>~, ...).
 - A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, so a project set up
   for Codex or Claude Code needs nothing more.
-- A conversation that grows long is handed over before the next turn: the agent first saves
-  what should outlive it to memory and tasks, then writes a summary, and the conversation
-  continues in a new file that starts from the summary and links back to the old one
+- A conversation that grows long first stops sending the output of older tool calls
+  (~lispm-compact-keep-results~). If it is still too long, it is handed over before the next
+  turn: the agent first saves what should outlive it to memory and tasks, then writes a
+  summary, and the conversation continues in a new file that starts from the summary and the
+  latest turns (~lispm-compact-keep-turns~) and links back to the old one
   (~lispm-compact-threshold~; ~M-x lispm-compact~ does it on demand).
 - Everything lives under ~lispm-directory~ (~/.emacs.d/lispm/~), a git repository:
   ~projects/<project>/sessions/~, ~projects/<project>/memory.org~ and ~tasks.org~ (shared by
