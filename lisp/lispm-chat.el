@@ -144,7 +144,8 @@
   "Hash table of the keys of the items shown in full.")
 
 (defvar-local lispm-chat--rendered nil
-  "Hash table from items to their text, so unchanged items are not redrawn.")
+  "Hash table from the items last drawn to their text, so unchanged items
+are not drawn again.")
 
 (defvar-local lispm-chat--parsed nil
   "The items last read from the session: (BUFFER TICK LIVE-START STABLE ITEMS).")
@@ -662,16 +663,27 @@ it names one."
   "STRING, made part of the drawn region the user cannot edit."
   (propertize string 'read-only t 'front-sticky '(read-only) 'rear-nonsticky '(read-only)))
 
-(defun lispm-chat--item-string (item)
-  "Text of ITEM as drawn, remembered while ITEM stays the same."
+(defun lispm-chat--item-string (item drawn)
+  "Text of ITEM as drawn, reused from the last draw while ITEM stays the
+same, and put in the hash table DRAWN."
   (let ((item (if (gethash (plist-get item :key) lispm-chat--expanded)
                   (append item '(:expanded t))
                 item)))
-    (or (gethash item lispm-chat--rendered)
-        (let ((string (lispm-chat--item item)))
-          (when-let* ((key (plist-get item :key)))
-            (setq string (propertize string 'lispm-chat-key key)))
-          (puthash item (lispm-chat--read-only string) lispm-chat--rendered)))))
+    (puthash item
+             (or (gethash item lispm-chat--rendered)
+                 (let ((string (lispm-chat--item item)))
+                   (when-let* ((key (plist-get item :key)))
+                     (setq string (propertize string 'lispm-chat-key key)))
+                   (lispm-chat--read-only string)))
+             drawn)))
+
+(defun lispm-chat--item-strings (items)
+  "Text of ITEMS as drawn.
+Only these items are remembered afterwards: a response streaming in is a
+new item at each step, and the old steps are not kept."
+  (let ((drawn (make-hash-table :test #'equal)))
+    (prog1 (mapcar (lambda (item) (lispm-chat--item-string item drawn)) items)
+      (setq lispm-chat--rendered drawn))))
 
 (defun lispm-chat--box (lines width &optional face)
   "LINES framed in a rounded box WIDTH columns wide, the frame in FACE."
@@ -984,7 +996,7 @@ ITEMS are the session's items, where the call's preview is."
   "Everything AGENT's chat shows before the prompt, as a list of strings."
   (let ((items (lispm-chat--items agent)))
     (append (list (lispm-chat--read-only (lispm-chat--header agent)))
-            (mapcar #'lispm-chat--item-string items)
+            (lispm-chat--item-strings items)
             (mapcar #'lispm-chat--read-only
                     (delq nil (list (lispm-chat--queued agent)
                                     (or (lispm-chat--approval agent items)

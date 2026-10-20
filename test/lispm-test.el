@@ -4927,6 +4927,10 @@ is one badly named; interactively, it asks first."
       (should (string-match-p "^λ >> hello\n\n⏺ Partial$" (lispm-test--chat-text chat)))
       (lispm--live-insert agent 'text " answer")
       (should (string-match-p "^⏺ Partial answer$" (lispm-test--chat-text chat)))
+      ;; Only the items drawn now are remembered, not each step of the response.
+      (with-current-buffer chat
+        (should-not (seq-find (lambda (item) (equal (plist-get item :text) "Partial"))
+                              (hash-table-keys lispm-chat--rendered))))
       (with-current-buffer session
         (goto-char (point-min))
         (search-forward "hello")
