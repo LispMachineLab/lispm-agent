@@ -942,6 +942,326 @@ stand in."
       (should (string-match-p "\\* Elisp:" (car (lispm-test--call agent "read_info" nil))))
       (should (cdr (lispm-test--call agent "read_info" '((manual . "no-such-manual"))))))))
 
+;;;; Developing Lisp in the image
+
+(defconst lispm-test--dev-source
+  (concat ";;; dev.el --- A fixture  -*- lexical-binding: t; -*-\n"
+          "(defvar lispm-test-dev-var 1\n"
+          "  \"A variable.\")\n"
+          "(defcustom lispm-test-dev-option 'one\n"
+          "  \"An option.\"\n"
+          "  :type 'symbol :group 'lispm-test)\n"
+          "(defface lispm-test-dev-face '((t :weight bold))\n"
+          "  \"A face.\"\n"
+          "  :group 'lispm-test)\n"
+          "(defun lispm-test-dev-f (x)\n"
+          "  \"Add one to X.\"\n"
+          "  (+ x 1))\n"
+          "(defun lispm-test-dev-g ()\n"
+          "  \"Call `lispm-test-dev-f'.\"\n"
+          "  (lispm-test-dev-f 2))\n"
+          "(defun lispm-test-dev-closure ()\n"
+          "  \"A closure over N.\"\n"
+          "  (let ((n 7)) (lambda () n)))\n")
+  "An Emacs Lisp file: its function lispm-test-dev-f is on lines 10-12.")
+
+(defmacro lispm-test-with-dev (&rest body)
+  "Run BODY in `lispm-test-env' with `file', the file dev.el of `project', loaded.
+Its definitions, and any of a symbol named lispm-test-dev-*, are gone after."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((file (expand-file-name "dev.el" project)))
+       (lispm-test--write file lispm-test--dev-source)
+       (unwind-protect
+           (progn
+             (load file nil t t)
+             ,@body)
+         (mapatoms (lambda (symbol)
+                     (when (string-prefix-p "lispm-test-dev-" (symbol-name symbol))
+                       (fmakunbound symbol)
+                       (makunbound symbol))))))))
+
+(defun lispm-test--call-async (agent tool input)
+  "Run the asynchronous TOOL on INPUT as AGENT; wait for (TEXT . ERRORP)."
+  (let ((lispm-current-agent agent) result)
+    (lispm-tool-invoke (lispm-get-tool tool) input
+                       (lambda (text errorp &rest _) (setq result (cons text errorp))))
+    (lispm-test--wait (lambda () result) 30)
+    result))
+
+(ert-deftest lispm-test-edit-definition ()
+  "edit_definition replaces the form defining a symbol, in the file Emacs has it from."
+  (lispm-test-with-dev
+    (let* ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+           (new "(defun lispm-test-dev-f (x)\n  \"Multiply X by ten.\"\n  (* x 10))")
+           (input `((name . "lispm-test-dev-f") (new_text . ,new)))
+           (changed nil))
+      ;; Previewed as a diff of the form, and shown in its buffer; nothing changes yet.
+      (let ((lispm-current-agent agent))
+        (should (string-match-p (concat "^-  \"Add one to X\\.\"\n-  (\\+ x 1))\n"
+                                        "\\+  \"Multiply X by ten\\.\"\n\\+  (\\* x 10))\n")
+                                (lispm-tool-preview-text (lispm-get-tool "edit_definition") input)))
+        (pcase-let ((`(,buffer . ,text) (lispm-tool-would-change (lispm-get-tool "edit_definition") input)))
+          (should (eq buffer (find-buffer-visiting file)))
+          (should (string-search (concat "\n" new "\n(defun lispm-test-dev-g") text))))
+      (should (equal (lispm-test--disk file) lispm-test--dev-source))
+      ;; Made as one undo step, journaled, saved, and told.
+      (let ((lispm-buffer-change-functions (list (lambda (buffer _old _new) (push buffer changed)))))
+        (should (equal (lispm-test--call agent "edit_definition"
+                                         `((name . "lispm-test-dev-f") (new_text . ,(concat "\n" new "\n"))))
+                       '("Replaced the definition of lispm-test-dev-f in dev.el, now lines 10-12.  \
+Emacs still runs the old one: evaluate this one with eval_definition." . nil))))
+      (should (equal (lispm-test--disk file)
+                     (string-replace "  \"Add one to X.\"\n  (+ x 1))" "  \"Multiply X by ten.\"\n  (* x 10))"
+                                     lispm-test--dev-source)))
+      (should (equal changed (list (find-buffer-visiting file))))
+      (should (equal (plist-get (cdr (car (cdr (assq 0 (lispm-agent-journal agent))))) :text)
+                     lispm-test--dev-source))
+      (with-current-buffer (find-buffer-visiting file)
+        (let ((last-command nil)) (undo))
+        (should (equal (buffer-string) lispm-test--dev-source))
+        (save-buffer))
+      ;; A variable, a face, and a definition not evaluated yet, in the file given.
+      (should-not (cdr (lispm-test--call agent "edit_definition"
+                                         '((name . "lispm-test-dev-var")
+                                           (new_text . "(defvar lispm-test-dev-var 42\n  \"A variable.\")")))))
+      (should-not (cdr (lispm-test--call agent "edit_definition"
+                                         '((name . "lispm-test-dev-face") (kind . "face")
+                                           (new_text . "(defface lispm-test-dev-face '((t :slant italic))
+  \"A face.\"
+  :group 'lispm-test)")))))
+      (should (string-search "(defvar lispm-test-dev-var 42\n" (lispm-test--disk file)))
+      (should (string-search "(defface lispm-test-dev-face '((t :slant italic))\n" (lispm-test--disk file)))
+      (lispm-test--write (expand-file-name "new.el" project) "(defun lispm-test-dev-new ()\n  1)\n")
+      (should (equal (lispm-test--call agent "edit_definition"
+                                       '((name . "lispm-test-dev-new") (path . "new.el")
+                                         (new_text . "(defun lispm-test-dev-new ()\n  2)")))
+                     '("Replaced the definition of lispm-test-dev-new in new.el, now lines 1-2.  \
+Emacs still runs the old one: evaluate this one with eval_definition." . nil)))
+      (should (equal (lispm-test--disk (expand-file-name "new.el" project))
+                     "(defun lispm-test-dev-new ()\n  2)\n"))
+      ;; What is not one form defining the symbol changes nothing.
+      (let ((before (lispm-test--disk file)))
+        (pcase-dolist (`(,text . ,why) '(("(defun lispm-test-dev-f (x) x) (defun lispm-test-dev-h ())"
+                                          . "more than one form")
+                                         ("(defun lispm-test-dev-f (x)" . "not a complete Lisp form")
+                                         ("(defun lispm-test-dev-h (x) x)" . "does not define lispm-test-dev-f")))
+          (pcase-let ((`(,result . ,errorp) (lispm-test--call agent "edit_definition"
+                                                              `((name . "lispm-test-dev-f") (new_text . ,text)))))
+            (should errorp)
+            (should (string-match-p why result))))
+        (should (string-match-p "\\`Emacs knows no file that defines lispm-test-dev-nowhere;"
+                                (car (lispm-test--call agent "edit_definition"
+                                                       '((name . "lispm-test-dev-nowhere")
+                                                         (new_text . "(defun lispm-test-dev-nowhere ())"))))))
+        (should (equal (lispm-test--disk file) before))))))
+
+(ert-deftest lispm-test-edit-definition-outside-root ()
+  "A definition outside the agent's root is written there, so it asks, whatever the policy.
+The tools are deferred: the model finds them with search_tools first."
+  (lispm-test-with-dev
+    (let* ((agent (lispm-defagent tester "Test agent." :root project :policy '((write . auto))))
+           (outside (expand-file-name "../elsewhere/ext.el" project))
+           (tool (lispm-get-tool "edit_definition"))
+           (redefine (lambda (name &rest more)
+                       `((name . ,name) (new_text . ,(format "(defun %s ()\n  2)" name)) ,@more)))
+           (names (lambda (request) (mapcar (lambda (tool) (alist-get 'name tool))
+                                            (alist-get 'tools request)))))
+      (lispm-test--write outside (concat ";;; ext.el --- A fixture  -*- lexical-binding: t; -*-\n"
+                                         "(defun lispm-test-dev-ext ()\n  1)\n"))
+      (load outside nil t t)
+      (should (eq (lispm-tool-action agent tool (funcall redefine "lispm-test-dev-f")) 'auto))
+      (should (eq (lispm-tool-action agent tool (funcall redefine "lispm-test-dev-ext")) 'ask))
+      ;; So does one in Emacs's own sources, one in a file given outside,
+      ;; and one whose file cannot be told.
+      (should (eq (lispm-tool-action agent tool (funcall redefine "find-function-library")) 'ask))
+      (should (eq (lispm-tool-action agent tool (funcall redefine "lispm-test-dev-ext" `(path . ,outside)))
+                  'ask))
+      (should (eq (lispm-tool-action agent tool (funcall redefine "lispm-test-dev-nowhere")) 'ask))
+      (should (seq-every-p (lambda (name) (lispm-tool-deferred (lispm-get-tool name)))
+                           '("edit_definition" "eval_definition" "ert_run"
+                             "xref_definitions" "xref_references" "flymake_diagnostics")))
+      (let ((chat (lispm-chat agent)))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "s1" "search_tools"
+                                                                       '((query . "lisp redefine"))))
+                        ,(lispm-test--msg "tool_use" (lispm-test--tool "e1" "edit_definition"
+                                                                       (funcall redefine "lispm-test-dev-ext")))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+        (lispm-test--chat-type chat "Make it two")
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+        (let ((requests (reverse lispm-test--requests)))
+          (should-not (member "edit_definition" (funcall names (nth 0 requests))))
+          (should (string-match-p "^- lisp: edit, evaluate and test Emacs Lisp definitions"
+                                  (alist-get 'description
+                                             (seq-find (lambda (tool) (equal (alist-get 'name tool) "search_tools"))
+                                                       (alist-get 'tools (nth 0 requests))))))
+          (should (member "edit_definition" (funcall names (nth 1 requests))))
+          (should-not (member "eval_definition" (funcall names (nth 1 requests)))))
+        ;; The chat asks with the diff.
+        (let ((text (lispm-test--chat-text chat)))
+          (should (string-match-p "│ Edit definition" text))
+          (should (string-match-p "│   -  1)" text))
+          (should (string-match-p "│   \\+  2)" text))
+          (should (string-match-p "Do you want to make this edit to lispm-test-dev-ext\\?" text)))
+        (should (string-suffix-p "(defun lispm-test-dev-ext ()\n  1)\n" (lispm-test--disk outside)))
+        (lispm-resolve agent "e1" 'approve)
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (string-suffix-p "(defun lispm-test-dev-ext ()\n  2)\n" (lispm-test--disk outside)))
+        (should (string-match-p "⏺ Redefine(lispm-test-dev-ext)\n  ⎿  Updated lispm-test-dev-ext with 1 addition and 1 removal"
+                                (lispm-test--chat-text chat)))))))
+
+(ert-deftest lispm-test-eval-definition ()
+  "eval_definition evaluates a definition from its file into Emacs, as C-M-x does."
+  (lispm-test-with-dev
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto))))
+          (other (expand-file-name "other.el" project)))
+      (lispm-test--call agent "edit_definition" '((name . "lispm-test-dev-f")
+                                                  (new_text . "(defun lispm-test-dev-f (x)\n  (* x 10))")))
+      ;; Edited, a definition changes in Emacs once it is evaluated.
+      (should (= (lispm-test-dev-f 2) 3))
+      (let ((lispm-current-agent agent))
+        (should (equal (lispm-tool-preview-text (lispm-get-tool "eval_definition") '((name . "lispm-test-dev-f")))
+                       "dev.el:10\n(defun lispm-test-dev-f (x)\n  (* x 10))")))
+      (should (equal (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-f")))
+                     '("Evaluated the definition of lispm-test-dev-f in dev.el, line 10.\n=> lispm-test-dev-f" . nil)))
+      (should (= (lispm-test-dev-f 2) 20))
+      ;; A defvar or a defcustom is reset to what it says, as C-M-x resets it.
+      (setq lispm-test-dev-var 5
+            lispm-test-dev-option 'two)
+      (should (equal (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-var")))
+                     '("Evaluated the definition of lispm-test-dev-var in dev.el, line 2.\n=> 1" . nil)))
+      (should (= lispm-test-dev-var 1))
+      (should-not (cdr (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-option")))))
+      (should (eq lispm-test-dev-option 'one))
+      ;; The file's lexical binding holds, and so does another file's dynamic one.
+      (should-not (cdr (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-closure")))))
+      (should (= (funcall (lispm-test-dev-closure)) 7))
+      (lispm-test--write other (concat ";;; other.el --- A fixture  -*- lexical-binding: nil; -*-\n"
+                                       "(defun lispm-test-dev-dynamic ()\n  (let ((n 7)) (lambda () n)))\n"
+                                       "(defvar lispm-test-dev-broken (car 3))\n"))
+      (should (equal (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-dynamic") (path . "other.el")))
+                     '("Evaluated the definition of lispm-test-dev-dynamic in other.el, line 2.\n=> lispm-test-dev-dynamic"
+                       . nil)))
+      (should-error (funcall (lispm-test-dev-dynamic)) :type 'void-variable)
+      ;; Emacs has it from that file now; the buffer visited for it is gone again.
+      (should (file-equal-p (symbol-file 'lispm-test-dev-dynamic 'defun) other))
+      (should-not (find-buffer-visiting other))
+      ;; An error in the code is the call's.
+      (should (equal (lispm-test--call agent "eval_definition"
+                                       '((name . "lispm-test-dev-broken") (kind . "variable") (path . "other.el")))
+                     '("Wrong type argument: listp, 3" . t))))))
+
+(ert-deftest lispm-test-xref ()
+  "The xref tools ask the backend of the code's buffer, with paths relative to the root."
+  (lispm-test-with-dev
+    (let ((agent (lispm-defagent tester :root project)))
+      (should (equal (lispm-test--call agent "xref_definitions" '((identifier . "lispm-test-dev-f")))
+                     '("dev.el:10: (defun lispm-test-dev-f)" . nil)))
+      (should (equal (lispm-test--call agent "xref_definitions" '((identifier . "lispm-test-dev-var")))
+                     '("dev.el:2: (defvar lispm-test-dev-var)" . nil)))
+      ;; Asked about an occurrence, in the file's buffer, which is not left behind.
+      (should (equal (lispm-test--call agent "xref_definitions"
+                                       '((identifier . "lispm-test-dev-f") (path . "dev.el") (line . 15)))
+                     '("dev.el:10: (defun lispm-test-dev-f)" . nil)))
+      (should-not (find-buffer-visiting file))
+      (should (equal (lispm-test--call agent "xref_definitions"
+                                       '((identifier . "lispm-test-dev-f") (path . "dev.el") (line . 1)))
+                     '("lispm-test-dev-f is not on line 1 of dev.el" . t)))
+      (should (equal (lispm-test--call agent "xref_references" '((identifier . "lispm-test-dev-f")))
+                     '("dev.el:10: (defun lispm-test-dev-f (x)
+dev.el:14: \"Call `lispm-test-dev-f'.\"
+dev.el:15: (lispm-test-dev-f 2))" . nil)))
+      (should (equal (lispm-test--call agent "xref_definitions" '((identifier . "lispm-test-dev-nowhere")))
+                     '("Nothing found for lispm-test-dev-nowhere." . nil))))))
+
+(ert-deftest lispm-test-flymake-diagnostics ()
+  "flymake_diagnostics reports what flymake's checkers find, and leaves flymake as it was.
+The byte compiler checks only a file Emacs trusts, and the result says so."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (file (expand-file-name "warn.el" project)))
+      (lispm-test--write file (concat ";;; warn.el --- A fixture  -*- lexical-binding: t; -*-\n"
+                                      "(defun lispm-test-dev-warn (x)\n  (+ x lispm-test-dev-unknown))\n"))
+      (pcase-let ((`(,text . ,errorp)
+                   (let ((trusted-content :all))
+                     (lispm-test--call-async agent "flymake_diagnostics" '((path . "warn.el"))))))
+        (should-not errorp)
+        (should (string-match-p "\\`warn\\.el: 1 warning, [0-9]+ notes?, from " text))
+        (should (string-match-p "^3:[0-9]+: warning: reference to free variable .lispm-test-dev-unknown.$" text))
+        (should (string-match-p "^[0-9]+:[0-9]+: note: " text)))
+      ;; The buffer visited for it is gone again.
+      (should-not (find-buffer-visiting file))
+      ;; In a buffer of the user's, flymake stays off.
+      (let ((buffer (find-file-noselect file)))
+        (pcase-let ((`(,text . ,errorp)
+                     (let ((trusted-content nil))
+                       (lispm-test--call-async agent "flymake_diagnostics" '((path . "warn.el"))))))
+          (should-not errorp)
+          ;; Released Emacs 30 and 31 keep checkdoc off untrusted content
+          ;; too, so it may say so instead of reporting notes.
+          (should (string-match-p (concat "\\`warn\\.el: [0-9]+ notes?, from elisp-flymake-checkdoc\\.\n"
+                                          "\\|\\`warn\\.el: no diagnostics, from no checker\\.\n"
+                                          "\\[elisp-flymake-checkdoc did not run: .*untrusted")
+                                  text))
+          (should-not (string-match-p "warning:" text))
+          (should (string-match-p "^\\[The byte compiler did not check warn\\.el: .*`trusted-content'" text)))
+        (should (buffer-live-p buffer))
+        (should-not (buffer-local-value 'flymake-mode buffer)))
+      (with-temp-buffer
+        (rename-buffer "lispm-test-plain" t)
+        (should (string-match-p "\\`Flymake has no checker for lispm-test-plain"
+                                (car (lispm-test--call-async agent "flymake_diagnostics"
+                                                             `((buffer . ,(buffer-name)))))))))))
+
+(ert-deftest lispm-test-ert-run ()
+  "ert_run runs tests in Emacs, from a file it loads, and reports each failure.
+This runs ERT inside the ERT run of this suite."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (tests '(lispm-dev-fixture-passes lispm-dev-fixture-fails lispm-dev-fixture-errs
+                   lispm-dev-fixture-skips)))
+      (lispm-test--write (expand-file-name "dev-tests.el" project)
+                         (concat ";;; dev-tests.el --- Fixtures  -*- lexical-binding: t; -*-\n"
+                                 "(require 'ert)\n"
+                                 "(defun lispm-test-dev-car (x) (car x))\n"
+                                 "(ert-deftest lispm-dev-fixture-passes () (should (= (+ 1 1) 2)))\n"
+                                 "(ert-deftest lispm-dev-fixture-fails () (should (equal (+ 1 1) 3)))\n"
+                                 "(ert-deftest lispm-dev-fixture-errs () (lispm-test-dev-car 3))\n"
+                                 "(ert-deftest lispm-dev-fixture-skips () (skip-unless nil))\n"))
+      (unwind-protect
+          (progn
+            (pcase-let ((`(,text . ,errorp)
+                         (lispm-test--call agent "ert_run" '((selector . "\\`lispm-dev-fixture-")
+                                                             (file . "dev-tests.el")))))
+              (should-not errorp)
+              (should (string-match-p "\\`Ran 4 tests in [0-9.]+ s: 1 passed, 2 failed, 1 skipped\\.\n" text))
+              (should (string-match-p (concat "^FAILED lispm-dev-fixture-fails\n"
+                                              "  (ert-test-failed ((should (equal (\\+ 1 1) 3)) :form (equal 2 3)")
+                                      text))
+              ;; The backtrace ends at the test: ERT's own frames are left out.
+              (should (string-match-p (concat "^FAILED lispm-dev-fixture-errs\n"
+                                              "  (wrong-type-argument listp 3)\n"
+                                              "  Backtrace, innermost call first:\n"
+                                              "    (car 3)\n"
+                                              "    (lispm-test-dev-car 3)\n")
+                                      text))
+              (should-not (string-match-p "ert-run-test" text))
+              (should (string-match-p "^SKIPPED lispm-dev-fixture-skips: ((skip-unless nil)" text)))
+            ;; A test's name selects it alone; a selector in Lisp, those it says.
+            (should (string-match-p "\\`Ran 1 test in [0-9.]+ s: 1 passed, 0 failed\\.\\'"
+                                    (car (lispm-test--call agent "ert_run"
+                                                           '((selector . "lispm-dev-fixture-passes"))))))
+            (should (string-match-p "\\`Ran 2 tests in [0-9.]+ s: 1 passed, 1 failed\\."
+                                    (car (lispm-test--call
+                                          agent "ert_run"
+                                          '((selector . "(member lispm-dev-fixture-passes lispm-dev-fixture-fails)"))))))
+            (should (string-match-p "\\`No tests match \"lispm-dev-fixture-none\"; if they are in a file"
+                                    (car (lispm-test--call agent "ert_run"
+                                                           '((selector . "lispm-dev-fixture-none")))))))
+        (mapc #'ert-delete-test tests)
+        (fmakunbound 'lispm-test-dev-car)))))
+
 (defun lispm-test--write (file text)
   "Write TEXT to FILE, making its directory."
   (make-directory (file-name-directory file) t)

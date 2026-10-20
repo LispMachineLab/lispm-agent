@@ -413,7 +413,10 @@ Code blocks lose their fences and keep their lines as they are."
     ("task_add" . "Task") ("task_update" . "Task") ("task_list" . "Tasks")
     ("ask_agent" . "Ask") ("send_message" . "Message") ("list_agents" . "Agents")
     ("search_tools" . "ToolSearch") ("skill" . "Skill") ("apropos" . "Apropos")
-    ("read_info" . "Info") ("web_search" . "WebSearch") ("web_fetch" . "WebFetch"))
+    ("read_info" . "Info") ("web_search" . "WebSearch") ("web_fetch" . "WebFetch")
+    ("edit_definition" . "Redefine") ("eval_definition" . "Evaluate") ("ert_run" . "Test")
+    ("xref_definitions" . "Definitions") ("xref_references" . "References")
+    ("flymake_diagnostics" . "Diagnostics"))
   "The names tools are shown under.")
 
 (defun lispm-chat--tool-name (name)
@@ -523,10 +526,16 @@ it names one."
                (lispm-chat--more (if expanded lines (seq-take lines 2)) (length lines))))
       (_
        (pcase name
-         ((or "edit_file" "edit_buffer")
+         ((and "edit_definition" (guard (not (plist-get item :preview))))
+          ;; Run unasked, it has no diff: its input holds only the new form.
+          (let ((new (split-string (string-trim-right (or (alist-get 'new_text input) "")) "\n")))
+            (cons (format "Redefined %s" (alist-get 'name input))
+                  (lispm-chat--more (if expanded new (seq-take new lispm-chat-preview-lines))
+                                    (length new)))))
+         ((or "edit_file" "edit_buffer" "edit_definition")
           (let* ((diff (or (plist-get item :preview) (lispm-chat--input-diff input)))
                  (shown (lispm-chat--diff-lines diff)))
-            (cons (lispm-chat--diff-summary diff path)
+            (cons (lispm-chat--diff-summary diff (or path (alist-get 'name input)))
                   (lispm-chat--more (if expanded shown (seq-take shown lispm-chat-diff-lines))
                                     (length shown)))))
          ("write_file"
@@ -811,14 +820,18 @@ ITEMS are the session's items, where the call's preview is."
            (why (alist-get 'why input))
            (item (seq-find (lambda (i) (equal (plist-get i :key) id)) items))
            (body (pcase name
-                   ((or "edit_file" "write_file" "edit_buffer")
+                   ((or "edit_file" "write_file" "edit_buffer" "edit_definition")
                     (lispm-chat--diff-lines (or (plist-get item :preview)
                                                 (lispm-chat--input-diff input))))
+                   ;; The definition, as the preview quotes it from its file.
+                   ("eval_definition" (split-string (or (plist-get item :preview) "") "\n"))
                    ("run_shell" (split-string (or (alist-get 'command input) "") "\n"))
                    ((or "eval_elisp" "run_lisp") (split-string (or (alist-get 'code input) "") "\n"))
                    (_ (split-string (lispm--json-pretty input) "\n"))))
            (title (concat (pcase name
                             ((or "edit_file" "edit_buffer") "Edit file")
+                            ("edit_definition" "Edit definition")
+                            ("eval_definition" "Evaluate a definition")
                             ("write_file" "Write file")
                             ("run_shell" "Bash command")
                             ("eval_elisp" "Evaluate Emacs Lisp")
@@ -831,6 +844,9 @@ ITEMS are the session's items, where the call's preview is."
            (question (pcase name
                        ((or "edit_file" "edit_buffer")
                         (format "Do you want to make this edit to %s?" path))
+                       ("edit_definition"
+                        (format "Do you want to make this edit to %s?" (alist-get 'name input)))
+                       ("eval_definition" "Do you want to evaluate this?")
                        ("write_file" (format "Do you want to write %s?" path))
                        ("eval_elisp" "Do you want to evaluate this?")
                        ("run_lisp" "Do you want to run this?")

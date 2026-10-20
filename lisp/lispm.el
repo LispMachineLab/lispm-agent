@@ -54,6 +54,9 @@
 ;;                  Peekaboo's for using the computer (lispm-mcp.el);
 ;;   Emacs itself   found with apropos and read in its manuals
 ;;                  (lispm-emacs.el), used with eval_elisp;
+;;   development    definitions edited in their files, evaluated into
+;;                  Emacs and tested there; xref and flymake for code
+;;                  in any language (lispm-develop.el);
 ;;   skills         how to do things with Emacs, such as browse the
 ;;                  web, loaded when needed (lispm-skills.el, skills/);
 ;;   audit, undo    every edit is an undo step and a journal entry
@@ -83,6 +86,7 @@
 (require 'lispm-mcp)
 (require 'lispm-title)
 (require 'lispm-emacs)
+(require 'lispm-develop)
 (require 'lispm-skills)
 (require 'lispm-inspect)
 (require 'lispm-chat)
