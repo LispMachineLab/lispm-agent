@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026  Ryan.K
 
 ;; Author: Ryan.K
-;; URL: https://github.com/RyanKung/lispm
+;; URL: https://github.com/LispMachineLab/lispm-agent
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "30.1") (mcp "0.1"))
 ;; Keywords: tools, ai
