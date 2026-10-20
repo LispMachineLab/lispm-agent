@@ -125,18 +125,21 @@ over latency and cost."
   :type 'integer)
 
 (defcustom lispm-default-policy
-  '((read . auto) (memory . auto) (comm . auto) (lisp . auto) (write . ask) (exec . ask)
-    (mcp . ask) (web . ask))
+  '((read . auto) (memory . auto) (comm . auto) (lisp . auto) (write . ask) (shell . ask)
+    (exec . ask) (mcp . ask) (web . ask))
   "Default approval policy: an alist from permission class to action.
 Classes are `read' (inspect files, buffers and Emacs state),
 `memory' (the agent's own memory and tasks), `comm' (talk to other
 agents), `lisp' (run Lisp programs whose effects are tool calls, each
 under the policy: run_lisp), `write' (change files or buffers),
-`exec' (run shell commands or evaluate any Lisp), `mcp' (tools of MCP
-servers, unless `lispm-mcp-servers' gives a server's tools another
-class) and `web' \(search the web and fetch pages).  Actions are
-`auto' (run at once), `ask' \(wait for the user's approval) and
-`deny'.  An agent's :policy overrides entries here."
+`shell' (run shell commands, on the machine of the agent's root),
+`exec' (evaluate any Lisp in Emacs), `mcp' (tools of MCP servers,
+unless `lispm-mcp-servers' gives a server's tools another class) and
+`web' \(search the web and fetch pages).  Actions are `auto' (run at
+once), `ask' \(wait for the user's approval) and `deny'.  An agent's
+:policy overrides entries here.  A policy that does not name `shell'
+gives it the action it gives `exec', the class of shell commands
+until they had one of their own (see `lispm--permission-fallbacks')."
   :type '(alist :key-type symbol
                 :value-type (choice (const auto) (const ask) (const deny))))
 
@@ -442,21 +445,34 @@ of your own can be added"))
       (insert-file-contents file nil 0 4096)
       (string-trim (buffer-substring (point-min) (line-end-position))))))
 
+(defun lispm--expand-file-name (file directory)
+  "FILE expanded against DIRECTORY, on DIRECTORY's machine.
+As `expand-file-name', except that on a remote DIRECTORY (a TRAMP file
+name), an absolute FILE that names no machine of its own, such as
+/etc/hosts or ~/notes, names a file on DIRECTORY's machine: to a program
+there, a shell command or git, that is the file meant."
+  (let ((remote (file-remote-p directory)))
+    (expand-file-name (if (and remote (file-name-absolute-p file) (not (file-remote-p file)))
+                          (concat remote file)
+                        file)
+                      directory)))
+
 (defun lispm--main-worktree (directory)
   "DIRECTORY, or its counterpart in the main worktree if it is in a linked one.
 The worktrees `git worktree add' links to a repository are one project
 with its main worktree.  A linked worktree's .git is a file naming its
 own git directory, whose commondir file names the repository's, so
-telling needs no git process."
+telling needs no git process.  On a remote DIRECTORY, the names in them
+are names on its machine."
   (let* ((directory (file-name-as-directory (expand-file-name directory)))
          (top (when-let* ((top (locate-dominating-file directory ".git")))
                 (file-name-as-directory (expand-file-name top))))
          (common (when-let* ((top)
                              (gitdir (lispm--first-line (expand-file-name ".git" top)))
                              ((string-match "\\`gitdir:[ \t]*\\(.+\\)" gitdir))
-                             (private (expand-file-name (match-string 1 gitdir) top))
+                             (private (lispm--expand-file-name (match-string 1 gitdir) top))
                              (common (lispm--first-line (expand-file-name "commondir" private))))
-                   (file-name-as-directory (expand-file-name common private)))))
+                   (file-name-as-directory (lispm--expand-file-name common private)))))
     (if (not common)
         directory
       (file-name-as-directory
@@ -495,25 +511,43 @@ An unknown action counts as the strictest, as `deny' does."
 Each entry is (CLASS . OTHERS): a Lisp program reads Emacs state
 itself, so an agent that may not read may not run one either.")
 
+(defconst lispm--permission-fallbacks '((shell . exec))
+  "Classes split from another, each (CLASS . FROM).
+A policy that does not name CLASS gives it the action it gives FROM, so
+that policies written before the split mean what they meant: shell
+commands were of class `exec', as Lisp is, until they had a class of
+their own.")
+
+(defun lispm--policy-lookup (permission policy)
+  "The action POLICY, an alist, gives the class PERMISSION, or nil.
+A class split from another that POLICY does not name gets the action
+POLICY gives that one (see `lispm--permission-fallbacks')."
+  (or (alist-get permission policy)
+      (when-let* ((from (alist-get permission lispm--permission-fallbacks)))
+        (lispm--policy-lookup from policy))))
+
 (defun lispm-policy-action (agent permission)
   "Action AGENT's policy prescribes for tools of class PERMISSION.
 An agent with a ceiling gets the stricter of its own policy's action
 and the ceiling's.  A class that implies others (see
-`lispm--implied-permissions') gets the strictest of their actions."
-  (let ((action (or (alist-get permission (lispm-agent-policy agent))
-                    (alist-get permission lispm-default-policy)
+`lispm--implied-permissions') gets the strictest of their actions.
+Each policy looked at gives a class it does not name the action of the
+class it was split from, if any (see `lispm--permission-fallbacks')."
+  (let ((action (or (lispm--policy-lookup permission (lispm-agent-policy agent))
+                    (lispm--policy-lookup permission lispm-default-policy)
                     'ask))
         (ceiling (lispm-agent-ceiling agent)))
     (dolist (other (alist-get permission lispm--implied-permissions))
       (setq action (lispm--stricter action (lispm-policy-action agent other))))
     (if ceiling
-        (lispm--stricter action (alist-get permission ceiling 'ask))
+        (lispm--stricter action (or (lispm--policy-lookup permission ceiling) 'ask))
       action)))
 
 (defun lispm-policy (agent)
   "AGENT's effective policy: an alist from each permission class to its action."
   (mapcar (lambda (class) (cons class (lispm-policy-action agent class)))
           (delete-dups (mapcar #'car (append lispm-default-policy
+                                             lispm--permission-fallbacks
                                              (lispm-agent-policy agent)
                                              (lispm-agent-ceiling agent))))))
 

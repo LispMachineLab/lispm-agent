@@ -191,7 +191,7 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
 - The parameter list generates the JSON Schema; kebab-case parameters appear in snake_case to
   the model. Inputs are validated against the schema before the call; failures go back to the
   model as error results.
-- *Tools of class write and exec get an extra required parameter, ~why~*: one sentence in
+- *Tools of class write, shell and exec get an extra required parameter, ~why~*: one sentence in
   which the model justifies the call. It appears in the approval UI and in the transcript, and
   is the smallest unit of explainability.
 - Tools act on *live Emacs state*, not on disk: ~read_file~ reads the buffer (unsaved edits
@@ -225,7 +225,7 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
 - Built-in tools, the core layer every agent carries (section 10 explains the deferred others
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
   ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
-  ~edit_buffer~ (write); ~run_shell~ ~eval_elisp~ ~write_skill~ (exec); ~run_lisp~ (lisp);
+  ~edit_buffer~ (write); ~run_shell~ (shell); ~eval_elisp~ ~write_skill~ (exec); ~run_lisp~ (lisp);
   memory, task and collaboration tools are described below. Deferred, for Lisp in the image
   (below): ~xref_definitions~ ~xref_references~ ~flymake_diagnostics~ (read);
   ~edit_definition~ (write); ~eval_definition~ ~ert_run~ (exec).
@@ -341,32 +341,65 @@ the audit log of what each agent learned and did, and a wrong memory is one ~git
 
 * 5. Permissions, approval, restarts and explainability
 
-*Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~lisp~ ~write~ ~exec~); a
-policy maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~ and ~exec~ need approval.
-~lisp~, the class of ~run_lisp~, implies ~read~: a program reads Emacs as it computes, so an
-agent that may not read may not run one either. One extra rule: *writes outside the agent's
-root always ask*, whatever the policy says, whether a ~path~ argument names the file, a
-~buffer~ argument a buffer visiting it, or the tool says which files a call changes
+*Permissions*: every tool belongs to a class (~read~ ~memory~ ~comm~ ~lisp~ ~write~ ~shell~
+~exec~); a policy maps classes to ~auto~, ~ask~ or ~deny~. By default ~write~, ~shell~ and ~exec~
+need approval. ~lisp~, the class of ~run_lisp~, implies ~read~: a program reads Emacs as it
+computes, so an agent that may not read may not run one either. One extra rule: *writes
+outside the agent's root always ask*, whatever the policy says, whether a ~path~ argument names
+the file, a ~buffer~ argument a buffer visiting it, or the tool says which files a call changes
 (~:targets~ in ~lispm-deftool~): ~edit_definition~ finds its file from a symbol, which may be
 anywhere, Emacs's own sources included. A write whose files cannot be told asks too. So does
 every call of a tool declared ~:always-ask~, such as ~write_skill~ (section 11), whose effect
 outlasts the session: what it saves is code that later sessions evaluate, which no policy should
 let an agent decide alone. A policy that denies the tool's class still denies it.
 
-*Unrestricted code is outside the permission model.* ~eval_elisp~ and ~run_shell~ (~exec~)
-reach all of Emacs and the system: what they run can change the policy of the agent running
-it, lift a helper's ceiling, or call a tool's function past its checks. The policy cannot
-mediate what such a call does, only whether it runs: it runs if the user approves it, or if
-the policy lets ~exec~ run unasked, which gives the agent everything. So approving one "for
-good" (~2~ in the chat, ~a~ in the review) allows that exact call again, with the same input,
-never every later one (~lispm-tools-allowance~), and so does approving a call of a tool that
-always asks. Lisp the policy should mediate is what ~run_lisp~ is for.
+*Unrestricted code is outside the permission model.* ~eval_elisp~ (~exec~) reaches all of
+Emacs, and ~run_shell~ (~shell~) all of the system, Emacs included, while the agent's root is on
+this machine: what they run can change the policy of the agent running it, lift a helper's
+ceiling, or call a tool's function past its checks. The policy cannot mediate what such a call
+does, only whether it runs: it runs if the user approves it, or if the policy lets its class
+run unasked, which gives the agent everything. So approving one "for good" (~2~ in the chat,
+~a~ in the review) allows that exact call again, with the same input, never every later one
+(~lispm-tools-allowance~), and so does approving a call of a tool that always asks. Lisp the
+policy should mediate is what ~run_lisp~ is for.
+
+*Commands and Lisp are apart.* Shell commands were of class ~exec~, as Lisp is; they have a
+class of their own, ~shell~, so that a policy can let commands run unasked while Lisp asks,
+which is what an agent whose root is on another machine wants (below). A policy that does not
+name ~shell~ gives it what it gives ~exec~ (~lispm--permission-fallbacks~), so policies,
+customized defaults and helpers' ceilings recorded before the split mean what they meant.
+
+*A root on another machine.* Hosted harnesses give each agent a computer of its own, a VM in
+their cloud, so that what it does cannot reach the user's. LispM's agents live in the user's
+Emacs, which is the point of them; what can go elsewhere is their hands. Emacs reaches other
+machines through TRAMP, so an agent's root may be a TRAMP directory: ~/ssh:vm:/work/~, or
+~/docker:box:/work/~ for a container on this machine. Its tools then work there by TRAMP's file
+name handlers, as they work here: ~read_file~ and the edit tools; ~list_directory~, in one round
+trip; ~search_files~, which reads remote files through TRAMP still (without decompressing or
+decrypting them, as here); and ~run_shell~, which TRAMP's ~make-process~ runs in the root on that
+machine, with that machine's shell (~shell-file-name~ as TRAMP's connection-local variables
+give it). An absolute path that names no machine, ~/etc/hosts~ or ~~/notes~, names a file there
+(~lispm--expand-file-name~), since to a command there that is the file meant; the system prompt
+says so, and the rule that writes outside the root ask goes by the same file. After a call that
+may have changed files, TRAMP forgets what it knew of that machine's files, as it does after
+~process-file~ but not after ~make-process~ (~lispm-tools--flush-remote~), and the buffers of
+those under the root are checked through its connection and reverted.
+
+What stays here is the image: ~eval_elisp~ and the other ~exec~ tools run in the user's Emacs
+wherever the root is. So ~((shell . auto))~ lets an agent run commands in its machine unasked
+while its Lisp still asks; and approving one of its commands for good allows ~run_shell~ for
+good, since a command there cannot reach the policy (~lispm-tools-elsewhere-p~: a remote root
+whose host is not one of the names TRAMP knows for this machine, as those of ~/sudo::/~ and
+~/su::/~ are). That holds only while the other machine cannot write this one's files: a container
+that mounts the user's home directory reaches their Emacs configuration, and with it everything.
+Such a root has the in-memory journal only (section 12).
 
 *Approval is an org TODO state.* A call that needs approval is recorded as
 ~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
 
 - in the chat, a box shows the command or diff and the ~why~ and asks as Claude Code does:
-  ~1~ yes, ~2~ yes and don't ask again for this tool (for an ~exec~ call, this exact call),
+  ~1~ yes, ~2~ yes and don't ask again for this tool (for an ~exec~ call, or a shell command
+  on this machine, this exact call),
   ~3~ no and say what to do instead (the answer is passed on to the model); a call a Lisp
   program makes is asked about the same way, the box saying so;
 - in the org transcript, ~C-c C-y~ (~lispm-review~): y to approve, n to deny (optionally with
@@ -501,7 +534,7 @@ queue in its inbox, a helper's caller keeps waiting, and ~lispm-abort~ stops the
 helper the user writes to does not retire once it has replied to its caller: it stays to answer
 them.
 
-*Explainability* comes in four layers: the ~why~ of every write or exec call; the transcript
+*Explainability* comes in four layers: the ~why~ of every write, shell or exec call; the transcript
 itself (every call's input, state and result); ~lispm-show-request~ (the raw request the model
 sees); the git history and per-turn diffs (~lispm-turn-diff~).
 
@@ -668,7 +701,7 @@ adds what an agent runtime needs on top:
   slot for tools that are not defined by ~lispm-deftool~ parameters). JSON crosses between the
   two libraries' conventions (alists and ~:false~ here, plists and ~:json-false~ in mcp.el).
 - *Permissions.* MCP tools have the permission class ~mcp~, which asks by default, like
-  ~write~ and ~exec~: a server can do anything. A server's ~:permission~ gives its tools
+  ~write~, ~shell~ and ~exec~: a server can do anything. A server's ~:permission~ gives its tools
   another class; "don't ask again" in the chat allows one tool at a time.
 - *Deferred tools.* A server's tools are deferred (see below): the server starts when an
   agent first searches them. A server with ~:defer nil~ starts when a session opens instead
@@ -802,6 +835,15 @@ removed at once.
   files of the project during the turn are counted as the turn's, and reverted with it (the
   in-memory journal knows only the buffers the agent's tools changed). Projects outside git have
   the in-memory journal only, which does not outlive Emacs.
+- *A remote root has no snapshots*: the journal repository is on this machine, git needs the
+  work tree it records on its own, and a snapshot reads the project's files one by one, a round
+  trip each through TRAMP. So an agent whose root is on another machine has the in-memory
+  journal only, of its tools' edits; a VM or a container can be snapshotted by its own means.
+  Direction: a journal repository on that machine, driven through ~process-file~.
+- *A remote root is slower*: ~search_files~ reads each file through TRAMP; a command runs in
+  a shell TRAMP keeps for the connection, with a terminal, unless TRAMP's direct asynchronous
+  processes are on for that machine (~tramp-direct-async-process~). TRAMP sets ~PAGER=cat~
+  there, so git and the like do not wait at a pager.
 - *Handovers inside a turn wait for a response to fill the context*: a turn that outgrows the
   model's context hands over once a response stops with the window full (~context-full~), not
   before; a request whose input alone is too large fails instead (~request-failed~). Direction:

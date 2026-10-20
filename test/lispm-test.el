@@ -12,6 +12,12 @@
 ;;; Code:
 
 (require 'ert)
+;; TRAMP before ert-x: it then sets up the mock method of remote tests
+;; (`ert-remote-temporary-file-directory').  What TRAMP learns in them is
+;; never saved, over what the user's Emacs keeps.
+(require 'tramp)
+(setq tramp-persistency-file-name nil)
+(require 'ert-x)
 (require 'lispm)
 
 ;; Git in any test, not only in `lispm-test-env', acts on the repository
@@ -1837,6 +1843,181 @@ skills/web.org).  Batch Emacs makes no xwidgets: stubs stand in."
       (should (lispm-test--wait (lambda () result) 5))
       (should (string-match-p "timeout" (car result)))
       (should (cdr result)))))
+
+;;;; Shell commands and remote roots
+
+(ert-deftest lispm-test-shell-class ()
+  "Shell commands have a class of their own, apart from Lisp.  A policy
+that does not name it gives it what it gives exec, as ceilings recorded
+before the split do."
+  (lispm-test-env
+    (let ((shell (lispm-get-tool "run_shell"))
+          (elisp (lispm-get-tool "eval_elisp"))
+          (action (lambda (policy class)
+                    (let ((agent (lispm-make-agent 'assistant project)))
+                      (setf (lispm-agent-policy agent) policy)
+                      (lispm-policy-action agent class)))))
+      (should (eq (lispm-tool-permission shell) 'shell))
+      (should (eq (lispm-tool-permission elisp) 'exec))
+      ;; Its calls say why, as those of exec do.
+      (should (assq 'why (alist-get 'properties (alist-get 'input_schema (lispm-tool-schema shell)))))
+      ;; Both ask by default.
+      (let ((agent (lispm-make-agent 'assistant project)))
+        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask))
+        (should (eq (alist-get 'shell (lispm-policy agent)) 'ask)))
+      ;; A policy naming exec alone governs shell commands too ...
+      (should (eq (funcall action '((exec . auto)) 'shell) 'auto))
+      (should (eq (funcall action '((exec . deny)) 'shell) 'deny))
+      ;; ... and one naming shell sets them apart.
+      (should (eq (funcall action '((shell . auto)) 'shell) 'auto))
+      (should (eq (funcall action '((shell . auto)) 'exec) 'ask))
+      (should (eq (funcall action '((shell . deny) (exec . auto)) 'shell) 'deny))
+      ;; So does a default policy customized before the split.
+      (let ((lispm-default-policy '((read . auto) (exec . auto))))
+        (should (eq (funcall action nil 'shell) 'auto)))
+      ;; A ceiling recorded before the split bounds shell commands as it
+      ;; bounds Lisp; one recorded since, by its own entry.
+      (let ((agent (lispm-make-agent 'assistant project))
+            (caller (lispm-make-agent 'assistant project)))
+        (setf (lispm-agent-policy agent) '((shell . auto) (exec . auto))
+              (lispm-agent-ceiling agent) '((read . auto) (exec . ask)))
+        (should (eq (lispm-policy-action agent 'shell) 'ask))
+        (setf (lispm-agent-policy caller) '((shell . auto)))
+        (setf (lispm-agent-ceiling agent) (lispm-policy caller))
+        (should (eq (alist-get 'shell (lispm-agent-ceiling agent)) 'auto))
+        (should (eq (lispm-policy-action agent 'shell) 'auto))
+        (should (eq (lispm-policy-action agent 'exec) 'ask))))))
+
+(ert-deftest lispm-test-shell-allowance ()
+  "Approving a shell command for good allows that exact command, unless the
+agent's root is on another machine: there, the tool.  Lisp, which runs in
+Emacs wherever the root is, is allowed call by call."
+  (lispm-test-env
+    (let ((agent (lispm-make-agent 'assistant project))
+          (shell (lispm-get-tool "run_shell"))
+          (input '((why . "w") (command . "make"))))
+      (should (equal (lispm-tools-allowance shell input agent) '("run_shell" (command . "make"))))
+      (should (equal (lispm-tools-allowance shell input) '("run_shell" (command . "make"))))
+      ;; Remote, but this machine.
+      (dolist (root (list "/sudo::/srv/" "/su::/srv/" "/ssh:localhost:/srv/"
+                          (format "/ssh:%s:/srv/" (system-name))))
+        (setf (lispm-agent-root agent) root)
+        (should-not (lispm-tools-elsewhere-p root))
+        (should (consp (lispm-tools-allowance shell input agent))))
+      (dolist (root '("/ssh:vm:/work/" "/docker:box:/work/"))
+        (setf (lispm-agent-root agent) root)
+        (should (lispm-tools-elsewhere-p root))
+        (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
+        (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
+                       '("eval_elisp" (code . "1"))))))))
+
+(defmacro lispm-test-with-remote (&rest body)
+  "Run BODY in `lispm-test-env' with `remote', `project' as a remote directory.
+It is reached through TRAMP's mock method, which Emacs's own tests of
+remote files use (`ert-remote-temporary-file-directory'): a shell on
+this machine.  Files are changed only through it, since TRAMP keeps
+what it learns of them a while."
+  (declare (indent 0))
+  `(lispm-test-env
+     (skip-unless (and ert-remote-temporary-file-directory
+                       (string-prefix-p "/mock:" ert-remote-temporary-file-directory)))
+     (let ((remote (concat (file-remote-p ert-remote-temporary-file-directory) project))
+           ;; Listings show the files the agent made, without backups.
+           (make-backup-files nil))
+       (unwind-protect
+           (progn ,@body)
+         (dolist (b (buffer-list))
+           (when (and (buffer-file-name b) (string-prefix-p remote (buffer-file-name b)))
+             (with-current-buffer b (set-buffer-modified-p nil))
+             (kill-buffer b)))
+         (tramp-cleanup-connection (tramp-dissect-file-name remote) t t)))))
+
+(ert-deftest lispm-test-remote-root ()
+  "An agent whose root is remote reads, writes, lists, searches and runs
+commands there; absolute paths name files there too."
+  (lispm-test-with-remote
+    (lispm-test--write (expand-file-name "a.txt" project) "alpha\nbeta\n")
+    (let* ((agent (lispm-make-agent 'assistant remote))
+           (write (lispm-get-tool "write_file")))
+      (setf (lispm-agent-policy agent) '((write . auto) (shell . auto)))
+      (should (equal (lispm-agent-root agent) remote))
+      (let ((lispm-current-agent agent))
+        (should (equal (lispm-tools--file "a.txt") (concat remote "a.txt")))
+        ;; An absolute path naming no machine is on the root's.
+        (should (equal (lispm-tools--file (expand-file-name "a.txt" project)) (concat remote "a.txt")))
+        (should (equal (lispm-tools--file "[[file:/etc/hosts::3]]")
+                       (concat (file-remote-p remote) "/etc/hosts"))))
+      (should (string-match-p "1\talpha\n +2\tbeta"
+                              (car (lispm-test--call agent "read_file" '((path . "a.txt"))))))
+      ;; Writes under the root run unasked; outside it, they ask.
+      (should (eq (lispm-tool-action agent write '((path . "b.txt"))) 'auto))
+      (should (eq (lispm-tool-action agent write `((path . ,(expand-file-name "b.txt" project)))) 'auto))
+      (should (eq (lispm-tool-action agent write '((path . "/etc/b.txt"))) 'ask))
+      (should (eq (lispm-tool-action agent write `((path . ,(expand-file-name "b.txt" tmp)))) 'ask))
+      (should-not (cdr (lispm-test--call agent "edit_file" '((path . "a.txt") (old_text . "beta")
+                                                            (new_text . "gamma")))))
+      (should-not (cdr (lispm-test--call agent "write_file" '((path . "sub/b.txt") (content . "b\n")))))
+      (should (equal (lispm-test--disk (expand-file-name "a.txt" project)) "alpha\ngamma\n"))
+      (should (equal (lispm-test--disk (expand-file-name "sub/b.txt" project)) "b\n"))
+      (should (equal (car (lispm-test--call agent "list_directory" nil))
+                     (concat (abbreviate-file-name remote) "\na.txt\nsub/")))
+      (should (equal (car (lispm-test--call-async agent "search_files" '((pattern . "gam+a"))))
+                     "a.txt:2:gamma"))
+      ;; Commands run in the root, on its machine, with that machine's
+      ;; shell, not the one Emacs runs locally.
+      (let* ((shell-file-name "/nonexistent/shell")
+             (result (lispm-test--call-async agent "run_shell" '((command . "ls -1; exit 2")))))
+        (should (equal (car result) "a.txt\nsub\n\n[exit status 2]")))
+      ;; What a command changed is seen at once: TRAMP forgets the
+      ;; listing it had ...
+      (lispm-test--call-async agent "run_shell" '((command . "echo c > c.txt")))
+      (should (equal (car (lispm-test--call agent "list_directory" nil))
+                     (concat (abbreviate-file-name remote) "\na.txt\nc.txt\nsub/")))
+      ;; ... and buffers are reverted.
+      (let ((buffer (find-buffer-visiting (concat remote "a.txt"))))
+        (should buffer)
+        (lispm-test--call-async agent "run_shell"
+                                '((command . "printf 'changed\\n' > a.txt; touch -t 203001010000 a.txt")))
+        (should (equal (with-current-buffer buffer (buffer-string)) "changed\n")))
+      ;; Its turns have the in-memory journal only.
+      (should-not (lispm-journal--top remote))
+      (should-not (lispm-journal-records agent))
+      ;; The model is told where it works.
+      (should (string-match-p "Your shell commands run there" (lispm--environment-prompt agent))))))
+
+(ert-deftest lispm-test-remote-turn ()
+  "An agent started from a buffer of another machine works there: a whole turn,
+told where it is, its command run there unasked under ((shell . auto))."
+  (lispm-test-with-remote
+    (lispm-test--write (expand-file-name "AGENTS.md" project) "Build with make.\n")
+    (setq lispm-test--scripts
+          `((assistant@project
+             ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_shell"
+                                                            '((why . "w") (command . "echo hi > d.txt"))))
+             ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+    (let ((agent (let ((default-directory remote)) (lispm-start))))
+      (should (equal (lispm-agent-root agent) remote))
+      (setf (lispm-agent-policy agent) '((shell . auto)))
+      (lispm-tell agent "make d")
+      (should (lispm-test--wait (lispm-test--idle-p agent) 30))
+      (should (equal (lispm-test--disk (expand-file-name "d.txt" project)) "hi\n"))
+      (should (string-match-p "^\\*\\* DONE run_shell" (lispm-test--transcript agent)))
+      (let ((system (format "%S" (alist-get 'system (car lispm-test--requests)))))
+        (should (string-match-p "Build with make" system))
+        (should (string-match-p "Your shell commands run there" system))))))
+
+(ert-deftest lispm-test-remote-worktree ()
+  "A linked git worktree on another machine is the project of its main worktree
+there: the names its .git file and commondir give are names on that machine."
+  (skip-unless (executable-find "git"))
+  (lispm-test-with-remote
+    (let* ((main (lispm-test--git-repo (file-truename project)))
+           (linked (expand-file-name "../linked/" main))
+           (host (file-remote-p remote)))
+      (lispm-test--git main "worktree" "add" "-q" "-b" "side" linked)
+      (should (equal (lispm--main-worktree (concat host linked)) (concat host main)))
+      (should (equal (lispm--main-worktree (concat host linked "lisp/"))
+                     (concat host main "lisp/"))))))
 
 (ert-deftest lispm-test-tool-interrupted ()
   "C-g interrupts a call, also where Emacs inhibits quitting; the call fails."

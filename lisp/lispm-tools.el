@@ -21,7 +21,7 @@
 
 ;; A tool is an Emacs Lisp function the model may call, declared with
 ;; `lispm-deftool'.  The declaration gives each tool a permission class
-;; (read, memory, comm, write or exec), from which an agent's policy
+;; (read, memory, comm, write, shell or exec), from which an agent's policy
 ;; decides whether a call runs at once, waits for the user, or is
 ;; refused; and optionally a preview function that shows the user what
 ;; a call would change (a diff) before they approve it.
@@ -41,7 +41,7 @@
 (require 'lispm-core)
 (require 'lispm-transcript)
 
-(defcustom lispm-rationale-permissions '(write exec)
+(defcustom lispm-rationale-permissions '(write shell exec)
   "Permission classes whose tools take a required `why' argument.
 The model states in one sentence why it makes the call; the user
 reads it when approving, and it stays in the transcript."
@@ -115,7 +115,7 @@ turned into underscores.  DOCSTRING is the description the model
 reads to decide when to call the tool.
 
 BODY may start with keyword options:
-  :permission CLASS  read (the default), memory, comm, write or exec
+  :permission CLASS  read (the default), memory, comm, write, shell or exec
   :async t           BODY gets a function `done' to call later with
                      the result (and non-nil as second argument on
                      failure); its own value is ignored
@@ -302,22 +302,37 @@ around it either: that would leave the call without a result."
 
 (defun lispm-tools--deliver (done agent tool text errorp images)
   "Give DONE the result of AGENT's call of TOOL: TEXT, ERRORP and IMAGES.
-First, if TOOL may have changed files, the buffers of those under
-AGENT's root that changed on disk are reverted, so that the user sees
-what the call did there (see `lispm-revert-after-calls'); C-g stops
-that.  DONE goes on with the turn: it records the result and may ask
-the model again, which C-g must not leave half done, so quitting is
-inhibited meanwhile."
+First, if TOOL may have changed files, TRAMP forgets what it knew of
+those of a remote root (see `lispm-tools--flush-remote'), and the
+buffers of those under AGENT's root that changed on disk are reverted,
+so that the user sees what the call did there (see
+`lispm-revert-after-calls'); C-g stops that.  DONE goes on with the
+turn: it records the result and may ask the model again, which C-g
+must not leave half done, so quitting is inhibited meanwhile."
   (let ((inhibit-quit t))
-    (when (and lispm-revert-after-calls agent
-               (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions)))
-      ;; Hooks the reverts run are the agent's doing.
-      (let ((lispm-current-agent agent))
-        (condition-case nil
-            (lispm-tools--interruptibly #'lispm-tools--revert-changed
-                                        (list (lispm-agent-root agent)))
-          (quit nil))))
+    (when (and agent (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions)))
+      (with-demoted-errors "LispM: forgetting remote file attributes: %S"
+        (lispm-tools--flush-remote (lispm-agent-root agent)))
+      (when lispm-revert-after-calls
+        ;; Hooks the reverts run are the agent's doing.
+        (let ((lispm-current-agent agent))
+          (condition-case nil
+              (lispm-tools--interruptibly #'lispm-tools--revert-changed
+                                          (list (lispm-agent-root agent)))
+            (quit nil)))))
     (apply done text errorp (and images (list images)))))
+
+(declare-function tramp-dissect-file-name "tramp")
+(declare-function tramp-flush-directory-properties "tramp-cache")
+
+(defun lispm-tools--flush-remote (root)
+  "Make TRAMP forget what it knows of the files of ROOT's machine, if remote.
+TRAMP keeps the attributes of remote files a while, and directories'
+listings.  A call that may have changed files, a shell command there,
+changed them behind its back; `process-file' has TRAMP forget them so,
+while `make-process' does not."
+  (when (file-remote-p root)
+    (tramp-flush-directory-properties (tramp-dissect-file-name root) "/")))
 
 (defun lispm-tool-invoke (tool input done)
   "Run TOOL on INPUT, a decoded JSON object.
@@ -616,21 +631,45 @@ waiting for them if a server has to start."
   (file-in-directory-p (expand-file-name file (lispm-agent-root agent))
                        (lispm-agent-root agent)))
 
+(defvar tramp-local-host-regexp)
+
+(defun lispm-tools-elsewhere-p (directory)
+  "Non-nil if DIRECTORY is on another machine than Emacs.
+That is a remote DIRECTORY (a TRAMP file name, such as /ssh:vm:/work/
+or /docker:box:/work/) whose host is not this one: not one of the
+names of the local host TRAMP knows (`tramp-local-host-regexp'), as
+those of /sudo::/ and /su::/ are.  A shell command there cannot reach
+Emacs, unless that machine reaches this one's files, as a container
+does that mounts the user's home directory.  Without a host name, or
+with no names of the local host to compare with, it is taken to be
+this machine."
+  (when-let* ((host (file-remote-p directory 'host)))
+    (require 'tramp)
+    (and (stringp tramp-local-host-regexp)
+         (not (string-empty-p host))
+         (not (string-match-p tramp-local-host-regexp host)))))
+
 (defun lispm-tools--call-key (input)
   "INPUT as an approval for this exact call remembers it: without `why'."
   (if (listp input)
       (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input)
     input))
 
-(defun lispm-tools-allowance (tool input)
-  "What approving a call of TOOL on INPUT for good adds to an agent's allowed.
+(defun lispm-tools-allowance (tool input &optional agent)
+  "What approving AGENT's call of TOOL on INPUT for good adds to its allowed.
 The tool's name: every later call of it runs at once.  For a tool of
-class `exec', which reaches all of Emacs or the system, this exact
-call: (NAME . INPUT), INPUT without `why'.  Allowing every later call
-would put the agent past its policy, which such a call can change.
-Likewise for a tool that always asks: approving one call is not
+class `exec', which reaches all of Emacs, this exact call: (NAME .
+INPUT), INPUT without `why'.  Allowing every later call would put the
+agent past its policy, which such a call can change.  So for a tool of
+class `shell', since a shell command reaches Emacs too, unless AGENT's
+root is on another machine (see `lispm-tools-elsewhere-p'): there it
+runs its commands, which cannot change the policy, and the tool is
+allowed.  Approving one call of a tool that always asks is never
 approving the next."
-  (if (or (eq (lispm-tool-permission tool) 'exec) (lispm-tool-always-ask tool))
+  (if (or (lispm-tool-always-ask tool)
+          (pcase (lispm-tool-permission tool)
+            ('exec t)
+            ('shell (not (and agent (lispm-tools-elsewhere-p (lispm-agent-root agent)))))))
       (cons (lispm-tool-name tool) (lispm-tools--call-key input))
     (lispm-tool-name tool)))
 
@@ -658,8 +697,13 @@ change any file."
       (let ((path (alist-get 'path input))
             (buffer (and (stringp (alist-get 'buffer input))
                          (get-buffer (lispm-tools-buffer-name (alist-get 'buffer input))))))
-        (delq nil (list (and (stringp path) (car (lispm-tools-reference path)))
-                        (and buffer (buffer-file-name buffer))))))))
+        ;; The file a path names is found as the tool finds it.
+        (condition-case nil
+            (delq nil (list (and (stringp path)
+                                 (let ((lispm-current-agent agent))
+                                   (lispm-tools--file path)))
+                            (and buffer (buffer-file-name buffer))))
+          (error t))))))
 
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
@@ -729,9 +773,11 @@ description or not, or file:FILE::LINE."
 
 (defun lispm-tools--file (path)
   "PATH expanded against the acting agent's root.
-PATH may be a reference to a file (see `lispm-tools-reference')."
-  (expand-file-name (substitute-in-file-name (car (lispm-tools-reference path)))
-                    (lispm-tools--root)))
+PATH may be a reference to a file (see `lispm-tools-reference').  On a
+remote root, an absolute PATH that names no machine names a file on the
+root's (see `lispm--expand-file-name'): the agent works there."
+  (lispm--expand-file-name (substitute-in-file-name (car (lispm-tools-reference path)))
+                           (lispm-tools--root)))
 
 (defun lispm-tools--label (file)
   "FILE as shown in diffs: relative to the root when inside it."
@@ -894,14 +940,15 @@ See `lispm--file-text'."
 Run after a call that may have changed files (a shell command, Lisp,
 an MCP server), so that the buffers the user and the agents see hold
 what is on disk; see `lispm-revert-after-calls'.  Remote files are
-left out: checking them would mean a connection each."
+left out, checking them would mean a connection each, unless ROOT is
+remote: then those under it are checked through its connection."
   (let ((root (file-name-as-directory (expand-file-name root))))
     (dolist (buffer (buffer-list))
       (let ((file (buffer-file-name buffer)))
         (when (and file
                    (not (buffer-modified-p buffer))
                    (string-prefix-p root file)
-                   (not (file-remote-p file))
+                   (or (file-remote-p root) (not (file-remote-p file)))
                    (eq (lispm-tools--state buffer) 'stale))
           (with-demoted-errors "LispM: reverting a buffer: %S"
             (lispm-tools--sync buffer)))))))
@@ -1001,10 +1048,17 @@ as org links, [[file:PATH::LINE]]: pass one as the path to read there."
   "List a directory's entries; subdirectories end with a slash."
   :permission read
   (let* ((dir (file-name-as-directory (lispm-tools--file (or path "."))))
-         (entries (directory-files dir nil directory-files-no-dot-files-regexp)))
+         ;; With their attributes: on a remote directory, one round trip
+         ;; rather than one per entry.
+         (entries (directory-files-and-attributes dir nil directory-files-no-dot-files-regexp)))
     (concat (abbreviate-file-name dir) "\n"
-            (mapconcat (lambda (f)
-                         (if (file-directory-p (expand-file-name f dir)) (concat f "/") f))
+            (mapconcat (lambda (entry)
+                         (let ((type (file-attribute-type (cdr entry))))
+                           (if (or (eq type t)
+                                   ;; A symbolic link to a directory is one.
+                                   (and (stringp type) (file-directory-p (expand-file-name (car entry) dir))))
+                               (concat (car entry) "/")
+                             (car entry))))
                        (seq-take entries 500)
                        "\n")
             (if (> (length entries) 500)
@@ -1229,8 +1283,12 @@ of AGENT in which it started ends meanwhile."
                         (small (<= size lispm-search-max-file-size))
                         ;; Read files as they are, no decompression or
                         ;; decryption, and as UTF-8: detecting each file's
-                        ;; coding system would double the time.
-                        (file-name-handler-alist nil)
+                        ;; coding system would double the time.  A remote
+                        ;; file is read through TRAMP's handler still.
+                        (file-name-handler-alist (and (file-remote-p file) file-name-handler-alist))
+                        (inhibit-file-name-handlers (append '(jka-compr-handler epa-file-handler)
+                                                            inhibit-file-name-handlers))
+                        (inhibit-file-name-operation 'insert-file-contents)
                         (coding-system-for-read 'utf-8))
                    (erase-buffer)
                    ;; Binary files are skipped; of a large one only the
@@ -1485,8 +1543,9 @@ For files use edit_file."
     ((command string "Shell command, run in your root directory.")
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
   "Run a shell command and return its output and exit status.  The
-output also streams into a buffer the user can watch."
-  :permission exec
+output also streams into a buffer the user can watch.  If your root is
+remote, the command runs on its machine."
+  :permission shell
   :async t
   ;; Setting up must not be cut short by C-g: a process left without
   ;; its timer and its agent could be neither timed out nor aborted.
@@ -1500,7 +1559,11 @@ output also streams into a buffer the user can watch."
            (proc (make-process
                   :name "lispm-shell" :buffer buffer :noquery t
                   :connection-type 'pipe
-                  :command (list shell-file-name shell-command-switch command)
+                  ;; On a remote root, TRAMP runs the command there,
+                  ;; with that machine's shell.
+                  :file-handler t
+                  :command (with-connection-local-variables
+                            (list shell-file-name shell-command-switch command))
                   :filter
                   (lambda (p chunk)
                     (setq output (concat output chunk))
