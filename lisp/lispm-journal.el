@@ -40,6 +40,7 @@
 ;; Snapshots are taken asynchronously, from the project's own file
 ;; list (`git ls-files'), and a turn's first request waits for its
 ;; first snapshot, so that no call changes anything before it is taken.
+;; A project on another machine, a remote root, has no snapshots.
 
 ;;; Code:
 
@@ -64,8 +65,12 @@ They are kept in a repository of LispM's own (see lispm-journal.el)."
   :group 'lispm)
 
 (defun lispm-journal--top (root)
-  "The top of the git work tree ROOT is in, or nil."
-  (when-let* ((top (locate-dominating-file root ".git")))
+  "The top of the git work tree ROOT is in, or nil.
+Nil for a remote ROOT too: its work tree is on another machine, which
+LispM's repository is not on, and whose files the snapshots would read
+one by one through TRAMP.  Such a root has the in-memory journal only."
+  (when-let* (((not (file-remote-p root)))
+              (top (locate-dominating-file root ".git")))
     (file-name-as-directory (expand-file-name top))))
 
 (defun lispm-journal--directory (root)

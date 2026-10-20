@@ -752,8 +752,8 @@ See `lispm--asked-condition'."
 
 (defun lispm-chat-yes-always ()
   "Approve the call, and every later call of its tool by this agent.
-For a tool that runs commands or any Lisp, only this exact call (see
-`lispm-tools-allowance')."
+For a tool that runs any Lisp, or commands that reach Emacs, only this
+exact call (see `lispm-tools-allowance')."
   (interactive)
   (lispm-allow lispm-chat-agent (lispm-chat--waiting))
   (goto-char (point-max)))
@@ -880,7 +880,7 @@ ITEMS are the session's items, where the call's preview is."
            (options (list "Yes"
                           (cond ((plist-get asked :always))
                                 ((and (plist-get asked :tool)
-                                      (consp (lispm-tools-allowance (plist-get asked :tool) input)))
+                                      (consp (lispm-tools-allowance (plist-get asked :tool) input agent)))
                                  (format "Yes, and don't ask again for this exact %s"
                                          (pcase name ("run_shell" "command") ("eval_elisp" "code")
                                                 ("write_skill" "skill") (_ "call"))))

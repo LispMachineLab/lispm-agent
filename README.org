@@ -197,10 +197,31 @@ from one that sends it whole, the change shows once it is complete.
 #+end_src
 
 Permission classes: ~read~, ~memory~, ~comm~ and ~lisp~ run automatically by default;
-~write~ and ~exec~ need approval (see ~lispm-default-policy~). Writes outside the agent's
-root always ask, and so does ~write_skill~. ~exec~ (~run_shell~, ~eval_elisp~, ~write_skill~)
-reaches all of Emacs and the system, the policy included, so approving such a call for good
-approves that exact call, not every one.
+~write~, ~shell~ and ~exec~ need approval (see ~lispm-default-policy~). Writes outside the
+agent's root always ask, and so does ~write_skill~. ~shell~ (~run_shell~) and ~exec~
+(~eval_elisp~, ~write_skill~) reach all of Emacs and the system, the policy included, so
+approving such a call for good approves that exact call, not every one. A policy that names
+~exec~ but not ~shell~ gives shell commands what it gives ~exec~, as before they had a class of
+their own.
+
+** A root on another machine
+
+An agent's root may be a directory on another machine, as TRAMP names it: ~/ssh:vm:/work/~,
+or ~/docker:box:/work/~ for a container (on a Mac, with colima, say). Its tools then read, edit,
+list and search files there, ~run_shell~ runs commands there, and absolute paths it gives name
+files there; Emacs Lisp still runs in your Emacs. So it can run commands unasked while its Lisp
+asks:
+
+#+begin_src emacs-lisp
+(lispm-defagent builder
+  :root "/docker:box:/work/"
+  :policy '((shell . auto) (write . auto)))
+#+end_src
+
+~M-x lispm~ from a buffer of that machine starts an agent there too. Approving one of its
+commands for good (~2~ in the chat) allows them all, since they run on the other machine; that
+holds only while the machine cannot write your files, so don't mount your home directory into
+the container. Its turns are journaled in memory only, without git snapshots.
 
 * Standing agents
 

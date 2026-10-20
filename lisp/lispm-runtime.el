@@ -122,6 +122,12 @@ See `lispm-session-tools'.")
    "# Your environment\n"
    "- Your root directory is " (abbreviate-file-name (lispm-agent-root agent))
    ". Relative paths are resolved against it.\n"
+   (if (file-remote-p (lispm-agent-root agent))
+       (concat "- Your root is on another machine, which Emacs reaches through TRAMP"
+               " (the prefix " (file-remote-p (lispm-agent-root agent)) "). Your shell commands"
+               " run there, and absolute paths you give tools, such as /etc/hosts or ~/notes,"
+               " name files there. Emacs Lisp still runs in the user's Emacs, on this machine.\n")
+     "")
    "- This conversation is an org-mode buffer the user can read, fold, edit and"
    " annotate while you work. What it contains is what you remember of this session.\n"
    "- Calls that change files or run code may wait for the user's approval. Such"
@@ -1403,17 +1409,17 @@ carries out.  Return nil, and ask nothing, if ID is not running."
 
 (defun lispm-allow (agent id)
   "Approve AGENT's call ID, and calls like it for the rest of the Emacs session.
-Like it are later calls of its tool, or for a tool of class `exec',
-calls with the same input (see `lispm-tools-allowance').  AGENT's
-other calls awaiting approval that this allows are approved too.  A
-call that a call makes may mean something else by it (see
-`lispm-call-ask'): then the call that made it is told, and nothing
-more is allowed."
+Like it are later calls of its tool, or for a tool that reaches Emacs,
+such as one of class `exec', calls with the same input (see
+`lispm-tools-allowance').  AGENT's other calls awaiting approval that
+this allows are approved too.  A call that a call makes may mean
+something else by it (see `lispm-call-ask'): then the call that made it
+is told, and nothing more is allowed."
   (when-let* ((call (gethash id (lispm-agent-pending agent)))
               (asked (lispm--asked call))
               (tool (plist-get asked :tool)))
     (unless (plist-get asked :always)
-      (push (lispm-tools-allowance tool (plist-get asked :input)) (lispm-agent-allowed agent)))
+      (push (lispm-tools-allowance tool (plist-get asked :input) agent) (lispm-agent-allowed agent)))
     (lispm-resolve agent id 'allow)
     (dolist (other (lispm--waiting-calls agent))
       (let ((asked (lispm--asked (gethash other (lispm-agent-pending agent)))))
@@ -1652,7 +1658,7 @@ waits at, choose a restart."
          (asked (lispm--asked call))
          (exact (and (plist-get asked :tool)
                      (consp (lispm-tools-allowance (plist-get asked :tool)
-                                                   (plist-get asked :input))))))
+                                                   (plist-get asked :input) agent)))))
     (when (plist-get call :marker)
       (goto-char (plist-get call :marker)))
     (ignore-errors (org-fold-show-subtree))
