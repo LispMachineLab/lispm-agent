@@ -1,7 +1,7 @@
 // capture-window.swift --- Record one window of a process, until interrupted
 //
 // Copyright (C) 2026  Ryan.K
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Usage: capture-window PID OUTPUT X Y WIDTH HEIGHT
 //

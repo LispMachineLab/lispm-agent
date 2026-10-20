@@ -1,7 +1,7 @@
 ;;; slug-test.el --- Tests for slug.el  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Ryan.K
-;; SPDX-License-Identifier: GPL-3.0-or-later
+;; SPDX-License-Identifier: AGPL-3.0-or-later
 
 ;;; Code:
 

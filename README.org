@@ -514,4 +514,4 @@ configuration but none of its state, a real model through the backend it chooses
 
 * License
 
-GPL-3.0-or-later; see [[file:LICENSE][LICENSE]].
+AGPL-3.0-or-later; see [[file:LICENSE][LICENSE]].
