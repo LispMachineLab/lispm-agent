@@ -1342,7 +1342,7 @@ A project's skill asks before its code runs; refused, its text is loaded alone."
             (lispm-tell agent "Greet Lisp")
             ;; Whatever the policy, the project's code waits for the user.
             (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
-            (should (equal (plist-get (lispm--asked (gethash "t3" (lispm-agent-pending agent))) :name)
+            (should (equal (plist-get (lispm-asked (gethash "t3" (lispm-agent-pending agent))) :name)
                            "trust_skill"))
             (lispm-resolve agent "t3" 'deny "not now")
             (should (lispm-test--wait (lispm-test--idle-p agent)))
@@ -1380,8 +1380,8 @@ A project's skill asks before its code runs; refused, its text is loaded alone."
 
 (defun lispm-test--asked (agent)
   "Name of the tool of the first call AGENT awaits approval for."
-  (when-let* ((id (car (lispm--waiting-calls agent))))
-    (plist-get (lispm--asked (gethash id (lispm-agent-pending agent))) :name)))
+  (when-let* ((id (car (lispm-waiting-calls agent))))
+    (plist-get (lispm-asked (gethash id (lispm-agent-pending agent))) :name)))
 
 (defmacro lispm-test-with-trust (&rest body)
   "Run BODY with no trusted skills, Customize saving to a scratch file.
@@ -2624,7 +2624,7 @@ text go back to the model byte for byte."
                ,(lispm-test--msg "end_turn" (lispm-test--text "Understood.")))))
       (lispm-tell agent "clean up")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
-      (should (equal (lispm--waiting-calls agent) '("t1")))
+      (should (equal (lispm-waiting-calls agent) '("t1")))
       (lispm-resolve agent "t1" 'deny "keep the build")
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (let* ((messages (alist-get 'messages (car lispm-test--requests)))
@@ -2802,7 +2802,7 @@ process died with Emacs, is recorded as interrupted."
                         (should (string-match-p "^\\*\\* RUNNING run_shell" (lispm--file-text file)))
                         (lispm-resume-file file))))
         ;; The call awaiting approval is known again ...
-        (should (equal (lispm--waiting-calls revived) '("t2")))
+        (should (equal (lispm-waiting-calls revived) '("t2")))
         (should (eq (lispm-agent-state revived) 'waiting))
         ;; ... the one that was running is not left without a result ...
         (should (string-match-p "^\\*\\* FAILED run_shell" (lispm-test--transcript revived)))
@@ -2842,7 +2842,7 @@ started, after the session opened."
             ;; Emacs restarts: the tool's server has not started yet.
             (remhash "lispm_test_late" lispm-tools--registry)
             (let ((revived (lispm-resume-file file)))
-              (should (equal (lispm--waiting-calls revived) '("l1")))
+              (should (equal (lispm-waiting-calls revived) '("l1")))
               (lispm-deftool lispm_test_late ()
                 "A tool registered late, as an MCP server's are."
                 :permission write
@@ -3534,7 +3534,7 @@ batch Emacs, as on CI when a test's directory went first."
       ;; Denied in org: the input is dropped, its sender told.
       (lispm-tell agent "second" :callback (lambda (r) (setq told r)))
       (lispm-test--condition-id agent)
-      (should (eq (lispm--stop-restart (lispm-agent-condition agent)) 'abort))
+      (should (eq (lispm-stop-restart (lispm-agent-condition agent)) 'abort))
       (with-current-buffer (lispm-agent-buffer agent)
         (goto-char (point-min))
         (re-search-forward "^\\* WAITING Condition")
@@ -3613,15 +3613,15 @@ BODY can use `agent', `id' (the call's) and `reply' (the turn's, once it ends)."
              `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt"))))
                        ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
        (lispm-tell agent "read" :callback (lambda (r) (setq reply r)))
-       (let ((id (progn (should (lispm-test--wait (lambda () (lispm--asked-condition agent))))
-                        (plist-get (lispm--asked-condition agent) :id))))
+       (let ((id (progn (should (lispm-test--wait (lambda () (lispm-asked-condition agent))))
+                        (plist-get (lispm-asked-condition agent) :id))))
          (ignore id)
          ,@body))))
 
 (ert-deftest lispm-test-tool-error-stops ()
   "A failure `lispm-debug-tool-errors' covers stops the call, recorded on its heading."
   (lispm-test-with-stopped-call
-    (let ((condition (lispm--asked-condition agent)))
+    (let ((condition (lispm-asked-condition agent)))
       (should (equal id "t1"))
       (should (eq (plist-get condition :type) 'tool-error))
       (should (equal (plist-get condition :restarts) '(report retry use-value abort)))
@@ -3693,11 +3693,11 @@ BODY can use `agent', `id' (the call's) and `reply' (the turn's, once it ends)."
       (setq lispm-test--scripts
             `((assistant@project ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "a.txt")))))))
       (lispm-tell agent "read")
-      (should (lispm-test--wait (lambda () (lispm--asked-condition agent))))
+      (should (lispm-test--wait (lambda () (lispm-asked-condition agent))))
       (let ((revived (lispm-resume-file (lispm-test--crash agent))))
         (should (eq (lispm-agent-state revived) 'waiting))
-        (should (eq (plist-get (lispm--asked-condition revived) :type) 'tool-error))
-        (should (string-match-p "No such file" (plist-get (lispm--asked-condition revived) :error)))
+        (should (eq (plist-get (lispm-asked-condition revived) :type) 'tool-error))
+        (should (string-match-p "No such file" (plist-get (lispm-asked-condition revived) :error)))
         (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done."))) lispm-test--scripts)
         (lispm-restart revived "t1" 'report)
         (should (lispm-test--wait (lispm-test--idle-p revived)))))))
@@ -3788,7 +3788,7 @@ BODY can use `agent'."
                                                            '((why . "w") (path . "b.txt") (content . "b"))))
                        ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
        (lispm-tell agent "write")
-       (should (lispm-test--wait (lambda () (equal (lispm--waiting-calls agent) '("t1" "t2")))))
+       (should (lispm-test--wait (lambda () (equal (lispm-waiting-calls agent) '("t1" "t2")))))
        (lispm-resolve agent "t1" 'approve)
        (should (lispm-test--wait (lambda () (lispm--call-condition agent "t1"))))
        ,@body)))
@@ -3796,7 +3796,7 @@ BODY can use `agent'."
 (ert-deftest lispm-test-tool-error-not-approval ()
   "A stopped call does not await approval: approving its tool for good leaves it alone."
   (lispm-test-with-stopped-write
-    (should (equal (lispm--waiting-calls agent) '("t2")))
+    (should (equal (lispm-waiting-calls agent) '("t2")))
     (should (equal (lispm--open-calls agent) '("t1" "t2")))
     (should (equal (lispm-agent-status agent) "1 call stopped at an error, 1 call awaits approval"))
     (let ((chat (lispm-chat agent)))
@@ -3822,12 +3822,12 @@ BODY can use `agent'."
     (should (lispm-test--wait (lambda () (string-match-p "^\\*\\*\\* Stopped\n"
                                                          (lispm-test--transcript agent)))))
     (should (lispm--call-condition agent "t1"))
-    (should (equal (lispm--waiting-calls agent) '("t2"))))
+    (should (equal (lispm-waiting-calls agent) '("t2"))))
   (lispm-test-with-stopped-write
     (let ((lispm-condition-handlers '((tool-error retry))))
       ;; Stopped before the handler was set: offer it again.
       (lispm--offer-condition agent (lispm--call-condition agent "t1"))
-      (should (lispm-test--wait (lambda () (equal (lispm--waiting-calls agent) '("t1" "t2")))))
+      (should (lispm-test--wait (lambda () (equal (lispm-waiting-calls agent) '("t1" "t2")))))
       (should-not (lispm--call-condition agent "t1"))
       (should (equal (lispm-agent-status agent) "2 calls await approval"))
       (should (string-match-p "^\\*\\* WAITING write_file  a\\.txt/x\n\\(?:.*\n\\)*\\*\\*\\* Stopped: retry\n"
@@ -5118,15 +5118,17 @@ handed over once nothing more can be."
   (with-temp-buffer
     (insert (lispm-transcript-section "User" "hi"))
     (let ((start (point-marker)))
+      ;; Marked as `lispm--live-insert' marks what streams in.
       (insert "* Assistant\n"
-              (propertize "weighing options" 'face 'shadow) "\n"
-              "Here is a\n* heading-like line\n"
-              (propertize "-> edit_file ...\n" 'face 'shadow))
+              (propertize "weighing options" 'face 'shadow 'lispm-live 'thinking) "\n"
+              (propertize "Here is a\n* heading-like line\n" 'lispm-live 'text)
+              (propertize "-> edit_file ...\n" 'face 'shadow 'lispm-live '(tool . "edit_file")))
       (setq lispm--live (cons start (point-marker))))
     (let ((items (lispm-chat-items (current-buffer))))
       (should (equal (mapcar (lambda (i) (plist-get i :kind)) items) '(user thought text tool)))
       (should (equal (plist-get (nth 2 items) :text) "Here is a\n* heading-like line"))
-      (should (equal (plist-get (nth 3 items) :state) "WRITING")))))
+      (should (equal (plist-get (nth 3 items) :state) "WRITING"))
+      (should (equal (plist-get (nth 3 items) :name) "edit_file")))))
 
 (ert-deftest lispm-test-chat-streaming ()
   "A response streams into the chat; an edit before it still shows."
@@ -5153,6 +5155,27 @@ handed over once nothing more can be."
       (should (string-match-p "^λ >> howdy$" (lispm-test--chat-text chat)))
       (lispm--live-delete agent)
       (should-not (string-match-p "Partial" (lispm-test--chat-text chat))))))
+
+(ert-deftest lispm-test-live-segments ()
+  "What streams into a response is read back as it came, each piece of its
+kind; a call being written also says so as the agent's activity."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (_chat (lispm-chat agent))
+           (session (lispm-agent-buffer agent)))
+      (lispm--live-begin agent)
+      (lispm--live-insert agent 'thinking "Let me see")
+      (lispm--live-insert agent 'text "Here it is.")
+      (lispm--live-insert agent 'tool "edit_file")
+      (should (equal (lispm-live-segments session)
+                     '((:kind thinking :text "Let me see")
+                       (:kind text :text "Here it is.")
+                       (:kind tool :name "edit_file"))))
+      (should (equal (lispm-agent-activity agent) '(writing . "a edit_file call")))
+      (should (equal (lispm-agent-status agent) "writing a edit_file call"))
+      (lispm--live-delete agent)
+      (should-not (lispm-live-region session))
+      (should-not (lispm-live-segments session)))))
 
 (ert-deftest lispm-test-chat-turn ()
   "A turn through the chat: send, see the calls, approve with 1, expand, commands."
@@ -5390,7 +5413,7 @@ Tools take the places and buffers agents name as org links."
       ;; This command, not every command.
       (should (equal (lispm-agent-allowed agent) '(("run_shell" (command . "echo one")))))
       (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
-                                                (equal (car (lispm--waiting-calls agent)) "t2")))))
+                                                (equal (car (lispm-waiting-calls agent)) "t2")))))
       (should (string-match-p "Do you want to write b\\.txt\\?" (lispm-test--chat-text chat)))
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "use the scratch buffer")))
         (lispm-test--chat-key chat "3"))
@@ -5842,12 +5865,12 @@ it made before keeping the results they had."
       (lispm-tell agent "Greet lisp")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
       (should (equal (lispm-agent-status agent) "1 call awaits approval"))
-      (should (equal (plist-get (lispm--asked (gethash "t1" (lispm-agent-pending agent))) :input)
+      (should (equal (plist-get (lispm-asked (gethash "t1" (lispm-agent-pending agent))) :input)
                      '((path . "a.txt") (old_text . "world") (new_text . "lisp"))))
       (should (string-match-p "^\\*\\* WAITING run_lisp .*\n\\(?:.*\n\\)*\\*\\*\\* Asks: edit_file  a.txt\n\\(?:.*\n\\)*\\*\\*\\* Preview\n\\(?:.*\n\\)*\\+hello lisp"
                               (lispm-test--transcript agent)))
       (lispm-resolve agent "t1" 'approve)
-      (should (lispm-test--wait (lambda () (equal (plist-get (lispm--asked (gethash "t1" (lispm-agent-pending agent)))
+      (should (lispm-test--wait (lambda () (equal (plist-get (lispm-asked (gethash "t1" (lispm-agent-pending agent)))
                                                              :input)
                                                   '((path . "b.txt") (old_text . "world") (new_text . "lisp"))))))
       (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))

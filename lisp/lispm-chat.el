@@ -212,23 +212,14 @@ are not drawn again.")
             (push (list :kind 'note :text "A fallback model took over this response.") items))))))
     (nreverse items)))
 
-(defun lispm-chat--live-items (beg end)
-  "Items of the response streaming in between BEG and END."
-  (let (items (pos beg))
-    (while (< pos end)
-      (let* ((next (next-single-property-change pos 'face nil end))
-             (dim (get-text-property pos 'face))
-             (text (string-trim (buffer-substring-no-properties pos next))))
-        (unless (string-empty-p text)
-          (cond ((not dim) (push (list :kind 'text :text text) items))
-                ((string-prefix-p "-> " text)
-                 (dolist (line (split-string text "\n" t))
-                   (when (string-match "\\`-> \\(.*\\) \\.\\.\\.\\'" line)
-                     (push (list :kind 'tool :name (match-string 1 line) :state "WRITING")
-                           items))))
-                (t (push (list :kind 'thought :key "thought@live" :text text :live t) items))))
-        (setq pos next)))
-    (nreverse items)))
+(defun lispm-chat--live-items (buffer)
+  "Items of the response streaming into the session BUFFER."
+  (mapcar (lambda (segment)
+            (pcase (plist-get segment :kind)
+              ('text (list :kind 'text :text (plist-get segment :text)))
+              ('thinking (list :kind 'thought :key "thought@live" :text (plist-get segment :text) :live t))
+              ('tool (list :kind 'tool :name (plist-get segment :name) :state "WRITING"))))
+          (lispm-live-segments buffer)))
 
 (defun lispm-chat--condition-note (section)
   "A note of the condition SECTION holds, once a restart settled it, or nil.
@@ -301,13 +292,10 @@ items, already known."
     (save-excursion
       (save-restriction
         (widen)
-        (let ((live (and lispm--live (marker-position (car lispm--live)))))
+        (let ((live (car (lispm-live-region buffer))))
           (list live
                 (or stable (lispm-chat--section-items (point-min) (or live (point-max))))
-                (and live
-                     (lispm-chat--live-items
-                      (save-excursion (goto-char live) (forward-line 1) (point))
-                      (max live (marker-position (cdr lispm--live)))))))))))
+                (and live (lispm-chat--live-items buffer))))))))
 
 (defun lispm-chat-items (buffer)
   "The conversation in the org session BUFFER, as display items."
@@ -322,8 +310,7 @@ unless it was edited."
     (pcase-let ((`(,old-buffer ,old-tick ,old-live ,old-stable ,old-items) lispm-chat--parsed))
       (if (and (eq old-buffer buffer) (eql old-tick tick))
           old-items
-        (let* ((live (buffer-local-value 'lispm--live buffer))
-               (live-start (and live (marker-position (car live))))
+        (let* ((live-start (car (lispm-live-region buffer)))
                (reuse (and (eq old-buffer buffer) live-start (eql old-live live-start)
                            (>= lispm-chat--dirty live-start)))
                (read (lispm-chat--read buffer (and reuse old-stable)))
@@ -706,18 +693,18 @@ new item at each step, and the old steps are not kept."
 
 (defun lispm-chat--waiting ()
   "Id of the call the approval prompt asks about."
-  (or (car (lispm--waiting-calls lispm-chat-agent))
+  (or (car (lispm-waiting-calls lispm-chat-agent))
       (user-error "Nothing awaits your approval")))
 
 (defun lispm-chat--condition (&optional agent)
   "The condition the prompt asks about, AGENT's or a call's, if any.
-See `lispm--asked-condition'."
+See `lispm-asked-condition'."
   (let ((agent (or agent lispm-chat-agent)))
-    (and agent (lispm--asked-condition agent))))
+    (and agent (lispm-asked-condition agent))))
 
 (defun lispm-chat--prompting-p ()
   "Non-nil if the chat asks something: a call's approval, or a restart."
-  (and lispm-chat-agent (lispm--awaiting lispm-chat-agent)))
+  (and lispm-chat-agent (lispm-awaiting lispm-chat-agent)))
 
 (defun lispm-chat-restart (restart)
   "Go on from the condition the prompt asks about by RESTART."
@@ -730,7 +717,7 @@ See `lispm--asked-condition'."
       (when-let* ((restart (nth (1- n) (plist-get condition :restarts))))
         (lispm-chat-restart restart)
         t)
-    (when-let* (((lispm--waiting-calls lispm-chat-agent))
+    (when-let* (((lispm-waiting-calls lispm-chat-agent))
                 (command (nth (1- n) '(lispm-chat-yes lispm-chat-yes-always lispm-chat-no))))
       (call-interactively command)
       t)))
@@ -738,9 +725,7 @@ See `lispm--asked-condition'."
 (defun lispm-chat-yes ()
   "Approve the call the prompt asks about, or take the condition's default restart."
   (interactive)
-  (if-let* ((condition (lispm-chat--condition)))
-      (lispm-chat-restart (car (plist-get condition :restarts)))
-    (lispm-resolve lispm-chat-agent (lispm-chat--waiting) 'approve))
+  (lispm-approve-for lispm-chat-agent)
   (goto-char (point-max)))
 
 (defun lispm-chat-yes-always ()
@@ -754,11 +739,10 @@ exact call (see `lispm-tools-allowance')."
 (defun lispm-chat-no ()
   "Deny the call, saying what to do instead; or stop at the condition."
   (interactive)
-  (if-let* ((condition (lispm-chat--condition)))
-      (lispm-chat-restart (lispm--stop-restart condition))
-    (let ((id (lispm-chat--waiting))
-          (reason (read-string "What should it do instead? (optional) ")))
-      (lispm-resolve lispm-chat-agent id 'deny reason)))
+  (lispm-deny-for lispm-chat-agent
+                  (unless (lispm-chat--condition)
+                    (lispm-chat--waiting)
+                    (read-string "What should it do instead? (optional) ")))
   (goto-char (point-max)))
 
 (defun lispm-chat-choose ()
@@ -807,10 +791,10 @@ exact call (see `lispm-tools-allowance')."
 ITEMS are the session's items, where the call's preview is."
   (when-let* (;; Not while a call before it, stopped at an error, asks
               ;; for a restart.
-              ((not (lispm--asked-condition agent)))
-              (id (car (lispm--waiting-calls agent)))
+              ((not (lispm-asked-condition agent)))
+              (id (car (lispm-waiting-calls agent)))
               (call (gethash id (lispm-agent-pending agent))))
-    (let* ((asked (lispm--asked call))
+    (let* ((asked (lispm-asked call))
            (name (plist-get asked :name))
            (input (and (consp (plist-get asked :input)) (plist-get asked :input)))
            (shown (lispm-chat--tool-name name))
@@ -871,13 +855,12 @@ ITEMS are the session's items, where the call's preview is."
                          (format "It may load the files beside it: %s."
                                  (mapconcat #'identity (alist-get 'files input) ", "))))))
            (options (list "Yes"
-                          (cond ((plist-get asked :always))
-                                ((and (plist-get asked :tool)
-                                      (consp (lispm-tools-allowance (plist-get asked :tool) input agent)))
-                                 (format "Yes, and don't ask again for this exact %s"
-                                         (pcase name ("run_shell" "command") ("eval_elisp" "code")
-                                                ("write_skill" "skill") (_ "call"))))
-                                (t (format "Yes, and don't ask again for %s calls by this agent" shown)))
+                          (pcase (lispm-call-allowance agent id)
+                            (`(always . ,text) text)
+                            ('exact (format "Yes, and don't ask again for this exact %s"
+                                            (pcase name ("run_shell" "command") ("eval_elisp" "code")
+                                                   ("write_skill" "skill") (_ "call"))))
+                            (_ (format "Yes, and don't ask again for %s calls by this agent" shown)))
                           "No, and tell it what to do differently")))
       (propertize
        (concat
@@ -939,14 +922,13 @@ ITEMS are the session's items, where the call's preview is."
              (status (or (lispm-agent-status agent) ""))
              (verb (cond ((eq state 'compacting) "Compacting conversation…")
                          ((eq state 'aborting) "Stopping…")
-                         ((string-prefix-p "running " status)
-                          (format "Running %s…" (substring status 8)))
-                         ((string-prefix-p "writing " status)
-                          (format "Writing %s…" (substring status 8)))
-                         ((string-match-p "retry" status) (format "Thinking… (%s)" status))
-                         ((string-prefix-p "waiting for " status)
-                          (concat "W" (substring status 1) "…"))
-                         (t "Thinking…"))))
+                         (t (pcase (lispm-agent-activity agent)
+                              (`(running . ,tool) (format "Running %s…" tool))
+                              (`(writing . ,what) (format "Writing %s…" what))
+                              ('retry (format "Thinking… (%s)" status))
+                              ((and 'waiting (guard (not (string-empty-p status))))
+                               (concat (upcase (substring status 0 1)) (substring status 1) "…"))
+                              (_ "Thinking…"))))))
         (concat "\n"
                 (propertize (concat frame " " verb) 'face 'lispm-chat-accent)
                 (propertize (format " (%ds · C-c C-c to interrupt)" seconds) 'face 'lispm-chat-dim)
@@ -1034,8 +1016,8 @@ ITEMS are the session's items, where the call's preview is."
 (defun lispm-chat--maybe-ask ()
   "Select the first answer of a newly shown prompt."
   ;; A condition itself, or a call's id: a condition's id can be given again.
-  (let ((id (or (lispm--asked-condition lispm-chat-agent)
-                (car (lispm--awaiting lispm-chat-agent)))))
+  (let ((id (or (lispm-asked-condition lispm-chat-agent)
+                (car (lispm-awaiting lispm-chat-agent)))))
     (unless (equal id lispm-chat--asked)
       (setq lispm-chat--asked id
             lispm-chat--choice 0))))
