@@ -125,6 +125,7 @@ conversation per agent, and you can run several and come back to any of them.
 | ~lispm-resume-agents~  | resume every agent that was at work when Emacs last stopped        |
 | ~lispm-show-request~   | show the full request that will be sent to the model next          |
 | ~lispm-history~        | git history of memory, tasks and sessions                          |
+| ~lispm-trust-skill~    | trust a project's skill's code until it changes (~C-u~: no longer) |
 
 What the chat shows are objects, as on a Lisp Machine, not only text: the file a call read,
 the ~file:line~ places and org links in replies and results, the agents named, the symbols
@@ -192,8 +193,9 @@ from one that sends it whole, the change shows once it is complete.
 
 Permission classes: ~read~, ~memory~, ~comm~ and ~lisp~ run automatically by default;
 ~write~ and ~exec~ need approval (see ~lispm-default-policy~). Writes outside the agent's
-root always ask. ~exec~ (~run_shell~, ~eval_elisp~) reaches all of Emacs and the system, the
-policy included, so approving such a call for good approves that exact call, not every one.
+root always ask, and so does ~write_skill~. ~exec~ (~run_shell~, ~eval_elisp~, ~write_skill~)
+reaches all of Emacs and the system, the policy included, so approving such a call for good
+approves that exact call, not every one.
 
 * Standing agents
 
@@ -300,7 +302,8 @@ room in requests until needed. Using one takes two steps: the model finds it wit
 offered like the others, for the rest of the session, and again when it is resumed. The tools
 of MCP servers are deferred by default; a tool of your own is when its ~lispm-deftool~ says
 ~:deferred t~. So are LispM's tools for developing Lisp in the running Emacs (the source
-~lisp~, below).
+~lisp~, below), and a tool an agent defines itself, with ~eval_elisp~ or a skill's code,
+always: it is that agent's from its next step on, and other agents find it with ~search_tools~.
 
 * Emacs is the operating system
 
@@ -350,8 +353,19 @@ your own, or stop the turn.
 A skill is how to do a kind of thing with Emacs, written down in an org file: a ~#+title~, a
 ~#+description~, instructions, and source blocks marked ~:lispm load~ with helper functions
 or tools. Agents see every skill's description and load one when a request needs it. Put
-yours in ~~/.lispm/skills/~ (~NAME.org~, or ~NAME/SKILL.org~ with files beside it); a
-project's go in its ~.lispm/skills/~, though their code is not run.
+yours in ~~/.lispm/skills/~ (~NAME.org~, or ~NAME/SKILL.org~ with files beside it).
+
+A project's skills go in its ~.lispm/skills/~. Their code runs only once you have seen it: an
+agent loading one asks you, showing the code, and ~2~ trusts that code for good, until it
+changes. The trust is pinned by a hash of the code (and of the files beside a ~SKILL.org~),
+kept in ~lispm-trusted-skills~ and saved with Customize; ~M-x lispm-trust-skill~ trusts a
+project's skill from Emacs, and with ~C-u~ trusts it no longer.
+
+Agents write skills too. A tool an agent defines with ~eval_elisp~ lasts until Emacs exits;
+~write_skill~ keeps it, with how to use it, as a skill in ~~/.lispm/skills/~
+(~lispm-write-skill-directory~). It always asks you, whatever the policy says, showing the file
+it would write; approved, the skill's code is evaluated, and the file saved if that succeeds.
+From then on every agent can load it.
 
 LispM comes with ~web~: ~web_search~ and ~web_fetch~, which render pages with Emacs's own
 WebKit (xwidgets) when it has it, else fetch them with url.el, and read them as eww's readable
@@ -428,7 +442,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
 | lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |
-| lisp/lispm-skills.el     | skills: loading them, their code and tools                       |
+| lisp/lispm-skills.el     | skills: loading them, trusting a project's, writing them         |
 | lisp/lispm-inspect.el    | presentations (objects in text to act on), the agent inspector   |
 | lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |
 | skills/                  | the skills LispM comes with: web, worktree                       |

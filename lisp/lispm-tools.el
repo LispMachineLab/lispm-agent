@@ -87,10 +87,11 @@ A DEFERRED tool is not offered to an agent until search_tools has
 found it for that agent.  CHANGES, for a tool that changes a buffer,
 tells what a call would make of it; TARGETS, for a tool whose
 arguments do not name the files it writes, tells which (see
-`lispm-deftool').  FILE is the file a tool defined with `lispm-deftool'
-was loaded from, if any."
+`lispm-deftool').  Calls of an ALWAYS-ASK tool await the user's approval
+whatever the policy says.  FILE is the file a tool defined with
+`lispm-deftool' was loaded from, if any."
   name description params input-schema permission function async preview deferred
-  changes targets file)
+  changes targets always-ask file)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -133,11 +134,15 @@ BODY may start with keyword options:
                      `lispm-tool-action'); it changes nothing
   :deferred t        offered only once search_tools finds it (see
                      `lispm-tool-sources'): for tools seldom needed
+  :always-ask t      every call awaits the user's approval, whatever
+                     the policy says (one that denies the class still
+                     denies it): for calls whose effects outlast the
+                     session, such as saving code later sessions run
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview changes targets deferred
+  (let ((permission 'read) async preview changes targets deferred always-ask
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -146,7 +151,8 @@ is printed.  Signal an error to report a failure to the model."
         (:preview (setq preview (pop body)))
         (:changes (setq changes (pop body)))
         (:targets (setq targets (pop body)))
-        (:deferred (setq deferred (pop body)))))
+        (:deferred (setq deferred (pop body)))
+        (:always-ask (setq always-ask (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -158,6 +164,7 @@ is printed.  Signal an error to report a failure to the model."
        :changes ,changes
        :targets ,targets
        :deferred ,deferred
+       :always-ask ,always-ask
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
@@ -374,6 +381,11 @@ valid call of TOOL."
 ;; offered to it like the others, for the rest of the session.  A
 ;; resumed session has them again: the transcript records which tools
 ;; it searched for and called.
+;;
+;; A tool an agent defines itself, with eval_elisp or the code of a
+;; skill it loads, is deferred too, and loaded for that agent at once:
+;; it is the agent's from its next step on, other agents find it with
+;; search_tools, and it joins no one's core layer (`lispm-tools--adopt').
 
 (defcustom lispm-tool-search-results 5
   "How many tools search_tools loads for a search by keywords."
@@ -468,6 +480,32 @@ the source's tools are found."
     (when new
       (setf (lispm-agent-loaded-tools agent) (append (lispm-agent-loaded-tools agent) new))
       (run-hook-with-args 'lispm-tools-changed-functions agent))))
+
+(defun lispm-tools--snapshot ()
+  "The tools registered now, for `lispm-tools--adopt' to tell those defined since."
+  (copy-hash-table lispm-tools--registry))
+
+(defun lispm-tools--adopt (agent before)
+  "Make the tools defined since BEFORE deferred tools of AGENT.
+BEFORE is the registry as `lispm-tools--snapshot' took it.  A tool
+new since then is deferred, so that it is offered to no other agent
+until search_tools finds it; one defined again keeps its place,
+deferred or in the core layer, unless it is defined as deferred now.
+The deferred ones are loaded for AGENT, if non-nil, from its next
+request on.  Return their names, sorted."
+  (let (names)
+    (maphash (lambda (name tool)
+               (let ((old (gethash name before)))
+                 (unless (eq tool old)
+                   (unless (lispm-tool-deferred tool)
+                     (setf (lispm-tool-deferred tool) (or (null old) (lispm-tool-deferred old))))
+                   (when (lispm-tool-deferred tool)
+                     (push name names)))))
+             lispm-tools--registry)
+    (setq names (sort names #'string<))
+    (when agent
+      (lispm-tools-load agent names))
+    names))
 
 (defconst lispm-tools--loaded-prefix "Tools now available: "
   "How a search_tools result starts the list of the tools it loaded.")
@@ -589,8 +627,10 @@ waiting for them if a server has to start."
 The tool's name: every later call of it runs at once.  For a tool of
 class `exec', which reaches all of Emacs or the system, this exact
 call: (NAME . INPUT), INPUT without `why'.  Allowing every later call
-would put the agent past its policy, which such a call can change."
-  (if (eq (lispm-tool-permission tool) 'exec)
+would put the agent past its policy, which such a call can change.
+Likewise for a tool that always asks: approving one call is not
+approving the next."
+  (if (or (eq (lispm-tool-permission tool) 'exec) (lispm-tool-always-ask tool))
       (cons (lispm-tool-name tool) (lispm-tools--call-key input))
     (lispm-tool-name tool)))
 
@@ -628,9 +668,11 @@ Calls the user allowed for this Emacs session run at once (see
 whatever the policy says: to files named by a `path' argument, visited
 by a buffer a `buffer' argument names, or that the tool's targets
 function returns (see `lispm-deftool'), as a write whose files that
-function cannot tell does."
+function cannot tell does.  So do the calls of a tool that always asks
+(see `lispm-deftool'), such as write_skill."
   (let ((action (lispm-policy-action agent (lispm-tool-permission tool))))
     (cond ((lispm-tools--allowed-p agent tool input) 'auto)
+          ((and (eq action 'auto) (lispm-tool-always-ask tool)) 'ask)
           ((and (eq action 'auto)
                 (eq (lispm-tool-permission tool) 'write)
                 (let ((targets (lispm-tools--targets agent tool input)))
@@ -1604,6 +1646,14 @@ Past `lispm-tools--backtrace-frames' of them, \"...\" stands for the rest."
       "\n")
      4000)))
 
+(defun lispm-tools--defined-note (names)
+  "What eval_elisp adds to its result about the tools NAMES it defined."
+  (if names
+      (concat "\n\n" lispm-tools--loaded-prefix (string-join names ", ") ".\n"
+              "They are yours from your next step on, until Emacs exits; "
+              "to keep them for later sessions, write a skill (write_skill).")
+    ""))
+
 (lispm-deftool eval_elisp
     ((code string "One or more Emacs Lisp forms, evaluated in order with lexical binding."))
   "Evaluate Emacs Lisp in the running Emacs and return the last value,
@@ -1613,41 +1663,54 @@ functions with apropos; learn them with describe_symbol and read_info.
 To wait for something asynchronous (a process, a page loading, a
 timer), end with (lispm-async (lambda (resolve) ...)) and call
 \(funcall resolve VALUE) once the value is there.  An error comes back
-with the backtrace of the code, innermost call first."
+with the backtrace of the code, innermost call first.  A tool you
+define here with lispm-deftool is yours from your next step on, and
+other agents can find it with search_tools; it lasts until Emacs
+exits, unless you keep it in a skill with write_skill."
   :permission exec
   :async t
-  (let* ((output (generate-new-buffer " *lispm-eval*" t))
+  (let* ((agent lispm-current-agent)
+         (output (generate-new-buffer " *lispm-eval*" t))
          (standard-output output)
          (default-directory (lispm-tools--root))
-         value printed)
+         (before (lispm-tools--snapshot))
+         value printed failure note)
     (unwind-protect
-        (progn
-          (dolist (form (lispm-tools--read-forms code))
-            (let ((lispm-tools--eval-form form)
-                  (lispm-tools--backtrace nil))
-              (condition-case err
-                  (setq value (handler-bind ((error #'lispm-tools--note-backtrace))
-                                (eval form t)))
-                (error
-                 (if (not lispm-tools--backtrace)
-                     (signal (car err) (cdr err))
-                   (error "%s\n\nBacktrace, innermost call first:\n%s"
-                          (error-message-string err)
-                          (lispm-tools--backtrace-text lispm-tools--backtrace)))))))
-          (setq printed (with-current-buffer output (buffer-string))))
-      (kill-buffer output))
-    (if (not (lispm-async-p value))
-        (funcall done (lispm-tools--eval-result printed value))
+        (condition-case err
+            (dolist (form (lispm-tools--read-forms code))
+              (let ((lispm-tools--eval-form form)
+                    (lispm-tools--backtrace nil))
+                (condition-case err
+                    (setq value (handler-bind ((error #'lispm-tools--note-backtrace))
+                                  (eval form t)))
+                  (error
+                   (if (not lispm-tools--backtrace)
+                       (signal (car err) (cdr err))
+                     (error "%s\n\nBacktrace, innermost call first:\n%s"
+                            (error-message-string err)
+                            (lispm-tools--backtrace-text lispm-tools--backtrace)))))))
+          (error (setq failure (error-message-string err))))
+      (setq printed (with-current-buffer output (buffer-string)))
+      (kill-buffer output)
+      ;; Tools the code defined, also before an error or a C-g, are
+      ;; the agent's, deferred: in no other agent's core layer.
+      (setq note (lispm-tools--defined-note (lispm-tools--adopt agent before))))
+    (cond
+     (failure (error "%s%s" failure note))
+     ((not (lispm-async-p value))
+      (funcall done (concat (lispm-tools--eval-result printed value) note)))
+     (t
       (let ((timer (run-at-time
                     lispm-eval-timeout nil
                     (lambda ()
-                      (funcall done (format "Timed out after %d seconds waiting for the promised value."
-                                            lispm-eval-timeout)
+                      (funcall done (format "Timed out after %d seconds waiting for the promised value.%s"
+                                            lispm-eval-timeout note)
                                t)))))
         (lispm-async-then value
                           (lambda (result failed)
                             (cancel-timer timer)
-                            (funcall done (lispm-tools--eval-result printed result) failed)))))))
+                            (funcall done (concat (lispm-tools--eval-result printed result) note)
+                                     failed))))))))
 
 (provide 'lispm-tools)
 ;;; lispm-tools.el ends here
