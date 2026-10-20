@@ -888,7 +888,7 @@ starting hold requests back so that their tools are there.")
    ((not (buffer-live-p (lispm-agent-buffer agent)))
     (lispm-set-state agent 'idle "session buffer was killed"))
    ((when-let* ((waiting (run-hook-with-args-until-success 'lispm-request-wait-functions agent)))
-      (lispm-set-state agent 'requesting waiting)
+      (lispm-set-state agent 'requesting waiting 'waiting)
       (let ((turn (lispm-agent-turn agent))
             (steps (lispm-agent-steps agent)))
         (run-at-time 0.2 nil (lambda ()
@@ -922,7 +922,8 @@ starting hold requests back so that their tools are there.")
 (defun lispm--send (agent body betas attempt)
   "Send the request BODY with BETAS for AGENT; ATTEMPT counts retries."
   (lispm-set-state agent 'requesting
-                   (if (> attempt 0) (format "retry %d" attempt) "thinking"))
+                   (if (> attempt 0) (format "retry %d" attempt) "thinking")
+                   (if (> attempt 0) 'retry 'thinking))
   (lispm--live-begin agent)
   (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent) body betas
                        :on-delta (lambda (kind text)
@@ -968,12 +969,46 @@ what a session opened again after Emacs stopped takes up."
         (unless (eq kind lispm--live-kind)
           (lispm--newline)
           (setq lispm--live-kind kind))
+        ;; Each piece says what it is, see `lispm-live-segments'.
         (pcase kind
-          ('text (insert text))
-          ('thinking (insert (propertize text 'face 'shadow)))
-          ('tool (insert (propertize (format "-> %s ...\n" text) 'face 'shadow)))))))
+          ('text (insert (propertize text 'lispm-live 'text)))
+          ('thinking (insert (propertize text 'face 'shadow 'lispm-live 'thinking)))
+          ('tool (insert (propertize (format "-> %s ...\n" text) 'face 'shadow
+                                     'lispm-live (cons 'tool text))))))))
   (when (eq kind 'tool)
-    (lispm-set-state agent 'requesting (format "writing a %s call" text))))
+    (lispm-set-state agent 'requesting (format "writing a %s call" text)
+                     (cons 'writing (format "a %s call" text)))))
+
+(defun lispm-live-region (buffer)
+  "Where the response streaming into the session BUFFER is, or nil:
+\(START . END), START where its heading starts."
+  (let ((live (buffer-local-value 'lispm--live buffer)))
+    (and live (cons (marker-position (car live))
+                    (max (marker-position (car live)) (marker-position (cdr live)))))))
+
+(defun lispm-live-segments (buffer)
+  "What has streamed into the session BUFFER's response so far, in order.
+Each is a plist: (:kind text :text TEXT), (:kind thinking :text TEXT) or
+\(:kind tool :name NAME), a call being written."
+  (when-let* ((region (lispm-live-region buffer)))
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (let ((pos (progn (goto-char (car region)) (forward-line 1) (min (point) (cdr region))))
+                (end (cdr region))
+                segments)
+            (while (< pos end)
+              (let ((next (next-single-property-change pos 'lispm-live nil end))
+                    (kind (get-text-property pos 'lispm-live)))
+                (pcase kind
+                  (`(tool . ,name) (push (list :kind 'tool :name name) segments))
+                  ((pred symbolp)
+                   (let ((text (string-trim (buffer-substring-no-properties pos next))))
+                     (when (and kind (not (string-empty-p text)))
+                       (push (list :kind kind :text text) segments)))))
+                (setq pos next)))
+            (nreverse segments)))))))
 
 (defun lispm--live-delete (agent)
   "Remove AGENT's streamed region; the final message replaces it."
@@ -1138,7 +1173,8 @@ tools of MCP servers appear only once the servers have started."
       (plist-put call :status 'run)
       (lispm--in-session agent
         (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
-      (lispm-set-state agent 'acting (format "running %s" (plist-get call :name)))
+      (lispm-set-state agent 'acting (format "running %s" (plist-get call :name))
+                       (cons 'running (plist-get call :name)))
       (let ((lispm-current-agent agent)
             (lispm-current-call id)
             (default-directory (lispm-agent-root agent)))
@@ -1220,7 +1256,8 @@ result holds besides TEXT."
                                             (if (= waiting 1) "" "s")
                                             (if (= waiting 1) "s" "")))))
                ", ")))
-            (running (lispm-set-state agent 'acting (format "running %s" running)))))))
+            (running (lispm-set-state agent 'acting (format "running %s" running)
+                                      (cons 'running running)))))))
 
 (defun lispm--maybe-continue (agent)
   "Request AGENT's next step once all its tool calls have results."
@@ -1270,7 +1307,8 @@ result holds besides TEXT."
     (if (and (lispm-api-retryable-p err) (< attempt lispm-api-max-retries))
         (let ((delay (* 2 (expt 2 attempt))))
           (lispm-set-state agent 'requesting
-                           (format "%s; retrying in %ds" (plist-get err :type) delay))
+                           (format "%s; retrying in %ds" (plist-get err :type) delay)
+                           'retry)
           (run-at-time delay nil
                        (lambda ()
                          (when (eq (lispm-agent-state agent) 'requesting)
@@ -1416,7 +1454,7 @@ call that made such a call learns."
           ((or 'approve 'allow) (lispm--run-tool agent id))
           ('deny (lispm--tool-done agent id (lispm--denial reason) t "DENIED")))))))
 
-(defun lispm--asked (call)
+(defun lispm-asked (call)
   "What CALL awaits approval for, as a plist (:tool :name :input).
 The call itself; or for a call that makes calls in turn, as a Lisp
 program does, the call of its that waits (see `lispm-call-ask'), with
@@ -1461,13 +1499,13 @@ this allows are approved too.  A call that a call makes may mean
 something else by it (see `lispm-call-ask'): then the call that made it
 is told, and nothing more is allowed."
   (when-let* ((call (gethash id (lispm-agent-pending agent)))
-              (asked (lispm--asked call))
+              (asked (lispm-asked call))
               (tool (plist-get asked :tool)))
     (unless (plist-get asked :always)
       (push (lispm-tools-allowance tool (plist-get asked :input) agent) (lispm-agent-allowed agent)))
     (lispm-resolve agent id 'allow)
-    (dolist (other (lispm--waiting-calls agent))
-      (let ((asked (lispm--asked (gethash other (lispm-agent-pending agent)))))
+    (dolist (other (lispm-waiting-calls agent))
+      (let ((asked (lispm-asked (gethash other (lispm-agent-pending agent)))))
         (when (and (plist-get asked :tool)
                    (lispm-tools--allowed-p agent (plist-get asked :tool) (plist-get asked :input)))
           (lispm-resolve agent other 'approve))))))
@@ -1609,7 +1647,7 @@ if it has one; the inbox file then no longer holds ENTRY."
 (defun lispm--ask-approval (agent id)
   "Show AGENT's call ID for approval: a preview, a notification."
   (let* ((call (gethash id (lispm-agent-pending agent)))
-         (asked (lispm--asked call))
+         (asked (lispm-asked call))
          (preview (and (plist-get asked :tool)
                        (let ((lispm-current-agent agent)
                              (default-directory (lispm-agent-root agent)))
@@ -1647,7 +1685,7 @@ This makes `org-todo', and the org agenda, an approval interface."
                         (car (plist-get condition :restarts))))
           ((or "DENIED" "FAILED")
            (run-at-time 0 nil #'lispm-restart agent (plist-get condition :id)
-                        (lispm--stop-restart condition)))))
+                        (lispm-stop-restart condition)))))
        ((eq (plist-get call :status) 'ask)
         (pcase org-state
           ((or "APPROVED" "RUNNING" "DONE")
@@ -1666,7 +1704,7 @@ This makes `org-todo', and the org agenda, an approval interface."
              (lispm-agent-pending agent))
     (mapcar #'car (sort ids (lambda (a b) (< (or (cdr a) 0) (or (cdr b) 0)))))))
 
-(defun lispm--waiting-calls (agent)
+(defun lispm-waiting-calls (agent)
   "Ids of AGENT's calls awaiting approval, in transcript order."
   (lispm--calls agent '(ask)))
 
@@ -1697,13 +1735,22 @@ waits at, choose a restart."
           (id (lispm--review-call agent id))
           (t (user-error "No call awaits approval")))))
 
+(defun lispm-call-allowance (agent id)
+  "What approving AGENT's call ID for good allows from then on.
+\(always . TEXT) when the call says, in TEXT; `exact' when it allows
+only this exact call again, see `lispm-tools-allowance'; else `tool',
+every later call of its tool."
+  (let ((asked (lispm-asked (gethash id (lispm-agent-pending agent)))))
+    (cond ((plist-get asked :always) (cons 'always (plist-get asked :always)))
+          ((and (plist-get asked :tool)
+                (consp (lispm-tools-allowance (plist-get asked :tool) (plist-get asked :input) agent)))
+           'exact)
+          (t 'tool))))
+
 (defun lispm--review-call (agent id)
   "Review AGENT's call ID awaiting approval, and decide."
   (let* ((call (gethash id (lispm-agent-pending agent)))
-         (asked (lispm--asked call))
-         (exact (and (plist-get asked :tool)
-                     (consp (lispm-tools-allowance (plist-get asked :tool)
-                                                   (plist-get asked :input) agent)))))
+         (asked (lispm-asked call)))
     (when (plist-get call :marker)
       (goto-char (plist-get call :marker)))
     (ignore-errors (org-fold-show-subtree))
@@ -1712,25 +1759,43 @@ waits at, choose a restart."
                  (format "%s wants to run %s" (lispm-agent-name agent) (plist-get asked :name))
                  `((?y "yes" "Run this call")
                    (?n "no" "Deny it; you may give a reason")
-                   (?a "always" ,(cond ((plist-get asked :always))
-                                       (exact "Run it, and this exact call again, this Emacs session")
-                                       (t "Run it, and every later call of this tool, this Emacs session")))
+                   (?a "always" ,(pcase (lispm-call-allowance agent id)
+                                   (`(always . ,text) text)
+                                   ('exact "Run it, and this exact call again, this Emacs session")
+                                   (_ "Run it, and every later call of this tool, this Emacs session")))
                    (?q "later" "Decide later"))))
       (?y (lispm-resolve agent id 'approve))
       (?n (lispm-resolve agent id 'deny (read-string "Reason (optional): ")))
       (?a (lispm-allow agent id)))))
 
-(defun lispm-approve ()
-  "Approve the call at point, or the first one awaiting approval.
-With none, choose the default restart of the condition the turn waits at."
-  (interactive)
-  (let* ((agent (lispm--buffer-agent))
-         (id (lispm--answered-call agent))
+(defun lispm-approve-for (agent &optional id)
+  "Approve AGENT's call ID, by default its first awaiting an answer.
+For a call stopped at an error, or with none, choose the default restart
+of the condition it waits at."
+  (let* ((id (or id (car (lispm--open-calls agent))))
          (condition (if id (lispm--call-condition agent id) (lispm-agent-condition agent))))
     (cond (condition (lispm-restart agent (plist-get condition :id)
                                     (car (plist-get condition :restarts))))
           (id (lispm-resolve agent id 'approve))
           (t (user-error "No call awaits approval")))))
+
+(defun lispm-deny-for (agent reason &optional id)
+  "Deny AGENT's call ID, by default its first awaiting an answer, for REASON.
+For a call stopped at an error, or with none, stop at the condition it
+waits at (see `lispm-stop-at-condition')."
+  (let* ((id (or id (car (lispm--open-calls agent))))
+         (condition (if id (lispm--call-condition agent id) (lispm-agent-condition agent))))
+    (cond (condition (lispm-restart agent (plist-get condition :id)
+                                    (lispm-stop-restart condition)))
+          (id (lispm-resolve agent id 'deny reason))
+          (t (user-error "No call awaits approval")))))
+
+(defun lispm-approve ()
+  "Approve the call at point, or the first one awaiting approval.
+With none, choose the default restart of the condition the turn waits at."
+  (interactive)
+  (let ((agent (lispm--buffer-agent)))
+    (lispm-approve-for agent (lispm--answered-call agent))))
 
 (defun lispm-deny (reason)
   "Deny the call at point, or the first one awaiting approval, for REASON.
@@ -1741,13 +1806,8 @@ With none, stop at the condition the turn waits at (see
           (id (lispm--answered-call agent)))
      (list (and id (not (lispm--call-condition agent id))
                 (read-string "Reason (optional): ")))))
-  (let* ((agent (lispm--buffer-agent))
-         (id (lispm--answered-call agent))
-         (condition (if id (lispm--call-condition agent id) (lispm-agent-condition agent))))
-    (cond (condition (lispm-restart agent (plist-get condition :id)
-                                    (lispm--stop-restart condition)))
-          (id (lispm-resolve agent id 'deny reason))
-          (t (user-error "No call awaits approval")))))
+  (let ((agent (lispm--buffer-agent)))
+    (lispm-deny-for agent reason (lispm--answered-call agent))))
 
 ;;;; Conditions and restarts
 ;;
@@ -1916,7 +1976,7 @@ between turns (`compaction-failed')."
         turn
       (lispm--call-condition agent id))))
 
-(defun lispm--asked-condition (agent)
+(defun lispm-asked-condition (agent)
   "The condition AGENT asks about first, if any.
 That of its first call awaiting an answer, if that call stopped at an
 error; else, when no call awaits one, the condition its turn waits at."
@@ -2005,10 +2065,10 @@ Stopped subsection names the restart."
   "Stop AGENT's turn at the condition it asks about, if any.
 That is restart `abort', or for a condition without it, the last of
 its restarts.  What the user asks of AGENT next goes past it this way."
-  (when-let* ((condition (lispm--asked-condition agent)))
-    (lispm-restart agent (plist-get condition :id) (lispm--stop-restart condition))))
+  (when-let* ((condition (lispm-asked-condition agent)))
+    (lispm-restart agent (plist-get condition :id) (lispm-stop-restart condition))))
 
-(defun lispm--stop-restart (condition)
+(defun lispm-stop-restart (condition)
   "The restart of CONDITION that stops there: `abort', or its last one."
   (let ((restarts (plist-get condition :restarts)))
     (if (memq 'abort restarts) 'abort (car (last restarts)))))
@@ -2019,7 +2079,7 @@ Only a failed handover is: it comes before the input that asked for it."
   (and (eq (plist-get condition :type) 'compaction-failed)
        (not (plist-get condition :resume))))
 
-(defun lispm--awaiting (agent)
+(defun lispm-awaiting (agent)
   "What AGENT awaits an answer to: its calls awaiting one, then its condition."
   (append (lispm--open-calls agent)
           (and (lispm-agent-condition agent) (list (lispm-agent-condition agent)))))
@@ -2057,7 +2117,7 @@ Interactively, the agent of the current session or chat."
   (interactive)
   (let* ((agent (or agent (lispm--buffer-agent)))
          (condition (or condition
-                        (lispm--asked-condition agent)
+                        (lispm-asked-condition agent)
                         (user-error "%s waits at no condition" (lispm-agent-name agent))))
          (keys nil)
          (choices
@@ -2079,7 +2139,7 @@ Interactively, the agent of the current session or chat."
   "Choose RESTART for CONDITION, by default the one AGENT asks about.
 If the restart needs a value, ask the user for it."
   (let* ((condition (or condition
-                        (lispm--asked-condition agent)
+                        (lispm-asked-condition agent)
                         (user-error "%s waits at no condition" (lispm-agent-name agent))))
          (reader (nth 3 (lispm--restart-spec condition restart)))
          (value (and reader (funcall reader agent))))

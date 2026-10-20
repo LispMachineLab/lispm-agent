@@ -226,6 +226,7 @@ A role defined again in Lisp is no longer one of them.")
   ;; Runtime state.
   (state 'idle)              ; idle, requesting, acting, waiting
   status                     ; short description of the current activity
+  activity                   ; that activity as data: VERB or (VERB . OBJECT)
   buffer                     ; session buffer: the org transcript
   view                       ; chat buffer showing the session, if any
   process                    ; request in flight
@@ -582,16 +583,24 @@ class it was split from, if any (see `lispm--permission-fallbacks')."
                                              (lispm-agent-policy agent)
                                              (lispm-agent-ceiling agent))))))
 
-(defun lispm-set-state (agent state &optional status)
-  "Set AGENT's STATE and STATUS, and tell whoever is watching."
+(defun lispm-set-state (agent state &optional status activity)
+  "Set AGENT's STATE and STATUS, and tell whoever is watching.
+ACTIVITY is what STATUS says as data, for views that word it their own
+way: `thinking', `retry' or `waiting' (for what STATUS names), or
+\(running . TOOL) or (writing . WHAT)."
   (setf (lispm-agent-state agent) state
-        (lispm-agent-status agent) status)
+        (lispm-agent-status agent) status
+        (lispm-agent-activity agent) activity)
   (run-hook-with-args 'lispm-state-change-functions agent)
   (force-mode-line-update t))
 
 (defun lispm-agent-busy-p (agent)
   "Non-nil if AGENT is in the middle of a turn."
   (not (eq (lispm-agent-state agent) 'idle)))
+
+(defun lispm-agent-working-p (agent)
+  "Non-nil while AGENT works: in a turn, and not waiting for an answer."
+  (not (memq (lispm-agent-state agent) '(idle waiting))))
 
 ;;;; Utilities
 
