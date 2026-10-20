@@ -325,7 +325,7 @@ LINES are strings, whose objects are presented."
                 (cons "Pending calls"
                       (mapcar (pcase-lambda (`(,id . ,call))
                                 (let* ((asked (lispm--asked call))
-                                       (summary (lispm-transcript--summary (plist-get asked :input))))
+                                       (summary (lispm-transcript-summary (plist-get asked :input))))
                                   (concat (lispm-present (plist-get call :name)
                                                          (list 'call (symbol-name (lispm-agent-name agent)) id))
                                           (if summary (concat " " summary) "")

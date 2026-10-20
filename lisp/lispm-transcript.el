@@ -84,6 +84,60 @@
   "\\(WAITING\\|APPROVED\\|RUNNING\\|DONE\\|DENIED\\|FAILED\\)"
   "Regexp matching a tool-call state keyword.")
 
+;;;; Kinds of sections
+
+(defconst lispm-transcript-kinds
+  '((system "System" "\\`System\\'" nil)
+    (user "User" "\\`User\\'" "")
+    (assistant "Assistant" "\\`Assistant\\'" nil)
+    (summary "Summary" "\\`Summary\\'"
+             "[Summary of the earlier conversation, handed over to this session]\n")
+    (from-lispm "From LispM" "\\`From LispM\\'" "[From LispM, for the user]\n")
+    (message "Message from %s" "\\`Message from \\(.+\\)\\'" "[Message from agent %s]\n")
+    (event "Event: %s" "\\`Event: *\\(.+\\)\\'" "[Event: %s]\n")
+    (note "Note" "\\`Note\\'" nil)
+    (condition "Condition: %s" "\\`Condition: \\(.+\\)\\'" nil))
+  "The kinds of top-level sections LispM writes: (KIND TITLE REGEXP PREFIX).
+TITLE is the heading's title, %s standing for the kind's argument: the
+agent a message is from, what an event is, what a condition says.
+REGEXP matches the title, in any case, its group the argument.  PREFIX,
+for a section the model reads as the user's, is what requests put before
+its text, %s again the argument.  A section of no kind is the user's own
+and is never sent.")
+
+(defun lispm-transcript-title (kind &optional arg)
+  "The title of a section of KIND, a key of `lispm-transcript-kinds', for ARG."
+  (format (nth 1 (assq kind lispm-transcript-kinds)) arg))
+
+(defun lispm-transcript-heading (kind &optional arg)
+  "The heading line of a section of KIND for ARG; see `lispm-transcript-title'."
+  (concat "* " (lispm-transcript-title kind arg) "\n"))
+
+(defun lispm-transcript-heading-regexp (&rest kinds)
+  "A regexp matching the heading line of a section of any of KINDS, the
+newline ending it included."
+  (concat "^\\* \\(?:"
+          (mapconcat (lambda (kind)
+                       (let ((regexp (nth 2 (assq kind lispm-transcript-kinds))))
+                         (substring regexp 2 -2)))
+                     kinds "\\|")
+          "\\)[ \t]*\\(?:\n\\|\\'\\)"))
+
+(defun lispm-transcript-kind (title)
+  "The kind of a top-level section titled TITLE, as (KIND . ARG), or nil."
+  (let ((case-fold-search t))
+    (cl-loop for (kind _ regexp) in lispm-transcript-kinds
+             when (string-match regexp title)
+             return (cons kind (match-string 1 title)))))
+
+(defun lispm-transcript-input-title (input)
+  "The title of the section INPUT starts in a session.
+INPUT is a plist with :from, the agent a message is from, or :event, as
+inbox entries are; with neither, it is the user's."
+  (cond ((plist-get input :from) (lispm-transcript-title 'message (plist-get input :from)))
+        ((plist-get input :event) (lispm-transcript-title 'event (plist-get input :event)))
+        (t (lispm-transcript-title 'user))))
+
 ;;;; Rendering
 
 (defun lispm-transcript-header (title keywords)
@@ -110,13 +164,13 @@ Keys are strings without the prefix, such as \"id\" or \"root\"."
                 keywords))
         (nreverse keywords)))))
 
-(defun lispm-transcript--body (text)
+(defun lispm-transcript-body (text)
   "TEXT as a section body that `lispm-transcript--text' reads back exactly."
   (concat (org-escape-code-in-string text) "\n"))
 
 (defun lispm-transcript-section (title text)
   "A top-level section with heading TITLE and body TEXT."
-  (concat "* " title "\n" (lispm-transcript--body text)))
+  (concat "* " title "\n" (lispm-transcript-body text)))
 
 (defun lispm-transcript-condition (title id type restarts message &optional resume)
   "Section of a condition awaiting a restart.
@@ -130,9 +184,9 @@ non-nil records that it stopped a turn in the middle, not between two."
           ":RESTARTS: " (mapconcat #'symbol-name restarts " ") "\n"
           (if resume ":RESUME: t\n" "")
           ":END:\n"
-          (lispm-transcript--body message)))
+          (lispm-transcript-body message)))
 
-(defun lispm-transcript--summary (input)
+(defun lispm-transcript-summary (input)
   "A short label for a tool call with INPUT: its main string argument."
   (when (consp input)
     (let ((value (or (cl-loop for key in '(pattern path buffer command query title name to agent id)
@@ -148,7 +202,7 @@ non-nil records that it stopped a turn in the middle, not between two."
   (let* ((name (alist-get 'name block))
          (input (alist-get 'input block))
          (why (and (consp input) (alist-get 'why input)))
-         (summary (lispm-transcript--summary input)))
+         (summary (lispm-transcript-summary input)))
     (concat "** " state " " name (if summary (concat "  " summary) "") "\n"
             ":PROPERTIES:\n"
             ":TOOL_ID:  " (alist-get 'id block) "\n"
@@ -156,7 +210,7 @@ non-nil records that it stopped a turn in the middle, not between two."
             ":END:\n"
             (if (stringp why) (concat "- why :: " (lispm--oneline why 200) "\n") "")
             "#+begin_src json\n"
-            (lispm-transcript--body (lispm--json-pretty input))
+            (lispm-transcript-body (lispm--json-pretty input))
             "#+end_src\n")))
 
 (defun lispm-transcript--raw-title (block)
@@ -183,7 +237,7 @@ non-nil records that it stopped a turn in the middle, not between two."
           ":BLOCK:    " (format "%s" (alist-get 'type block)) "\n"
           ":END:\n"
           "#+begin_src json\n"
-          (lispm-transcript--body (lispm--json-encode block))
+          (lispm-transcript-body (lispm--json-encode block))
           "#+end_src\n"))
 
 (defun lispm-transcript-result (text errorp &optional images directory)
@@ -192,7 +246,7 @@ IMAGES are files the result also holds, such as screenshots; they are
 linked, relative to DIRECTORY if given, one per line."
   (concat "*** " (if errorp "Error" "Result") "\n"
           "#+begin_example\n"
-          (lispm-transcript--body text)
+          (lispm-transcript-body text)
           "#+end_example\n"
           (mapconcat (lambda (file)
                        (format "[[file:%s]]\n"
@@ -296,22 +350,22 @@ The others become a line of text; see `lispm-context-images'."
   "Subsection of a call stopped at the error TEXT.
 RESTART, once one is chosen, is named in its heading."
   (concat "*** Stopped" (if restart (format ": %s" restart) "") "\n"
-          (lispm-transcript--body text)))
+          (lispm-transcript-body text)))
 
 (defun lispm-transcript-asks (name input)
   "Subsection of a call awaiting approval of a call of NAME on INPUT it makes."
-  (let ((summary (lispm-transcript--summary input))
+  (let ((summary (lispm-transcript-summary input))
         (why (and (consp input) (alist-get 'why input))))
     (concat "*** Asks: " name (if summary (concat "  " summary) "") "\n"
             (if (stringp why) (concat "- why :: " (lispm--oneline why 200) "\n") "")
             "#+begin_src json\n"
-            (lispm-transcript--body (lispm--json-pretty input))
+            (lispm-transcript-body (lispm--json-pretty input))
             "#+end_src\n")))
 
 (defun lispm-transcript-preview (diff)
   "Section text showing DIFF while a call awaits approval."
   (concat "*** Preview\n#+begin_src diff\n"
-          (lispm-transcript--body diff)
+          (lispm-transcript-body diff)
           "#+end_src\n"))
 
 (defun lispm-transcript-fold (pos)
@@ -337,7 +391,7 @@ Return an alist (TOOL-ID . MARKER) locating each tool-call heading."
       (let ((start (point)))
         (pcase (alist-get 'type block)
           ("text"
-           (insert "** Reply\n" (lispm-transcript--body (alist-get 'text block))))
+           (insert "** Reply\n" (lispm-transcript-body (alist-get 'text block))))
           ("tool_use"
            (insert (lispm-transcript--tool-use block (funcall state-function block)))
            ;; Results of earlier calls are inserted right where this
@@ -430,7 +484,7 @@ it, and where the section ends."
                          (split-string (match-string 3 line) ":" t)))))))
 
 (defun lispm-transcript--text (beg end)
-  "Read back text stored by `lispm-transcript--body' between BEG and END."
+  "Read back text stored by `lispm-transcript-body' between BEG and END."
   (let ((s (buffer-substring-no-properties beg end)))
     (org-unescape-code-in-string
      (if (string-suffix-p "\n" s) (substring s 0 -1) s))))
@@ -463,22 +517,16 @@ it, and where the section ends."
                  (format "^[ \t]*#\\+end_%s[ \t]*$" (regexp-quote kind)) end t)
             (lispm-transcript--text content-beg (match-beginning 0))))))))
 
-(defun lispm-transcript--role (title)
-  "Role of a top-level section titled TITLE.
-Return `system', `assistant', (user . PREFIX) or nil for the user's
-own notes."
-  (let ((case-fold-search t))
-    (cond ((string-match-p "\\`system\\'" title) 'system)
-          ((string-match-p "\\`user\\'" title) '(user . ""))
-          ((string-match-p "\\`assistant\\'" title) 'assistant)
-          ((string-match-p "\\`summary\\'" title)
-           '(user . "[Summary of the earlier conversation, handed over to this session]\n"))
-          ((string-match-p "\\`from lispm\\'" title)
-           '(user . "[From LispM, for the user]\n"))
-          ((string-match "\\`message from \\(.+\\)\\'" title)
-           (cons 'user (format "[Message from agent %s]\n" (match-string 1 title))))
-          ((string-match "\\`event: *\\(.+\\)\\'" title)
-           (cons 'user (format "[Event: %s]\n" (match-string 1 title)))))))
+(defun lispm-transcript--role (kind)
+  "Role of a top-level section of KIND, (KIND . ARG) as
+`lispm-transcript-kind' returns it.  Return `system', `assistant',
+\(user . PREFIX) or nil for a section never sent."
+  (pcase kind
+    (`(system . ,_) 'system)
+    (`(assistant . ,_) 'assistant)
+    (`(,kind . ,arg)
+     (when-let* ((prefix (nth 3 (assq kind lispm-transcript-kinds))))
+       (cons 'user (format prefix arg))))))
 
 (defun lispm-transcript--text-block (text)
   "A text content block holding TEXT."
@@ -498,20 +546,15 @@ IMAGES are files the result holds besides TEXT."
                   text))
     ,@(when errorp '((is_error . t)))))
 
-(defun lispm-transcript--parse-assistant (beg end)
-  "Parse an assistant section body between BEG and END.
-Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
-call a plist (:id :name :input :state :pos :properties), :pos being
-where its heading starts and :properties the alist of its heading's
-properties, and :stopped, the error it stopped at, for a call
-waiting at one (see `lispm-transcript-stopped')."
+(defun lispm-transcript--parts (beg end)
+  "The parts of an assistant section whose body is between BEG and END.
+See `lispm-transcript-parts'."
   (let* ((children (lispm-transcript--sections 2 beg end))
          (lead (string-trim (buffer-substring-no-properties
                              beg (if children (caar children) end))))
-         blocks results pending)
+         parts)
     (unless (string-empty-p lead)
-      (push (lispm-transcript--text-block (org-unescape-code-in-string lead))
-            blocks))
+      (push (list :kind 'text :text (org-unescape-code-in-string lead)) parts))
     (pcase-dolist (`(,hbeg ,bbeg ,cend) children)
       (let* ((heading (lispm-transcript--heading hbeg))
              (kids (lispm-transcript--sections 3 bbeg cend))
@@ -519,50 +562,90 @@ waiting at one (see `lispm-transcript-stopped')."
              (props (lispm-transcript--properties bbeg own-end)))
         (cond
          ((assoc "TOOL_ID" props)
-          (let* ((id (cdr (assoc "TOOL_ID" props)))
-                 (json (lispm-transcript--block bbeg own-end))
+          (let* ((json (lispm-transcript--block bbeg own-end))
                  (input (and json (ignore-errors (lispm--json-decode json))))
-                 (result (cl-loop for (kbeg kbody kend) in kids
-                                  for kid = (lispm-transcript--heading kbeg)
-                                  for title = (plist-get kid :title)
-                                  when (member title '("Result" "Error"))
-                                  return (if (member "cleared" (plist-get kid :tags))
-                                             (list lispm-transcript-cleared-text
-                                                   (equal title "Error"))
-                                           (list (or (lispm-transcript--block kbody kend) "")
-                                                 (equal title "Error")
-                                                 (lispm-transcript--images kbody kend))))))
-            (push `((type . "tool_use") (id . ,id)
-                    (name . ,(cdr (assoc "TOOL" props)))
-                    (input . ,(if (consp input) input nil)))
-                  blocks)
-            (cond (result
-                   (push (apply #'lispm-transcript--tool-result id result)
-                         results))
-                  ((member (plist-get heading :todo) '("WAITING" "APPROVED" "RUNNING"))
-                   (push (list :id id :name (cdr (assoc "TOOL" props))
-                               :input (if (consp input) input nil)
-                               :state (plist-get heading :todo) :pos hbeg
-                               :properties props
-                               :stopped (and (assoc "CONDITION" props)
-                                             (cl-loop for (kbeg kbody kend) in kids
-                                                      when (equal (plist-get (lispm-transcript--heading kbeg)
-                                                                             :title)
-                                                                  "Stopped")
-                                                      return (lispm-transcript--text kbody kend))))
-                         pending))
-                  (t
-                   (push (lispm-transcript--tool-result id "(no result recorded)" t)
-                         results)))))
-         ((equal (cdr (assoc "BLOCK" props)) "reasoning"))
+                 result preview stopped)
+            (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
+              (let* ((kid (lispm-transcript--heading kbeg))
+                     (title (plist-get kid :title)))
+                (cond ((and (member title '("Result" "Error")) (not result))
+                       (setq result (list :result (or (lispm-transcript--block kbody kend) "")
+                                          :error (equal title "Error")
+                                          :cleared (and (member "cleared" (plist-get kid :tags)) t)
+                                          :images (lispm-transcript--images kbody kend))))
+                      ((and (equal title "Preview") (not preview))
+                       (setq preview (lispm-transcript--block kbody kend)))
+                      ((and (equal title "Stopped") (not stopped))
+                       (setq stopped (lispm-transcript--text kbody kend))))))
+            (push (append (list :kind 'tool
+                                :id (cdr (assoc "TOOL_ID" props))
+                                :name (cdr (assoc "TOOL" props))
+                                :input (and (consp input) input)
+                                :state (plist-get heading :todo)
+                                :pos hbeg
+                                :properties props
+                                :preview preview
+                                :stopped (and (assoc "CONDITION" props) stopped))
+                          result)
+                  parts)))
          ((assoc "BLOCK" props)
-          (when-let* ((json (lispm-transcript--block bbeg own-end))
-                      (raw (ignore-errors (lispm--json-decode json))))
-            (push raw blocks)))
+          (push (list :kind 'block
+                      :type (cdr (assoc "BLOCK" props))
+                      :block (when-let* ((json (lispm-transcript--block bbeg own-end)))
+                               (ignore-errors (lispm--json-decode json)))
+                      :pos hbeg)
+                parts))
          ((equal (plist-get heading :title) "Reply")
-          (push (lispm-transcript--text-block (lispm-transcript--text bbeg own-end))
-                blocks)))))
+          (push (list :kind 'text :text (lispm-transcript--text bbeg own-end)) parts)))))
+    (nreverse parts)))
+
+(defun lispm-transcript--parse-assistant (beg end)
+  "Parse an assistant section body between BEG and END.
+Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
+call a plist (:id :name :input :state :pos :properties), :pos being
+where its heading starts and :properties the alist of its heading's
+properties, and :stopped, the error it stopped at, for a call
+waiting at one (see `lispm-transcript-stopped')."
+  (let (blocks results pending)
+    (dolist (part (lispm-transcript--parts beg end))
+      (pcase (plist-get part :kind)
+        ('text
+         (push (lispm-transcript--text-block (plist-get part :text)) blocks))
+        ('tool
+         (let ((id (plist-get part :id)))
+           (push `((type . "tool_use") (id . ,id)
+                   (name . ,(plist-get part :name))
+                   (input . ,(plist-get part :input)))
+                 blocks)
+           (cond ((plist-member part :result)
+                  (push (if (plist-get part :cleared)
+                            (lispm-transcript--tool-result id lispm-transcript-cleared-text
+                                                           (plist-get part :error))
+                          (lispm-transcript--tool-result id (plist-get part :result)
+                                                         (plist-get part :error)
+                                                         (plist-get part :images)))
+                        results))
+                 ((member (plist-get part :state) '("WAITING" "APPROVED" "RUNNING"))
+                  (push (list :id id :name (plist-get part :name)
+                              :input (plist-get part :input)
+                              :state (plist-get part :state) :pos (plist-get part :pos)
+                              :properties (plist-get part :properties)
+                              :stopped (plist-get part :stopped))
+                        pending))
+                 (t
+                  (push (lispm-transcript--tool-result id "(no result recorded)" t)
+                        results)))))
+        ('block
+         (when (and (plist-get part :block) (not (equal (plist-get part :type) "reasoning")))
+           (push (plist-get part :block) blocks)))))
     (list (nreverse blocks) (nreverse results) (nreverse pending))))
+
+(defun lispm-transcript--after-drawer (beg end)
+  "Where the text under the property drawer between BEG and END starts:
+right after it, or BEG without one."
+  (save-excursion
+    (goto-char beg)
+    (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) beg)))
 
 (defun lispm-transcript--condition (hbeg bbeg end)
   "The condition whose section starts at HBEG, its body at BBEG, up to END.
@@ -575,9 +658,7 @@ one chosen, once it is) and :value (the value it was given, if any),
     (when (string-match "\\`Condition: \\(.*\\)\\'" title)
       (let* ((name (match-string 1 title))
              (props (lispm-transcript--properties bbeg end))
-             (text (save-excursion
-                     (goto-char bbeg)
-                     (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) bbeg)))
+             (text (lispm-transcript--after-drawer bbeg end))
              (restart (cdr (assoc "RESTART" props)))
              (value (cdr (assoc "VALUE" props))))
         (list :id (cdr (assoc "CONDITION_ID" props))
@@ -604,6 +685,66 @@ one chosen, once it is) and :value (the value it was given, if any),
       (pop out))
     out))
 
+;;;; Sections, as other code reads them
+
+(defun lispm-transcript-sections (&optional beg end)
+  "The top-level sections of the current buffer between BEG and END, by
+default all of it, in order.  Each is a plist: :kind and :arg, as
+`lispm-transcript-kind' reads its title, nil for the user's own; its
+heading's :title, :todo and :tags; :ignore, non-nil when it is tagged
+:ignore:, left out of requests; and :start, :body and :end, where its
+heading and its body start and where it ends."
+  (cl-loop for (start body end) in (lispm-transcript--sections 1 (or beg (point-min)) (or end (point-max)))
+           for heading = (lispm-transcript--heading start)
+           for title = (or (plist-get heading :title) "")
+           for kind = (lispm-transcript-kind title)
+           collect (list :kind (car kind) :arg (cdr kind)
+                         :title title :todo (plist-get heading :todo) :tags (plist-get heading :tags)
+                         :ignore (and (member "ignore" (plist-get heading :tags)) t)
+                         :start start :body body :end end)))
+
+(defun lispm-transcript-section-text (section)
+  "The text of SECTION's body, as it was written, trimmed."
+  (string-trim (org-unescape-code-in-string
+                (buffer-substring-no-properties (plist-get section :body) (plist-get section :end)))))
+
+(defun lispm-transcript-section-input (section)
+  "The text requests carry for SECTION, a user's input: its text after its
+kind's prefix.  Nil for a section left out or holding nothing."
+  (when-let* (((not (plist-get section :ignore)))
+              (role (lispm-transcript--role (cons (plist-get section :kind) (plist-get section :arg))))
+              ((consp role))
+              (text (lispm-transcript-section-text section))
+              ((not (string-empty-p text))))
+    (concat (cdr role) text)))
+
+(defun lispm-transcript-parts (section)
+  "The parts of the assistant SECTION, in order.  Each is a plist:
+- (:kind text :text TEXT), a reply;
+- (:kind tool ...), a tool call: :id, :name, :input, :state (its TODO
+  keyword), :pos (where its heading starts), :properties (its drawer),
+  :preview, :stopped (the error it waits at a restart after); once it
+  has one, :result, :error, :cleared (tagged :cleared:) and :images;
+- (:kind block :type TYPE :block BLOCK :pos POS), a content block kept
+  as JSON, such as thinking, BLOCK decoded or nil."
+  (lispm-transcript--parts (plist-get section :body) (plist-get section :end)))
+
+(defun lispm-transcript-section-condition (section)
+  "The condition SECTION holds, as `lispm-transcript--condition' reads it,
+or nil."
+  (lispm-transcript--condition (plist-get section :start) (plist-get section :body)
+                               (plist-get section :end)))
+
+(defun lispm-transcript-properties (beg end)
+  "Alist of the properties in the first drawer between BEG and END."
+  (lispm-transcript--properties beg end))
+
+(defun lispm-transcript-text-after-drawer (beg end)
+  "The text between BEG and END under the property drawer there, read back
+as `lispm-transcript-body' stored it, or nil when there is none."
+  (let ((start (lispm-transcript--after-drawer beg end)))
+    (and (< start end) (lispm-transcript--text start end))))
+
 (defun lispm-transcript-results ()
   "The tool results of the current session, oldest first.
 Each is a list (POS BYTES CLEARED): where its heading starts, the size
@@ -617,7 +758,7 @@ Results in responses that are not sent (tagged :ignore:) are left out."
           (let ((heading (lispm-transcript--heading hbeg)))
             (when (and heading
                        (not (member "ignore" (plist-get heading :tags)))
-                       (eq (lispm-transcript--role (plist-get heading :title)) 'assistant))
+                       (eq (car (lispm-transcript-kind (plist-get heading :title))) 'assistant))
               (pcase-dolist (`(,_ ,cbeg ,cend) (lispm-transcript--sections 2 bbeg end))
                 (pcase-dolist (`(,kbeg ,kbody ,kend) (lispm-transcript--sections 3 cbeg cend))
                   (let ((kid (lispm-transcript--heading kbeg)))
@@ -639,27 +780,24 @@ as `lispm-transcript--condition' describes it) and :last-role."
     (save-restriction
       (widen)
       (let (system messages pending condition)
-        (pcase-dolist (`(,hbeg ,bbeg ,end) (lispm-transcript--sections 1 (point-min) (point-max)))
-          (let* ((heading (lispm-transcript--heading hbeg))
-                 (role (and heading
-                            (not (member "ignore" (plist-get heading :tags)))
-                            (lispm-transcript--role (plist-get heading :title)))))
-            (when (and (null role) (equal (plist-get heading :todo) "WAITING"))
-              (when-let* ((found (lispm-transcript--condition hbeg bbeg end)))
+        (dolist (section (lispm-transcript-sections))
+          (let ((role (and (not (plist-get section :ignore))
+                           (lispm-transcript--role (cons (plist-get section :kind)
+                                                         (plist-get section :arg))))))
+            (when (and (null role) (equal (plist-get section :todo) "WAITING"))
+              (when-let* ((found (lispm-transcript-section-condition section)))
                 (setq condition found)))
             (pcase role
-              ('system (setq system (lispm-transcript--text bbeg end)))
-              (`(user . ,prefix)
-               (let ((text (string-trim (org-unescape-code-in-string
-                                         (buffer-substring-no-properties bbeg end)))))
-                 (unless (string-empty-p text)
-                   (push `((role . "user")
-                           (content . ,(vector (lispm-transcript--text-block
-                                                (concat prefix text)))))
-                         messages))))
+              ('system (setq system (lispm-transcript--text (plist-get section :body)
+                                                            (plist-get section :end))))
+              (`(user . ,_)
+               (when-let* ((text (lispm-transcript-section-input section)))
+                 (push `((role . "user") (content . ,(vector (lispm-transcript--text-block text))))
+                       messages)))
               ('assistant
                (pcase-let ((`(,blocks ,results ,calls)
-                            (lispm-transcript--parse-assistant bbeg end)))
+                            (lispm-transcript--parse-assistant (plist-get section :body)
+                                                               (plist-get section :end))))
                  (when blocks
                    (push `((role . "assistant") (content . ,(vconcat blocks))) messages))
                  (when results

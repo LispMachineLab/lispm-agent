@@ -440,10 +440,10 @@ the continuation keeps the title the conversation is listed under."
                 ,@(when-let* ((title (and previous
                                           (plist-get (lispm--session-description previous) :title))))
                     `(("title" . ,(lispm--oneline title 200))))))
-             (lispm-transcript-section "System" (lispm-system-prompt agent))
-             (if summary (lispm-transcript-section "Summary" summary) "")
+             (lispm-transcript-section (lispm-transcript-title 'system) (lispm-system-prompt agent))
+             (if summary (lispm-transcript-section (lispm-transcript-title 'summary) summary) "")
              (or kept "")
-             "* User\n")
+             (lispm-transcript-heading 'user))
      nil file nil 'silent)
     file))
 
@@ -454,7 +454,7 @@ the continuation keeps the title the conversation is listed under."
       (setq lispm-session-agent agent)
       (lispm-session-mode 1)
       (goto-char (point-min))
-      (when (re-search-forward "^\\* System" nil t)
+      (when (re-search-forward (lispm-transcript-heading-regexp 'system) nil t)
         (lispm-transcript-fold (match-beginning 0)))
       (goto-char (point-max)))
     (setf (lispm-agent-buffer agent) buffer)
@@ -592,14 +592,11 @@ its request was made from, for the turn to be taken up again."
 
 (defun lispm--first-prompt ()
   "First line of the first input in the current session text, or nil."
-  (goto-char (point-min))
-  (when (re-search-forward "^\\* \\(?:User\\|Message from .*\\|Event: .*\\)[ \t]*\n" nil t)
-    (let* ((start (point))
-           (end (if (re-search-forward "^\\* " nil t) (match-beginning 0) (point-max)))
-           (text (string-trim (org-unescape-code-in-string
-                               (buffer-substring-no-properties start end)))))
-      (unless (string-empty-p text)
-        (car (split-string text "\n"))))))
+  (when-let* ((input (seq-find (lambda (section) (memq (plist-get section :kind) '(user message event)))
+                               (lispm-transcript-sections)))
+              (text (lispm-transcript-section-text input))
+              ((not (string-empty-p text))))
+    (car (split-string text "\n"))))
 
 (defun lispm--session-description (file)
   "Describe the session recorded in FILE, or nil if it holds none.
@@ -682,7 +679,7 @@ Windows that showed the end of the buffer keep following it."
   (save-excursion
     (goto-char (point-max))
     (and (re-search-backward "^\\* " nil t)
-         (looking-at "\\* User[ \t]*\\(?:\n[ \t\n]*\\)?\\'")
+         (looking-at (concat (lispm-transcript-heading-regexp 'user) "[ \t\n]*\\'"))
          (point))))
 
 (defun lispm--save-session (agent)
@@ -708,15 +705,9 @@ It goes before the input heading a turn ended with, if any."
   "Note TEXT as an event in AGENT's session without starting a turn.
 The event's heading is \"Event: TITLE\".  The model reads it with
 the next input."
-  (lispm--add-section agent (concat "Event: " title) text))
+  (lispm--add-section agent (lispm-transcript-title 'event title) text))
 
 ;;;; Turns
-
-(defun lispm--entry-title (entry)
-  "Heading of the section holding inbox ENTRY."
-  (cond ((plist-get entry :from) (format "Message from %s" (plist-get entry :from)))
-        ((plist-get entry :event) (format "Event: %s" (plist-get entry :event)))
-        (t "User")))
 
 (defun lispm-reply-value (reply)
   "The value a turn returned with REPLY, as a turn callback gets it; or nil.
@@ -804,7 +795,7 @@ takes it up (see `lispm--resume-calls')."
       (let ((input (lispm--input-heading-p)))
         (when input (delete-region input (point-max))))
       (lispm--newline)
-      (insert (lispm-transcript-section (lispm--entry-title entry) (plist-get entry :text)))))
+      (insert (lispm-transcript-section (lispm-transcript-input-title entry) (plist-get entry :text)))))
   (lispm-inbox-save agent)
   (with-demoted-errors "LispM: taking a snapshot: %S"
     (lispm-journal-begin agent))
@@ -964,7 +955,7 @@ what a session opened again after Emacs stopped takes up."
     (lispm--unsaved
       (lispm--newline)
       (let ((start (point-marker)))
-        (insert "* Assistant\n")
+        (insert (lispm-transcript-heading 'assistant))
         (setq lispm--live (cons start (copy-marker (point) t))
               lispm--live-kind nil)))))
 
@@ -1084,7 +1075,7 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE)."
       (when content
         (setq calls (lispm--in-session agent
                       (lispm--newline)
-                      (insert "* Assistant\n")
+                      (insert (lispm-transcript-heading 'assistant))
                       (lispm-transcript-insert-blocks
                        content
                        (lambda (b) (car (alist-get (alist-get 'id b) decisions nil nil #'equal)))))))
@@ -1249,8 +1240,8 @@ result holds besides TEXT."
     (lispm--in-session agent
       (lispm--newline)
       (when note
-        (insert (lispm-transcript-section "Note" note)))
-      (insert "* User\n"))
+        (insert (lispm-transcript-section (lispm-transcript-title 'note) note)))
+      (insert (lispm-transcript-heading 'user)))
     (lispm-set-state agent 'idle)
     (lispm--save-session agent)
     (with-demoted-errors "LispM: taking a snapshot: %S"
@@ -1336,7 +1327,7 @@ condition's; without one, say how to go on."
                   (save-restriction
                     (widen)
                     (goto-char (point-max))
-                    (and (re-search-backward "^\\* User[ \t]*$" nil t)
+                    (and (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
                          (> (point) (plist-get condition :marker))
                          (string-trim (buffer-substring-no-properties
                                        (min (point-max) (1+ (line-end-position)))
@@ -2055,13 +2046,10 @@ says the same."
         (if (eq restart 'abort)
             (delete-region marker (lispm-transcript-subtree-end marker 1))
           (lispm-transcript-set-state marker "DONE")
-          (when (re-search-forward "^:END:$" (lispm-transcript-subtree-end marker 1) t)
-            (beginning-of-line)
-            (insert (format ":RESTART: %s\n" restart)
-                    (if value
-                        (format ":VALUE: %s\n" (let ((print-escape-newlines t))
-                                                  (prin1-to-string value)))
-                      ""))))))))
+          (lispm-transcript-set-property marker "RESTART" restart)
+          (when value
+            (lispm-transcript-set-property marker "VALUE" (let ((print-escape-newlines t))
+                                                             (prin1-to-string value)))))))))
 
 (defun lispm-choose-restart (&optional agent condition)
   "Choose a restart for CONDITION, by default the one AGENT asks about.
@@ -2225,7 +2213,7 @@ if there is one (a response may have had nothing in it): tagged
     (lispm--in-session agent
       (goto-char marker)
       (when (and (re-search-backward "^\\* " nil t)
-                 (looking-at "\\* Assistant[ \t]*$"))
+                 (looking-at (lispm-transcript-heading-regexp 'assistant)))
         (end-of-line)
         (insert " :ignore:")))))
 
@@ -2242,7 +2230,7 @@ The limit stays raised for the rest of AGENT's turn."
 
 (defun lispm--tell-for-user (agent text)
   "Tell AGENT's model TEXT, as LispM passing on the user's choice; ask it again."
-  (lispm--add-section agent "From LispM" text)
+  (lispm--add-section agent (lispm-transcript-title 'from-lispm) text)
   (lispm--request agent))
 
 (defun lispm--restart-keep (agent _condition _value)
@@ -2445,49 +2433,46 @@ out, and the beginning of the input the first of them handled.  See
 `lispm-compact-keep-turns'."
   (lispm--in-session agent
     (let* ((end (or (lispm--input-heading-p) (point-max)))
-           (sections (seq-filter (lambda (section) (< (car section) end))
-                                 (lispm-transcript--sections 1 (point-min) (point-max))))
-           (title (lambda (section)
-                    (or (plist-get (lispm-transcript--heading (car section)) :title) "")))
-           (inputs (seq-filter (lambda (section)
-                                 (string-match-p "\\`\\(?:User\\|Message from .+\\|Event: .+\\)\\'"
-                                                 (funcall title section)))
+           (sections (seq-filter (lambda (section) (< (plist-get section :start) end))
+                                 (lispm-transcript-sections)))
+           (inputs (seq-filter (lambda (section) (memq (plist-get section :kind) '(user message event)))
                                sections))
            ;; A quarter of the threshold, in bytes; with none, of its default.
            (limit (* 3 (/ (or lispm-compact-threshold
                               (eval (car (get 'lispm-compact-threshold 'standard-value)) t))
                           4))))
       ;; The turn that saved memory for this handover goes with the rest.
-      (when (and inputs (equal (funcall title (car (last inputs))) "Event: compaction"))
-        (setq end (caar (last inputs))
+      (when-let* ((last (car (last inputs)))
+                  ((eq (plist-get last :kind) 'event))
+                  ((equal (plist-get last :arg) "compaction")))
+        (setq end (plist-get last :start)
               inputs (butlast inputs)))
       (cl-loop for n from (min lispm-compact-keep-turns (1- (length inputs))) downto 1
                for first = (nth (- (length inputs) n) inputs)
                for text = (mapconcat
                            (lambda (section)
-                             (if (or (< (car section) (car first))
-                                     (>= (car section) end)
-                                     (string-prefix-p "Condition: " (funcall title section)))
+                             (if (or (< (plist-get section :start) (plist-get first :start))
+                                     (>= (plist-get section :start) end)
+                                     (eq (plist-get section :kind) 'condition))
                                  ""
-                               (buffer-substring-no-properties (car section)
-                                                               (min (nth 2 section) end))))
+                               (buffer-substring-no-properties (plist-get section :start)
+                                                               (min (plist-get section :end) end))))
                            sections "")
                when (<= (string-bytes text) limit)
                return (cons (if (string-suffix-p "\n" text) text (concat text "\n"))
-                            (lispm--oneline (lispm-transcript--text (nth 1 first) (nth 2 first))
-                                            60))))))
+                            (lispm--oneline (lispm-transcript-section-text first) 60))))))
 
 (defun lispm--has-history-p (agent)
   "Non-nil if AGENT's session holds a response: something to hand over."
   (with-current-buffer (lispm-agent-buffer agent)
     (save-excursion
       (goto-char (point-min))
-      (re-search-forward "^\\* Assistant[ \t]*$" nil t))))
+      (re-search-forward (lispm-transcript-heading-regexp 'assistant) nil t))))
 
 (defun lispm--take-input (agent)
   "Remove the text the user typed under AGENT's last \"* User\" and return it."
   (lispm--in-session agent
-    (when (re-search-backward "^\\* User[ \t]*$" nil t)
+    (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
       (let ((text (string-trim (buffer-substring-no-properties
                                 (min (point-max) (1+ (line-end-position))) (point-max)))))
         (delete-region (point) (point-max))
@@ -2558,7 +2543,8 @@ RESUME non-nil goes on with the turn there."
             (when input (delete-region input (point-max))))
           (lispm--newline)
           (insert (lispm-transcript-section
-                   "Note" (format "Continued in [[file:%s]]." (abbreviate-file-name file)))))
+                   (lispm-transcript-title 'note)
+                   (format "Continued in [[file:%s]]." (abbreviate-file-name file)))))
         (lispm--save-session agent)
         (let ((new (lispm--visit-session agent file)))
           (dolist (window (get-buffer-window-list old nil t))
