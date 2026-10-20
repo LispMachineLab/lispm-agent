@@ -73,11 +73,11 @@ topic, in %s. No quotes, no final punctuation."
         (cdr (assoc "title" (lispm-transcript-keywords)))))))
 
 (defun lispm-title--first-prompt (agent)
-  "The text of the first message in AGENT's session."
+  "The text of the first message in AGENT's session, as requests carry it."
   (with-current-buffer (lispm-agent-buffer agent)
-    (let ((first (car (plist-get (lispm-transcript-parse) :messages))))
-      (alist-get 'text (seq-find (lambda (block) (equal (alist-get 'type block) "text"))
-                                 (alist-get 'content first))))))
+    (save-restriction
+      (widen)
+      (seq-some #'lispm-transcript-section-input (lispm-transcript-sections)))))
 
 (defun lispm-title--clean (text)
   "TEXT, a model's reply, as a title: its first line, without quotes."

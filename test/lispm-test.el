@@ -209,6 +209,42 @@ BODY can use `project', a scratch directory for agents to work in."
       (should (equal (alist-get 'is_error (aref (alist-get 'content (nth 2 (plist-get parsed :messages))) 0))
                      t)))))
 
+(ert-deftest lispm-test-transcript-sections ()
+  "Other code reads a session through its sections: each of a kind its
+title names, the user's inputs as requests carry them, and an assistant
+section's parts, a cleared result read back whole."
+  (with-temp-buffer
+    (insert (lispm-transcript-header "t" '(("agent" . "t")))
+            (lispm-transcript-section (lispm-transcript-title 'system) "Be brief.")
+            (lispm-transcript-section (lispm-transcript-input-title '(:from "boss")) "do it")
+            (lispm-transcript-section "Notes" "mine")
+            (lispm-transcript-heading 'assistant)
+            "** Reply\nOn it.\n"
+            "** DONE read_file  a\n:PROPERTIES:\n:TOOL_ID:  t1\n:TOOL:     read_file\n:END:\n"
+            "#+begin_src json\n{\"path\": \"a\"}\n#+end_src\n"
+            "*** Result :cleared:\n#+begin_example\nold output\n#+end_example\n"
+            "** Thinking: hm\n:PROPERTIES:\n:BLOCK:    thinking\n:END:\n"
+            "#+begin_src json\n{\"type\": \"thinking\", \"thinking\": \"hm\"}\n#+end_src\n"
+            (lispm-transcript-section (lispm-transcript-input-title '(:event "timer")) "tick")
+            "* User :ignore:\nleft out\n")
+    (org-mode)
+    (let ((sections (lispm-transcript-sections)))
+      (should (equal (mapcar (lambda (s) (list (plist-get s :kind) (plist-get s :arg))) sections)
+                     '((system nil) (message "boss") (nil nil) (assistant nil) (event "timer") (user nil))))
+      (should (equal (mapcar #'lispm-transcript-section-input sections)
+                     '(nil "[Message from agent boss]\ndo it" nil nil "[Event: timer]\ntick" nil)))
+      (should (plist-get (car (last sections)) :ignore))
+      (pcase-let ((`(,reply ,call ,thinking) (lispm-transcript-parts (nth 3 sections))))
+        (should (equal reply '(:kind text :text "On it.")))
+        (should (equal (plist-get call :input) '((path . "a"))))
+        (should (equal (plist-get call :result) "old output"))
+        (should (plist-get call :cleared))
+        (should (equal (plist-get thinking :block) '((type . "thinking") (thinking . "hm"))))))
+    (should (equal (lispm-transcript-kind "event:  after-save-hook") '(event . "after-save-hook")))
+    (goto-char (point-min))
+    (should (re-search-forward (lispm-transcript-heading-regexp 'user 'event) nil t))
+    (should (looking-at "tick"))))
+
 ;;;; Streaming
 
 (defun lispm-test--sse (&rest events)

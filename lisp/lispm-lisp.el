@@ -681,7 +681,7 @@ way.  The program's errors are signaled."
   (when-let* ((log (lispm-lisp--run-log run)))
     (concat "Tool calls:\n"
             (mapconcat (pcase-lambda (`(,name ,input ,outcome ,_text))
-                         (let ((summary (lispm-transcript--summary input)))
+                         (let ((summary (lispm-transcript-summary input)))
                            (format "- %s%s%s" name (if summary (concat " " summary) "")
                                    (pcase outcome ('value "") (_ (format " (%s)" outcome))))))
                        (seq-take log 30) "\n")

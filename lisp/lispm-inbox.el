@@ -73,16 +73,10 @@ having been lost with Emacs.")
   "A fresh id for an inbox entry."
   (concat "i" (lispm--new-id)))
 
-(defun lispm-inbox--title (entry)
-  "Heading of ENTRY, as a section of the session it starts would be titled."
-  (cond ((plist-get entry :from) (format "Message from %s" (plist-get entry :from)))
-        ((plist-get entry :event) (format "Event: %s" (plist-get entry :event)))
-        (t "User")))
-
 (defun lispm-inbox--render (agent entry state)
   "Section of AGENT's inbox ENTRY in STATE, `queued' or `running'.
 A running entry's text is in the session already, and is left out."
-  (concat "* " (upcase (symbol-name state)) " " (lispm-inbox--title entry) "\n"
+  (concat "* " (upcase (symbol-name state)) " " (lispm-transcript-input-title entry) "\n"
           ":PROPERTIES:\n"
           ":ENTRY:    " (plist-get entry :id) "\n"
           ":AGENT:    " (symbol-name (lispm-agent-name agent)) "\n"
@@ -93,7 +87,7 @@ A running entry's text is in the session already, and is left out."
           ":QUEUED:   " (or (plist-get entry :queued) (format-time-string "[%Y-%m-%d %a %H:%M]")) "\n"
           ":END:\n"
           (if (and (eq state 'queued) (plist-get entry :text))
-              (lispm-transcript--body (plist-get entry :text))
+              (lispm-transcript-body (plist-get entry :text))
             "")))
 
 (defun lispm-inbox--parse ()
@@ -104,18 +98,17 @@ Each has :state (`queued' or `running'), :id, :agent, :session, :from,
     (save-restriction
       (widen)
       (let (entries)
-        (pcase-dolist (`(,beg ,body ,end) (lispm-transcript--sections 1 (point-min) (point-max)))
-          (let ((line (buffer-substring-no-properties beg (progn (goto-char beg) (line-end-position))))
-                (case-fold-search nil))
-            (when (string-match "\\`\\* \\(QUEUED\\|RUNNING\\) " line)
-              (let* ((state (if (equal (match-string 1 line) "QUEUED") 'queued 'running))
-                     (props (lispm-transcript--properties body end))
+        (dolist (section (lispm-transcript-sections))
+          ;; RUNNING is a keyword of sessions too, and reads as one.
+          (let ((state (cond ((equal (plist-get section :todo) "RUNNING") 'running)
+                             ((string-prefix-p "QUEUED " (plist-get section :title)) 'queued)))
+                (body (plist-get section :body))
+                (end (plist-get section :end)))
+            (when state
+              (let* ((props (lispm-transcript-properties body end))
                      (get (lambda (name)
                             (let ((value (cdr (assoc name props))))
-                              (and value (not (string-empty-p value)) value))))
-                     (text-start (save-excursion
-                                   (goto-char body)
-                                   (if (re-search-forward "^[ \t]*:END:[ \t]*\n" end t) (point) body))))
+                              (and value (not (string-empty-p value)) value)))))
                 (push (list :state state
                             :id (funcall get "ENTRY")
                             :agent (funcall get "AGENT")
@@ -124,8 +117,8 @@ Each has :state (`queued' or `running'), :id, :agent, :session, :from,
                             :event (funcall get "EVENT")
                             :reply-to (funcall get "REPLY_TO")
                             :queued (funcall get "QUEUED")
-                            :text (and (< text-start end) (lispm-transcript--text text-start end))
-                            :beg beg :end end)
+                            :text (lispm-transcript-text-after-drawer body end)
+                            :beg (plist-get section :start) :end end)
                       entries)))))
         (nreverse entries)))))
 
