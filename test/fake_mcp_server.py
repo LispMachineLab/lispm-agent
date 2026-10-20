@@ -2,7 +2,7 @@
 # fake_mcp_server.py --- a Model Context Protocol server for LispM's tests
 #
 # Copyright (C) 2026  Ryan.K
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Speaks MCP over stdio (newline-delimited JSON-RPC) with three tools:
 # echo (text back, with the arguments as received), snap (a text and
