@@ -101,6 +101,7 @@ conversation per agent, and you can run several and come back to any of them.
 | ~RET~               | send; with nothing written, answer the prompt shown              |
 | ~S-RET~, ~C-j~      | new line                                                         |
 | ~TAB~               | show the item at point in full, or briefly again; complete ~/~   |
+| ~RET~ on an object  | act on it: a file at its line, an agent inspected, a symbol, ... |
 | ~1~ ~2~ ~3~ ...     | answer the prompt: an approval, or how to go on after a failure  |
 | ~M-p~, ~M-n~        | previous and next message sent                                   |
 | ~C-c C-c~           | interrupt the agent                                              |
@@ -116,6 +117,7 @@ conversation per agent, and you can run several and come back to any of them.
 | ~lispm-ask~            | give the project's agent a request from the minibuffer             |
 | ~lispm-ask-region~     | ask the project's agent about the region                           |
 | ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
+| ~lispm-inspect~        | one agent whole: calls, inbox, delegations, policy, journal        |
 | ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
 | ~lispm-review~         | review pending calls, or choose a restart (~C-c C-y~ in org)       |
 | ~lispm-turn-diff~      | show what an agent changed in its last turn (~C-u~: in another)    |
@@ -123,6 +125,12 @@ conversation per agent, and you can run several and come back to any of them.
 | ~lispm-resume-agents~  | resume every agent that was at work when Emacs last stopped        |
 | ~lispm-show-request~   | show the full request that will be sent to the model next          |
 | ~lispm-history~        | git history of memory, tasks and sessions                          |
+
+What the chat shows are objects, as on a Lisp Machine, not only text: the file a call read,
+the ~file:line~ places and org links in replies and results, the agents named, the symbols
+written as code. They light up under the mouse; ~RET~ or a click acts on one, visiting the file
+at the line, inspecting the agent, describing the symbol. On a call's ~⏺~ it shows the call in
+the transcript, on a tool's name the tool's definition.
 
 ** The org transcript
 
@@ -212,7 +220,11 @@ Agents collaborate through ~ask_agent~ and ~send_message~. ~ask_agent~ delegates
 agent and waits for its reply; given a role instead, it starts a helper of that role in the
 same project, which retires once it has replied (a subagent) and may do no more than the agent
 that asked for it. With the ~worktree~ skill (see Skills), a helper works in a git worktree of
-its own instead, so that several can change the same files at once. Project task lists can
+its own instead, so that several can change the same files at once. What passes between agents
+can be more than text: they name places as ~[[file:PATH::LINE]]~ and buffers as
+~[[buffer:NAME]]~, which their tools take as files and buffers, and a helper can return a value
+with its reply (~return_value~), such as a list of places, which ~ask_agent~ gives as JSON.
+~inspect_agent~ shows an agent in depth, as ~M-x lispm-inspect~ (~/inspect~) shows it to you. Project task lists can
 join your agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
 
 * When Emacs stops
@@ -403,6 +415,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
 | lisp/lispm-skills.el     | skills: loading them, their code and tools                       |
+| lisp/lispm-inspect.el    | presentations (objects in text to act on), the agent inspector   |
 | lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |
 | skills/                  | the skills LispM comes with: web, worktree                       |
 | test/                    | ERT suite, fake model, SSE and MCP servers                       |

@@ -680,12 +680,18 @@ the next input."
         ((plist-get entry :event) (format "Event: %s" (plist-get entry :event)))
         (t "User")))
 
+(defun lispm-reply-value (reply)
+  "The value a turn returned with REPLY, as a turn callback gets it; or nil.
+An agent returns one with return_value: data, decoded from JSON."
+  (and (stringp reply) (> (length reply) 0) (get-text-property 0 'lispm-value reply)))
+
 (cl-defun lispm-tell (agent text &key from event callback reply-to)
   "Give AGENT the input TEXT; it starts working as soon as it is idle.
 FROM names the agent sending it; EVENT describes the hook or timer
 that produced it (pending events with the same description are
 coalesced).  CALLBACK, if given, is called with the agent's final
-reply when the turn handling TEXT ends.  REPLY-TO, a string, says who
+reply when the turn handling TEXT ends, and a value the turn returned
+with it, if any (see `lispm-reply-value').  REPLY-TO, a string, says who
 waits for that reply in a way that outlives Emacs: the input is kept
 in the project's inbox file until its turn ends, and if Emacs stops
 before, `lispm-inbox-callback-function' makes a callback of it again."
@@ -743,6 +749,7 @@ takes it up (see `lispm--resume-calls')."
   (cl-incf (lispm-agent-turn agent))
   (setf (lispm-agent-steps agent) 0
         (lispm-agent-last-reply agent) nil
+        (lispm-agent-value agent) nil
         (lispm-agent-auto-restarts agent) nil
         (lispm-agent-max-tokens agent) nil
         ;; Another agent's message or an event: nobody may be watching.
@@ -1188,10 +1195,14 @@ result holds besides TEXT."
     (lispm--save-session agent)
     (with-demoted-errors "LispM: taking a snapshot: %S"
       (lispm-journal-end agent))
-    (let ((answer (string-trim (concat reply (if note (concat "\n\n" note) "")))))
+    (let* ((answer (string-trim (concat reply (if note (concat "\n\n" note) ""))))
+           (answer (if (string-empty-p answer) "(no reply)" answer)))
+      ;; A value the turn returned goes with the reply, as its property.
+      (when (lispm-agent-value agent)
+        (setq answer (propertize answer 'lispm-value (lispm-agent-value agent))))
       (dolist (callback callbacks)
         (with-demoted-errors "lispm turn callback: %S"
-          (funcall callback (if (string-empty-p answer) "(no reply)" answer)))))
+          (funcall callback answer))))
     ;; Only once whoever waited has the reply: if Emacs stopped before,
     ;; the entry would tell them again.
     (setf (lispm-agent-entry agent) nil)

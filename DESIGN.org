@@ -17,6 +17,7 @@ implementation:
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
+| Presentations, inspector  | text is the objects it shows; one agent shown whole              | [[file:lisp/lispm-inspect.el][lispm-inspect.el]]: ~lispm-act~, ~lispm-inspect~        |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
@@ -155,6 +156,20 @@ area is not part of the context, so a draft is never sent by accident. Tool call
 kind (~Read(path)~ with a line count, ~Update(path)~ with its diff, ~Bash(command)~ with its
 first lines of output), and ~TAB~ shows any of them in full. ~/transcript~ opens the org
 document for the edits above; ~lispm-interface~ set to ~org~ makes it the interface again.
+
+*Objects, not strings* ([[file:lisp/lispm-inspect.el][lispm-inspect.el]]). On a Lisp Machine the screen showed objects: Genera's
+presentations made a pathname or an instance on the screen the object itself, with commands by
+its type. The chat does the same. A presentation is text whose ~lispm-object~ property is the
+object it shows: a file and a line, a buffer, an agent, a symbol, a tool, a call. The chat
+presents a call's argument (~Read(a.el)~ is the file), the ~file:line~ places and org links in
+replies and results, agents' names, and code that names a symbol or a file; ~RET~ or a click
+acts by type: the file is visited at the line, the agent inspected, the symbol described, the
+tool's definition shown, the call found in the transcript. They look as they would and light up
+under the mouse, as Genera's did. The *inspector* (~lispm-inspect~) shows one agent whole, as
+Genera's inspector showed an object: identity, state and model, policy and ceiling, the calls it
+has pending and what they ask for, its inbox, whom it waits on and who waits on it, the files
+its turns changed, its tools and triggers, all of them presentations; agents have it as the tool
+~inspect_agent~.
 
 * 3. Tool calls as Emacs actions
 
@@ -480,9 +495,10 @@ Agents do not only answer when asked. Any Emacs hook or timer can wake one up:
 * 7. Multi-agent collaboration
 
 Agents share one Emacs: the same buffers, the same files, the same event loop. Collaboration
-needs only three tools:
+needs only three tools, and two more to see each other and to answer with data:
 
-- ~list_agents~: who is running, in which project, doing what, and which roles exist;
+- ~list_agents~: who is running, in which project, doing what, and which roles exist
+  (~inspect_agent~ shows one in depth);
 - ~send_message~: delivered to the other agent's inbox, where it becomes a
   ~* Message from X~ turn;
 - ~ask_agent~: *delegation*. The caller's tool call stays pending (an asynchronous tool); when
@@ -492,6 +508,15 @@ needs only three tools:
   whose session stays on record. *A helper may do no more than its caller*: for each permission
   class its policy is the stricter of its role's and its caller's (its ~ceiling~), so a reviewer
   that may not write cannot get writes done by starting a coder.
+
+What passes between agents need not be only text. A reply can carry a *value*: the agent asked
+returns one with ~return_value~ (any JSON: a list of places, an org subtree as text), the turn's
+callbacks get it as the reply's ~lispm-value~ property (~lispm-reply-value~), and ~ask_agent~
+gives it to the model after the reply, as JSON. And messages carry *references* the receiver's
+tools resolve: places as org links, ~[[file:PATH::LINE]]~, which every tool taking a ~path~
+accepts (~read_file~ reads from the line), and buffers as ~[[buffer:NAME]]~, which tools taking
+a ~buffer~ accept (~lispm-tools-reference~); the system prompt says so, and the chat presents
+them. A write a link names outside the agent's root asks as any does.
 
 Concurrency:
 

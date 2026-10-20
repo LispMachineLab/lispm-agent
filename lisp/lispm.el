@@ -84,6 +84,7 @@
 (require 'lispm-title)
 (require 'lispm-emacs)
 (require 'lispm-skills)
+(require 'lispm-inspect)
 (require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)

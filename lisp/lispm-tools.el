@@ -85,9 +85,10 @@ MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist,
 or a function returning one) and a FUNCTION taking the whole input.
 A DEFERRED tool is not offered to an agent until search_tools has
 found it for that agent.  CHANGES, for a tool that changes a buffer,
-tells what a call would make of it (see `lispm-deftool')."
+tells what a call would make of it (see `lispm-deftool').  FILE is the
+file a tool defined with `lispm-deftool' was loaded from, if any."
   name description params input-schema permission function async preview deferred
-  changes)
+  changes file)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -147,6 +148,8 @@ is printed.  Signal an error to report a failure to the model."
        :preview ,preview
        :changes ,changes
        :deferred ,deferred
+       :file (or load-file-name
+                 (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
                     `(lambda ,args (ignore ,@args) ,@body))))))
@@ -590,13 +593,14 @@ would put the agent past its policy, which such a call can change."
 
 (defun lispm-tools--targets (input)
   "Files a call with INPUT changes, as far as its arguments tell.
-Those its `path' names, and the file of the buffer its `buffer' names."
+Those its `path' names, and the file of the buffer its `buffer' names,
+either of them a reference (see `lispm-tools-reference')."
   (when (listp input)
     (let ((path (alist-get 'path input))
-          (buffer (alist-get 'buffer input)))
-      (delq nil (list (and (stringp path) path)
-                      (and (stringp buffer) (get-buffer buffer)
-                           (buffer-file-name (get-buffer buffer))))))))
+          (buffer (and (stringp (alist-get 'buffer input))
+                       (get-buffer (lispm-tools-buffer-name (alist-get 'buffer input))))))
+      (delq nil (list (and (stringp path) (car (lispm-tools-reference path)))
+                      (and buffer (buffer-file-name buffer)))))))
 
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
@@ -641,9 +645,28 @@ visited by a buffer a `buffer' argument names."
   "Root directory of the acting agent."
   (if lispm-current-agent (lispm-agent-root lispm-current-agent) default-directory))
 
+(defun lispm-tools-reference (path)
+  "The file and line PATH refers to, as (FILE . LINE), LINE nil if none.
+PATH is a file name, or an org link to a file, with a line or not, as
+agents pass places to each other: [[file:FILE::LINE]], with a
+description or not, or file:FILE::LINE."
+  (if (string-match "\\`\\(?:\\[\\[\\)?file:\\([^]\n]+?\\)\\(?:::\\([0-9]+\\)\\)?\\(?:\\]\\(?:\\[[^]\n]*\\]\\)?\\]\\)?\\'"
+                    path)
+      (cons (match-string 1 path)
+            (and (match-string 2 path) (string-to-number (match-string 2 path))))
+    (cons path nil)))
+
+(defun lispm-tools-buffer-name (name)
+  "The name of the buffer NAME refers to: NAME, or that of a link [[buffer:NAME]]."
+  (if (string-match "\\`\\[\\[buffer:\\([^]\n]+\\)\\]\\(?:\\[[^]\n]*\\]\\)?\\]\\'" name)
+      (match-string 1 name)
+    name))
+
 (defun lispm-tools--file (path)
-  "PATH expanded against the acting agent's root."
-  (expand-file-name (substitute-in-file-name path) (lispm-tools--root)))
+  "PATH expanded against the acting agent's root.
+PATH may be a reference to a file (see `lispm-tools-reference')."
+  (expand-file-name (substitute-in-file-name (car (lispm-tools-reference path)))
+                    (lispm-tools--root)))
 
 (defun lispm-tools--label (file)
   "FILE as shown in diffs: relative to the root when inside it."
@@ -855,8 +878,9 @@ so is a read-only one, before anything is journaled."
         (save-buffer)))))
 
 (defun lispm-tools--buffer (name)
-  "The live buffer called NAME."
-  (or (get-buffer name) (error "No buffer named %s" name)))
+  "The live buffer NAME refers to (see `lispm-tools-buffer-name')."
+  (let ((name (lispm-tools-buffer-name name)))
+    (or (get-buffer name) (error "No buffer named %s" name))))
 
 (defun lispm-tools--buffer-to-change (name)
   "The live buffer called NAME, up to date with its file if it visits one.
@@ -881,14 +905,16 @@ or cannot be written (see `lispm-tools--check-writable')."
 ;;;; Built-in tools: reading
 
 (lispm-deftool read_file
-    ((path string "File path, absolute or relative to your root directory.")
-     (offset integer "First line to return, 1-based." :optional t)
+    ((path string "File path, absolute or relative to your root directory, or a place [[file:PATH::LINE]].")
+     (offset integer "First line to return, 1-based (default: the place's line, else 1)." :optional t)
      (limit integer "Maximum number of lines (default 2000)." :optional t))
   "Read a text file; lines come prefixed with their numbers.
 If the file is open in Emacs, you get the buffer's current contents,
-unsaved edits included: what the user sees."
+unsaved edits included: what the user sees.  Other agents name places
+as org links, [[file:PATH::LINE]]: pass one as the path to read there."
   :permission read
   (let* ((file (lispm-tools--file path))
+         (offset (or offset (cdr (lispm-tools-reference path))))
          (open (find-buffer-visiting file))
          (state (and open (lispm-tools--sync open))))
     (cond ((memq state '(current conflict held))
