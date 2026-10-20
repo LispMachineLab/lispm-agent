@@ -59,7 +59,7 @@ LispM is four projects, each a repository of its own under
 | *lispm-agent*     | LispM Agent, this repository: AI agents that run inside Emacs, their conversations org documents, their tools Elisp |
 | [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]]   | LispM Desktop: Emacs laid out as Mac OS 9's desktop, a workspace for agents, ready from the first start |
 | [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]]   | LispM Browser: a WebKit browser in Emacs, with tabs, keyboard hints and Chrome extensions |
-| [[https://github.com/LispMachineLab/lispm-store][lispm-store]]     | LispM Store: the catalog of apps, roles and skills the desktop's App Store installs |
+| [[https://github.com/LispMachineLab/lispm-store][lispm-store]]     | LispM Store: the catalog of applications, agents and skills LispM Desktop's App Store installs |
 
 The agents need none of the others. LispM Desktop, an Emacs distribution built around them,
 runs them in its sidebar beside Claude Code, Codex and Hermes, with LispM Browser as one of its
