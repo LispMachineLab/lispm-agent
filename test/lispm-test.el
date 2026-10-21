@@ -1949,6 +1949,197 @@ Emacs wherever the root is, is allowed call by call."
         (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
                        '("eval_elisp" (code . "1"))))))))
 
+;;;; The sandbox
+
+(defmacro lispm-test-with-fake-srt (log &rest body)
+  "Run BODY with a stand-in for srt bound to `lispm-sandbox-srt-program'.
+It runs commands unconfined, after copying its settings to
+settings.json in the directory LOG names, and appends the lines of
+its control channel to the file control there."
+  (declare (indent 1))
+  `(let* ((,log (make-temp-file "lispm-srt-" t))
+          (lispm-sandbox-srt-program (expand-file-name "srt" ,log))
+          (lispm-sandbox--runs nil))
+     (with-temp-file lispm-sandbox-srt-program
+       (insert "#!/bin/sh\n"
+               "log=" (shell-quote-argument ,log) "\n"
+               "while [ \"$1\" != -- ]; do\n"
+               "  [ \"$1\" = --settings ] && cp \"$2\" \"$log/settings.json\"\n"
+               "  shift\n"
+               "done\n"
+               "shift\n"
+               "while read -r line; do echo \"$line\" >> \"$log/control\"; done <&3 2>/dev/null &\n"
+               "exec \"$@\"\n"))
+     (set-file-modes lispm-sandbox-srt-program #o755)
+     (unwind-protect (progn ,@body)
+       (delete-directory ,log t))))
+
+(defun lispm-test--json-file (file)
+  "The JSON object in FILE, as an alist with lists for arrays."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (json-parse-buffer :object-type 'alist :array-type 'list)))
+
+(ert-deftest lispm-test-sandbox-levels ()
+  "Each level gives srt settings stricter than the one before; none gives none.
+No level lets commands write where Emacs and LispM keep their files."
+  (lispm-test-env
+    (let ((lispm-sandbox-allowed-domains '("example.com"))
+          (lispm-sandbox-secrets '("~/.ssh")))
+      (should-not (lispm-sandbox-settings 'none))
+      (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'low))
+                                    :object-type 'alist :array-type 'list)
+        (should (member "example.com" .network.allowedDomains))
+        (should (member "registry.npmjs.org" .network.allowedDomains))
+        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (member "." .filesystem.allowWrite))
+        (should (member "~/.npm" .filesystem.allowWrite))
+        (should (member "/tmp" .filesystem.allowWrite)))
+      (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'middle))
+                                    :object-type 'alist :array-type 'list)
+        (should (equal .network.allowedDomains '("example.com")))
+        (should (member "/tmp" .filesystem.allowWrite))
+        (should-not (member "~/.npm" .filesystem.allowWrite)))
+      (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'high))
+                                    :object-type 'alist :array-type 'list)
+        (should (null .network.allowedDomains))
+        (should (equal .filesystem.denyRead '("~")))
+        (should (member "." .filesystem.allowRead))
+        ;; The project, and the sandbox's own temporary directory.
+        (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir)))))
+      (dolist (level '(low middle high))
+        (let ((protected (plist-get (plist-get (lispm-sandbox-settings level) :filesystem)
+                                    :denyWrite)))
+          (should (seq-contains-p protected (directory-file-name (expand-file-name lispm-directory))))
+          (should (seq-contains-p protected (directory-file-name
+                                             (expand-file-name user-emacs-directory))))))
+      (should (equal (lispm-sandbox-settings) (lispm-sandbox-settings lispm-sandbox-level)))
+      (should-error (lispm-sandbox-settings 'extreme) :type 'lispm-sandbox-error))))
+
+(ert-deftest lispm-test-sandbox-run-shell ()
+  "Shell commands run through srt at the level set, and a change of level
+reaches a command that runs.  The result says what the sandbox allowed."
+  (lispm-test-env
+    (lispm-test-with-fake-srt log
+      (let ((agent (lispm-defagent tester :root project))
+            (lispm-sandbox-level 'middle)
+            result)
+        (let ((lispm-current-agent agent))
+          (lispm-tool-invoke (lispm-get-tool "run_shell")
+                             '((command . "echo hi; sleep 1; pwd"))
+                             (lambda (text errorp) (setq result (cons text errorp)))))
+        (let ((run (car lispm-sandbox--runs)))
+          (should (eq (lispm-sandbox-run-started run) 'middle))
+          (should (file-exists-p (lispm-sandbox-run-fifo run)))
+          ;; Set while the command runs, the level reaches it.
+          (setq lispm-sandbox-level 'high)
+          (should (lispm-test--wait (lambda () result) 10))
+          (should (string-match-p
+                   "\\`hi\n.*project/?\n\n?\\[exit status 0; sandbox Middle: reads all but secrets"
+                   (car result)))
+          (should-not (cdr result))
+          ;; It started with Middle's settings, and was sent High's.
+          (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
+            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+          (should (lispm-test--wait
+                   (lambda () (file-exists-p (expand-file-name "control" log)))))
+          (let-alist (json-parse-string
+                      (with-temp-buffer
+                        (insert-file-contents (expand-file-name "control" log))
+                        (buffer-string))
+                      :object-type 'alist :array-type 'list)
+            (should (equal .filesystem.denyRead '("~"))))
+          ;; Once it has exited, its channel is gone.
+          (should (lispm-test--wait (lambda () (null lispm-sandbox--runs))))
+          (should-not (file-exists-p (lispm-sandbox-run-fifo run))))
+        ;; At none, a command runs as before.
+        (setq result nil lispm-sandbox-level 'none)
+        (let ((lispm-current-agent agent))
+          (lispm-tool-invoke (lispm-get-tool "run_shell") '((command . "echo plain"))
+                             (lambda (text errorp) (setq result (cons text errorp)))))
+        (should (lispm-test--wait (lambda () result)))
+        (should (equal (car result) "plain\n\n[exit status 0]"))))))
+
+(ert-deftest lispm-test-sandbox-unavailable ()
+  "Without srt, a command that should be sandboxed fails rather than run outside it."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester :root project))
+           (lispm-sandbox-level 'low)
+           (lispm-sandbox-srt-program (expand-file-name "no-srt" project))
+           (marker (expand-file-name "ran" project))
+           (result (lispm-test--call agent "run_shell" `((command . ,(concat "touch " marker))))))
+      (should (cdr result))
+      (should (string-match-p "Sandbox unavailable: the srt program .*no-srt is not found" (car result)))
+      (should-not (file-exists-p marker)))))
+
+(ert-deftest lispm-test-sandbox-mcp ()
+  "An MCP server started over stdio runs in the sandbox, at its own level if
+it has one; a change of the level set then passes it by."
+  (lispm-test-env
+    (lispm-test-with-fake-srt log
+      (lispm-test-with-mcp (:sandbox high)
+        (let ((lispm-sandbox-level 'low))
+          (lispm-mcp-start "fake")
+          (should (lispm-test--wait (lambda () (lispm-get-tool "mcp__fake__echo")) 15))
+          (let ((run (car lispm-sandbox--runs)))
+            (should (equal (lispm-sandbox-run-name run) "the MCP server fake"))
+            (should (eq (lispm-sandbox-run-level run) 'high)))
+          (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
+            (should (equal .filesystem.denyRead '("~"))))
+          (setq lispm-sandbox-level 'middle)
+          (lispm-sandbox--changed)
+          (should-not (file-exists-p (expand-file-name "control" log)))
+          (lispm-mcp-stop "fake")
+          (should (lispm-test--wait (lambda () (null lispm-sandbox--runs)))))))))
+
+(ert-deftest lispm-test-sandbox-chat ()
+  "/sandbox sets the level, which every chat's header shows."
+  (lispm-test-env
+    (lispm-test-with-fake-srt _log
+      (let* ((lispm-sandbox-level 'none)
+             (agent (lispm-start nil project))
+             (chat (lispm-chat agent)))
+        (should-not (string-match-p "sandbox:" (lispm-test--chat-text chat)))
+        (lispm-chat--command agent "/sandbox High")
+        (should (eq lispm-sandbox-level 'high))
+        (should (string-match-p "│   sandbox: High (/sandbox to change) +│" (lispm-test--chat-text chat)))
+        (should-error (lispm-chat--command agent "/sandbox extreme") :type 'user-error)))))
+
+(ert-deftest lispm-test-sandbox-srt ()
+  "The real srt, named by the environment variable LISPM_TEST_SRT, confines a
+command: High lets it write only the project; Middle hides secrets."
+  (skip-unless (and (getenv "LISPM_TEST_SRT") (file-executable-p (getenv "LISPM_TEST_SRT"))))
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester :root project))
+           (lispm-sandbox-srt-program (getenv "LISPM_TEST_SRT"))
+           (outside (make-temp-file "lispm-outside-" t))
+           (secret (expand-file-name "key" outside)))
+      (unwind-protect
+          (progn
+            (lispm-test--write secret "hidden")
+            (let* ((lispm-sandbox-level 'high)
+                   (result (lispm-test--wait-call
+                            agent (format "echo in > in.txt && cat in.txt; echo out > %s/out.txt"
+                                          outside))))
+              (should (string-match-p "\\`in\n" result))
+              (should (string-match-p "Operation not permitted" result))
+              (should (file-exists-p (expand-file-name "in.txt" project)))
+              (should-not (file-exists-p (expand-file-name "out.txt" outside))))
+            (let* ((lispm-sandbox-level 'middle)
+                   (lispm-sandbox-secrets (list outside))
+                   (result (lispm-test--wait-call agent (concat "cat " secret))))
+              (should (string-match-p "Operation not permitted" result))
+              (should-not (string-match-p "hidden" result))))
+        (delete-directory outside t)))))
+
+(defun lispm-test--wait-call (agent command)
+  "The output of AGENT's run_shell COMMAND, once it has run."
+  (let ((lispm-current-agent agent) result)
+    (lispm-tool-invoke (lispm-get-tool "run_shell") `((command . ,command))
+                       (lambda (text _errorp) (setq result text)))
+    (lispm-test--wait (lambda () result) 30)
+    result))
+
 (defmacro lispm-test-with-remote (&rest body)
   "Run BODY in `lispm-test-env' with `remote', `project' as a remote directory.
 It is reached through TRAMP's mock method, which Emacs's own tests of
@@ -1969,6 +2160,18 @@ what it learns of them a while."
              (with-current-buffer b (set-buffer-modified-p nil))
              (kill-buffer b)))
          (tramp-cleanup-connection (tramp-dissect-file-name remote) t t)))))
+
+(ert-deftest lispm-test-sandbox-remote ()
+  "The sandbox confines processes of this machine: on a remote root, a
+command it should confine fails."
+  (lispm-test-with-remote
+    (lispm-test-with-fake-srt _log
+      (let* ((agent (lispm-make-agent 'assistant remote))
+             (lispm-sandbox-level 'middle)
+             (result (lispm-test--call agent "run_shell" '((command . "echo hi")))))
+        (should (cdr result))
+        (should (string-match-p "\\`Sandbox unavailable: it confines processes of this machine"
+                                (car result)))))))
 
 (ert-deftest lispm-test-remote-root ()
   "An agent whose root is remote reads, writes, lists, searches and runs

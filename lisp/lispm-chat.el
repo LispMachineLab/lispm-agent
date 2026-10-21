@@ -56,6 +56,7 @@
 (require 'lispm-runtime)
 (require 'lispm-memory)
 (require 'lispm-inspect)
+(require 'lispm-sandbox)
 
 (declare-function lispm--read-session "lispm" (prompt))
 (declare-function lispm-dashboard "lispm" ())
@@ -708,7 +709,8 @@ new item at each step, and the old steps are not kept."
       (setq lispm-chat--rendered drawn))))
 
 (defun lispm-chat--box (lines width &optional face)
-  "LINES framed in a rounded box WIDTH columns wide, the frame in FACE."
+  "LINES framed in a rounded box WIDTH columns wide, the frame in FACE.
+Lines that are nil are left out."
   (let* ((face (or face 'lispm-chat-dim))
          (inner (- width 4))
          (bar (lambda (left right)
@@ -719,7 +721,7 @@ new item at each step, and the old steps are not kept."
                            (concat (propertize "│ " 'face face) line
                                    (make-string (max 0 (- inner (string-width line))) ?\s)
                                    (propertize " │" 'face face))))
-                       lines "\n")
+                       (delq nil (copy-sequence lines)) "\n")
             "\n" (funcall bar "╰" "╯") "\n")))
 
 (defun lispm-chat--header (agent)
@@ -740,7 +742,11 @@ new item at each step, and the old steps are not kept."
                                  (lispm-agent-role agent))
                        (format "  no model backend (see `lispm-backend') · role: %s"
                                (lispm-agent-role agent)))
-                     'face 'lispm-chat-dim))
+                     'face 'lispm-chat-dim)
+         (unless (eq lispm-sandbox-level 'none)
+           (propertize (format "  sandbox: %s (/sandbox to change)"
+                               (lispm-sandbox-level-name lispm-sandbox-level))
+                       'face 'lispm-chat-dim)))
    (min 64 (lispm-chat--width)) 'lispm-chat-accent))
 
 ;;;; Approval
@@ -1118,9 +1124,17 @@ ITEMS are the session's items, where the call's preview is."
       (with-current-buffer chat (setq lispm-chat--closing t))
       (kill-buffer chat))))
 
+(defun lispm-chat--sandbox-changed ()
+  "Show the sandbox level now set in every chat."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
+        (lispm-chat--redraw)))))
+
 (add-hook 'lispm-session-mode-hook #'lispm-chat--watch-transcript)
 (add-hook 'lispm-state-change-functions #'lispm-chat--state-changed)
 (add-hook 'lispm-session-end-functions #'lispm-chat--session-ended)
+(add-hook 'lispm-sandbox-change-hook #'lispm-chat--sandbox-changed)
 
 ;;;; Input
 
@@ -1270,6 +1284,7 @@ or show the item at point in full."
     ("compact" lispm-chat-compact "Summarize the conversation and continue from the summary")
     ("resume" lispm-chat-resume "Resume a recorded conversation here")
     ("model" lispm-chat-model "Show the model, or switch with /model NAME")
+    ("sandbox" lispm-chat-sandbox "Choose the sandbox level (None, Low, Middle, High)")
     ("diff" lispm-chat-diff "Show what the agent changed in its last turn")
     ("undo" lispm-chat-undo "Undo what the agent changed in its last turn")
     ("memory" lispm-chat-memory "Open this project's memory")
@@ -1358,6 +1373,12 @@ Return the chat of the new conversation."
     (with-current-buffer (lispm-agent-view agent)
       (lispm-chat--redraw))
     (message "%s now uses %s" (lispm-agent-name agent) argument)))
+
+(defun lispm-chat-sandbox (_agent argument)
+  "Choose the sandbox level of shell commands and MCP servers, or set ARGUMENT."
+  (lispm-sandbox-set-level (if (string-empty-p argument)
+                               (lispm-sandbox-read-level)
+                             (intern (downcase argument)))))
 
 (defun lispm-chat-diff (agent _argument)
   "Show what AGENT changed in its last turn."

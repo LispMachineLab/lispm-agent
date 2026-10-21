@@ -378,6 +378,22 @@ which is what an agent whose root is on another machine wants (below). A policy 
 name ~shell~ gives it what it gives ~exec~ (~lispm--permission-fallbacks~), so policies,
 customized defaults and helpers' ceilings recorded before the split mean what they meant.
 
+*A sandbox for commands* ([[file:lisp/lispm-sandbox.el][lispm-sandbox.el]]). The policy decides
+whether a command runs, never what it does once it runs; a sandbox decides that, and it has to
+be the operating system's, since a command is a process Emacs cannot watch. LispM uses
+Anthropic's sandbox runtime, srt: ~sandbox-exec~ on macOS, bubblewrap on Linux, and a proxy that
+checks the domain of every connection. The configuration stays in Emacs, as everything else
+does, and Emacs stays outside the sandbox: what holds the rules must not be confined by them,
+and on macOS a sandboxed process cannot start another under rules of its own. So
+~lispm-sandbox-level~ (None, Low, Middle, High) becomes srt's settings each time ~run_shell~
+starts a command or an MCP server starts, and a change reaches processes already running through
+srt's control channel, a named pipe Emacs keeps open to each: their network rules change at once;
+their file rules were fixed when they started, and the change says which to restart. When srt
+cannot be had, or the root is on another machine, which srt cannot confine, the command fails
+with the reason: a sandbox that stepped aside when missing would be worse than none, since it
+would still be trusted. Emacs Lisp stays unconfined, so ~exec~ keeps asking; and no level lets
+a command write Emacs's configuration or ~lispm-directory~, which holds srt itself.
+
 *A root on another machine.* Hosted harnesses give each agent a computer of its own, a VM in
 their cloud, so that what it does cannot reach the user's. LispM's agents live in the user's
 Emacs, which is the point of them; what can go elsewhere is their hands. Emacs reaches other
