@@ -152,7 +152,9 @@ LispM installs version `lispm-sandbox-srt-version' (see
   "Seconds before an installation of srt that failed is tried again on its own.")
 
 (defvar lispm-sandbox-change-hook nil
-  "Normal hook run after the sandbox level, or what a level allows, changed.")
+  "Normal hook run after the sandbox level, what a level allows, or srt changed.
+srt changes as LispM starts installing it and once that is done (see
+`lispm-sandbox-srt-status').")
 
 ;;;; Places
 
@@ -262,6 +264,18 @@ names are relative to a sandboxed command's directory: its project."
                 (node (executable-find "node")))
       (list node (lispm-sandbox--package-file "dist/cli.js")))))
 
+(defun lispm-sandbox-srt-status ()
+  "Whether srt can run, for those who show it.
+`ready' when it can; `installing' while LispM installs it; (failed
+. WHY) when it cannot be had, WHY saying why; nil when it is not there
+and nothing needed it yet."
+  (cond ((lispm-sandbox--srt) 'ready)
+        (lispm-sandbox-srt-program
+         (cons 'failed (format "the srt program %s is not found" lispm-sandbox-srt-program)))
+        ((process-live-p lispm-sandbox--installer) 'installing)
+        (lispm-sandbox--install-failure
+         (cons 'failed (format "srt could not be installed: %s" (cdr lispm-sandbox--install-failure))))))
+
 (defun lispm-sandbox--install-failed (why)
   "Note and say that srt could not be installed, because of WHY."
   (setq lispm-sandbox--install-failure (cons (float-time) why))
@@ -299,8 +313,10 @@ time a level other than none is used."
                                (with-current-buffer (process-buffer process)
                                  (string-trim (buffer-substring
                                                (max (point-min) (- (point-max) 300))
-                                               (point-max))))))))))))
-      (lispm-sandbox--install-failed "it needs npm, from Node.js 22.12 or later"))))
+                                               (point-max)))))))
+                     (run-hooks 'lispm-sandbox-change-hook))))))
+      (lispm-sandbox--install-failed "it needs npm, from Node.js 22.12 or later"))
+    (run-hooks 'lispm-sandbox-change-hook)))
 
 (defun lispm-sandbox--ensure (&optional level)
   "Start installing srt if LEVEL needs it and it is not there.
@@ -319,12 +335,10 @@ LEVEL defaults to `lispm-sandbox-level'."
       (progn
         (lispm-sandbox--ensure 'low)
         (lispm-sandbox--fail
-         (cond (lispm-sandbox-srt-program
-                (format "the srt program %s is not found" lispm-sandbox-srt-program))
-               ((process-live-p lispm-sandbox--installer)
-                "srt is being installed; try again in a minute")
-               (t (format "srt could not be installed: %s"
-                          (cdr lispm-sandbox--install-failure))))))))
+         (pcase (lispm-sandbox-srt-status)
+           ('installing "srt is being installed; try again in a minute")
+           (`(failed . ,why) why)
+           (_ "srt is not installed"))))))
 
 ;;;; Processes
 

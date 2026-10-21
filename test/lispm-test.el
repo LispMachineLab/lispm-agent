@@ -2129,6 +2129,37 @@ reaches a command that runs.  The result says what the sandbox allowed."
       (should (string-match-p "Sandbox unavailable: the srt program .*no-srt is not found" (car result)))
       (should-not (file-exists-p marker)))))
 
+(ert-deftest lispm-test-sandbox-srt-status ()
+  "srt's status says whether it runs, is being installed, or why it cannot be
+had; the change hook hears an installation start and end."
+  (lispm-test-with-fake-srt log
+    (should (eq (lispm-sandbox-srt-status) 'ready)))
+  (let ((lispm-sandbox-srt-program "lispm-test-no-srt"))
+    (should (equal (lispm-sandbox-srt-status)
+                   '(failed . "the srt program lispm-test-no-srt is not found"))))
+  (lispm-test-env
+    (let* ((bin (expand-file-name "bin" project))
+           (npm (expand-file-name "npm" bin))
+           (exec-path (cons bin exec-path))
+           (lispm-sandbox-srt-program nil)
+           (lispm-sandbox--installer nil)
+           (lispm-sandbox--install-failure nil)
+           (told 0)
+           (lispm-sandbox-change-hook (list (lambda () (setq told (1+ told))))))
+      (make-directory bin t)
+      ;; An npm that cannot reach its registry.
+      (with-temp-file npm
+        (insert "#!/bin/sh\nread -r go\necho 'npm error network unreachable' >&2\nexit 1\n"))
+      (set-file-modes npm #o755)
+      (should-not (lispm-sandbox-srt-status))
+      (lispm-sandbox-install)
+      (should (eq (lispm-sandbox-srt-status) 'installing))
+      (should (= told 1))
+      (process-send-string lispm-sandbox--installer "go\n")
+      (should (lispm-test--wait (lambda () (= told 2))))
+      (should (equal (lispm-sandbox-srt-status)
+                     '(failed . "srt could not be installed: npm error network unreachable"))))))
+
 (ert-deftest lispm-test-sandbox-mcp ()
   "An MCP server started over stdio runs in the sandbox, at its own level if
 it has one; a change of the level set then passes it by."
