@@ -75,9 +75,9 @@ An error if STRING is not one Lisp object."
   (let ((read (condition-case nil
                   (read-from-string string)
                 ((end-of-file invalid-read-syntax)
-                 (user-error "%s: #+%s: is not Lisp data: %s" where keyword string)))))
+                 (user-error "%s: #+%s: %s" where keyword (lispm-tr "is not Lisp data: %s" string))))))
     (unless (string-blank-p (substring string (cdr read)))
-      (user-error "%s: #+%s: is more than one Lisp object: %s" where keyword string))
+      (user-error "%s: #+%s: %s" where keyword (lispm-tr "is more than one Lisp object: %s" string)))
     (car read)))
 
 (defun lispm-roles--read (file &optional text)
@@ -90,11 +90,11 @@ takes: :description, :instructions, :tools if the file names them,
         (name (file-name-base file))
         keywords body)
     (unless (string-suffix-p ".org" file)
-      (user-error "A role file is NAME.org: not %s" where))
+      (user-error "%s" (lispm-tr "A role file is NAME.org: not %s" where)))
     (unless (let ((case-fold-search nil))
               (string-match-p "\\`[a-z0-9][a-z0-9_-]\\{0,63\\}\\'" name))
-      (user-error "The name of a role is lowercase letters, digits, - and _, at most 64: not %S"
-                  name))
+      (user-error "%s" (lispm-tr "The name of a role is lowercase letters, digits, - and _, at most 64: not %S"
+                                 name)))
     (with-temp-buffer
       (insert (or text (lispm-roles--file-text file)))
       (goto-char (point-min))
@@ -105,14 +105,15 @@ takes: :description, :instructions, :tools if the file names them,
           (when-let* ((keyword (match-string 1)))
             (setq keyword (downcase keyword))
             (when (assoc keyword keywords)
-              (user-error "%s: #+%s: is there twice" where keyword))
+              (user-error "%s: #+%s: %s" where keyword (lispm-tr "is there twice")))
             (push (cons keyword (match-string 2)) keywords))
           (forward-line 1)))
       (setq body (string-trim (buffer-substring-no-properties (point) (point-max)))))
     (dolist (keyword '("backend" "model"))
       (when (assoc keyword keywords)
-        (user-error "%s: #+%s: a role file names no backend or model, its agents use yours; \
-a role with its own is defined in Lisp, with `lispm-defrole'" where keyword)))
+        (user-error "%s: #+%s: %s" where keyword
+                    (lispm-tr "a role file names no backend or model, its agents use yours; \
+a role with its own is defined in Lisp, with `lispm-defrole'"))))
     (let* ((value (lambda (keyword)
                     (when-let* ((string (cdr (assoc keyword keywords))))
                       (lispm-roles--value where keyword string))))
@@ -127,19 +128,19 @@ a role with its own is defined in Lisp, with `lispm-defrole'" where keyword)))
                        (seq-every-p (lambda (tool)
                                       (or (stringp tool) (and tool (symbolp tool) (not (eq tool t)))))
                                     tools)))
-        (user-error "%s: #+tools: is t, for every tool, or a list of tool names: not %S" where tools))
+        (user-error "%s: #+tools: %s" where (lispm-tr "is t, for every tool, or a list of tool names: not %S" tools)))
       (unless (and (proper-list-p policy)
                    (seq-every-p (lambda (entry)
                                   (and (consp entry) (car entry) (symbolp (car entry))
                                        (memq (cdr entry) lispm--policy-actions)))
                                 policy))
-        (user-error "%s: #+policy: is an alist from permission classes to auto, ask or deny, \
-such as ((write . deny)): not %S" where policy))
+        (user-error "%s: #+policy: %s" where (lispm-tr "is an alist from permission classes to auto, ask or deny, \
+such as ((write . deny)): not %S" policy)))
       (setq effort (cond ((null (assoc "effort" keywords)) nil)
                          ((and (stringp effort) (not (string-empty-p effort))) effort)
                          ((and effort (symbolp effort) (not (eq effort t))) (symbol-name effort))
-                         (t (user-error "%s: #+effort: is an effort level, such as high: not %S"
-                                        where effort))))
+                         (t (user-error "%s: #+effort: %s" where
+                                        (lispm-tr "is an effort level, such as high: not %S" effort)))))
       `(:name ,(intern name)
         :title ,(or (funcall line "title") name)
         :file ,(expand-file-name file)
@@ -163,8 +164,8 @@ such as ((write . deny)): not %S" where policy))
   "Signal an error if the role NAME is defined in Lisp: no role file replaces it."
   (when (or (memq name lispm-roles--builtin)
             (and (lispm-get-role name t) (not (lispm-role-file name))))
-    (user-error "There is a role named %s already, defined in Lisp, which a role file \
-would not replace; choose another name" name)))
+    (user-error "%s" (lispm-tr "There is a role named %s already, defined in Lisp, which a role file \
+would not replace; choose another name" name))))
 
 (defun lispm-roles--files ()
   "The role files of `lispm-role-directories', by name: an alist (NAME . FILE).
@@ -196,13 +197,14 @@ LispM calls this when it loads."
             (lispm-roles--register role)
             (push name loaded))
         (error (let ((where (abbreviate-file-name file)))
-                 (message "LispM: role file %s left out: %s" where
-                          (string-remove-prefix (concat where ": ") (error-message-string err)))))))
+                 (message "%s" (lispm-tr "LispM: role file %s left out: %s" where
+                                         (string-remove-prefix (concat where ": ")
+                                                               (error-message-string err))))))))
     (setq loaded (nreverse loaded))
     (when (called-interactively-p 'any)
-      (message "LispM: %s" (if loaded
-                               (format "roles loaded: %s" (mapconcat #'symbol-name loaded ", "))
-                             "no role files")))
+      (message "%s" (if loaded
+                        (lispm-tr "LispM: roles loaded: %s" (mapconcat #'symbol-name loaded ", "))
+                      (lispm-tr "LispM: no role files"))))
     loaded))
 
 (defun lispm-roles--show (old new label)
@@ -231,33 +233,35 @@ whenever LispM loads.  Unless NOCONFIRM, FILE is shown, as the diff
 against the role file it replaces if there is one, and you are asked
 first; what is installed is the text shown.  An error if FILE is no
 role file, or if NAME is a role defined in Lisp."
-  (interactive (list (read-file-name "Install the role file: " nil nil t)))
+  (interactive (list (read-file-name (lispm-tr "Install the role file: ") nil nil t)))
   (let* ((text (lispm-roles--file-text file))
          (role (lispm-roles--read file text))
          (name (plist-get role :name))
          (directory (file-name-as-directory
                      (expand-file-name (or (car lispm-role-directories)
-                                           (user-error "No directory to install roles in: \
-`lispm-role-directories' is empty")))))
+                                           (user-error "%s" (lispm-tr "No directory to install roles in: \
+`lispm-role-directories' is empty"))))))
          (target (expand-file-name (format "%s.org" name) directory))
          (old (seq-find (lambda (file) (and file (file-regular-p file)))
                         (list (lispm-role-file name) target)))
          (open (find-buffer-visiting target)))
     (lispm-roles--check-free name)
     (when (and open (buffer-modified-p open))
-      (user-error "%s is open in Emacs with unsaved changes; save or discard them first"
-                  (abbreviate-file-name target)))
+      (user-error "%s" (lispm-tr "%s is open in Emacs with unsaved changes; save or discard them first"
+                                 (abbreviate-file-name target))))
     (unless noconfirm
       (save-window-excursion
         (lispm-roles--show (and old (lispm-roles--file-text old)) text (format "%s.org" name))
-        (unless (yes-or-no-p (format "%s the role %s, as shown? " (if old "Replace" "Install") name))
-          (user-error "The role %s was not installed" name))))
+        (unless (yes-or-no-p (if old
+                                 (lispm-tr "Replace the role %s, as shown? " name)
+                               (lispm-tr "Install the role %s, as shown? " name)))
+          (user-error "%s" (lispm-tr "The role %s was not installed" name)))))
     (make-directory directory t)
     (let ((coding-system-for-write 'utf-8))
       (write-region text nil target nil 'silent))
     (lispm-roles--register (plist-put role :file target))
     (when (called-interactively-p 'any)
-      (message "LispM: role %s installed in %s" name (abbreviate-file-name directory)))
+      (message "%s" (lispm-tr "LispM: role %s installed in %s" name (abbreviate-file-name directory))))
     name))
 
 ;;;###autoload
@@ -269,9 +273,9 @@ agents of the role keep what they had from it (see
 assistant, is not deleted, nor is `lispm-default-role'.
 Interactively, you are asked first."
   (interactive
-   (list (completing-read "Delete the role: "
+   (list (completing-read (lispm-tr "Delete the role: ")
                           (or (mapcar (lambda (entry) (symbol-name (car entry))) lispm--role-files)
-                              (user-error "No role is from a role file"))
+                              (user-error "%s" (lispm-tr "No role is from a role file")))
                           nil t)))
   (let* ((name (if (stringp name) (intern name) name))
          (files (delete-dups
@@ -281,16 +285,16 @@ Interactively, you are asked first."
                                              (expand-file-name (format "%s.org" name) directory))
                                            lispm-role-directories))))))
     (cond ((memq name lispm-roles--builtin)
-           (user-error "The role %s is LispM's own; it is not deleted" name))
+           (user-error "%s" (lispm-tr "The role %s is LispM's own; it is not deleted" name)))
           ((and (lispm-get-role name t) (not (lispm-role-file name)))
-           (user-error "The role %s is defined in Lisp, not in a role file; it is not deleted" name))
+           (user-error "%s" (lispm-tr "The role %s is defined in Lisp, not in a role file; it is not deleted" name)))
           ((eq name lispm-default-role)
-           (user-error "The role %s is `lispm-default-role'; choose another one first" name))
+           (user-error "%s" (lispm-tr "The role %s is `lispm-default-role'; choose another one first" name)))
           ((not (or files (lispm-get-role name t)))
-           (user-error "No role named %s" name)))
+           (user-error "%s" (lispm-tr "No role named %s" name))))
     (when (and (called-interactively-p 'any)
-               (not (yes-or-no-p (format "Delete the role %s? " name))))
-      (user-error "The role %s was not deleted" name))
+               (not (yes-or-no-p (lispm-tr "Delete the role %s? " name))))
+      (user-error "%s" (lispm-tr "The role %s was not deleted" name)))
     (dolist (file files)
       (delete-file file t))
     (lispm-unregister-role name)

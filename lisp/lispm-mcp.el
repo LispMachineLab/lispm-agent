@@ -158,8 +158,8 @@ TOOLS: an alist from a tool's name to `ask' or `deny', the strictest."
        (let* ((every (lambda (action) (mapcar (lambda (name) (cons name action)) names)))
               (answer (condition-case err
                           (funcall function server tools)
-                        (error (message "LispM: %s failed on the tools of %s, which all ask: %s"
-                                        function server (error-message-string err))
+                        (error (message "%s" (lispm-tr "LispM: %s failed on the tools of %s, which all ask: %s"
+                                                       function server (error-message-string err)))
                                'ask))))
          (pcase-dolist (`(,name . ,action)
                         (pcase answer
@@ -208,8 +208,12 @@ Those `lispm-mcp-register-functions' deny are kept back."
             :function (lambda (done input) (lispm-mcp--call server tool-name input done)))))))
     (puthash server (reverse names) lispm-mcp--tools)
     (remhash server lispm-mcp--starting)
-    (message "LispM: %d tools from MCP server %s%s" (length names) server
-             (if kept (format "; kept back: %s" (string-join (nreverse kept) ", ")) ""))))
+    (message "%s" (if kept
+                      (lispm-tr-n "LispM: %d tool from MCP server %s; kept back: %s"
+                                  "LispM: %d tools from MCP server %s; kept back: %s"
+                                  (length names) (length names) server (string-join (nreverse kept) ", "))
+                    (lispm-tr-n "LispM: %d tool from MCP server %s" "LispM: %d tools from MCP server %s"
+                                (length names) (length names) server)))))
 
 (defun lispm-mcp--unregister (server)
   "Remove SERVER's tools from those of LispM agents."
@@ -282,7 +286,7 @@ Images are saved in AGENT's session."
   "Note that SERVER failed to start, because of WHY."
   (remhash server lispm-mcp--starting)
   (puthash server (float-time) lispm-mcp--failed)
-  (message "LispM: MCP server %s failed to start: %s" server why))
+  (message "%s" (lispm-tr "LispM: MCP server %s failed to start: %s" server why)))
 
 (defun lispm-mcp--connect (server config)
   "Start SERVER as CONFIG describes, and take its tools when it lists them.
@@ -365,13 +369,13 @@ changed its tools, or what those functions go by changed."
                (mapconcat (lambda (entry)
                             (let ((name (car entry)))
                               (format "%s: %s" name
-                                      (cond ((gethash name lispm-mcp--starting) "starting")
+                                      (cond ((gethash name lispm-mcp--starting) (lispm-tr "starting"))
                                             ((gethash name lispm-mcp--tools)
-                                             (format "%d tools" (length (gethash name lispm-mcp--tools))))
-                                            ((gethash name lispm-mcp--failed) "failed")
-                                            (t "stopped")))))
-                          lispm-mcp-servers "; ")
-             "No MCP servers: see `lispm-mcp-servers'")))
+                                             (lispm-tr-n "%d tool" "%d tools" (length (gethash name lispm-mcp--tools))))
+                                            ((gethash name lispm-mcp--failed) (lispm-tr "failed"))
+                                            (t (lispm-tr "stopped"))))))
+                          lispm-mcp-servers (lispm-tr-in "between the parts of a list" "; "))
+             (lispm-tr "No MCP servers: see `lispm-mcp-servers'"))))
 
 (defun lispm-mcp--autostart ()
   "Start the servers with :defer nil, if `lispm-mcp-autostart' says so."

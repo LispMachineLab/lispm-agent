@@ -207,11 +207,27 @@ bubblewrap on Linux), reaching the network through a proxy that checks each doma
 the new network rules at once.  The first level other than None installs srt with npm (Node.js
 22.12+).  The sandbox does not confine ~eval_elisp~, so keep ~exec~ at ~ask~ when it matters.
 
+* Languages
+
+The chat, its approvals and / commands, the sandbox's levels and LispM's messages speak English
+(US or UK), German, French, Japanese, and Simplified or Traditional Chinese: LispM Desktop's
+language while the desktop runs, else the computer's (macOS's preferred languages, or
+=LANGUAGE=, =LC_ALL=, =LC_MESSAGES= and =LANG=).  What models read stays English: tool
+descriptions and results, system prompts, transcripts.
+
+#+begin_src emacs-lisp
+(setopt lispm-language 'ja)   ; en-US, en-GB, de, fr, ja, zh-Hans, zh-Hant; nil: as above
+#+end_src
+
+The code writes its words in English through ~lispm-tr~ and its kin (see =lisp/lispm-i18n.el=);
+=i18n/= holds a catalog per language, in LispM Desktop's format.
+
 * Development
 
 #+begin_src sh
 make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers
 make compile   # warnings are errors
+make i18n      # the messages each catalog of i18n/ lacks, and those it no longer needs
 make demo      # record the demo again: a real model and ffmpeg (macOS)
 #+end_src
 

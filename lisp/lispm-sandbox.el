@@ -86,14 +86,20 @@
   (signal 'lispm-sandbox-error (list "Sandbox unavailable" why)))
 
 (defconst lispm-sandbox-levels
-  '((none . "no sandbox")
-    (low . "reads all but secrets; writes the project, temporary files and package caches; reaches package registries, code hosts and allowed domains")
-    (middle . "reads all but secrets; writes the project and temporary files; reaches only allowed domains")
-    (high . "reads only the project and the system; writes only the project; no network")
-    (custom . "your own rules"))
+  `((none . ,(lispm-tr-noop "no sandbox"))
+    (low . ,(lispm-tr-noop "reads all but secrets; writes the project, temporary files and package caches; reaches package registries, code hosts and allowed domains"))
+    (middle . ,(lispm-tr-noop "reads all but secrets; writes the project and temporary files; reaches only allowed domains"))
+    (high . ,(lispm-tr-noop "reads only the project and the system; writes only the project; no network"))
+    (custom . ,(lispm-tr-noop "your own rules")))
   "The sandbox levels, from none to the strictest and then your own.
-Each comes with what it allows; `lispm-sandbox-level-description'
-says that of `custom' from its rules.")
+Each comes with what it allows, in English; `lispm-sandbox-level-description'
+says it in the language spoken, and that of `custom' from its rules.")
+
+(defconst lispm-sandbox--level-names
+  `((none . ,(lispm-tr-noop "None" "sandbox level")) (low . ,(lispm-tr-noop "Low" "sandbox level"))
+    (middle . ,(lispm-tr-noop "Middle" "sandbox level")) (high . ,(lispm-tr-noop "High" "sandbox level"))
+    (custom . ,(lispm-tr-noop "Custom" "sandbox level")))
+  "The names of the sandbox levels, in English; see `lispm-sandbox-level-name'.")
 
 (defcustom lispm-sandbox-level 'none
   "How strictly agents' shell commands and MCP servers are confined.
@@ -240,8 +246,20 @@ loads them or runs srt."
 ;;;; Settings
 
 (defun lispm-sandbox-level-name (level)
-  "LEVEL as the user sees it: None, Low, Middle, High or Custom."
-  (capitalize (symbol-name level)))
+  "LEVEL as the user sees it: None, Low, Middle, High or Custom, in the
+language spoken (see lispm-i18n.el)."
+  (if-let* ((name (alist-get level lispm-sandbox--level-names)))
+      (lispm-tr name)
+    (capitalize (symbol-name level))))
+
+(defun lispm-sandbox-level-named (name)
+  "The level of `lispm-sandbox-levels' NAME names, or nil.
+NAME is the level's name as shown, or its symbol's, case ignored."
+  (seq-some (pcase-lambda (`(,level . ,_))
+              (and (member (downcase (string-trim name))
+                           (list (downcase (lispm-sandbox-level-name level)) (symbol-name level)))
+                   level))
+            lispm-sandbox-levels))
 
 (defconst lispm-sandbox--rule-keys
   '(:deny-read :allow-read :allow-write :deny-write :allowed-domains :denied-domains
@@ -299,36 +317,38 @@ names are relative to a sandboxed command's directory: its project."
 
 (defun lispm-sandbox--some (items)
   "The first few of ITEMS, strings, and how many more there are."
-  (concat (string-join (seq-take items 3) ", ")
-          (if (> (length items) 3) (format " and %d more" (- (length items) 3)) "")))
+  (let ((shown (string-join (seq-take items 3) ", ")))
+    (if (> (length items) 3)
+        (lispm-tr "%s and %d more" shown (- (length items) 3))
+      shown)))
 
 (defun lispm-sandbox-level-description (&optional level)
-  "What LEVEL, by default `lispm-sandbox-level', allows, in a few words.
-That of `custom' is said from its rules."
+  "What LEVEL, by default `lispm-sandbox-level', allows, in a few words, in
+the language spoken.  That of `custom' is said from its rules."
   (let ((level (or level lispm-sandbox-level)))
     (if (not (eq level 'custom))
-        (alist-get level lispm-sandbox-levels)
+        (lispm-tr (alist-get level lispm-sandbox-levels))
       (let ((rules (lispm-sandbox-rules 'custom)))
         (string-join
          (delq nil
                (list (if-let* ((hidden (plist-get rules :deny-read)))
-                         (concat "reads all but " (lispm-sandbox--some hidden)
-                                 (if-let* ((again (plist-get rules :allow-read)))
-                                     (concat " (except " (lispm-sandbox--some again) ")")
-                                   ""))
-                       "reads everything")
+                         (if-let* ((again (plist-get rules :allow-read)))
+                             (lispm-tr "reads all but %s (except %s)"
+                                       (lispm-sandbox--some hidden) (lispm-sandbox--some again))
+                           (lispm-tr "reads all but %s" (lispm-sandbox--some hidden)))
+                       (lispm-tr "reads everything"))
                      (if-let* ((places (plist-get rules :allow-write)))
-                         (concat "writes " (lispm-sandbox--some places))
-                       "writes only temporary files")
+                         (lispm-tr "writes %s" (lispm-sandbox--some places))
+                       (lispm-tr "writes only temporary files"))
                      (if-let* ((domains (plist-get rules :allowed-domains)))
-                         (concat "reaches " (lispm-sandbox--some domains))
-                       "no network")
-                     (and (plist-get rules :local-binding) "uses local ports")
+                         (lispm-tr "reaches %s" (lispm-sandbox--some domains))
+                       (lispm-tr "no network"))
+                     (and (plist-get rules :local-binding) (lispm-tr "uses local ports"))
                      (and (plist-get rules :unix-sockets)
-                          (concat "connects to " (lispm-sandbox--some (plist-get rules :unix-sockets))))
-                     (and (plist-get rules :pty) "uses terminals")
-                     (and (plist-get rules :apple-events) "opens applications")))
-         "; ")))))
+                          (lispm-tr "connects to %s" (lispm-sandbox--some (plist-get rules :unix-sockets))))
+                     (and (plist-get rules :pty) (lispm-tr "uses terminals"))
+                     (and (plist-get rules :apple-events) (lispm-tr "opens applications"))))
+         (lispm-tr-in "between the parts of a list" "; "))))))
 
 (defun lispm-sandbox--settings-file (json)
   "A file holding the settings JSON, named after what it holds."
@@ -386,7 +406,7 @@ and nothing needed it yet."
 (defun lispm-sandbox--install-failed (why)
   "Note and say that srt could not be installed, because of WHY."
   (setq lispm-sandbox--install-failure (cons (float-time) why))
-  (message "LispM: could not install srt for the sandbox: %s" why))
+  (message "%s" (lispm-tr "LispM: could not install srt for the sandbox: %s" why)))
 
 ;;;###autoload
 (defun lispm-sandbox-install ()
@@ -401,7 +421,7 @@ time a level other than none is used."
     (if-let* ((npm (executable-find "npm")))
         (let ((buffer (get-buffer-create " *lispm-sandbox-install*")))
           (with-current-buffer buffer (erase-buffer))
-          (message "LispM: installing srt %s for the sandbox..." lispm-sandbox-srt-version)
+          (message "%s" (lispm-tr "LispM: installing srt %s for the sandbox..." lispm-sandbox-srt-version))
           (setq lispm-sandbox--installer
                 (make-process
                  :name "lispm-sandbox-install" :buffer buffer :noquery t
@@ -413,7 +433,8 @@ time a level other than none is used."
                  (lambda (process _event)
                    (unless (process-live-p process)
                      (cond ((lispm-sandbox--srt)
-                            (message "LispM: the sandbox is ready (srt %s)" lispm-sandbox-srt-version))
+                            (message "%s" (lispm-tr "LispM: the sandbox is ready (srt %s)"
+                                                    lispm-sandbox-srt-version)))
                            ((zerop (process-exit-status process))
                             (lispm-sandbox--install-failed "node, from Node.js 22.12 or later, is not found"))
                            (t (lispm-sandbox--install-failed
@@ -543,8 +564,9 @@ and forget it once PROCESS has exited."
   "What RUN's sandbox allowed, for an agent reading its output; nil if none."
   (when (lispm-sandbox-run-settings run)
     (let ((level (lispm-sandbox-run-started run)))
-      (format "sandbox %s: %s" (lispm-sandbox-level-name level)
-              (lispm-sandbox-level-description level)))))
+      (lispm-in-english
+        (format "sandbox %s: %s" (lispm-sandbox-level-name level)
+                (lispm-sandbox-level-description level))))))
 
 ;;;; Changes
 
@@ -580,18 +602,20 @@ nothing ran."
           (push run restart))))
     (run-hooks 'lispm-sandbox-change-hook)
     (when (or verbose sent restart)
-      (message "LispM: sandbox %s (%s)%s%s"
-               (lispm-sandbox-level-name lispm-sandbox-level)
-               (lispm-sandbox-level-description)
-               (if sent
-                   (format "; %d running process%s took its network rules"
-                           (length sent) (if (cdr sent) "es" ""))
-                 "")
-               (if restart
-                   (format "; restart %s to apply all of it"
-                           (mapconcat (lambda (run) (or (lispm-sandbox-run-name run) "a process"))
-                                      (nreverse restart) ", "))
-                 "")))))
+      (message "%s"
+               (concat (lispm-tr "LispM: sandbox %s (%s)"
+                                 (lispm-sandbox-level-name lispm-sandbox-level)
+                                 (lispm-sandbox-level-description))
+                       (if sent
+                           (lispm-tr-n "; %d running process took its network rules"
+                                       "; %d running processes took their network rules"
+                                       (length sent))
+                         "")
+                       (if restart
+                           (lispm-tr "; restart %s to apply all of it"
+                                     (mapconcat (lambda (run) (or (lispm-sandbox-run-name run) (lispm-tr "a process")))
+                                                (nreverse restart) ", "))
+                         ""))))))
 
 (defun lispm-sandbox--watch (_symbol _value operation where)
   "Bring running processes up to a change of a sandbox variable, once made.
@@ -610,13 +634,13 @@ OPERATION and WHERE are those of `add-variable-watcher'."
          (completion-extra-properties
           (list :annotation-function
                 (lambda (name)
-                  (concat "  " (lispm-sandbox-level-description (intern (downcase name)))))))
+                  (concat "  " (lispm-sandbox-level-description (lispm-sandbox-level-named name))))))
          (current (lispm-sandbox-level-name lispm-sandbox-level))
-         (name (completing-read (or prompt (format "Sandbox level (now %s): " current))
+         (name (completing-read (or prompt (lispm-tr "Sandbox level (now %s): " current))
                                 (mapcar (lambda (entry) (lispm-sandbox-level-name (car entry)))
                                         lispm-sandbox-levels)
                                 nil t nil nil current)))
-    (intern (downcase name))))
+    (lispm-sandbox-level-named name)))
 
 ;;;###autoload
 (defun lispm-sandbox-set-level (level &optional save)
@@ -627,7 +651,9 @@ running ones take its network rules at once.  With a prefix argument,
 SAVE it for future sessions too."
   (interactive (list (lispm-sandbox-read-level) current-prefix-arg))
   (unless (assq level lispm-sandbox-levels)
-    (user-error "No sandbox level %s: it is one of none, low, middle, high and custom" level))
+    (user-error "%s" (lispm-tr "No sandbox level %s: it is one of %s"
+                               level (mapconcat (pcase-lambda (`(,level . ,_)) (lispm-sandbox-level-name level))
+                                                lispm-sandbox-levels ", "))))
   (if save
       (customize-save-variable 'lispm-sandbox-level level)
     (customize-set-variable 'lispm-sandbox-level level))
@@ -642,8 +668,10 @@ replace those it has.  Choose the level itself with
 `lispm-sandbox-set-level'."
   (interactive
    (list (when current-prefix-arg
-           (intern (downcase (completing-read "Start from the rules of: "
-                                              '("Low" "Middle" "High") nil t))))))
+           (let ((completion-ignore-case t))
+             (lispm-sandbox-level-named
+              (completing-read (lispm-tr "Start from the rules of: ")
+                               (mapcar #'lispm-sandbox-level-name '(low middle high)) nil t))))))
   (when (or from (null lispm-sandbox-custom))
     (customize-set-variable 'lispm-sandbox-custom
                             (copy-tree (lispm-sandbox-rules (or from 'middle)))))

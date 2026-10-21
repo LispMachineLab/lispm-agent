@@ -120,8 +120,8 @@ topic, in %s. No quotes, no final punctuation."
     (puthash (lispm-agent-id agent) t lispm-title--asked)
     (condition-case err
         (lispm-title--ask agent reply)
-      (error (message "LispM: could not title %s: %s"
-                      (lispm-agent-name agent) (error-message-string err))))))
+      (error (message "%s" (lispm-tr "LispM: could not title %s: %s"
+                                     (lispm-agent-name agent) (error-message-string err)))))))
 
 (add-hook 'lispm-turn-end-functions #'lispm-title--maybe)
 

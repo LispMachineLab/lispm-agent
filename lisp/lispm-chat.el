@@ -212,7 +212,7 @@ it, and all the :items.")
                             :text (string-trim text))
                       items))))
            ("fallback"
-            (push (list :kind 'note :text "A fallback model took over this response.") items))))))
+            (push (list :kind 'note :text (lispm-tr "A fallback model took over this response.")) items))))))
     (nreverse items)))
 
 (defun lispm-chat--live-items (buffer)
@@ -253,9 +253,9 @@ A condition still waiting is the prompt below the chat, not an item."
                                      " ")))
                 (push (list :kind 'note
                             :text (if (string-blank-p text)
-                                      "A response, left out of the conversation."
-                                    (concat "Left out of the conversation: "
-                                            (lispm--oneline text 70))))
+                                      (lispm-tr "A response, left out of the conversation.")
+                                    (lispm-tr "Left out of the conversation: %s"
+                                              (lispm--oneline text 70))))
                       items)))
           (pcase kind
             ('user
@@ -374,53 +374,63 @@ Code blocks lose their fences and keep their lines as they are."
             (t (push (lispm-chat--inline line) out))))
     (string-join (nreverse out) "\n")))
 
-(defun lispm-chat--count (n thing)
-  "N THINGs, in words."
-  (format "%d %s%s" n thing (if (= n 1) "" "s")))
-
 (defconst lispm-chat--tools
-  `(("read_file" :shown "Read" :result read)
-    ("read_buffer" :shown "Read" :result read)
-    ("edit_file" :shown "Update" :result edit :ask diff :title "Edit file"
-     :question "Do you want to make this edit to %s?")
-    ("edit_buffer" :shown "Update" :result edit :ask diff :title "Edit file"
-     :question "Do you want to make this edit to %s?")
-    ("edit_definition" :shown "Redefine" :result definition :ask diff :title "Edit definition"
-     :question "Do you want to make this edit to %s?" :subject name)
-    ("write_file" :shown "Write" :result write :ask diff :title "Write file"
-     :question "Do you want to write %s?")
-    ("eval_definition" :shown "Evaluate" :ask preview :title "Evaluate a definition"
-     :question "Do you want to evaluate this?")
-    ("write_skill" :shown "WriteSkill" :ask skill :exact "skill"
-     :title ,(lambda (input _preview) (format "Write the skill %s" (alist-get 'name input)))
+  `(("read_file" :shown ,(lispm-tr-noop "Read" "tool") :result read)
+    ("read_buffer" :shown ,(lispm-tr-noop "Read" "tool") :result read)
+    ("edit_file" :shown ,(lispm-tr-noop "Update" "tool") :result edit :ask diff
+     :title ,(lispm-tr-noop "Edit file") :question ,(lispm-tr-noop "Do you want to make this edit to %s?"))
+    ("edit_buffer" :shown ,(lispm-tr-noop "Update" "tool") :result edit :ask diff
+     :title ,(lispm-tr-noop "Edit file") :question ,(lispm-tr-noop "Do you want to make this edit to %s?"))
+    ("edit_definition" :shown ,(lispm-tr-noop "Redefine" "tool") :result definition :ask diff
+     :title ,(lispm-tr-noop "Edit definition")
+     :question ,(lispm-tr-noop "Do you want to make this edit to %s?") :subject name)
+    ("write_file" :shown ,(lispm-tr-noop "Write" "tool") :result write :ask diff
+     :title ,(lispm-tr-noop "Write file") :question ,(lispm-tr-noop "Do you want to write %s?"))
+    ("eval_definition" :shown ,(lispm-tr-noop "Evaluate" "tool") :ask preview
+     :title ,(lispm-tr-noop "Evaluate a definition") :question ,(lispm-tr-noop "Do you want to evaluate this?"))
+    ("write_skill" :shown "WriteSkill" :ask skill
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact skill")
+     :title ,(lambda (input _preview) (lispm-tr "Write the skill %s" (alist-get 'name input)))
      :question ,(lambda (_input preview)
-                  (format "Do you want to save it%s?"
-                          (if-let* ((file (lispm-chat--diff-file preview))) (concat " as " file) "")))
-     :note "Its code runs whenever an agent loads the skill, from now on.")
+                  (if-let* ((file (lispm-chat--diff-file preview)))
+                      (lispm-tr "Do you want to save it as %s?" file)
+                    (lispm-tr "Do you want to save it?")))
+     :note ,(lispm-tr-noop "Its code runs whenever an agent loads the skill, from now on."))
     ("trust_skill" :ask skill :alone t
      :title ,(lambda (input _preview)
-               (format "Run the code of the project's skill %s" (alist-get 'name input)))
+               (lispm-tr "Run the code of the project's skill %s" (alist-get 'name input)))
      :question ,(lambda (_input preview)
-                  (format "Do you want to evaluate this code%s?"
-                          (if-let* ((file (lispm-chat--diff-file preview))) (concat " from " file) "")))
+                  (if-let* ((file (lispm-chat--diff-file preview)))
+                      (lispm-tr "Do you want to evaluate this code from %s?" file)
+                    (lispm-tr "Do you want to evaluate this code?")))
      :note ,(lambda (input _preview)
               (and (> (length (alist-get 'files input)) 0)
-                   (format "It may load the files beside it: %s."
-                           (mapconcat #'identity (alist-get 'files input) ", ")))))
-    ("run_shell" :shown "Bash" :ask command :title "Bash command" :exact "command")
-    ("eval_elisp" :shown "Eval" :ask code :title "Evaluate Emacs Lisp"
-     :question "Do you want to evaluate this?" :exact "code")
-    ("run_lisp" :shown "Lisp" :ask code :title "Run a Lisp program" :question "Do you want to run this?")
-    ("search_files" :shown "Search" :result search)
-    ("list_directory" :shown "List" :result list)
-    ("list_buffers" :shown "Buffers") ("describe_symbol" :shown "Describe")
-    ("remember" :shown "Remember") ("recall" :shown "Recall") ("forget" :shown "Forget")
-    ("task_add" :shown "Task") ("task_update" :shown "Task") ("task_list" :shown "Tasks")
-    ("ask_agent" :shown "Ask") ("send_message" :shown "Message") ("list_agents" :shown "Agents")
-    ("search_tools" :shown "ToolSearch") ("skill" :shown "Skill") ("apropos" :shown "Apropos")
-    ("read_info" :shown "Info") ("web_search" :shown "WebSearch") ("web_fetch" :shown "WebFetch")
-    ("ert_run" :shown "Test") ("xref_definitions" :shown "Definitions")
-    ("xref_references" :shown "References") ("flymake_diagnostics" :shown "Diagnostics"))
+                   (lispm-tr "It may load the files beside it: %s."
+                             (mapconcat #'identity (alist-get 'files input) ", ")))))
+    ("run_shell" :shown "Bash" :ask command :title ,(lispm-tr-noop "Bash command")
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact command"))
+    ("eval_elisp" :shown "Eval" :ask code :title ,(lispm-tr-noop "Evaluate Emacs Lisp")
+     :question ,(lispm-tr-noop "Do you want to evaluate this?")
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code"))
+    ("run_lisp" :shown "Lisp" :ask code :title ,(lispm-tr-noop "Run a Lisp program")
+     :question ,(lispm-tr-noop "Do you want to run this?"))
+    ("search_files" :shown ,(lispm-tr-noop "Search" "tool") :result search)
+    ("list_directory" :shown ,(lispm-tr-noop "List" "tool") :result list)
+    ("list_buffers" :shown ,(lispm-tr-noop "Buffers" "tool"))
+    ("describe_symbol" :shown ,(lispm-tr-noop "Describe" "tool"))
+    ("remember" :shown ,(lispm-tr-noop "Remember" "tool")) ("recall" :shown ,(lispm-tr-noop "Recall" "tool"))
+    ("forget" :shown ,(lispm-tr-noop "Forget" "tool"))
+    ("task_add" :shown ,(lispm-tr-noop "Task" "tool")) ("task_update" :shown ,(lispm-tr-noop "Task" "tool"))
+    ("task_list" :shown ,(lispm-tr-noop "Tasks" "tool"))
+    ("ask_agent" :shown ,(lispm-tr-noop "Ask" "tool")) ("send_message" :shown ,(lispm-tr-noop "Message" "tool"))
+    ("list_agents" :shown ,(lispm-tr-noop "Agents" "tool"))
+    ("search_tools" :shown "ToolSearch") ("skill" :shown ,(lispm-tr-noop "Skill" "tool"))
+    ("apropos" :shown "Apropos") ("read_info" :shown "Info")
+    ("web_search" :shown "WebSearch") ("web_fetch" :shown "WebFetch")
+    ("ert_run" :shown ,(lispm-tr-noop "Test" "tool"))
+    ("xref_definitions" :shown ,(lispm-tr-noop "Definitions" "tool"))
+    ("xref_references" :shown ,(lispm-tr-noop "References" "tool"))
+    ("flymake_diagnostics" :shown ,(lispm-tr-noop "Diagnostics" "tool")))
   "How the chat shows each tool's calls: (NAME . PROPERTIES).
 :shown is the name a call is shown under.  :result is how its result is
 summed up: `read', `edit', `definition', `write', `search' or `list';
@@ -428,9 +438,10 @@ lines of it otherwise.  :ask is what its approval shows: `diff',
 `preview', `skill', `command' or `code'; the input otherwise.  :title,
 :question and :note word the approval, each a string, %s standing for
 the call's file or, with :subject `name', the name it names, or a
-function of the call's input and preview; :exact names what approving
-it for good allows again, and :alone keeps its title from naming the
-program it runs in.")
+function of the call's input and preview; :exact is the answer that
+approves it for good when that allows only the exact call again, and
+:alone keeps its title from naming the program it runs in.  The
+strings are English, translated where shown (see lispm-i18n.el).")
 
 (defun lispm-chat--tool-get (name property)
   "PROPERTY of the tool NAME, see `lispm-chat--tools'."
@@ -441,11 +452,11 @@ program it runs in.")
 SUBJECT standing for %s, or nil when it gives none."
   (let ((value (lispm-chat--tool-get name property)))
     (cond ((functionp value) (funcall value input preview))
-          (value (format value subject)))))
+          (value (lispm-tr value subject)))))
 
 (defun lispm-chat--tool-name (name)
   "The name the tool NAME is shown under; SERVER:TOOL for an MCP server's."
-  (cond ((lispm-chat--tool-get name :shown))
+  (cond ((when-let* ((shown (lispm-chat--tool-get name :shown))) (lispm-tr shown)))
         ((and name (string-match "\\`mcp__\\(.+?\\)__\\(.+\\)\\'" name))
          (format "%s:%s" (match-string 1 name) (match-string 2 name)))
         (t name)))
@@ -475,10 +486,9 @@ it names one."
   (let* ((input (plist-get item :input))
          (argument (if (and (equal (plist-get item :name) "search_files")
                             (stringp (alist-get 'pattern input)))
-                       (concat (format "%S" (alist-get 'pattern input))
-                               (if (stringp (alist-get 'path input))
-                                   (format " in %s" (alist-get 'path input))
-                                 "")
+                       (concat (if (stringp (alist-get 'path input))
+                                   (lispm-tr "%S in %s" (alist-get 'pattern input) (alist-get 'path input))
+                                 (format "%S" (alist-get 'pattern input)))
                                (if (stringp (alist-get 'glob input))
                                    (format ", %s" (alist-get 'glob input))
                                  ""))
@@ -522,13 +532,15 @@ it names one."
       (cond ((string-match-p "\\`\\(---\\|\\+\\+\\+\\) " line))
             ((string-prefix-p "+" line) (cl-incf added))
             ((string-prefix-p "-" line) (cl-incf removed))))
-    (format "Updated %s with %s and %s" (or path "the file")
-            (lispm-chat--count added "addition") (lispm-chat--count removed "removal"))))
+    (lispm-tr "Updated %s with %s and %s" (or path (lispm-tr "the file"))
+              (lispm-tr-n "%d addition" "%d additions" added)
+              (lispm-tr-n "%d removal" "%d removals" removed))))
 
 (defun lispm-chat--more (lines total)
   "LINES, followed by a note of how many of TOTAL lines they leave out."
   (if (> total (length lines))
-      (append lines (list (propertize (format "… +%d lines (TAB to expand)" (- total (length lines)))
+      (append lines (list (propertize (lispm-tr-n "… +%d line (TAB to expand)" "… +%d lines (TAB to expand)"
+                                                  (- total (length lines)))
                                       'face 'lispm-chat-dim)))
     lines))
 
@@ -546,13 +558,13 @@ it names one."
                      (split-string (string-trim-right result) "\n"))))
     (pcase (plist-get item :state)
       ("WRITING" nil)
-      ((or "RUNNING" "APPROVED") (list "Running…"))
+      ((or "RUNNING" "APPROVED") (list (lispm-tr "Running…")))
       ("WAITING"
        (if-let* ((stopped (plist-get item :stopped))
                  (lines (split-string (string-trim-right stopped) "\n")))
            (mapcar (lambda (l) (propertize l 'face 'lispm-chat-error))
                    (lispm-chat--preview lines 2 expanded))
-         (list "Waiting for your approval…")))
+         (list (lispm-tr "Waiting for your approval…"))))
       ((or "DENIED" "FAILED")
        (mapcar (lambda (l) (propertize l 'face 'lispm-chat-error))
                (lispm-chat--preview lines 2 expanded)))
@@ -561,7 +573,7 @@ it names one."
          ((and 'definition (guard (not (plist-get item :preview))))
           ;; Run unasked, it has no diff: its input holds only the new form.
           (let ((new (split-string (string-trim-right (or (alist-get 'new_text input) "")) "\n")))
-            (cons (format "Redefined %s" (alist-get 'name input))
+            (cons (lispm-tr "Redefined %s" (alist-get 'name input))
                   (lispm-chat--preview new lispm-chat-preview-lines expanded))))
          ((or 'edit 'definition)
           (let* ((diff (or (plist-get item :preview) (lispm-chat--input-diff input)))
@@ -570,22 +582,20 @@ it names one."
                   (lispm-chat--preview shown lispm-chat-diff-lines expanded))))
          ('write
           (let ((content (split-string (string-trim-right (or (alist-get 'content input) "")) "\n")))
-            (cons (format "Wrote %s to %s" (lispm-chat--count (length content) "line") path)
+            (cons (lispm-tr-n "Wrote %d line to %s" "Wrote %d lines to %s" (length content)
+                              (length content) path)
                   (lispm-chat--preview content lispm-chat-preview-lines expanded))))
          ('read
           (if expanded lines
-            (list (concat "Read " (lispm-chat--count
-                                   (cl-count-if (lambda (l) (string-match-p "\\`[ \t]*[0-9]+\t" l))
-                                                lines)
-                                   "line")))))
+            (let ((n (cl-count-if (lambda (l) (string-match-p "\\`[ \t]*[0-9]+\t" l)) lines)))
+              (list (lispm-tr-n "Read %d line" "Read %d lines" n)))))
          ('list
           (if expanded lines
-            (list (concat "Listed " (lispm-chat--count (max 0 (1- (length lines))) "path")))))
+            (list (lispm-tr-n "Listed %d path" "Listed %d paths" (max 0 (1- (length lines)))))))
          ('search
           (if (or expanded (string-prefix-p "No matches" result)) lines
-            (list (concat "Found " (lispm-chat--count
-                                    (cl-count-if (lambda (l) (not (string-prefix-p "[" l))) lines)
-                                    "matching line")))))
+            (list (lispm-tr-n "Found %d matching line" "Found %d matching lines"
+                              (cl-count-if (lambda (l) (not (string-prefix-p "[" l))) lines)))))
          (_ (lispm-chat--preview lines lispm-chat-preview-lines expanded)))))))
 
 (defun lispm-chat--image (file)
@@ -596,15 +606,14 @@ it names one."
                                          :max-width (min 900 (max 300 (* (lispm-chat--width)
                                                                          (frame-char-width))))
                                          :max-height 700))
-    (format "[image %s]" (abbreviate-file-name file))))
+    (lispm-tr "[image %s]" (abbreviate-file-name file))))
 
 (defun lispm-chat--image-lines (item)
   "Lines showing the images of the tool call ITEM's result."
   (when-let* ((images (plist-get item :images)))
     (if (plist-get item :expanded)
         (mapcar #'lispm-chat--image images)
-      (list (propertize (format "%s (TAB to show)"
-                                (lispm-chat--count (length images) "image"))
+      (list (propertize (lispm-tr-n "%d image (TAB to show)" "%d images (TAB to show)" (length images))
                         'face 'lispm-chat-dim)))))
 
 (defun lispm-chat--tool (item)
@@ -633,12 +642,11 @@ it names one."
   (pcase (plist-get item :kind)
     ('user
      (let* ((from (plist-get item :from))
-            (shown (propertize (lispm-chat--prompted
-                                (concat (if from (format "[from %s] " from) "")
-                                        (plist-get item :text)))
+            (prefix (if from (lispm-tr "[from %s] " from) ""))
+            (shown (propertize (lispm-chat--prompted (concat prefix (plist-get item :text)))
                                'face 'lispm-chat-user)))
        (when (and from (lispm-get-agent from t))
-         (let ((at (+ (string-search "[from " shown) 6)))
+         (let ((at (+ (string-search prefix shown) (string-search from prefix))))
            (lispm-present-in shown at (+ at (length from)) (list 'agent from))))
        (concat "\n" (lispm-chat--present shown) "\n")))
     ('text
@@ -651,17 +659,17 @@ it names one."
                (propertize (lispm-chat--indent
                             (if (or (plist-get item :expanded) (plist-get item :live))
                                 text
-                              (concat (lispm--oneline text 70) "  (TAB to show)"))
+                              (concat (lispm--oneline text 70) "  " (lispm-tr "(TAB to show)")))
                             "  " "✻ ")
                            'face 'lispm-chat-thought)
                "\n")))
     ('summary
      (concat "\n"
-             (propertize "✻ Conversation compacted" 'face 'lispm-chat-accent)
+             (propertize (concat "✻ " (lispm-tr "Conversation compacted")) 'face 'lispm-chat-accent)
              (if (plist-get item :expanded)
                  (concat "\n" (propertize (lispm-chat--indent (plist-get item :text) "  ")
                                           'face 'lispm-chat-dim))
-               (propertize " (TAB for the summary)" 'face 'lispm-chat-dim))
+               (propertize (concat " " (lispm-tr "(TAB for the summary)")) 'face 'lispm-chat-dim))
              "\n"))
     ('event
      (concat "\n"
@@ -728,24 +736,25 @@ Lines that are nil are left out."
   "The welcome box at the top of AGENT's chat."
   (lispm-chat--box
    (list (concat (propertize "✻ " 'face 'lispm-chat-accent)
-                 "Welcome to " (propertize "LispM" 'face 'bold) "!  "
+                 (lispm-tr "Welcome to %s!" (propertize "LispM" 'face 'bold)) "  "
                  (propertize (symbol-name (lispm-agent-name agent)) 'face 'lispm-chat-dim))
          ""
-         (propertize "  /help for help, /model to switch models" 'face 'lispm-chat-dim)
+         (propertize (concat "  " (lispm-tr "/help for help, /model to switch models")) 'face 'lispm-chat-dim)
          ""
-         (propertize (format "  cwd: %s" (abbreviate-file-name (lispm-agent-root agent)))
+         (propertize (concat "  " (lispm-tr "cwd: %s" (abbreviate-file-name (lispm-agent-root agent))))
                      'face 'lispm-chat-dim)
-         (propertize (if (lispm-backend-name agent)
-                         (format "  model: %s via %s · role: %s"
-                                 (or (lispm-agent-model* agent) "?")
-                                 (lispm-backend-name agent)
-                                 (lispm-agent-role agent))
-                       (format "  no model backend (see `lispm-backend') · role: %s"
-                               (lispm-agent-role agent)))
+         (propertize (concat "  "
+                             (if (lispm-backend-name agent)
+                                 (lispm-tr "model: %s via %s · role: %s"
+                                           (or (lispm-agent-model* agent) "?")
+                                           (lispm-backend-name agent)
+                                           (lispm-agent-role agent))
+                               (lispm-tr "no model backend (see `lispm-backend') · role: %s"
+                                         (lispm-agent-role agent))))
                      'face 'lispm-chat-dim)
          (unless (eq lispm-sandbox-level 'none)
-           (propertize (format "  sandbox: %s (/sandbox to change)"
-                               (lispm-sandbox-level-name lispm-sandbox-level))
+           (propertize (concat "  " (lispm-tr "sandbox: %s (/sandbox to change)"
+                                              (lispm-sandbox-level-name lispm-sandbox-level)))
                        'face 'lispm-chat-dim)))
    (min 64 (lispm-chat--width)) 'lispm-chat-accent))
 
@@ -754,7 +763,7 @@ Lines that are nil are left out."
 (defun lispm-chat--waiting ()
   "Id of the call the approval prompt asks about."
   (or (car (lispm-waiting-calls lispm-chat-agent))
-      (user-error "Nothing awaits your approval")))
+      (user-error "%s" (lispm-tr "Nothing awaits your approval"))))
 
 (defun lispm-chat--condition (&optional agent)
   "The condition the prompt asks about, AGENT's or a call's, if any.
@@ -802,7 +811,7 @@ exact call (see `lispm-tools-allowance')."
   (lispm-deny-for lispm-chat-agent
                   (unless (lispm-chat--condition)
                     (lispm-chat--waiting)
-                    (read-string "What should it do instead? (optional) ")))
+                    (read-string (lispm-tr "What should it do instead? (optional) "))))
   (goto-char (point-max)))
 
 (defun lispm-chat-choose ()
@@ -883,22 +892,22 @@ ITEMS are the session's items, where the call's preview is."
                    ('code (split-string (or (alist-get 'code input) "") "\n"))
                    (_ (split-string (lispm--json-pretty input) "\n"))))
            (title (concat (or (lispm-chat--tool-text name :title input preview subject)
-                              (format "Use %s" shown))
+                              (lispm-tr "Use %s" shown))
                           (if (and (plist-get call :asking) (not (lispm-chat--tool-get name :alone)))
-                              (format " · in the program %s runs" (lispm-chat--tool-name
-                                                                   (plist-get call :name)))
+                              (concat " · " (lispm-tr "in the program %s runs"
+                                                      (lispm-chat--tool-name (plist-get call :name))))
                             "")))
            (question (or (lispm-chat--tool-text name :question input preview subject)
-                         "Do you want to proceed?"))
+                         (lispm-tr "Do you want to proceed?")))
            ;; What saying yes leads to, beyond the call itself.
            (note (lispm-chat--tool-text name :note input preview subject))
-           (options (list "Yes"
+           (options (list (lispm-tr "Yes")
                           (pcase (lispm-call-allowance agent id)
-                            (`(always . ,text) text)
-                            ('exact (format "Yes, and don't ask again for this exact %s"
-                                            (or (lispm-chat--tool-get name :exact) "call")))
-                            (_ (format "Yes, and don't ask again for %s calls by this agent" shown)))
-                          "No, and tell it what to do differently")))
+                            (`(always . ,text) (lispm-tr text))
+                            ('exact (lispm-tr (or (lispm-chat--tool-get name :exact)
+                                                  (lispm-tr-noop "Yes, and don't ask again for this exact call"))))
+                            (_ (lispm-tr "Yes, and don't ask again for %s calls by this agent" shown)))
+                          (lispm-tr "No, and tell it what to do differently"))))
       (propertize
        (concat
         "\n"
@@ -906,7 +915,7 @@ ITEMS are the session's items, where the call's preview is."
          (append (list (propertize title 'face 'bold) "")
                  (mapcar (lambda (l) (concat "  " l)) (seq-take body 30))
                  (and (> (length body) 30)
-                      (list (propertize (format "  … +%d lines" (- (length body) 30))
+                      (list (propertize (concat "  " (lispm-tr-n "… +%d line" "… +%d lines" (- (length body) 30)))
                                         'face 'lispm-chat-dim)))
                  ;; Why a check of this Emacs has it ask.
                  (mapcan (lambda (reason)
@@ -930,13 +939,13 @@ ITEMS are the session's items, where the call's preview is."
        (concat
         "\n"
         (lispm-chat--box
-         (append (list (propertize (plist-get condition :title) 'face 'bold) "")
+         (append (list (propertize (lispm-tr (plist-get condition :title)) 'face 'bold) "")
                  (mapcar (lambda (l) (concat "  " l))
                          (seq-take (split-string (string-fill (plist-get condition :message)
                                                               (- width 8))
                                                  "\n")
                                    12))
-                 (list "" "How do you want to go on?")
+                 (list "" (lispm-tr "How do you want to go on?"))
                  (lispm-chat--options (mapcar (lambda (restart) (lispm-restart-description condition restart))
                                               (plist-get condition :restarts))))
          width 'lispm-chat-pending))
@@ -954,18 +963,18 @@ ITEMS are the session's items, where the call's preview is."
              (frame (aref lispm-chat--spinner
                           (mod (floor (* 4 (float-time))) (length lispm-chat--spinner))))
              (status (or (lispm-agent-status agent) ""))
-             (verb (cond ((eq state 'compacting) "Compacting conversation…")
-                         ((eq state 'aborting) "Stopping…")
+             (verb (cond ((eq state 'compacting) (lispm-tr "Compacting conversation…"))
+                         ((eq state 'aborting) (lispm-tr "Stopping…"))
                          (t (pcase (lispm-agent-activity agent)
-                              (`(running . ,tool) (format "Running %s…" tool))
-                              (`(writing . ,what) (format "Writing %s…" what))
-                              ('retry (format "Thinking… (%s)" status))
+                              (`(running . ,tool) (lispm-tr "Running %s…" tool))
+                              (`(writing . ,tool) (lispm-tr "Writing a call of %s…" tool))
+                              ('retry (lispm-tr "Thinking… (%s)" status))
                               ((and 'waiting (guard (not (string-empty-p status))))
                                (concat (upcase (substring status 0 1)) (substring status 1) "…"))
-                              (_ "Thinking…"))))))
+                              (_ (lispm-tr "Thinking…")))))))
         (concat "\n"
                 (propertize (concat frame " " verb) 'face 'lispm-chat-accent)
-                (propertize (format " (%ds · C-c C-c to interrupt)" seconds) 'face 'lispm-chat-dim)
+                (propertize (concat " " (lispm-tr "(%ds · C-c C-c to interrupt)" seconds)) 'face 'lispm-chat-dim)
                 "\n")))))
 
 (defun lispm-chat--queued (agent)
@@ -975,14 +984,14 @@ ITEMS are the session's items, where the call's preview is."
             (mapconcat (lambda (entry)
                          (propertize (lispm-chat--prompted
                                       (concat (cond ((plist-get entry :from)
-                                                     (format "[from %s] " (plist-get entry :from)))
+                                                     (lispm-tr "[from %s] " (plist-get entry :from)))
                                                     ((plist-get entry :event)
                                                      (format "[%s] " (plist-get entry :event)))
                                                     (t ""))
                                               (plist-get entry :text)))
                                      'face 'lispm-chat-dim))
                        inbox "\n")
-            (propertize "\n  ⎿  queued; sent when the agent is free" 'face 'lispm-chat-dim)
+            (propertize (concat "\n  ⎿  " (lispm-tr "queued; sent when the agent is free")) 'face 'lispm-chat-dim)
             "\n")))
 
 (defun lispm-chat--rule ()
@@ -1138,10 +1147,20 @@ ITEMS are the session's items, where the call's preview is."
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
         (lispm-chat--redraw)))))
 
+(defun lispm-chat--language-changed ()
+  "Draw every chat again, whole, in the language now spoken."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
+        (setq lispm-chat--parsed nil)
+        (clrhash lispm-chat--rendered)
+        (lispm-chat--redraw)))))
+
 (add-hook 'lispm-session-mode-hook #'lispm-chat--watch-transcript)
 (add-hook 'lispm-state-change-functions #'lispm-chat--state-changed)
 (add-hook 'lispm-session-end-functions #'lispm-chat--session-ended)
 (add-hook 'lispm-sandbox-change-hook #'lispm-chat--sandbox-changed)
+(add-hook 'lispm-language-changed-hook #'lispm-chat--language-changed)
 
 ;;;; Input
 
@@ -1166,14 +1185,14 @@ ITEMS are the session's items, where the call's preview is."
     (let ((footer
            (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
                        (propertize (cond ((not (lispm-chat--prompting-p))
-                                          "Try \"explain this project\", or / for commands")
+                                          (lispm-tr "Try \"explain this project\", or / for commands"))
                                          ((lispm-chat--condition)
-                                          "Choose above with its number, or write to stop and send")
-                                         (t "Answer above with 1, 2 or 3"))
+                                          (lispm-tr "Choose above with its number, or write to stop and send"))
+                                         (t (lispm-tr "Answer above with 1, 2 or 3")))
                                    'face 'lispm-chat-dim)
                      " ")
                    "\n" (lispm-chat--rule) "\n"
-                   (propertize "  / for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt"
+                   (propertize (concat "  " (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt"))
                                'face 'lispm-chat-dim))))
       ;; The footer is drawn at the end of the input, where point usually
       ;; is, and Emacs would draw the cursor after it, below the hints.
@@ -1281,26 +1300,38 @@ or show the item at point in full."
   (interactive)
   (if (lispm-agent-busy-p lispm-chat-agent)
       (lispm-abort lispm-chat-agent)
-    (message "Nothing to interrupt")))
+    (message "%s" (lispm-tr "Nothing to interrupt"))))
 
 ;;;; Commands
 
 (defconst lispm-chat-commands
-  '(("help" lispm-chat-help "List commands and keys")
-    ("clear" lispm-chat-clear "Start a new conversation (this one stays on record)")
-    ("compact" lispm-chat-compact "Summarize the conversation and continue from the summary")
-    ("resume" lispm-chat-resume "Resume a recorded conversation here")
-    ("model" lispm-chat-model "Show the model, or switch with /model NAME")
-    ("sandbox" lispm-chat-sandbox "Choose the sandbox level; /sandbox edit, the Custom one's rules")
-    ("diff" lispm-chat-diff "Show what the agent changed in its last turn")
-    ("undo" lispm-chat-undo "Undo what the agent changed in its last turn")
-    ("memory" lispm-chat-memory "Open this project's memory")
-    ("cost" lispm-chat-cost "Show the tokens used")
-    ("agents" lispm-chat-agents "Show every agent")
-    ("inspect" lispm-chat-inspect "Inspect this agent, or /inspect NAME another")
-    ("transcript" lispm-chat-transcript "Open the org transcript of this conversation")
-    ("exit" lispm-chat-exit "End this agent"))
-  "The / commands: name, function of the agent and the argument, description.")
+  `(("help" lispm-chat-help ,(lispm-tr-noop "List commands and keys"))
+    ("clear" lispm-chat-clear ,(lispm-tr-noop "Start a new conversation (this one stays on record)"))
+    ("compact" lispm-chat-compact ,(lispm-tr-noop "Summarize the conversation and continue from the summary"))
+    ("resume" lispm-chat-resume ,(lispm-tr-noop "Resume a recorded conversation here"))
+    ("model" lispm-chat-model ,(lispm-tr-noop "Show the model, or switch with /model NAME"))
+    ("sandbox" lispm-chat-sandbox ,(lispm-tr-noop "Choose the sandbox level; /sandbox edit, the Custom one's rules"))
+    ("diff" lispm-chat-diff ,(lispm-tr-noop "Show what the agent changed in its last turn"))
+    ("undo" lispm-chat-undo ,(lispm-tr-noop "Undo what the agent changed in its last turn"))
+    ("memory" lispm-chat-memory ,(lispm-tr-noop "Open this project's memory"))
+    ("cost" lispm-chat-cost ,(lispm-tr-noop "Show the tokens used"))
+    ("agents" lispm-chat-agents ,(lispm-tr-noop "Show every agent"))
+    ("inspect" lispm-chat-inspect ,(lispm-tr-noop "Inspect this agent, or /inspect NAME another"))
+    ("transcript" lispm-chat-transcript ,(lispm-tr-noop "Open the org transcript of this conversation"))
+    ("exit" lispm-chat-exit ,(lispm-tr-noop "End this agent")))
+  "The / commands: name, function of the agent and the argument, description.
+The descriptions are English, translated where shown.")
+
+(defconst lispm-chat--keys
+  `(("RET" ,(lispm-tr-noop "send; on an object (a file, an agent...), act on it; on an item, show it in full"))
+    ("S-RET, C-j" ,(lispm-tr-noop "new line"))
+    ("TAB" ,(lispm-tr-noop "show the item at point in full; complete a / command"))
+    ("M-p, M-n" ,(lispm-tr-noop "previous and next messages sent"))
+    ("C-c C-c" ,(lispm-tr-noop "interrupt the agent"))
+    ("1, 2, 3" ,(lispm-tr-noop "answer an approval prompt (or up, down and RET)"))
+    ("C-c C-t" ,(lispm-tr-noop "the org transcript")))
+  "The keys /help lists: (KEYS DESCRIPTION), the description English,
+translated where shown.")
 
 (defun lispm-chat--command (agent text)
   "Run the / command TEXT for AGENT."
@@ -1308,23 +1339,17 @@ or show the item at point in full."
          (entry (assoc (car words) lispm-chat-commands)))
     (if entry
         (funcall (nth 1 entry) agent (string-join (cdr words) " "))
-      (message "Unknown command /%s; /help lists them" (car words)))))
+      (message "%s" (lispm-tr "Unknown command /%s; /help lists them" (car words))))))
 
 (defun lispm-chat-help (_agent _argument)
   "Show the commands and keys of the chat."
   (with-help-window "*LispM help*"
-    (princ "Commands\n\n")
+    (princ (concat (lispm-tr "Commands") "\n\n"))
     (pcase-dolist (`(,name ,_ ,doc) lispm-chat-commands)
-      (princ (format "  /%-11s %s\n" name doc)))
-    (princ (concat "\nKeys\n\n"
-                   "  RET         send; on an object (a file, an agent...), act on it;\n"
-                   "              on an item, show it in full\n"
-                   "  S-RET, C-j  new line\n"
-                   "  TAB         show the item at point in full; complete a / command\n"
-                   "  M-p, M-n    previous and next messages sent\n"
-                   "  C-c C-c     interrupt the agent\n"
-                   "  1, 2, 3     answer an approval prompt (or up, down and RET)\n"
-                   "  C-c C-t     the org transcript\n"))))
+      (princ (format "  /%-11s %s\n" name (lispm-tr doc))))
+    (princ (concat "\n" (lispm-tr "Keys") "\n\n"))
+    (pcase-dolist (`(,keys ,doc) lispm-chat--keys)
+      (princ (format "  %-11s %s\n" keys (lispm-tr doc))))))
 
 (defun lispm-chat--replace (old new)
   "Show the chat of agent NEW where the chat of agent OLD is."
@@ -1341,7 +1366,7 @@ or show the item at point in full."
 Return the chat of the new conversation."
   (lispm-stop-at-condition agent)
   (when (lispm-agent-busy-p agent)
-    (user-error "%s is busy; C-c C-c interrupts it" (lispm-agent-name agent)))
+    (user-error "%s" (lispm-tr "%s is busy; C-c C-c interrupts it" (lispm-agent-name agent))))
   (if (lispm-agent-standing agent)
       (let ((old (lispm-agent-buffer agent)))
         (lispm--save-session agent)
@@ -1366,7 +1391,7 @@ Return the chat of the new conversation."
 
 (defun lispm-chat-resume (agent _argument)
   "Resume a recorded conversation where AGENT's chat is."
-  (let* ((session (lispm--read-session "Resume: "))
+  (let* ((session (lispm--read-session (lispm-tr "Resume: ")))
          (resumed (lispm-resume-file (plist-get session :file))))
     (unless (eq resumed agent)
       (lispm-chat--replace agent resumed))))
@@ -1374,19 +1399,19 @@ Return the chat of the new conversation."
 (defun lispm-chat-model (agent argument)
   "Show AGENT's model, or switch it to ARGUMENT."
   (if (string-empty-p argument)
-      (message "%s uses %s via %s" (lispm-agent-name agent)
-               (lispm-agent-model* agent) (lispm-backend-name agent))
+      (message "%s" (lispm-tr "%s uses %s via %s" (lispm-agent-name agent)
+                         (lispm-agent-model* agent) (lispm-backend-name agent)))
     (lispm-use-model agent (lispm-agent-backend agent) argument)
     (with-current-buffer (lispm-agent-view agent)
       (lispm-chat--redraw))
-    (message "%s now uses %s" (lispm-agent-name agent) argument)))
+    (message "%s" (lispm-tr "%s now uses %s" (lispm-agent-name agent) argument))))
 
 (defun lispm-chat-sandbox (_agent argument)
   "Choose the sandbox level of shell commands and MCP servers, or set ARGUMENT.
 ARGUMENT edit edits the rules of the level Custom instead."
   (cond ((string-empty-p argument) (lispm-sandbox-set-level (lispm-sandbox-read-level)))
         ((equal (downcase argument) "edit") (lispm-sandbox-customize))
-        (t (lispm-sandbox-set-level (intern (downcase argument))))))
+        (t (lispm-sandbox-set-level (or (lispm-sandbox-level-named argument) (intern (downcase argument)))))))
 
 (defun lispm-chat-diff (agent _argument)
   "Show what AGENT changed in its last turn."
@@ -1394,8 +1419,8 @@ ARGUMENT edit edits the rules of the level Custom instead."
 
 (defun lispm-chat-undo (agent _argument)
   "Undo what AGENT changed in its last turn."
-  (when (yes-or-no-p (format "Undo the changes %s made in its last turn? "
-                             (lispm-agent-name agent)))
+  (when (yes-or-no-p (lispm-tr "Undo the changes %s made in its last turn? "
+                               (lispm-agent-name agent)))
     (lispm-revert-turn agent)))
 
 (defun lispm-chat-memory (agent _argument)
@@ -1405,8 +1430,8 @@ ARGUMENT edit edits the rules of the level Custom instead."
 (defun lispm-chat-cost (agent _argument)
   "Show the tokens AGENT used."
   (pcase-let ((`(,in ,out ,cached) (lispm-agent-usage agent)))
-    (message "%s: %d input, %d output, %d cached tokens (%s)"
-             (lispm-agent-name agent) in out cached (lispm-agent-model* agent))))
+    (message "%s" (lispm-tr "%s: %d input, %d output, %d cached tokens (%s)"
+                       (lispm-agent-name agent) in out cached (lispm-agent-model* agent)))))
 
 (defun lispm-chat-agents (_agent _argument)
   "Show every agent."
