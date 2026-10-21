@@ -39,6 +39,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'lispm-i18n)
 
 (defgroup lispm nil
   "An Emacs-native agent runtime."
@@ -268,7 +269,7 @@ Signal an error if there is none, unless NOERROR."
   (cond ((lispm-role-p role) role)
         ((alist-get (if (stringp role) (intern role) role) lispm--roles))
         (noerror nil)
-        (t (user-error "No role named %s" role))))
+        (t (user-error "%s" (lispm-tr "No role named %s" role)))))
 
 (defun lispm-agents ()
   "Return the live agents."
@@ -283,7 +284,7 @@ Signal an error if there is none, unless NOERROR."
               (or (alist-get (intern agent) lispm--agents)
                   (seq-find (lambda (a) (equal (lispm-agent-id a) agent)) (lispm-agents)))))
         (noerror nil)
-        (t (user-error "No agent named %s" agent))))
+        (t (user-error "%s" (lispm-tr "No agent named %s" agent)))))
 
 (defun lispm--apply-role (agent role)
   "Give AGENT the capabilities of ROLE."
@@ -583,11 +584,27 @@ class it was split from, if any (see `lispm--permission-fallbacks')."
                                              (lispm-agent-policy agent)
                                              (lispm-agent-ceiling agent))))))
 
+(defconst lispm--state-names
+  `((idle . ,(lispm-tr-noop "idle" "agent state"))
+    (requesting . ,(lispm-tr-noop "requesting" "agent state"))
+    (acting . ,(lispm-tr-noop "acting" "agent state"))
+    (waiting . ,(lispm-tr-noop "waiting" "agent state"))
+    (compacting . ,(lispm-tr-noop "compacting" "agent state"))
+    (aborting . ,(lispm-tr-noop "aborting" "agent state")))
+  "The states of agents as views name them to the user, in English,
+translated where shown.")
+
+(defun lispm--state-name (state)
+  "STATE, an agent's, as views name it to the user, in the language spoken."
+  (if-let* ((name (alist-get state lispm--state-names)))
+      (lispm-tr name)
+    (symbol-name state)))
+
 (defun lispm-set-state (agent state &optional status activity)
   "Set AGENT's STATE and STATUS, and tell whoever is watching.
 ACTIVITY is what STATUS says as data, for views that word it their own
 way: `thinking', `retry' or `waiting' (for what STATUS names), or
-\(running . TOOL) or (writing . WHAT)."
+\(running . TOOL) or (writing . TOOL), a call of TOOL being written."
   (setf (lispm-agent-state agent) state
         (lispm-agent-status agent) status
         (lispm-agent-activity agent) activity)

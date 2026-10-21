@@ -392,7 +392,7 @@ text, the text it replaced, and its length, TOTAL in all."
           (seq-filter (lambda (show)
                         (condition-case err
                             (lispm-edits--draw show now)
-                          (error (message "LispM: showing a change: %S" err)
+                          (error (message "%s" (lispm-tr "LispM: showing a change: %S" err))
                                  (lispm-edits--drop show)
                                  nil)))
                       lispm-edits--shows))
@@ -550,7 +550,9 @@ changes no buffer, or does not make sense yet."
                (window (lispm-edits--window buffer))
                (room (if (window-live-p window) (max 4 (- (window-body-height window) 4)) 30))
                (hunks (lispm-edits--hunks old text))
-               (tag (concat (lispm-edits--tag agent (if streaming "writing…" "awaiting approval"))
+               (tag (concat (lispm-edits--tag agent (if streaming
+                                                        (lispm-tr "writing…")
+                                                      (lispm-tr "awaiting approval")))
                             "\n"))
                (bar (propertize " " 'face `(:background ,(lispm-edits--color agent))))
                overlays)
@@ -605,9 +607,10 @@ BAR, if non-nil, is a cursor at its end."
                        (or bar "")
                        (if (or newline (> n room)) "\n" ""))))
     (cond ((<= n room) text)
-          (tail (concat (propertize (format "… %d lines above\n" (- n room)) 'face 'lispm-edits-note)
+          (tail (concat (propertize (concat (lispm-tr-n "… %d line above" "… %d lines above" (- n room)) "\n")
+                                    'face 'lispm-edits-note)
                         text))
-          (t (concat text (propertize (format "… %d more lines\n" (- n room))
+          (t (concat text (propertize (concat (lispm-tr-n "… %d more line" "… %d more lines" (- n room)) "\n")
                                       'face 'lispm-edits-note))))))
 
 (defun lispm-edits--retire (p made)

@@ -363,10 +363,13 @@ runs."
                            (setq result args)
                          (apply #'lispm-tools--deliver done agent tool args)))))))
     (condition-case err
-        (let ((args (lispm-tools--arguments tool input)))
-          (if (lispm-tool-async tool)
-              (lispm-tools--interruptibly (lispm-tool-function tool) (cons finish args))
-            (funcall finish (lispm-tools--interruptibly (lispm-tool-function tool) args))))
+        ;; What the tool says is for the model: in English, though it
+        ;; reach a function that speaks to the user too.
+        (lispm-in-english
+          (let ((args (lispm-tools--arguments tool input)))
+            (if (lispm-tool-async tool)
+                (lispm-tools--interruptibly (lispm-tool-function tool) (cons finish args))
+              (funcall finish (lispm-tools--interruptibly (lispm-tool-function tool) args)))))
       (error (funcall finish (error-message-string err) t))
       (quit (funcall finish lispm-tools--interrupted t)))
     (setq running nil)
@@ -621,7 +624,7 @@ waiting for them if a server has to start."
                      sources)
          (lambda (problems)
            (when problems
-             (message "LispM: %s" (string-join problems "; ")))))))))
+             (message "LispM: %s" (string-join problems (lispm-tr-in "between the parts of a list" "; "))))))))))
 
 (add-hook 'lispm-session-mode-hook #'lispm-tools--restore)
 

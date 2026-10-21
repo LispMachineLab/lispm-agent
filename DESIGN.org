@@ -17,6 +17,7 @@ implementation:
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
+| Languages                 | words written in English, shown from a catalog per language      | [[file:lisp/lispm-i18n.el][lispm-i18n.el]]: ~lispm-tr~, [[file:i18n/][i18n/]]                    |
 | Presentations, inspector  | text is the objects it shows; one agent shown whole              | [[file:lisp/lispm-inspect.el][lispm-inspect.el]]: ~lispm-act~, ~lispm-inspect~        |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |

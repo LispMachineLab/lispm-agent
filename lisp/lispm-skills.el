@@ -388,7 +388,7 @@ evaluated; load the skill again for them to see the new code"))
                         (error (funcall done (format "The code of skill %s failed: %s"
                                                      (plist-get skill :name) (error-message-string err))
                                         t))))))
-                  "Yes, and trust this code until it changes"))
+                  (lispm-tr-noop "Yes, and trust this code until it changes")))
       (funcall unevaluated "its code was not evaluated: that needs the user's approval, which is \
 asked only in a turn, or M-x lispm-trust-skill"))))
 
@@ -424,8 +424,10 @@ asked only in a turn, or M-x lispm-trust-skill"))))
          (root (if agent (lispm-agent-root agent) (lispm--project-root)))
          (skills (lispm-skills--in (expand-file-name ".lispm/skills/" root))))
     (unless skills
-      (user-error "No skills in %s" (abbreviate-file-name (expand-file-name ".lispm/skills/" root))))
-    (let ((name (completing-read (if distrust "Trust no longer the skill: " "Trust the code of the skill: ")
+      (user-error "%s" (lispm-tr "No skills in %s" (abbreviate-file-name (expand-file-name ".lispm/skills/" root)))))
+    (let ((name (completing-read (if distrust
+                                     (lispm-tr "Trust no longer the skill: ")
+                                   (lispm-tr "Trust the code of the skill: "))
                                  (mapcar (lambda (skill) (plist-get skill :name)) skills) nil t)))
       (list (plist-get (seq-find (lambda (skill) (equal (plist-get skill :name) name)) skills) :file)
             distrust))))
@@ -443,15 +445,15 @@ is shown before you decide."
     (if distrust
         (progn
           (lispm-skills--trust file nil)
-          (message "LispM: the code of skill %s is asked about again" name))
+          (message "%s" (lispm-tr "LispM: the code of skill %s is asked about again" name)))
       (let ((hash (lispm-skills--hash file)))
         (when (called-interactively-p 'any)
           (save-window-excursion
             (lispm-skills--show-code file)
-            (unless (yes-or-no-p (format "Trust the code of the skill %s, as shown? " name))
-              (user-error "The code of skill %s is not trusted" name))))
+            (unless (yes-or-no-p (lispm-tr "Trust the code of the skill %s, as shown? " name))
+              (user-error "%s" (lispm-tr "The code of skill %s is not trusted" name)))))
         (lispm-skills--trust file hash)
-        (message "LispM: the code of skill %s is trusted, until it changes" name)))))
+        (message "%s" (lispm-tr "LispM: the code of skill %s is trusted, until it changes" name))))))
 
 ;;;; The skill tool
 
@@ -603,13 +605,13 @@ neither."
     (cond ((file-directory-p source)
            (let ((file (expand-file-name "SKILL.org" source)))
              (unless (file-regular-p file)
-               (user-error "%s holds no SKILL.org: it is no skill" (abbreviate-file-name source)))
+               (user-error "%s" (lispm-tr "%s holds no SKILL.org: it is no skill" (abbreviate-file-name source))))
              file))
           ((not (file-regular-p source))
-           (user-error "No skill file %s" (abbreviate-file-name source)))
+           (user-error "%s" (lispm-tr "No skill file %s" (abbreviate-file-name source))))
           ((string-suffix-p ".org" source) source)
-          (t (user-error "A skill is NAME.org, or a directory holding SKILL.org: not %s"
-                         (abbreviate-file-name source))))))
+          (t (user-error "%s" (lispm-tr "A skill is NAME.org, or a directory holding SKILL.org: not %s"
+                                        (abbreviate-file-name source)))))))
 
 (defun lispm-skills--label (name file)
   "FILE, a file of the skill NAME, as shown in diffs."
@@ -664,7 +666,7 @@ first; what is installed is what was shown.  An error if SOURCE is no
 skill, if its code does not read, or if NAME is no name for a skill
 or one that another skill has, such as one of LispM's own, which the
 skill installed would not replace."
-  (interactive (list (read-file-name "Install the skill (NAME.org, or a directory with SKILL.org): "
+  (interactive (list (read-file-name (lispm-tr "Install the skill (NAME.org, or a directory with SKILL.org): ")
                                      nil nil t)))
   (let* ((file (lispm-skills--source source))
          (directory-p (equal (file-name-nondirectory file) "SKILL.org"))
@@ -679,29 +681,31 @@ skill installed would not replace."
          (other (expand-file-name (concat name (if directory-p ".org" "/")) directory)))
     (condition-case err
         (lispm-skills--forms text)
-      (error (user-error "Skill %s was not installed: %s" name (error-message-string err))))
+      (error (user-error "%s" (lispm-tr "Skill %s was not installed: %s" name (error-message-string err)))))
     (cond
      ((lispm-skills--same-file-p file target-file))
      ((and directory-p (or (file-in-directory-p target (file-name-directory file))
                            (file-in-directory-p (file-name-directory file) target)))
-      (user-error "Skill %s is not installed in %s from inside it, nor from a directory holding it"
-                  name (abbreviate-file-name target)))
+      (user-error "%s" (lispm-tr "Skill %s is not installed in %s from inside it, nor from a directory holding it"
+                                 name (abbreviate-file-name target))))
      (t
       (dolist (location (list target-file (if directory-p other (expand-file-name "SKILL.org" other))))
         (when-let* ((open (find-buffer-visiting location)))
           (when (buffer-modified-p open)
-            (user-error "%s is open in Emacs with unsaved changes; save or discard them first"
-                        (abbreviate-file-name location)))))
+            (user-error "%s" (lispm-tr "%s is open in Emacs with unsaved changes; save or discard them first"
+                                       (abbreviate-file-name location))))))
       (unless noconfirm
         (save-window-excursion
           (if installed
               (lispm-skills--show-diff (lispm-skills--install-diff name installed file text))
             (lispm-skills--show-code file))
-          (unless (yes-or-no-p (format "%s the skill %s, as shown? " (if installed "Replace" "Install") name))
-            (user-error "Skill %s was not installed" name)))
+          (unless (yes-or-no-p (if installed
+                                   (lispm-tr "Replace the skill %s, as shown? " name)
+                                 (lispm-tr "Install the skill %s, as shown? " name)))
+            (user-error "%s" (lispm-tr "Skill %s was not installed" name))))
         (unless (equal (lispm-skills--hash file) hash)
-          (user-error "The code of skill %s changed while you were asked; install it again to see it \
-as it is now" name)))
+          (user-error "%s" (lispm-tr "The code of skill %s changed while you were asked; install it again to see it \
+as it is now" name))))
       (make-directory directory t)
       (let ((coding-system-for-write 'utf-8))
         (if (not directory-p)
@@ -727,7 +731,7 @@ as it is now" name)))
       (when-let* ((open (find-buffer-visiting target-file)))
         (lispm-tools--sync open))
       (when (called-interactively-p 'any)
-        (message "LispM: skill %s installed in %s" name (abbreviate-file-name directory)))))
+        (message "%s" (lispm-tr "LispM: skill %s installed in %s" name (abbreviate-file-name directory))))))
     name))
 
 ;;;###autoload
@@ -738,11 +742,11 @@ own, of a project or of another of `lispm-skill-directories' is not
 deleted.  Agents that loaded it keep what its code defined until Emacs
 exits.  Interactively, you are asked first."
   (interactive
-   (list (completing-read "Delete the skill: "
+   (list (completing-read (lispm-tr "Delete the skill: ")
                           (or (mapcar (lambda (skill) (plist-get skill :name))
                                       (lispm-skills--in (lispm-skills--write-directory)))
-                              (user-error "No skills in %s"
-                                          (abbreviate-file-name (lispm-skills--write-directory))))
+                              (user-error "%s" (lispm-tr "No skills in %s"
+                                                         (abbreviate-file-name (lispm-skills--write-directory)))))
                           nil t)))
   (lispm-skills--check-name name)
   (let* ((directory (lispm-skills--write-directory))
@@ -754,19 +758,19 @@ exits.  Interactively, you are asked first."
       (let ((other (lispm-skills--find name (or (bound-and-true-p lispm-session-agent)
                                                 (bound-and-true-p lispm-chat-agent)))))
         (cond ((null other)
-               (user-error "No skill named %s in %s" name (abbreviate-file-name directory)))
+               (user-error "%s" (lispm-tr "No skill named %s in %s" name (abbreviate-file-name directory))))
               ((file-in-directory-p (plist-get other :file) lispm-skills--builtin)
-               (user-error "Skill %s is one of LispM's own; it is not deleted" name))
+               (user-error "%s" (lispm-tr "Skill %s is one of LispM's own; it is not deleted" name)))
               ((plist-get other :project)
-               (user-error "Skill %s is the project's, in %s; it is not deleted" name
-                           (abbreviate-file-name (file-name-directory (plist-get other :file)))))
+               (user-error "%s" (lispm-tr "Skill %s is the project's, in %s; it is not deleted" name
+                                          (abbreviate-file-name (file-name-directory (plist-get other :file))))))
               (t
-               (user-error "Skill %s is in %s, not among the skills installed in %s; it is not deleted"
-                           name (abbreviate-file-name (file-name-directory (plist-get other :file)))
-                           (abbreviate-file-name directory))))))
+               (user-error "%s" (lispm-tr "Skill %s is in %s, not among the skills installed in %s; it is not deleted"
+                                          name (abbreviate-file-name (file-name-directory (plist-get other :file)))
+                                          (abbreviate-file-name directory)))))))
     (when (and (called-interactively-p 'any)
-               (not (yes-or-no-p (format "Delete the skill %s? " name))))
-      (user-error "Skill %s was not deleted" name))
+               (not (yes-or-no-p (lispm-tr "Delete the skill %s? " name))))
+      (user-error "%s" (lispm-tr "Skill %s was not deleted" name)))
     (when (file-regular-p file)
       (delete-file file t))
     (when dir-p
@@ -796,9 +800,9 @@ That of a project's skill only while the user trusts it as it is now."
             (let ((text (lispm-skills--file-text (plist-get skill :file))))
               (if (lispm-skill-trusted-p skill text)
                   (lispm-skills--evaluate skill agent (lispm-skills--forms text))
-                (message "LispM: skill %s: a project's skill whose code you have not trusted as \
-it is now, so it was not evaluated again (see `lispm-trust-skill')" name)))
-          (error (message "LispM: skill %s: %s" name (error-message-string err))))))))
+                (message "%s" (lispm-tr "LispM: skill %s: a project's skill whose code you have not trusted as \
+it is now, so it was not evaluated again (see `lispm-trust-skill')" name))))
+          (error (message "%s" (lispm-tr "LispM: skill %s: %s" name (error-message-string err)))))))))
 
 (add-hook 'lispm-session-mode-hook #'lispm-skills--restore)
 

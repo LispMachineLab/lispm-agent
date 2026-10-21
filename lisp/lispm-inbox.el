@@ -147,8 +147,8 @@ unsaved changes, the file is left as it is, and a message says so."
   (let* ((file (lispm-inbox-file root))
          (visiting (find-buffer-visiting file)))
     (if (and visiting (buffer-modified-p visiting))
-        (message "LispM: %s not updated: its buffer has unsaved changes"
-                 (abbreviate-file-name file))
+        (message "%s" (lispm-tr "LispM: %s not updated: its buffer has unsaved changes"
+                                (abbreviate-file-name file)))
       (with-temp-buffer
         (if (file-exists-p file)
             (insert-file-contents file)

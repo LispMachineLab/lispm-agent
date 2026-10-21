@@ -145,7 +145,7 @@ you write under its last heading and send with C-c RET."
 (defun lispm--read-agent (prompt)
   "Read the name of a running agent with PROMPT; return the agent."
   (let ((names (mapcar (lambda (a) (symbol-name (lispm-agent-name a))) (lispm-agents))))
-    (unless names (user-error "No agent is running; start one with M-x lispm"))
+    (unless names (user-error "%s" (lispm-tr "No agent is running; start one with M-x lispm")))
     (lispm-get-agent (completing-read prompt names nil t))))
 
 (defun lispm--current-or-read (prompt)
@@ -162,13 +162,13 @@ you write under its last heading and send with C-c RET."
   "Start a new agent in the current project, as starting Claude Code there would.
 The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
-  (interactive (list (and current-prefix-arg (lispm--read-role "Role"))))
+  (interactive (list (and current-prefix-arg (lispm--read-role (lispm-tr "Role")))))
   (lispm-show (lispm-start role directory)))
 
 ;;;###autoload
 (defun lispm-resume (session)
   "Resume a recorded SESSION, sessions of the current project first."
-  (interactive (list (lispm--read-session "Resume session: ")))
+  (interactive (list (lispm--read-session (lispm-tr "Resume session: "))))
   (lispm-show (lispm-resume-file (plist-get session :file))))
 
 (defun lispm-resume-agents ()
@@ -187,18 +187,18 @@ say whether to go on, others go on.  Return the agents resumed."
                                        (lispm-resume-session (plist-get session :session))))
                                    (lispm-inbox-sessions)))))
     (when (called-interactively-p 'any)
-      (message (if resumed
-                   (format "Resumed %s" (mapconcat (lambda (agent) (symbol-name (lispm-agent-name agent)))
-                                                   resumed ", "))
-                 "No agent was at work when Emacs last stopped")))
+      (message "%s" (if resumed
+                        (lispm-tr "Resumed %s" (mapconcat (lambda (agent) (symbol-name (lispm-agent-name agent)))
+                                                          resumed ", "))
+                      (lispm-tr "No agent was at work when Emacs last stopped"))))
     resumed))
 
 (defun lispm--age (time)
   "A short age for TIME, float seconds."
   (let ((seconds (- (float-time) time)))
-    (cond ((< seconds 3600) (format "%dm" (/ seconds 60)))
-          ((< seconds 86400) (format "%dh" (/ seconds 3600)))
-          (t (format "%dd" (/ seconds 86400))))))
+    (cond ((< seconds 3600) (lispm-tr "%dm" (/ seconds 60)))
+          ((< seconds 86400) (lispm-tr "%dh" (/ seconds 3600)))
+          (t (lispm-tr "%dd" (/ seconds 86400))))))
 
 (defun lispm--read-session (prompt)
   "Read a recorded session with PROMPT; return its description."
@@ -208,16 +208,19 @@ say whether to go on, others go on.  Return the agents resumed."
          (sessions (append (seq-filter here-p sessions) (seq-remove here-p sessions)))
          (table (make-hash-table :test #'equal))
          (labels (mapcar (lambda (s)
-                           (let ((label (format "%-16s %-5s %s  %s"
+                           (let ((label (format "%s %s %s  %s"
                                                 (truncate-string-to-width
-                                                 (lispm--project-name (plist-get s :root)) 16)
-                                                (lispm--age (plist-get s :time))
+                                                 (lispm--project-name (plist-get s :root)) 16 nil ?\s)
+                                                ;; Padded as wide as it shows: ages are
+                                                ;; words in some languages.
+                                                (truncate-string-to-width
+                                                 (lispm--age (plist-get s :time)) 8 nil ?\s)
                                                 (lispm--oneline (plist-get s :title) 60)
                                                 (propertize (plist-get s :id) 'face 'shadow))))
                              (puthash label s table)
                              label))
                          sessions)))
-    (unless labels (user-error "No recorded sessions"))
+    (unless labels (user-error "%s" (lispm-tr "No recorded sessions")))
     (gethash (completing-read prompt
                               (lambda (string pred action)
                                 (if (eq action 'metadata)
@@ -229,7 +232,7 @@ say whether to go on, others go on.  Return the agents resumed."
 ;;;###autoload
 (defun lispm-switch (agent)
   "Switch to the session of a running AGENT."
-  (interactive (list (lispm--read-agent "Switch to agent: ")))
+  (interactive (list (lispm--read-agent (lispm-tr "Switch to agent: "))))
   (lispm-show agent))
 
 (defun lispm-new-session ()
@@ -247,7 +250,7 @@ A standing agent starts a new conversation; otherwise a new agent starts."
   "Give AGENT the request TEXT without leaving the current buffer.
 AGENT is the running agent of the current project, or a new one."
   (interactive (let ((agent (or (lispm--project-agent) (lispm-start))))
-                 (list agent (read-string (format "Ask %s: " (lispm-agent-name agent))))))
+                 (list agent (read-string (lispm-tr "Ask %s: " (lispm-agent-name agent))))))
   (lispm-tell agent text)
   (display-buffer (lispm-agent-display-buffer agent)))
 
@@ -255,7 +258,7 @@ AGENT is the running agent of the current project, or a new one."
 (defun lispm-ask-region (beg end text)
   "Ask the current project's agent TEXT about the region from BEG to END."
   (interactive (list (region-beginning) (region-end)
-                     (read-string "Ask about the region: ")))
+                     (read-string (lispm-tr "Ask about the region: "))))
   (lispm-ask (or (lispm--project-agent) (lispm-start))
              (format "%s\n\nThis concerns lines %d-%d of %s:\n\n%s"
                      text (line-number-at-pos beg) (line-number-at-pos end)
@@ -266,7 +269,7 @@ AGENT is the running agent of the current project, or a new one."
 
 (defun lispm-show-request (agent)
   "Show the request AGENT would send next: exactly what the model sees."
-  (interactive (list (lispm--current-or-read "Show request of")))
+  (interactive (list (lispm--current-or-read (lispm-tr "Show request of: "))))
   (let* ((agent (lispm-get-agent agent))
          (request (condition-case err
                       (lispm-request-body agent)
@@ -292,7 +295,7 @@ AGENT is the running agent of the current project, or a new one."
   "Show the git log of all agent memory, tasks and sessions."
   (interactive)
   (let ((default-directory (file-name-as-directory (expand-file-name lispm-directory))))
-    (unless (file-directory-p ".git") (user-error "No history yet"))
+    (unless (file-directory-p ".git") (user-error "%s" (lispm-tr "No history yet")))
     (if (fboundp 'magit-log-current)
         (magit-log-current nil)
       (vc-print-root-log))))
@@ -309,7 +312,7 @@ AGENT is the running agent of the current project, or a new one."
                              (let ((b (lispm-agent-buffer a)))
                                (and (buffer-live-p b) (buffer-file-name b))))
                            (lispm-agents)))))
-    (unless org-agenda-files (user-error "No live sessions"))
+    (unless org-agenda-files (user-error "%s" (lispm-tr "No live sessions")))
     (mapc (lambda (a) (lispm--save-session a)) (lispm-agents))
     (org-todo-list "WAITING")))
 
@@ -325,7 +328,7 @@ AGENT is the running agent of the current project, or a new one."
              (vector (symbol-name (lispm-agent-name a))
                      (symbol-name (lispm-agent-role a))
                      (lispm--project-name (lispm-agent-root a))
-                     (propertize (symbol-name (lispm-agent-state a))
+                     (propertize (lispm--state-name (lispm-agent-state a))
                                  'face (if (> waiting 0) 'warning 'default))
                      (or (lispm-agent-status a) "")
                      (if (> waiting 0) (number-to-string waiting) "")
@@ -343,10 +346,11 @@ AGENT is the running agent of the current project, or a new one."
 
 (define-derived-mode lispm-dashboard-mode tabulated-list-mode "λ Agents"
   "List of agents and what they are doing."
-  (setq tabulated-list-format [("Agent" 20 t) ("Role" 10 t) ("Project" 14 t)
-                               ("State" 10 t) ("Activity" 28 nil)
-                               ("Wait" 5 t) ("Inbox" 6 t) ("Tokens in/out/cached" 22 nil)
-                               ("Model" 16 t) ("Description" 0 nil)]
+  (setq tabulated-list-format (vector (list (lispm-tr "Agent") 20 t) (list (lispm-tr "Role") 10 t)
+                                      (list (lispm-tr "Project") 14 t) (list (lispm-tr "State") 10 t)
+                                      (list (lispm-tr "Activity") 28 nil) (list (lispm-tr "Wait") 5 t)
+                                      (list (lispm-tr "Inbox") 6 t) (list (lispm-tr "Tokens in/out/cached") 22 nil)
+                                      (list (lispm-tr "Model") 16 t) (list (lispm-tr "Description") 0 nil))
         tabulated-list-entries #'lispm--dashboard-entries)
   (tabulated-list-init-header))
 
@@ -375,7 +379,15 @@ AGENT is the running agent of the current project, or a new one."
     (when (get-buffer-window buffer t)
       (with-current-buffer buffer (tabulated-list-print t)))))
 
+(defun lispm--dashboard-language-changed ()
+  "Show the dashboard again in the language now spoken."
+  (when-let* ((buffer (get-buffer "*lispm-agents*")))
+    (with-current-buffer buffer
+      (lispm-dashboard-mode)
+      (tabulated-list-print t))))
+
 (add-hook 'lispm-state-change-functions #'lispm--refresh-dashboard)
+(add-hook 'lispm-language-changed-hook #'lispm--dashboard-language-changed)
 
 ;;;; Mode line
 

@@ -85,13 +85,14 @@ Genera's did."
 (defun lispm-present--describe (object)
   "What acting on OBJECT does, said for a tooltip."
   (pcase object
-    (`(file ,file ,line) (format "RET: visit %s%s" (abbreviate-file-name file)
-                                 (if line (format " at line %d" line) "")))
-    (`(buffer ,name) (format "RET: show buffer %s" name))
-    (`(agent ,name) (format "RET: inspect %s" name))
-    (`(symbol ,symbol) (format "RET: describe %s" symbol))
-    (`(tool ,name) (format "RET: go to the definition of the tool %s" name))
-    (`(call ,_agent ,id) (format "RET: show call %s in the transcript" id))))
+    (`(file ,file ,line) (if line
+                             (lispm-tr "RET: visit %s at line %d" (abbreviate-file-name file) line)
+                           (lispm-tr "RET: visit %s" (abbreviate-file-name file))))
+    (`(buffer ,name) (lispm-tr "RET: show buffer %s" name))
+    (`(agent ,name) (lispm-tr "RET: inspect %s" name))
+    (`(symbol ,symbol) (lispm-tr "RET: describe %s" symbol))
+    (`(tool ,name) (lispm-tr "RET: go to the definition of the tool %s" name))
+    (`(call ,_agent ,id) (lispm-tr "RET: show call %s in the transcript" id))))
 
 (defun lispm-object-at (&optional pos)
   "The object presented at POS (default: point), or nil."
@@ -106,17 +107,17 @@ Genera's did."
        (goto-char (point-min))
        (forward-line (1- line))))
     (`(buffer ,name)
-     (pop-to-buffer (or (get-buffer name) (user-error "No buffer named %s" name))))
+     (pop-to-buffer (or (get-buffer name) (user-error "%s" (lispm-tr "No buffer named %s" name)))))
     (`(agent ,name) (lispm-inspect (lispm-get-agent name)))
     (`(symbol ,symbol) (describe-symbol symbol))
     (`(tool ,name) (lispm-inspect--visit-tool name))
     (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-get-agent agent) id))
-    (_ (user-error "Nothing to act on here"))))
+    (_ (user-error "%s" (lispm-tr "Nothing to act on here")))))
 
 (defun lispm-act-at-point ()
   "Act on the object presented at point."
   (interactive)
-  (lispm-act (or (lispm-object-at) (user-error "Nothing to act on here"))))
+  (lispm-act (or (lispm-object-at) (user-error "%s" (lispm-tr "Nothing to act on here")))))
 
 (defun lispm-act-at-mouse (event)
   "Act on the object presented where EVENT, a click, happened."
@@ -124,17 +125,17 @@ Genera's did."
   (let ((position (event-start event)))
     (with-current-buffer (window-buffer (posn-window position))
       (lispm-act (or (lispm-object-at (posn-point position))
-                     (user-error "Nothing to act on here"))))))
+                     (user-error "%s" (lispm-tr "Nothing to act on here")))))))
 
 (defun lispm-inspect--visit-tool (name)
   "Show where the tool NAME is defined: its file, or its skill's."
-  (let* ((tool (or (lispm-get-tool name) (user-error "No tool named %s" name)))
+  (let* ((tool (or (lispm-get-tool name) (user-error "%s" (lispm-tr "No tool named %s" name))))
          (file (or (lispm-tool-file tool)
                    (when-let* ((skill (get (intern name) 'lispm-skill))
                                (found (seq-find (lambda (s) (equal (plist-get s :name) skill))
                                                 (and (fboundp 'lispm-skills) (lispm-skills)))))
                      (plist-get found :file))
-                   (user-error "Where %s is defined is not known (an MCP server's tool, say)" name))))
+                   (user-error "%s" (lispm-tr "Where %s is defined is not known (an MCP server's tool, say)" name)))))
     (pop-to-buffer (find-file-noselect file))
     (goto-char (point-min))
     (re-search-forward (format "\\(?:(lispm-deftool\\|:name\\)[ \t\n]+\"?%s\\_>" (regexp-quote name))
@@ -145,7 +146,7 @@ Genera's did."
   "Show AGENT's call ID in its org transcript."
   (let ((buffer (lispm-agent-buffer agent)))
     (unless (buffer-live-p buffer)
-      (user-error "%s's session is closed" (lispm-agent-name agent)))
+      (user-error "%s" (lispm-tr "%s's session is closed" (lispm-agent-name agent))))
     (if (fboundp 'lispm-chat-transcript)
         (lispm-chat-transcript agent)
       (pop-to-buffer buffer))
@@ -236,7 +237,7 @@ to ROOT), with a line after a colon or not."
 
 (defun lispm-inspect--line (label value)
   "A line of the inspector: LABEL, then VALUE."
-  (concat (propertize (format "%-12s" label) 'face 'shadow) " " value))
+  (concat (propertize (truncate-string-to-width label 12 nil ?\s) 'face 'shadow) " " value))
 
 (defun lispm-inspect--agent-name (agent)
   "AGENT's name, presented."
@@ -249,7 +250,7 @@ to ROOT), with a line after a colon or not."
 
 (defun lispm-inspect--entry (entry)
   "An inbox ENTRY, on one line."
-  (concat (cond ((plist-get entry :from) (format "[from %s] " (plist-get entry :from)))
+  (concat (cond ((plist-get entry :from) (lispm-tr "[from %s] " (plist-get entry :from)))
                 ((plist-get entry :event) (format "[%s] " (plist-get entry :event)))
                 (t ""))
           (lispm--oneline (or (plist-get entry :text) "") 70)))
@@ -271,58 +272,60 @@ LINES are strings, whose objects are presented."
          (usage (lispm-agent-usage agent)))
     (delq nil
           (list
-           (cons "Agent"
+           (cons (lispm-tr "Agent")
                  (delq nil
-                       (list (lispm-inspect--line "name" (lispm-inspect--agent-name agent))
-                             (lispm-inspect--line "role" (format "%s%s" (lispm-agent-role agent)
+                       (list (lispm-inspect--line (lispm-tr "name") (lispm-inspect--agent-name agent))
+                             (lispm-inspect--line (lispm-tr "role") (format "%s%s" (lispm-agent-role agent)
                                                                  (if (lispm-agent-standing agent)
-                                                                     ", standing" "")))
-                             (lispm-inspect--line "project" (lispm-present
+                                                                     (concat ", " (lispm-tr "standing"))
+                                                                   "")))
+                             (lispm-inspect--line (lispm-tr "project") (lispm-present
                                                              (abbreviate-file-name (lispm-agent-root agent))
                                                              (list 'file (lispm-agent-root agent) nil)))
-                             (lispm-inspect--line "session" (lispm-agent-id agent))
-                             (and file (lispm-inspect--line "file" (lispm-present
+                             (lispm-inspect--line (lispm-tr "session") (lispm-agent-id agent))
+                             (and file (lispm-inspect--line (lispm-tr "file") (lispm-present
                                                                     (abbreviate-file-name file)
                                                                     (list 'file file nil))))
                              (and (lispm-agent-description agent)
-                                  (lispm-inspect--line "description" (lispm-agent-description agent))))))
-           (cons "State"
+                                  (lispm-inspect--line (lispm-tr "description") (lispm-agent-description agent))))))
+           (cons (lispm-tr "State")
                  (delq nil
-                       (list (lispm-inspect--line "state" (format "%s%s" (lispm-agent-state agent)
+                       (list (lispm-inspect--line (lispm-tr "state") (format "%s%s" (lispm--state-name (lispm-agent-state agent))
                                                                   (if (lispm-agent-status agent)
                                                                       (concat ": " (lispm-agent-status agent))
                                                                     "")))
-                             (lispm-inspect--line "turn" (format "%d, %d request%s" (lispm-agent-turn agent)
-                                                                 (lispm-agent-steps agent)
-                                                                 (if (= (lispm-agent-steps agent) 1) "" "s")))
+                             (lispm-inspect--line (lispm-tr "turn") (lispm-tr-n "%d, %d request" "%d, %d requests"
+                                                                             (lispm-agent-steps agent)
+                                                                             (lispm-agent-turn agent)
+                                                                             (lispm-agent-steps agent)))
                              (and condition
-                                  (lispm-inspect--line "condition"
-                                                       (format "%s: %s (restarts: %s)"
-                                                               (plist-get condition :title)
+                                  (lispm-inspect--line (lispm-tr "condition")
+                                                       (lispm-tr "%s: %s (restarts: %s)"
+                                                               (lispm-tr (plist-get condition :title))
                                                                (lispm--oneline (plist-get condition :message) 70)
                                                                (mapconcat #'symbol-name
                                                                           (plist-get condition :restarts) ", "))))
-                             (lispm-inspect--line "model" (or (ignore-errors
-                                                                (format "%s via %s, effort %s"
+                             (lispm-inspect--line (lispm-tr "model") (or (ignore-errors
+                                                                (lispm-tr "%s via %s, effort %s"
                                                                         (lispm-agent-model* agent)
                                                                         (lispm-backend-name agent)
                                                                         (lispm-agent-effort* agent)))
-                                                              "no backend"))
-                             (lispm-inspect--line "usage" (format "%d in, %d out, %d from cache"
+                                                              (lispm-tr "no backend")))
+                             (lispm-inspect--line (lispm-tr "usage") (lispm-tr "%d in, %d out, %d from cache"
                                                                   (nth 0 usage) (nth 1 usage) (nth 2 usage))))))
-           (cons "Policy"
+           (cons (lispm-tr "Policy")
                  (delq nil
-                       (list (lispm-inspect--line "policy" (lispm-inspect--policy (lispm-policy agent)))
+                       (list (lispm-inspect--line (lispm-tr "policy") (lispm-inspect--policy (lispm-policy agent)))
                              (and (lispm-agent-ceiling agent)
-                                  (lispm-inspect--line "ceiling" (lispm-inspect--policy (lispm-agent-ceiling agent))))
+                                  (lispm-inspect--line (lispm-tr "ceiling") (lispm-inspect--policy (lispm-agent-ceiling agent))))
                              (and (lispm-agent-allowed agent)
-                                  (lispm-inspect--line "allowed"
+                                  (lispm-inspect--line (lispm-tr "allowed")
                                                        (mapconcat (lambda (a) (if (consp a)
-                                                                                  (format "%s (that call)" (car a))
+                                                                                  (lispm-tr "%s (that call)" (car a))
                                                                                 a))
                                                                   (lispm-agent-allowed agent) ", "))))))
            (and pending
-                (cons "Pending calls"
+                (cons (lispm-tr "Pending calls")
                       (mapcar (pcase-lambda (`(,id . ,call))
                                 (let* ((asked (lispm-asked call))
                                        (summary (lispm-transcript-summary (plist-get asked :input))))
@@ -331,34 +334,34 @@ LINES are strings, whose objects are presented."
                                           (if summary (concat " " summary) "")
                                           (propertize (format "  %s%s" (plist-get call :status)
                                                               (if (plist-get call :asking)
-                                                                  (format ", asks for %s" (plist-get asked :name))
+                                                                  (concat ", " (lispm-tr "asks for %s" (plist-get asked :name)))
                                                                 ""))
                                                       'face 'shadow))))
                               pending)))
            (and (or (lispm-agent-entry agent) (lispm-agent-inbox agent))
-                (cons "Inbox"
+                (cons (lispm-tr "Inbox")
                       (append (and (lispm-agent-entry agent)
-                                   (list (lispm-inspect--line "handling"
+                                   (list (lispm-inspect--line (lispm-tr "handling")
                                                               (lispm-inspect--entry (lispm-agent-entry agent)))))
-                              (mapcar (lambda (entry) (lispm-inspect--line "queued" (lispm-inspect--entry entry)))
+                              (mapcar (lambda (entry) (lispm-inspect--line (lispm-tr "queued") (lispm-inspect--entry entry)))
                                       (lispm-agent-inbox agent)))))
            (and (or (lispm-agent-waiting-on agent) waited-by)
-                (cons "Delegation"
+                (cons (lispm-tr "Delegation")
                       (delq nil
                             (list (and (lispm-agent-waiting-on agent)
-                                       (lispm-inspect--line "waits on"
+                                       (lispm-inspect--line (lispm-tr "waits on")
                                                             (mapconcat #'lispm-inspect--agent-name
                                                                        (delete-dups (copy-sequence
                                                                                      (lispm-agent-waiting-on agent)))
                                                                        ", ")))
                                   (and waited-by
-                                       (lispm-inspect--line "waited on by"
+                                       (lispm-inspect--line (lispm-tr "waited on by")
                                                             (mapconcat #'lispm-inspect--agent-name waited-by ", ")))))))
            (and (seq-some #'cdr (lispm-agent-journal agent))
-                (cons "Journal"
+                (cons (lispm-tr "Journal")
                       (mapcar (pcase-lambda (`(,turn . ,snapshots))
                                 (lispm-inspect--line
-                                 (format "turn %d" turn)
+                                 (lispm-tr "turn %d" turn)
                                  (mapconcat (lambda (s)
                                               (let ((file (plist-get (cdr s) :file)))
                                                 (if file
@@ -368,23 +371,25 @@ LINES are strings, whose objects are presented."
                                             snapshots ", ")))
                               (seq-filter #'cdr (lispm-agent-journal agent)))))
            (and (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
-                (cons "Extensions"
+                (cons (lispm-tr "Extensions")
                       (delq nil
                             (list (and (lispm-agent-loaded-tools agent)
-                                       (lispm-inspect--line "tools loaded"
+                                       (lispm-inspect--line (lispm-tr "tools loaded")
                                                             (mapconcat (lambda (name)
                                                                          (lispm-present name (list 'tool name)))
                                                                        (lispm-agent-loaded-tools agent) ", ")))
                                   (and (lispm-agent-triggers agent)
-                                       (lispm-inspect--line "triggers"
+                                       (lispm-inspect--line (lispm-tr "triggers")
                                                             (mapconcat (lambda (trigger) (plist-get trigger :name))
                                                                        (lispm-agent-triggers agent) ", ")))))))))))
 
 (defun lispm-inspect-text (agent)
-  "What the inspector shows of AGENT, as plain text."
-  (mapconcat (pcase-lambda (`(,title . ,lines))
-               (concat "# " title "\n" (mapconcat #'substring-no-properties lines "\n")))
-             (lispm-inspect-sections agent) "\n\n"))
+  "What the inspector shows of AGENT, as plain text, in English: what an
+agent reads of it."
+  (lispm-in-english
+    (mapconcat (pcase-lambda (`(,title . ,lines))
+                 (concat "# " title "\n" (mapconcat #'substring-no-properties lines "\n")))
+               (lispm-inspect-sections agent) "\n\n")))
 
 (defun lispm-inspect--draw ()
   "Draw the inspector in the current buffer again."
@@ -393,7 +398,7 @@ LINES are strings, whose objects are presented."
         (line (line-number-at-pos)))
     (erase-buffer)
     (if (not (memq agent (lispm-agents)))
-        (insert (format "%s has ended.\n" (lispm-agent-name agent)))
+        (insert (lispm-tr "%s has ended." (lispm-agent-name agent)) "\n")
       (insert (mapconcat (pcase-lambda (`(,title . ,lines))
                            (concat (propertize title 'face 'bold) "\n"
                                    (mapconcat (lambda (l) (concat "  " l)) lines "\n")
@@ -420,6 +425,14 @@ LINES are strings, whose objects are presented."
 
 (add-hook 'lispm-state-change-functions #'lispm-inspect--changed)
 
+(defun lispm-inspect--language-changed ()
+  "Draw every inspector again in the language now spoken."
+  (dolist (buffer (buffer-list))
+    (when (buffer-local-value 'lispm-inspect-agent buffer)
+      (with-current-buffer buffer (lispm-inspect--draw)))))
+
+(add-hook 'lispm-language-changed-hook #'lispm-inspect--language-changed)
+
 (defun lispm-inspect-refresh ()
   "Draw the inspector again."
   (interactive)
@@ -435,7 +448,7 @@ LINES are strings, whose objects are presented."
   (interactive)
   (pop-to-buffer (or (and (buffer-live-p (lispm-agent-buffer lispm-inspect-agent))
                           (lispm-agent-buffer lispm-inspect-agent))
-                     (user-error "%s's session is closed" (lispm-agent-name lispm-inspect-agent)))))
+                     (user-error "%s" (lispm-tr "%s's session is closed" (lispm-agent-name lispm-inspect-agent))))))
 
 (defun lispm-inspect-abort ()
   "Stop the inspected agent's turn."
@@ -466,7 +479,7 @@ LINES are strings, whose objects are presented."
     (when (lispm-object-at pos)
       (setq pos (or (next-single-property-change pos 'lispm-object) (point-max))))
     (let ((next (if (lispm-object-at pos) pos (next-single-property-change pos 'lispm-object))))
-      (if next (goto-char next) (message "No more objects")))))
+      (if next (goto-char next) (message "%s" (lispm-tr "No more objects"))))))
 
 (defun lispm-inspect-previous ()
   "Move to the previous object presented."
@@ -477,7 +490,7 @@ LINES are strings, whose objects are presented."
     (let ((previous (previous-single-property-change pos 'lispm-object)))
       (when (and previous (not (lispm-object-at previous)))
         (setq previous (previous-single-property-change previous 'lispm-object)))
-      (if previous (goto-char previous) (message "No more objects")))))
+      (if previous (goto-char previous) (message "%s" (lispm-tr "No more objects"))))))
 
 (define-derived-mode lispm-inspect-mode special-mode "λ Inspect"
   "An agent, shown whole: its state, calls, inbox, delegations and journal.
@@ -495,8 +508,8 @@ Interactively, the agent of the current session or chat, or one read."
                          lispm-session-agent (bound-and-true-p lispm-chat-agent)
                          (let ((names (mapcar (lambda (a) (symbol-name (lispm-agent-name a)))
                                               (lispm-agents))))
-                           (unless names (user-error "No agent is running"))
-                           (lispm-get-agent (completing-read "Inspect agent: " names nil t))))))
+                           (unless names (user-error "%s" (lispm-tr "No agent is running")))
+                           (lispm-get-agent (completing-read (lispm-tr "Inspect agent: ") names nil t))))))
   (let ((buffer (get-buffer-create (format "*lispm inspect %s*" (lispm-agent-name agent)))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'lispm-inspect-mode) (lispm-inspect-mode))
