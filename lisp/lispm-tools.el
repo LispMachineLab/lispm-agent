@@ -40,6 +40,7 @@
 (require 'project)
 (require 'lispm-core)
 (require 'lispm-transcript)
+(require 'lispm-sandbox)
 
 (defcustom lispm-rationale-permissions '(write shell exec)
   "Permission classes whose tools take a required `why' argument.
@@ -1615,7 +1616,9 @@ For files use edit_file."
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
   "Run a shell command and return its output and exit status.  The
 output also streams into a buffer the user can watch.  If your root is
-remote, the command runs on its machine."
+remote, the command runs on its machine.  The user may have the
+command run in a sandbox: its result then says what the sandbox
+allows."
   :permission shell
   :async t
   ;; Setting up must not be cut short by C-g: a process left without
@@ -1627,14 +1630,20 @@ remote, the command runs on its machine."
                     (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
            (default-directory (lispm-tools--root))
            (output "")
+           ;; At `lispm-sandbox-level', or not at all if the sandbox
+           ;; cannot be had.
+           (run (lispm-sandbox-prepare
+                 (with-connection-local-variables
+                  (list shell-file-name shell-command-switch command))
+                 nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
+           (note (lispm-sandbox-run-note run))
            (proc (make-process
                   :name "lispm-shell" :buffer buffer :noquery t
                   :connection-type 'pipe
                   ;; On a remote root, TRAMP runs the command there,
                   ;; with that machine's shell.
                   :file-handler t
-                  :command (with-connection-local-variables
-                            (list shell-file-name shell-command-switch command))
+                  :command (lispm-sandbox-run-command run)
                   :filter
                   (lambda (p chunk)
                     (setq output (concat output chunk))
@@ -1651,10 +1660,14 @@ remote, the command runs on its machine."
                       (let ((status (process-exit-status p)))
                         (funcall done
                                  (concat output
+                                         "\n["
                                          (if (process-get p 'timed-out)
-                                             "\n[killed: timeout]"
-                                           (format "\n[exit status %d]" status)))
+                                             "killed: timeout"
+                                           (format "exit status %d" status))
+                                         (if note (concat "; " note) "")
+                                         "]")
                                  (process-get p 'timed-out))))))))
+      (lispm-sandbox-attach run proc)
       (with-current-buffer buffer
         (goto-char (point-max))
         (insert (format "\n$ %s\n" command))

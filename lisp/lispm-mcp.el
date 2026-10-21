@@ -40,11 +40,17 @@
 ;; `lispm-mcp-register-functions' may keep a server's tools back, or
 ;; have every call of them ask, as a checker of what servers say of
 ;; their tools does.
+;;
+;; A server started over stdio runs in the sandbox, at
+;; `lispm-sandbox-level' (none by default) or at its own :sandbox
+;; level.  One that has to reach what no level allows, Peekaboo using
+;; the screen and other applications for one, takes :sandbox none.
 
 ;;; Code:
 
 (require 'mcp)
 (require 'lispm-core)
+(require 'lispm-sandbox)
 (require 'lispm-tools)
 (require 'lispm-runtime)
 
@@ -64,7 +70,9 @@ to decide when to search them; :defer, nil for a server to start with
 each session and all its tools to be offered, rather than its tools
 being deferred, found with search_tools (the default); and
 :permission, the permission class of the server's tools, `mcp' by
-default (see `lispm-default-policy')."
+default (see `lispm-default-policy'); and :sandbox, the sandbox level
+a server started over stdio runs at: `none', `low', `middle' or
+`high', or nil (the default) to follow `lispm-sandbox-level'."
   :type '(alist :key-type string :value-type plist))
 
 (defcustom lispm-mcp-autostart t
@@ -277,7 +285,9 @@ Images are saved in AGENT's session."
   (message "LispM: MCP server %s failed to start: %s" server why))
 
 (defun lispm-mcp--connect (server config)
-  "Start SERVER as CONFIG describes, and take its tools when it lists them."
+  "Start SERVER as CONFIG describes, and take its tools when it lists them.
+A server started over stdio runs in the sandbox, at its :sandbox
+level or at `lispm-sandbox-level'."
   (remhash server lispm-mcp--failed)
   (puthash server (float-time) lispm-mcp--starting)
   (let ((connection (gethash server mcp-server-connections))
@@ -288,20 +298,33 @@ Images are saved in AGENT's session."
                               (lambda (_connection tools) (lispm-mcp--register server tools))
                               (lambda (code message)
                                 (lispm-mcp--failed server (format "%s %s" code message))))
-      (apply #'mcp-connect-server server
-             :initial-callback
-             (lambda (_connection)
-               ;; A server without tools never lists any: stop waiting,
-               ;; unless it has been started again since.
-               (run-at-time (+ mcp-server-wait-initial-time 15) nil
-                            (lambda ()
-                              (when (eql (gethash server lispm-mcp--starting) started)
-                                (remhash server lispm-mcp--starting)))))
-             :tools-callback (lambda (_connection tools) (lispm-mcp--register server tools))
-             :error-callback (lambda (code message)
-                               (lispm-mcp--failed server (format "%s %s" code message)))
-             (cl-loop for (key value) on config by #'cddr
-                      when (memq key lispm-mcp--connect-keys) append (list key value))))))
+      (condition-case err
+          (let* ((run (when-let* ((command (plist-get config :command)))
+                        (lispm-sandbox-prepare (cons command (plist-get config :args))
+                                               (plist-get config :sandbox)
+                                               (format "the MCP server %s" server))))
+                 (command (and run (lispm-sandbox-run-command run))))
+            (apply #'mcp-connect-server server
+                   :initial-callback
+                   (lambda (_connection)
+                     ;; A server without tools never lists any: stop waiting,
+                     ;; unless it has been started again since.
+                     (run-at-time (+ mcp-server-wait-initial-time 15) nil
+                                  (lambda ()
+                                    (when (eql (gethash server lispm-mcp--starting) started)
+                                      (remhash server lispm-mcp--starting)))))
+                   :tools-callback (lambda (_connection tools) (lispm-mcp--register server tools))
+                   :error-callback (lambda (code message)
+                                     (lispm-mcp--failed server (format "%s %s" code message)))
+                   ;; The first :command and :args are the ones taken.
+                   (append (and command (list :command (car command) :args (cdr command)))
+                           (cl-loop for (key value) on config by #'cddr
+                                    when (memq key lispm-mcp--connect-keys) append (list key value))))
+            (when-let* ((run)
+                        (connection (gethash server mcp-server-connections)))
+              (lispm-sandbox-attach run (jsonrpc--process connection))))
+        (lispm-sandbox-error
+         (lispm-mcp--failed server (error-message-string err)))))))
 
 ;;;###autoload
 (defun lispm-mcp-start (&optional server)

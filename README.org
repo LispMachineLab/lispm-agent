@@ -27,6 +27,7 @@ entries; last, the agent shows the diff beside the chat by evaluating Emacs Lisp
 
 Requires Emacs 30.1+ (developed on 31.1), curl, and a model: any endpoint speaking either the
 OpenAI Chat Completions API (most servers do, local or hosted) or the Anthropic Messages API.
+The sandbox for agents' commands, off by default, needs Node.js 22.12+ (see [[*The sandbox][The sandbox]]).
 
 LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA, which must be in
 ~package-archives~); installing LispM as a package installs it too:
@@ -477,7 +478,8 @@ Node 22+) lets agents see the screen and use applications:
 #+begin_src emacs-lisp
 (setq lispm-mcp-servers
       '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp")
-         :description "See the macOS screen and use its applications (computer use).")))
+         :description "See the macOS screen and use its applications (computer use)."
+         :sandbox none)))               ; it drives other applications: see The sandbox
 #+end_src
 
 Emacs then needs Screen Recording and Accessibility permission (System Settings > Privacy &
@@ -486,6 +488,42 @@ tokens; deferred, an agent loads only those it uses. Images that tools return, s
 screenshots of ~peekaboo:see~, go to the model and are kept next to the session (out of git);
 ~TAB~ on the call shows them in the chat. Requests carry the latest ~lispm-context-images~
 images. ~M-x lispm-mcp-status~, ~lispm-mcp-start~ and ~lispm-mcp-stop~ manage the servers.
+
+* The sandbox
+
+Agents' shell commands and MCP servers can run in a sandbox the operating system enforces:
+Anthropic's [[https://github.com/anthropics/sandbox-runtime][sandbox runtime]], srt, confines a
+process and everything it starts, with ~sandbox-exec~ on macOS and bubblewrap on Linux, and lets
+it reach the network only through a proxy that checks each domain. Emacs stays outside it and
+holds the configuration: ~lispm-sandbox-level~, one of four levels.
+
+| None   | the default: no sandbox, commands may do anything you can                                                                                                     |
+| Low    | read everything but secrets; write the project, temporary files and package caches; reach package registries, code hosts and ~lispm-sandbox-allowed-domains~ |
+| Middle | read everything but secrets; write the project and temporary files; reach only ~lispm-sandbox-allowed-domains~                                                |
+| High   | read only the project, git's configuration and the system; write only the project; no network                                                                |
+
+Choose one with ~M-x lispm-sandbox-set-level~ (~C-u~ saves it for later sessions) or ~/sandbox~
+in a chat, whose header then shows it. Nothing needs restarting: commands started afterwards run
+at the new level, and those already running, an MCP server or a long build, take its network
+rules at once, through srt's control channel. Their file rules were fixed when they started; the
+message says which to restart for those. What counts as a secret (~lispm-sandbox-secrets~), the
+caches, the registries and further writable places (~lispm-sandbox-allow-write~) are lists you
+can change; changes reach running processes as a new level does.
+
+The first time a level other than None is used, LispM installs srt (~lispm-sandbox-srt-version~)
+with npm, from Node.js 22.12+, into =sandbox/= under ~lispm-directory~; ~lispm-sandbox-srt-program~
+runs one of your own instead. On Linux srt needs bubblewrap, socat and ripgrep too. Until srt is
+there, a command that should be sandboxed fails with the reason rather than run outside it, and so
+does one whose root is on another machine, which srt cannot confine.
+
+A sandboxed command's result says what its sandbox allowed, so the model knows why a write was
+refused. An MCP server's ~:sandbox~ gives it a level of its own: Peekaboo, which sees the screen
+and drives other applications, needs ~:sandbox none~.
+
+The sandbox does not confine Emacs Lisp: ~eval_elisp~ (class ~exec~) can do whatever Emacs can,
+lowering the level included, so keep ~exec~ at ~ask~ when the sandbox matters. No level lets a
+command write Emacs's configuration or ~lispm-directory~, where srt itself is, but a project it
+may write can hold files your Emacs loads.
 
 * Tests
 
@@ -520,6 +558,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-lisp.el       | run_lisp: Lisp programs whose effects are calls under the policy |
 | lisp/lispm-collab.el     | multi-agent collaboration tools                                  |
 | lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
+| lisp/lispm-sandbox.el    | commands and MCP servers in srt, at a level from None to High    |
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
 | lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |
