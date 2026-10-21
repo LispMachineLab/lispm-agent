@@ -43,7 +43,8 @@
 ;;   #+begin_src json ... #+end_src the call's input
 ;;   *** Asks: write_file  b.el     a call the call makes in turn, as a
 ;;                                  Lisp program does, awaiting approval
-;;   *** Preview                    diff shown while awaiting approval
+;;   *** Preview                    diff shown while awaiting approval,
+;;                                  after why it asks, if a check said
 ;;   *** Result                     the tool's output (or *** Error); tagged
 ;;                                  :cleared:, it is no longer sent
 ;;   *** Stopped                    an error the call stopped at, awaiting a
@@ -362,11 +363,27 @@ RESTART, once one is chosen, is named in its heading."
             (lispm-transcript-body (lispm--json-pretty input))
             "#+end_src\n")))
 
-(defun lispm-transcript-preview (diff)
-  "Section text showing DIFF while a call awaits approval."
-  (concat "*** Preview\n#+begin_src diff\n"
-          (lispm-transcript-body diff)
-          "#+end_src\n"))
+(defun lispm-transcript-preview (diff &optional reasons)
+  "Section text showing DIFF while a call awaits approval, and REASONS.
+DIFF may be nil; REASONS are why it asks, a list of strings, each an
+item of a list before DIFF (see `lispm-tool-decision')."
+  (concat "*** Preview\n"
+          (mapconcat (lambda (reason) (concat "- " (lispm--oneline reason 1000) "\n")) reasons "")
+          (if diff
+              (concat "#+begin_src diff\n" (lispm-transcript-body diff) "#+end_src\n")
+            "")))
+
+(defun lispm-transcript--reasons (beg end)
+  "The reasons a Preview section between BEG and END gives, a list of strings.
+See `lispm-transcript-preview'."
+  (save-excursion
+    (goto-char beg)
+    (let ((case-fold-search t) reasons)
+      (while (and (< (point) end) (not (looking-at-p "[ \t]*#\\+begin_")))
+        (when (looking-at "- \\(.+\\)$")
+          (push (match-string-no-properties 1) reasons))
+        (forward-line 1))
+      (nreverse reasons))))
 
 (defun lispm-transcript-fold (pos)
   "Fold the subtree whose heading starts at POS, ignoring failures."
@@ -564,7 +581,7 @@ See `lispm-transcript-parts'."
          ((assoc "TOOL_ID" props)
           (let* ((json (lispm-transcript--block bbeg own-end))
                  (input (and json (ignore-errors (lispm--json-decode json))))
-                 result preview stopped)
+                 result preview reasons stopped)
             (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
               (let* ((kid (lispm-transcript--heading kbeg))
                      (title (plist-get kid :title)))
@@ -573,8 +590,9 @@ See `lispm-transcript-parts'."
                                           :error (equal title "Error")
                                           :cleared (and (member "cleared" (plist-get kid :tags)) t)
                                           :images (lispm-transcript--images kbody kend))))
-                      ((and (equal title "Preview") (not preview))
-                       (setq preview (lispm-transcript--block kbody kend)))
+                      ((and (equal title "Preview") (not preview) (not reasons))
+                       (setq preview (lispm-transcript--block kbody kend)
+                             reasons (lispm-transcript--reasons kbody kend)))
                       ((and (equal title "Stopped") (not stopped))
                        (setq stopped (lispm-transcript--text kbody kend))))))
             (push (append (list :kind 'tool
@@ -585,6 +603,7 @@ See `lispm-transcript-parts'."
                                 :pos hbeg
                                 :properties props
                                 :preview preview
+                                :reasons reasons
                                 :stopped (and (assoc "CONDITION" props) stopped))
                           result)
                   parts)))
@@ -604,8 +623,9 @@ See `lispm-transcript-parts'."
 Return (ASSISTANT-BLOCKS RESULT-BLOCKS PENDING-CALLS), each pending
 call a plist (:id :name :input :state :pos :properties), :pos being
 where its heading starts and :properties the alist of its heading's
-properties, and :stopped, the error it stopped at, for a call
-waiting at one (see `lispm-transcript-stopped')."
+properties, :reasons, why it asks if a check said (see
+`lispm-transcript-preview'), and :stopped, the error it stopped at, for
+a call waiting at one (see `lispm-transcript-stopped')."
   (let (blocks results pending)
     (dolist (part (lispm-transcript--parts beg end))
       (pcase (plist-get part :kind)
@@ -630,6 +650,7 @@ waiting at one (see `lispm-transcript-stopped')."
                               :input (plist-get part :input)
                               :state (plist-get part :state) :pos (plist-get part :pos)
                               :properties (plist-get part :properties)
+                              :reasons (plist-get part :reasons)
                               :stopped (plist-get part :stopped))
                         pending))
                  (t
@@ -723,7 +744,8 @@ kind's prefix.  Nil for a section left out or holding nothing."
 - (:kind text :text TEXT), a reply;
 - (:kind tool ...), a tool call: :id, :name, :input, :state (its TODO
   keyword), :pos (where its heading starts), :properties (its drawer),
-  :preview, :stopped (the error it waits at a restart after); once it
+  :preview, :reasons (why it asked, see `lispm-transcript-preview'),
+  :stopped (the error it waits at a restart after); once it
   has one, :result, :error, :cleared (tagged :cleared:) and :images;
 - (:kind block :type TYPE :block BLOCK :pos POS), a content block kept
   as JSON, such as thinking, BLOCK decoded or nil."

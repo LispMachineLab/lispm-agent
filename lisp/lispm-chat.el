@@ -902,6 +902,13 @@ ITEMS are the session's items, where the call's preview is."
                  (and (> (length body) 30)
                       (list (propertize (format "  … +%d lines" (- (length body) 30))
                                         'face 'lispm-chat-dim)))
+                 ;; Why a check of this Emacs has it ask.
+                 (mapcan (lambda (reason)
+                           (cons "" (mapcar (lambda (line)
+                                              (propertize (concat "  " line) 'face 'lispm-chat-pending))
+                                            (split-string (string-fill reason (- (lispm-chat--width) 8))
+                                                          "\n"))))
+                         (plist-get asked :reasons))
                  (and (stringp why) (list "" (propertize (concat "  " why) 'face 'lispm-chat-dim)))
                  (and note (list "" (propertize (concat "  " note) 'face 'lispm-chat-dim)))
                  (list "" question)

@@ -1062,7 +1062,9 @@ with the session's size in bytes when the request was made."
 (defun lispm--decide (agent block invalid stopped)
   "Decide what to do with the tool_use BLOCK of AGENT.
 INVALID lists calls with malformed input; STOPPED is the stop reason
-if the response ended abnormally.  Return (STATE ACTION MESSAGE)."
+if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
+\(STATE `ask' REASONS) for a call to await approval, REASONS those
+`lispm-tool-decision' gives."
   (let* ((name (alist-get 'name block))
          (tool (lispm-get-tool name)))
     (cond
@@ -1073,12 +1075,10 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE)."
      ((not (and tool (lispm--offers-tool-p agent name)))
       (list "FAILED" 'fail (format "There is no tool named %s available to you." name)))
      (t
-      (pcase (lispm-tool-action agent tool (alist-get 'input block))
-        ('auto (list "RUNNING" 'run))
-        ('ask (list "WAITING" 'ask))
-        (_ (list "DENIED" 'deny
-                 (format "Denied by policy: %s may not use %s tools."
-                         (lispm-agent-name agent) (lispm-tool-permission tool)))))))))
+      (pcase (lispm-tool-decision agent tool (alist-get 'input block))
+        (`(auto . ,_) (list "RUNNING" 'run))
+        (`(ask . ,reasons) (list "WAITING" 'ask reasons))
+        (`(,_ . ,reasons) (list "DENIED" 'deny (lispm-tools-denial agent tool reasons))))))))
 
 (defconst lispm--stop-conditions
   '(("max_tokens" . output-limit)
@@ -1134,12 +1134,14 @@ once every call has a result."
           ;; result cannot resume the loop while others are unregistered.
           (dolist (b uses)
             (let ((id (alist-get 'id b)))
-              (puthash id (list :status (nth 1 (alist-get id decisions nil nil #'equal))
-                                :name (alist-get 'name b)
-                                :tool (lispm-get-tool (alist-get 'name b))
-                                :input (alist-get 'input b)
-                                :marker (alist-get id calls nil nil #'equal))
-                       pending)))
+              (pcase-let ((`(,_ ,status ,reasons) (alist-get id decisions nil nil #'equal)))
+                (puthash id (list :status status
+                                  :name (alist-get 'name b)
+                                  :tool (lispm-get-tool (alist-get 'name b))
+                                  :input (alist-get 'input b)
+                                  :marker (alist-get id calls nil nil #'equal)
+                                  :reasons (and (eq status 'ask) reasons))
+                         pending))))
           (lispm-set-state agent 'acting)
           (dolist (b uses)
             (let* ((id (alist-get 'id b))
@@ -1455,16 +1457,19 @@ call that made such a call learns."
           ('deny (lispm--tool-done agent id (lispm--denial reason) t "DENIED")))))))
 
 (defun lispm-asked (call)
-  "What CALL awaits approval for, as a plist (:tool :name :input).
+  "What CALL awaits approval for, as a plist (:tool :name :input :reasons).
 The call itself; or for a call that makes calls in turn, as a Lisp
 program does, the call of its that waits (see `lispm-call-ask'), with
-:always, what approving it for good means, if it says."
+:always, what approving it for good means, if it says.  :reasons are
+why functions of `lispm-tool-action-functions' had it ask, if they
+did: a list of strings."
   (or (plist-get call :asking)
       (list :tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))
             :name (plist-get call :name)
-            :input (plist-get call :input))))
+            :input (plist-get call :input)
+            :reasons (plist-get call :reasons))))
 
-(defun lispm-call-ask (agent id tool input continue &optional always)
+(defun lispm-call-ask (agent id tool input continue &optional always reasons)
   "Have AGENT's running call ID await approval of a call of TOOL on INPUT.
 The running call makes that call in turn, as a Lisp program does; it
 waits meanwhile, and the call is shown, approved and denied as if the
@@ -1474,11 +1479,13 @@ call's heading.  Once the user decides, CONTINUE is called with
 the denial results in.  Approving it for good allows AGENT calls like
 it, as `lispm-allow' says, unless ALWAYS is non-nil: a sentence saying
 what it means instead, shown with the choice, which CONTINUE then
-carries out.  Return nil, and ask nothing, if ID is not running."
+carries out.  REASONS, a list of strings, are why it asks, shown with
+it, as `lispm-tool-decision' gives them.  Return nil, and ask nothing,
+if ID is not running."
   (when-let* ((call (gethash id (lispm-agent-pending agent)))
               ((eq (plist-get call :status) 'run)))
     (plist-put call :asking (list :tool tool :name (lispm-tool-name tool) :input input
-                                  :continue continue :always always))
+                                  :continue continue :always always :reasons reasons))
     (plist-put call :status 'ask)
     (when-let* ((marker (plist-get call :marker))
                 ((marker-buffer marker)))
@@ -1504,10 +1511,13 @@ is told, and nothing more is allowed."
     (unless (plist-get asked :always)
       (push (lispm-tools-allowance tool (plist-get asked :input) agent) (lispm-agent-allowed agent)))
     (lispm-resolve agent id 'allow)
+    ;; Not those a function of `lispm-tool-action-functions' still asks about.
     (dolist (other (lispm-waiting-calls agent))
       (let ((asked (lispm-asked (gethash other (lispm-agent-pending agent)))))
         (when (and (plist-get asked :tool)
-                   (lispm-tools--allowed-p agent (plist-get asked :tool) (plist-get asked :input)))
+                   (lispm-tools--allowed-p agent (plist-get asked :tool) (plist-get asked :input))
+                   (eq (lispm-tool-action agent (plist-get asked :tool) (plist-get asked :input))
+                       'auto))
           (lispm-resolve agent other 'approve))))))
 
 (defconst lispm--interrupted-result
@@ -1598,7 +1608,8 @@ condition it waits at, if any; see `lispm--resume-calls'."
                        :name (plist-get call :name)
                        :input (plist-get call :input)
                        :marker marker
-                       :condition condition)
+                       :condition condition
+                       :reasons (plist-get call :reasons))
                  (lispm-agent-pending agent))))
     (lispm-set-state agent 'acting)
     (setf (lispm-agent-dispatching agent) t)
@@ -1645,18 +1656,19 @@ if it has one; the inbox file then no longer holds ENTRY."
   (lispm-inbox-save agent))
 
 (defun lispm--ask-approval (agent id)
-  "Show AGENT's call ID for approval: a preview, a notification."
+  "Show AGENT's call ID for approval: a preview, why it asks, a notification."
   (let* ((call (gethash id (lispm-agent-pending agent)))
          (asked (lispm-asked call))
+         (reasons (plist-get asked :reasons))
          (preview (and (plist-get asked :tool)
                        (let ((lispm-current-agent agent)
                              (default-directory (lispm-agent-root agent)))
                          (lispm-tool-preview-text (plist-get asked :tool)
                                                   (plist-get asked :input))))))
-    (when (and preview (plist-get call :marker))
+    (when (and (or preview reasons) (plist-get call :marker))
       (lispm--in-session agent
         (goto-char (lispm-transcript-subtree-end (plist-get call :marker) 2))
-        (insert (lispm-transcript-preview preview))))
+        (insert (lispm-transcript-preview preview reasons))))
     (run-hook-with-args 'lispm-approval-functions agent (plist-get asked :name)
                         (plist-get asked :input))
     (message "λ %s wants to run %s: %s" (lispm-agent-name agent) (plist-get asked :name)
@@ -2230,11 +2242,13 @@ Chosen by a handler rather than the user, it runs only if the policy
 would run it unasked; else it awaits approval again."
   (let* ((id (plist-get condition :call))
          (call (gethash id (lispm-agent-pending agent)))
-         (tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))))
-    (if (and lispm--handler-restart tool
-             (not (eq (lispm-tool-action agent tool (plist-get call :input)) 'auto)))
+         (tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name))))
+         (decision (and lispm--handler-restart tool
+                        (lispm-tool-decision agent tool (plist-get call :input)))))
+    (if (and decision (not (eq (car decision) 'auto)))
         (progn
           (plist-put call :status 'ask)
+          (plist-put call :reasons (cdr decision))
           (lispm--update-state agent)
           (lispm--ask-approval agent id))
       (lispm--run-tool agent id))))
