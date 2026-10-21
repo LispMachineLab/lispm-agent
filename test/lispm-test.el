@@ -2073,6 +2073,55 @@ No level lets commands write where Emacs and LispM keep their files."
       (should (equal (lispm-sandbox-settings) (lispm-sandbox-settings lispm-sandbox-level)))
       (should-error (lispm-sandbox-settings 'extreme) :type 'lispm-sandbox-error))))
 
+(ert-deftest lispm-test-sandbox-custom ()
+  "The level custom has the rules of `lispm-sandbox-custom', Middle's while
+there are none; they reach every option srt has for them, and are checked."
+  (lispm-test-env
+    (let ((lispm-sandbox-custom nil)
+          (lispm-sandbox-secrets '("~/.ssh" "~/.ssh")))
+      (should (equal (lispm-sandbox-settings 'custom) (lispm-sandbox-settings 'middle)))
+      ;; Settings leave the lists they are made of as they were.
+      (should (equal lispm-sandbox-secrets '("~/.ssh" "~/.ssh")))
+      (setq lispm-sandbox-custom
+            '(:deny-read ("~/.ssh") :allow-read ("~/.ssh/config") :allow-write (".")
+              :deny-write ("secrets") :allowed-domains ("github.com" "example.com")
+              :denied-domains ("gist.github.com") :local-binding t
+              :unix-sockets ("/var/run/docker.sock") :pty t :apple-events t))
+      (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'custom))
+                                    :object-type 'alist :array-type 'list :false-object nil)
+        (should (equal .network.allowedDomains '("github.com" "example.com")))
+        (should (equal .network.deniedDomains '("gist.github.com")))
+        (should (eq .network.allowLocalBinding t))
+        (should (equal .network.allowUnixSockets '("/var/run/docker.sock")))
+        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (equal .filesystem.allowRead '("~/.ssh/config")))
+        (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir))))
+        (should (equal (car .filesystem.denyWrite) "secrets"))
+        (should (member (directory-file-name (expand-file-name lispm-directory))
+                        .filesystem.denyWrite))
+        (should (eq .allowPty t))
+        (should (eq .allowAppleEvents t)))
+      (should (equal (lispm-sandbox-level-description 'custom)
+                     (concat "reads all but ~/.ssh (except ~/.ssh/config); writes .; "
+                             "reaches github.com, example.com; uses local ports; "
+                             "connects to /var/run/docker.sock; uses terminals; opens applications")))
+      (should (string-prefix-p "sandbox Custom: reads all but ~/.ssh"
+                               (lispm-sandbox-run-note
+                                (lispm-sandbox--make-run :started 'custom :settings '(:network nil)))))
+      ;; What srt would refuse, LispM refuses first, saying why.
+      (dolist (rules '((:allowed-domains ("*")) (:allow-everything t) "rules"))
+        (setq lispm-sandbox-custom rules)
+        (should-error (lispm-sandbox-settings 'custom) :type 'lispm-sandbox-error))
+      ;; Customizing starts from Middle's rules, or replaces them by a level's.
+      (cl-letf (((symbol-function 'customize-variable) #'ignore))
+        (setq lispm-sandbox-custom nil)
+        (lispm-sandbox-customize)
+        (should (equal lispm-sandbox-custom (lispm-sandbox-rules 'middle)))
+        (lispm-sandbox-customize 'high)
+        (should (equal (plist-get lispm-sandbox-custom :deny-read) '("~")))
+        (should-not (eq (plist-get lispm-sandbox-custom :deny-read)
+                        (plist-get (lispm-sandbox-rules 'high) :deny-read)))))))
+
 (ert-deftest lispm-test-sandbox-run-shell ()
   "Shell commands run through srt at the level set, and a change of level
 reaches a command that runs.  The result says what the sandbox allowed."
@@ -2191,6 +2240,15 @@ it has one; a change of the level set then passes it by."
         (lispm-chat--command agent "/sandbox High")
         (should (eq lispm-sandbox-level 'high))
         (should (string-match-p "│   sandbox: High (/sandbox to change) +│" (lispm-test--chat-text chat)))
+        (let ((lispm-sandbox-custom nil) edited)
+          (lispm-chat--command agent "/sandbox custom")
+          (should (string-match-p "│   sandbox: Custom (/sandbox to change) +│"
+                                  (lispm-test--chat-text chat)))
+          (cl-letf (((symbol-function 'customize-variable)
+                     (lambda (variable) (setq edited variable))))
+            (lispm-chat--command agent "/sandbox edit"))
+          (should (eq edited 'lispm-sandbox-custom))
+          (should (eq lispm-sandbox-level 'custom)))
         (should-error (lispm-chat--command agent "/sandbox extreme") :type 'user-error)))))
 
 (ert-deftest lispm-test-sandbox-srt ()
@@ -2217,7 +2275,19 @@ command: High lets it write only the project; Middle hides secrets."
                    (lispm-sandbox-secrets (list outside))
                    (result (lispm-test--wait-call agent (concat "cat " secret))))
               (should (string-match-p "Operation not permitted" result))
-              (should-not (string-match-p "hidden" result))))
+              (should-not (string-match-p "hidden" result)))
+            ;; Custom rules: the project is writable but for one file.
+            (let* ((lispm-sandbox-level 'custom)
+                   (lispm-sandbox-custom `(:deny-read (,outside) :allow-write (".")
+                                           :deny-write ("locked.txt")))
+                   (result (lispm-test--wait-call
+                            agent (concat "echo a > free.txt && echo free; echo b > locked.txt; cat "
+                                          secret))))
+              (should (string-match-p "\\`free\n" result))
+              (should (file-exists-p (expand-file-name "free.txt" project)))
+              (should-not (file-exists-p (expand-file-name "locked.txt" project)))
+              (should-not (string-match-p "hidden" result))
+              (should (string-match-p "sandbox Custom: reads all but" result))))
         (delete-directory outside t)))))
 
 (defun lispm-test--wait-call (agent command)

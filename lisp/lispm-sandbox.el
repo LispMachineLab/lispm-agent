@@ -28,7 +28,7 @@
 ;; the configuration, and turns `lispm-sandbox-level' into srt's
 ;; settings whenever it starts one of those processes.
 ;;
-;; There are four levels, from none to the strictest:
+;; There are four levels, from none to the strictest, and your own:
 ;;
 ;;   none    no sandbox, the default: commands may do anything you can;
 ;;   low     read everything but secrets (`lispm-sandbox-secrets'); write
@@ -38,7 +38,11 @@
 ;;   middle  read everything but secrets; write the project and temporary
 ;;           files; reach only `lispm-sandbox-allowed-domains';
 ;;   high    read only the project, git's configuration and the system;
-;;           write only the project; no network.
+;;           write only the project; no network;
+;;   custom  the rules of `lispm-sandbox-custom': what may be read and
+;;           written, which domains reached, and whether local ports,
+;;           Unix sockets, terminals and Apple Events may be used.  M-x
+;;           lispm-sandbox-customize edits them, starting from a level's.
 ;;
 ;; Choose one with M-x lispm-sandbox-set-level, or /sandbox in a chat.
 ;; Processes started afterwards run at the new level.  Running ones
@@ -85,20 +89,25 @@
   '((none . "no sandbox")
     (low . "reads all but secrets; writes the project, temporary files and package caches; reaches package registries, code hosts and allowed domains")
     (middle . "reads all but secrets; writes the project and temporary files; reaches only allowed domains")
-    (high . "reads only the project and the system; writes only the project; no network"))
-  "The sandbox levels, from none to the strictest, with what each allows.")
+    (high . "reads only the project and the system; writes only the project; no network")
+    (custom . "your own rules"))
+  "The sandbox levels, from none to the strictest and then your own.
+Each comes with what it allows; `lispm-sandbox-level-description'
+says that of `custom' from its rules.")
 
 (defcustom lispm-sandbox-level 'none
   "How strictly agents' shell commands and MCP servers are confined.
 `none', the default, runs them as Emacs runs anything: they may do
 whatever you can.  `low', `middle' and `high' run them in srt, each
-stricter than the one before (see `lispm-sandbox-levels').  Set it
-with `lispm-sandbox-set-level' or /sandbox in a chat; running
-processes take a new level's network rules at once."
+stricter than the one before (see `lispm-sandbox-levels'), and
+`custom' by the rules of `lispm-sandbox-custom'.  Set it with
+`lispm-sandbox-set-level' or /sandbox in a chat; running processes
+take a new level's network rules at once."
   :type '(choice (const :tag "None: no sandbox" none)
                  (const :tag "Low" low)
                  (const :tag "Middle" middle)
-                 (const :tag "High" high)))
+                 (const :tag "High" high)
+                 (const :tag "Custom: `lispm-sandbox-custom'" custom)))
 
 (defcustom lispm-sandbox-secrets
   '("~/.ssh" "~/.gnupg" "~/.aws" "~/.azure" "~/.kube" "~/.docker" "~/.config/gcloud"
@@ -135,6 +144,43 @@ middle they are all there is.  Entries are as for the registries."
 (defcustom lispm-sandbox-allow-write nil
   "Further places sandboxed commands may write at levels low and middle."
   :type '(repeat string))
+
+(defcustom lispm-sandbox-custom nil
+  "The rules of the sandbox level `custom', or nil for those of `middle'.
+A plist, each of whose keys may be left out:
+
+  :deny-read        files and directories commands may not read;
+  :allow-read       places inside those that they may read after all;
+  :allow-write      where they may write, and nowhere else;
+  :deny-write       places inside those that they may not write;
+  :allowed-domains  the domains they may reach, and no others;
+  :denied-domains   domains refused even when allowed;
+  :local-binding    non-nil to let them serve on local ports and reach
+                    the local ones of this machine;
+  :unix-sockets     Unix sockets they may connect to, such as
+                    /var/run/docker.sock, which may well let them out;
+  :pty              non-nil to let them use pseudo-terminals (macOS);
+  :apple-events     non-nil to let them send Apple Events and open
+                    applications (macOS), which then run outside the
+                    sandbox.
+
+Entries are srt's: file names relative to the project, or globs
+such as **/.env in the read rules; domains such as example.com,
+*.example.com (its subdomains) or example.com:443.  Whatever the
+rules, commands may write their temporary directory and never
+where Emacs and LispM keep their files.  `lispm-sandbox-customize'
+edits the rules, starting from those of a level."
+  :type '(plist :key-type symbol
+                :options ((:deny-read (repeat :tag "Files" string))
+                          (:allow-read (repeat :tag "Files" string))
+                          (:allow-write (repeat :tag "Files" string))
+                          (:deny-write (repeat :tag "Files" string))
+                          (:allowed-domains (repeat :tag "Domains" string))
+                          (:denied-domains (repeat :tag "Domains" string))
+                          (:local-binding boolean)
+                          (:unix-sockets (repeat :tag "Sockets" string))
+                          (:pty boolean)
+                          (:apple-events boolean))))
 
 (defcustom lispm-sandbox-srt-program nil
   "The srt program to run, or nil to run the one LispM installs.
@@ -194,34 +240,95 @@ loads them or runs srt."
 ;;;; Settings
 
 (defun lispm-sandbox-level-name (level)
-  "LEVEL as the user sees it: None, Low, Middle or High."
+  "LEVEL as the user sees it: None, Low, Middle, High or Custom."
   (capitalize (symbol-name level)))
+
+(defconst lispm-sandbox--rule-keys
+  '(:deny-read :allow-read :allow-write :deny-write :allowed-domains :denied-domains
+    :local-binding :unix-sockets :pty :apple-events)
+  "The keys of a level's rules (see `lispm-sandbox-custom').")
+
+(defun lispm-sandbox-rules (&optional level)
+  "The rules of LEVEL, by default `lispm-sandbox-level'; nil for `none'.
+They are a plist, as `lispm-sandbox-custom' describes; those of
+`custom' are its value, or Middle's while it has none."
+  (pcase (or level lispm-sandbox-level)
+    ('none nil)
+    ('low (list :deny-read lispm-sandbox-secrets
+                :allow-write (append '(".") (lispm-sandbox--temporary)
+                                     lispm-sandbox-caches lispm-sandbox-allow-write)
+                :allowed-domains (append lispm-sandbox-registries lispm-sandbox-allowed-domains)))
+    ('middle (list :deny-read lispm-sandbox-secrets
+                   :allow-write (append '(".") (lispm-sandbox--temporary) lispm-sandbox-allow-write)
+                   :allowed-domains lispm-sandbox-allowed-domains))
+    ('high (list :deny-read '("~") :allow-read '("." "~/.gitconfig" "~/.config/git")
+                 :allow-write '(".")))
+    ('custom (or lispm-sandbox-custom (lispm-sandbox-rules 'middle)))
+    (other (lispm-sandbox--fail (format "no sandbox level %s" other)))))
+
+(defun lispm-sandbox--check (rules)
+  "Signal what is wrong with RULES, which `lispm-sandbox-custom' describes."
+  (unless (and (proper-list-p rules) (cl-evenp (length rules)))
+    (lispm-sandbox--fail "the rules of `lispm-sandbox-custom' are not a plist"))
+  (cl-loop for key in rules by #'cddr
+           unless (memq key lispm-sandbox--rule-keys)
+           do (lispm-sandbox--fail (format "%s is no sandbox rule (see `lispm-sandbox-custom')" key)))
+  (when (member "*" (plist-get rules :allowed-domains))
+    (lispm-sandbox--fail "srt cannot allow every domain: \"*\" may only be denied")))
 
 (defun lispm-sandbox-settings (&optional level)
   "srt's settings for LEVEL, by default `lispm-sandbox-level'.
 A plist for `json-serialize', or nil for `none'.  Relative file
 names are relative to a sandboxed command's directory: its project."
+  (when-let* ((rules (lispm-sandbox-rules level)))
+    (lispm-sandbox--check rules)
+    (let ((array (lambda (&rest lists) (vconcat (seq-uniq (apply #'append lists))))))
+      `(:network (:allowedDomains ,(funcall array (plist-get rules :allowed-domains))
+                  :deniedDomains ,(funcall array (plist-get rules :denied-domains))
+                  ,@(and (plist-get rules :local-binding) '(:allowLocalBinding t))
+                  ,@(and (plist-get rules :unix-sockets)
+                         (list :allowUnixSockets (funcall array (plist-get rules :unix-sockets)))))
+        :filesystem (:denyRead ,(funcall array (plist-get rules :deny-read))
+                     :allowRead ,(funcall array (plist-get rules :allow-read))
+                     :allowWrite ,(funcall array (plist-get rules :allow-write)
+                                           (list (lispm-sandbox--tmpdir)))
+                     :denyWrite ,(funcall array (plist-get rules :deny-write)
+                                          (lispm-sandbox--protected)))
+        ,@(and (plist-get rules :pty) '(:allowPty t))
+        ,@(and (plist-get rules :apple-events) '(:allowAppleEvents t))))))
+
+(defun lispm-sandbox--some (items)
+  "The first few of ITEMS, strings, and how many more there are."
+  (concat (string-join (seq-take items 3) ", ")
+          (if (> (length items) 3) (format " and %d more" (- (length items) 3)) "")))
+
+(defun lispm-sandbox-level-description (&optional level)
+  "What LEVEL, by default `lispm-sandbox-level', allows, in a few words.
+That of `custom' is said from its rules."
   (let ((level (or level lispm-sandbox-level)))
-    (unless (assq level lispm-sandbox-levels)
-      (lispm-sandbox--fail (format "no sandbox level %s" level)))
-    (unless (eq level 'none)
-      (pcase-let* ((tmp (lispm-sandbox--tmpdir))
-                   (`(,deny-read ,allow-read ,allow-write ,domains)
-                    (pcase level
-                      ('low (list lispm-sandbox-secrets nil
-                                  (append '(".") (lispm-sandbox--temporary)
-                                          lispm-sandbox-caches lispm-sandbox-allow-write)
-                                  (append lispm-sandbox-registries lispm-sandbox-allowed-domains)))
-                      ('middle (list lispm-sandbox-secrets nil
-                                     (append '(".") (lispm-sandbox--temporary) lispm-sandbox-allow-write)
-                                     lispm-sandbox-allowed-domains))
-                      ('high (list '("~") '("." "~/.gitconfig" "~/.config/git") '(".") nil)))))
-        `(:network (:allowedDomains ,(vconcat (delete-dups (copy-sequence domains)))
-                    :deniedDomains [])
-          :filesystem (:denyRead ,(vconcat deny-read)
-                       :allowRead ,(vconcat allow-read)
-                       :allowWrite ,(vconcat (delete-dups (append allow-write (list tmp))))
-                       :denyWrite ,(vconcat (lispm-sandbox--protected))))))))
+    (if (not (eq level 'custom))
+        (alist-get level lispm-sandbox-levels)
+      (let ((rules (lispm-sandbox-rules 'custom)))
+        (string-join
+         (delq nil
+               (list (if-let* ((hidden (plist-get rules :deny-read)))
+                         (concat "reads all but " (lispm-sandbox--some hidden)
+                                 (if-let* ((again (plist-get rules :allow-read)))
+                                     (concat " (except " (lispm-sandbox--some again) ")")
+                                   ""))
+                       "reads everything")
+                     (if-let* ((places (plist-get rules :allow-write)))
+                         (concat "writes " (lispm-sandbox--some places))
+                       "writes only temporary files")
+                     (if-let* ((domains (plist-get rules :allowed-domains)))
+                         (concat "reaches " (lispm-sandbox--some domains))
+                       "no network")
+                     (and (plist-get rules :local-binding) "uses local ports")
+                     (and (plist-get rules :unix-sockets)
+                          (concat "connects to " (lispm-sandbox--some (plist-get rules :unix-sockets))))
+                     (and (plist-get rules :pty) "uses terminals")
+                     (and (plist-get rules :apple-events) "opens applications")))
+         "; ")))))
 
 (defun lispm-sandbox--settings-file (json)
   "A file holding the settings JSON, named after what it holds."
@@ -437,7 +544,7 @@ and forget it once PROCESS has exited."
   (when (lispm-sandbox-run-settings run)
     (let ((level (lispm-sandbox-run-started run)))
       (format "sandbox %s: %s" (lispm-sandbox-level-name level)
-              (alist-get level lispm-sandbox-levels)))))
+              (lispm-sandbox-level-description level)))))
 
 ;;;; Changes
 
@@ -475,7 +582,7 @@ nothing ran."
     (when (or verbose sent restart)
       (message "LispM: sandbox %s (%s)%s%s"
                (lispm-sandbox-level-name lispm-sandbox-level)
-               (alist-get lispm-sandbox-level lispm-sandbox-levels)
+               (lispm-sandbox-level-description)
                (if sent
                    (format "; %d running process%s took its network rules"
                            (length sent) (if (cdr sent) "es" ""))
@@ -494,7 +601,7 @@ OPERATION and WHERE are those of `add-variable-watcher'."
 
 (dolist (variable '(lispm-sandbox-level lispm-sandbox-secrets lispm-sandbox-caches
                     lispm-sandbox-registries lispm-sandbox-allowed-domains
-                    lispm-sandbox-allow-write))
+                    lispm-sandbox-allow-write lispm-sandbox-custom))
   (add-variable-watcher variable #'lispm-sandbox--watch))
 
 (defun lispm-sandbox-read-level (&optional prompt)
@@ -503,7 +610,7 @@ OPERATION and WHERE are those of `add-variable-watcher'."
          (completion-extra-properties
           (list :annotation-function
                 (lambda (name)
-                  (concat "  " (alist-get (intern (downcase name)) lispm-sandbox-levels)))))
+                  (concat "  " (lispm-sandbox-level-description (intern (downcase name)))))))
          (current (lispm-sandbox-level-name lispm-sandbox-level))
          (name (completing-read (or prompt (format "Sandbox level (now %s): " current))
                                 (mapcar (lambda (entry) (lispm-sandbox-level-name (car entry)))
@@ -514,17 +621,33 @@ OPERATION and WHERE are those of `add-variable-watcher'."
 ;;;###autoload
 (defun lispm-sandbox-set-level (level &optional save)
   "Run agents' shell commands and MCP servers at sandbox LEVEL.
-LEVEL is `none', `low', `middle' or `high' (see
+LEVEL is `none', `low', `middle', `high' or `custom' (see
 `lispm-sandbox-levels').  Processes started from now on run at it;
 running ones take its network rules at once.  With a prefix argument,
 SAVE it for future sessions too."
   (interactive (list (lispm-sandbox-read-level) current-prefix-arg))
   (unless (assq level lispm-sandbox-levels)
-    (user-error "No sandbox level %s: it is one of none, low, middle and high" level))
+    (user-error "No sandbox level %s: it is one of none, low, middle, high and custom" level))
   (if save
       (customize-save-variable 'lispm-sandbox-level level)
     (customize-set-variable 'lispm-sandbox-level level))
   (lispm-sandbox--changed t))
+
+;;;###autoload
+(defun lispm-sandbox-customize (&optional from)
+  "Edit the rules of the sandbox level `custom' in Customize.
+Rules it has not got yet start as those of the level FROM, `middle'
+by default; with a prefix argument, choose FROM, whose rules then
+replace those it has.  Choose the level itself with
+`lispm-sandbox-set-level'."
+  (interactive
+   (list (when current-prefix-arg
+           (intern (downcase (completing-read "Start from the rules of: "
+                                              '("Low" "Middle" "High") nil t))))))
+  (when (or from (null lispm-sandbox-custom))
+    (customize-set-variable 'lispm-sandbox-custom
+                            (copy-tree (lispm-sandbox-rules (or from 'middle)))))
+  (customize-variable 'lispm-sandbox-custom))
 
 ;; A level chosen in the init file gets its srt while Emacs starts.
 (lispm-sandbox--ensure)
