@@ -4,587 +4,219 @@
 #+HTML: <p align="center"><img src="assets/logo/lispm-lambda-rainbow.png" alt="LispM logo" width="200" /></p>
 #+HTML: <p align="center"><a href="https://github.com/LispMachineLab/lispm-agent/actions/workflows/test.yml"><img src="https://github.com/LispMachineLab/lispm-agent/actions/workflows/test.yml/badge.svg" alt="test" /></a></p>
 
-LispM runs AI agents inside Emacs rather than beside it. You talk to an agent in a chat
-laid out like Claude Code's; underneath, the conversation is stored as an org document that is
-also the agent's context, tools are Elisp functions, approvals are org TODO states, memory is
-org files under git, and agents are woken by Emacs hooks and delegate work to each other. See
-[[file:DESIGN.org][DESIGN.org]] for the design.
-
-The name comes from the Lisp Machine (LispM): an environment where everything was a live Lisp
-object and the editor and the system were one. Back then its inhabitants were programs; here
-they are agents. This repository is lispm-agent, LispM's agents; in code, the package name and
-prefix are all lowercase: ~lispm~.
+AI agents that run inside Emacs rather than beside it.  You chat with an agent as in Claude
+Code; underneath, the conversation is an org document that is also the model's context, tools
+are Elisp functions, approvals are TODO states, memory is org files under git, and agents are
+woken by hooks and delegate to each other.  The name comes from the Lisp Machine, where the
+editor and the system were one.  [[file:DESIGN.org][DESIGN.org]] explains the design.
 
 #+HTML: <p align="center"><img src="assets/demo/lispm-demo.gif" alt="An agent fixes a failing test in Emacs, its conversation is shown as an org document, and it opens a diff window by evaluating Emacs Lisp" /></p>
 
-Above, in the author's Emacs (its sidebar and workspaces are configuration, not LispM), an
-agent runs a project's failing tests, fixes the bug and writes a README, asking before it runs
-a command or changes a file. Each change streams into its file as the model writes it and
-awaits approval there; the chat then turns out to be an org document whose tool calls are TODO
-entries; last, the agent shows the diff beside the chat by evaluating Emacs Lisp.
+* The LispM projects
+
+| *lispm-agent*   | AI agents inside Emacs (this repository)                         |
+| [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]] | Emacs as a Mac OS 9 desktop, set up as a workspace for agents     |
+| [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]] | a WebKit browser in Emacs, with keyboard hints and Chrome extensions |
+| [[https://github.com/LispMachineLab/lispm-store][lispm-store]]   | the catalog LispM Desktop's App Store installs from               |
+
+The agents need none of the others.  To get all of them at once on macOS, install LispM.app:
+=curl -fsSL https://lispm.ai/install.sh | sh= (see LispM Desktop).
 
 * Installation
 
-Requires Emacs 30.1+ (developed on 31.1), curl, and a model: any endpoint speaking either the
-OpenAI Chat Completions API (most servers do, local or hosted) or the Anthropic Messages API.
-The sandbox for agents' commands, off by default, needs Node.js 22.12+ (see [[*The sandbox][The sandbox]]).
-
-LispM depends on [[https://github.com/lizqwerscott/mcp.el][mcp.el]] (from MELPA, which must be in
-~package-archives~); installing LispM as a package installs it too:
-
-#+begin_src emacs-lisp
-(package-vc-install '(lispm :url "https://github.com/LispMachineLab/lispm-agent"))
-;; or, from a checkout of your own: (package-vc-install-from-checkout "~/src/lispm")
-(require 'lispm)
-(lispm-mode-line-mode 1)          ; show busy agents and pending approvals in the mode line
-#+end_src
-
-or, with ~use-package~:
+Emacs 30.1+, curl, and a model behind an OpenAI Chat Completions or Anthropic Messages
+endpoint.  MELPA must be in ~package-archives~ for the one dependency,
+[[https://github.com/lizqwerscott/mcp.el][mcp.el]].
 
 #+begin_src emacs-lisp
 (use-package lispm
   :vc (:url "https://github.com/LispMachineLab/lispm-agent" :rev :newest)
-  :config (lispm-mode-line-mode 1))
+  :config (lispm-mode-line-mode 1))     ; busy agents and pending approvals in the mode line
 #+end_src
 
-Either way the package is =lisp/=: its package name is ~lispm~, the repository's ~lispm-agent~.
-
-Then give it a model. With ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ set in Emacs's environment,
-nothing more is needed; for any other server, local or hosted, see [[*Backends][Backends]].
-
-* The LispM projects
-
-LispM is four projects, each a repository of its own under
-[[https://github.com/LispMachineLab][LispMachineLab]]:
-
-| *lispm-agent*     | LispM Agent, this repository: AI agents that run inside Emacs, their conversations org documents, their tools Elisp |
-| [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]]   | LispM Desktop: Emacs laid out as Mac OS 9's desktop, a workspace for agents, ready from the first start |
-| [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]]   | LispM Browser: a WebKit browser in Emacs, with tabs, keyboard hints and Chrome extensions |
-| [[https://github.com/LispMachineLab/lispm-store][lispm-store]]     | LispM Store: the catalog of applications, agents and skills LispM Desktop's App Store installs |
-
-The agents need none of the others. LispM Desktop, an Emacs distribution built around them,
-runs them in its sidebar beside Claude Code, Codex and Hermes, with LispM Browser as one of its
-applications, and its App Store installs more from LispM Store. It installs the agents and the
-browser at its first start:
-
-#+begin_src sh
-git clone https://github.com/LispMachineLab/lispm-desktop ~/lispm-desktop
-emacs --init-directory ~/lispm-desktop
-#+end_src
+The package is ~lispm~; without ~use-package~,
+~(package-vc-install '(lispm :url "https://github.com/LispMachineLab/lispm-agent"))~.  With
+~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ in Emacs's environment there is nothing more to set; for
+any other server see [[*Backends][Backends]].
 
 * Getting started
 
-LispM is used the way Claude Code and Codex are: an agent works in a project, one
-conversation per agent, and you can run several and come back to any of them.
+- ~M-x lispm~ starts an agent in the current project and opens its chat (~C-u~ picks a role).
+- Type at the ~λ >>~ prompt and press ~RET~.  Messages sent while the agent works are queued.
+- A call that needs approval shows its command or diff: ~1~ yes, ~2~ yes and don't ask again,
+  ~3~ no and say what to do instead.
+- A turn that stops early (a failed request, the step limit, a refusal) offers ways to go on:
+  retry, another model, compact, stop.
+- ~C-c C-c~ interrupts; ~/help~ lists the slash commands (~/model~, ~/diff~, ~/undo~, ~/compact~, ...).
+- Killing the chat ends the agent; ~M-x lispm-resume~ brings back any recorded session.
 
-1. In any project, ~M-x lispm~ starts a new agent there and opens its chat (role
-   ~assistant~; ~C-u M-x lispm~ picks another role). Start as many as you like.
-2. Type at the ~λ >>~ prompt at the bottom (~lispm-chat-prompt~) and press ~RET~; ~S-RET~ or
-   ~C-j~ starts a new line, ~M-p~ / ~M-n~ recall what you sent. Messages sent while the agent
-   works are queued.
-3. The reply streams in above the prompt: what the agent says (~⏺~), each tool call as
-   ~⏺ Read(file)~ with a one-line result (~TAB~ on it shows it in full), edits as diffs. A
-   call that needs approval opens a box with the command or diff and the model's reason;
-   answer ~1~ (yes), ~2~ (yes, and don't ask again for that tool; for a shell command or
-   ~eval_elisp~, for that exact one) or ~3~ (no, and say what to do instead), or pick with
-   the arrow keys and ~RET~.
-4. A turn that stops early, because a request failed, the agent reached ~lispm-max-steps~
-   requests, or a response was cut short or refused, does not end: a box says what happened
-   and how it can go on (retry, use another model, ask again with a larger limit, compact,
-   continue, stop here); answer with its number, or just write your next message to stop
-   there. ~lispm-condition-handlers~ can choose for you, say to retry a failed request
-   after a minute. Agents nobody may be watching, helpers and agents woken by hooks and
-   timers, retry a failed request twice and then stop by themselves
-   (~lispm-unattended-condition-handlers~).
-5. ~C-c C-c~ interrupts. ~/~ starts a command (~/help~ lists them): ~/clear~, ~/compact~,
-   ~/resume~, ~/model~, ~/diff~, ~/undo~, ~/memory~, ~/cost~, ~/agents~, ~/transcript~,
-   ~/exit~.
-6. Killing the chat ends the agent; its session stays on disk, and ~M-x lispm-resume~ brings
-   back any recorded session (those of the current project first). Sessions are listed under
-   a title the model gives them after their first turn, in your language
-   (~lispm-auto-title~; ~lispm-title-language~ picks another), until you rename them.
+| Key                | In the chat                                              |
+|--------------------+----------------------------------------------------------|
+| ~RET~              | send, or answer the prompt shown                         |
+| ~S-RET~, ~C-j~     | new line                                                 |
+| ~TAB~              | expand or fold the item at point; complete ~/~ commands  |
+| ~RET~ on an object | visit the file at its line, inspect the agent, describe the symbol |
+| ~M-p~, ~M-n~       | previous, next message sent                              |
+| ~C-c C-c~          | interrupt                                                |
+| ~C-c C-t~          | open the org transcript                                  |
 
-| Key                 | In the chat                                                      |
-|---------------------+------------------------------------------------------------------|
-| ~RET~               | send; with nothing written, answer the prompt shown              |
-| ~S-RET~, ~C-j~      | new line                                                         |
-| ~TAB~               | show the item at point in full, or briefly again; complete ~/~   |
-| ~RET~ on an object  | act on it: a file at its line, an agent inspected, a symbol, ... |
-| ~1~ ~2~ ~3~ ...     | answer the prompt: an approval, or how to go on after a failure  |
-| ~M-p~, ~M-n~        | previous and next message sent                                   |
-| ~C-c C-c~           | interrupt the agent                                              |
-| ~C-c C-t~           | open the org transcript                                          |
+| Command               | What it does                                               |
+|-----------------------+------------------------------------------------------------|
+| ~lispm~               | start an agent in the current project                      |
+| ~lispm-resume~        | resume a recorded session                                  |
+| ~lispm-switch~        | switch to a running agent                                  |
+| ~lispm-ask-region~    | ask the project's agent about the region                   |
+| ~lispm-dashboard~     | every agent's state, pending approvals and token usage     |
+| ~lispm-agenda~        | calls awaiting approval, as an org agenda                  |
+| ~lispm-inspect~       | one agent in depth: calls, inbox, delegations, policy      |
+| ~lispm-turn-diff~     | what an agent changed in its last turn                     |
+| ~lispm-revert-turn~   | undo it                                                    |
+| ~lispm-resume-agents~ | resume every agent that was at work when Emacs stopped     |
 
-| Command                | What it does                                                       |
-|------------------------+--------------------------------------------------------------------|
-| ~lispm~                | start a new agent in the current project                           |
-| ~lispm-resume~         | resume a recorded session                                          |
-| ~lispm-switch~         | switch to a running agent                                          |
-| ~lispm-new-session~    | a fresh session like the current one: same role, same project      |
-| ~lispm-compact~        | hand the session over to a continuation holding a summary          |
-| ~lispm-ask~            | give the project's agent a request from the minibuffer             |
-| ~lispm-ask-region~     | ask the project's agent about the region                           |
-| ~lispm-dashboard~      | every agent's state, pending approvals, inbox and token usage      |
-| ~lispm-inspect~        | one agent whole: calls, inbox, delegations, policy, journal        |
-| ~lispm-agenda~         | calls awaiting approval across all sessions (org agenda)           |
-| ~lispm-review~         | review pending calls, or choose a restart (~C-c C-y~ in org)       |
-| ~lispm-turn-diff~      | show what an agent changed in its last turn (~C-u~: in another)    |
-| ~lispm-revert-turn~    | undo what an agent changed in its last turn (~C-u~: in another)    |
-| ~lispm-resume-agents~  | resume every agent that was at work when Emacs last stopped        |
-| ~lispm-show-request~   | show the full request that will be sent to the model next          |
-| ~lispm-history~        | git history of memory, tasks and sessions                          |
-| ~lispm-trust-skill~    | trust a project's skill's code until it changes (~C-u~: no longer) |
+* How it works
 
-What the chat shows are objects, as on a Lisp Machine, not only text: the file a call read,
-the ~file:line~ places and org links in replies and results, the agents named, the symbols
-written as code. They light up under the mouse; ~RET~ or a click acts on one, visiting the file
-at the line, inspecting the agent, describing the symbol. On a call's ~⏺~ it shows the call in
-the transcript, on a tool's name the tool's definition.
+- *The transcript is the context.*  Each conversation is an org file under ~lispm-directory~;
+  every request is built from it and the chat is drawn from it.  Delete a subtree and the agent
+  forgets it, tag a heading ~:ignore:~ to stop sending it, add headings of your own as private
+  notes.  Tool calls are TODO entries: changing a ~WAITING~ call's state approves or denies it.
+  Set ~lispm-interface~ to ~org~ to work in the org file instead of the chat.
+- *Edits show where they happen.*  A change streams into its file as the model writes it and
+  awaits approval there, removed lines struck out (~lispm-show-edits~).
+- *Roles, agents, sessions.*  A role is instructions, tools, policy and model: ~lispm-defrole~,
+  or an org file in =~/.lispm/roles/=.  An agent is one session of a role in one project, named
+  ~ROLE@PROJECT~.  A project's =AGENTS.md= and =CLAUDE.md= join the system prompt.
+- *Memory under git.*  ~lispm-directory~ (=~/.emacs.d/lispm/=) is a git repository of sessions,
+  each project's =memory.org= and =tasks.org=, and each role's memory.  A conversation that
+  grows too long is handed over to a new one starting from a summary (~lispm-compact-threshold~).
+- *Nothing is lost when Emacs stops.*  Sessions are saved before every request; pending
+  approvals, queued messages and delegations come back with them, and an interrupted turn waits
+  to be continued.  Each turn's changes to a git project are snapshotted outside the project,
+  for ~lispm-turn-diff~ and ~lispm-revert-turn~.
+- *Remote roots.*  An agent's root may be a TRAMP directory (=/ssh:vm:/work/=,
+  =/docker:box:/work/=): its files and commands are there, its Lisp runs in your Emacs.
 
-** The org transcript
+** Permissions
 
-The chat is only the interface. The conversation itself is an org document under
-~lispm-directory~, and that document is the context: every request is built from it, and the
-chat is redrawn from it whenever it changes. ~/transcript~ (~C-c C-t~) opens it. Delete a
-subtree and the agent forgets it; tag a message ~:ignore:~ and it is no longer sent; headings
-of your own, such as ~* Notes~, are private annotations. Tool calls are TODO entries
-(~WAITING~, ~DONE~, ~DENIED~, ...), so changing a waiting call's state approves or denies it,
-and ~M-x lispm-agenda~ lists every call awaiting approval.
+| Class                        | Default | Covers                                    |
+|------------------------------+---------+-------------------------------------------|
+| ~read~ ~memory~ ~comm~ ~lisp~ | auto    | reading, memory and tasks, other agents, ~run_lisp~ |
+| ~write~                      | ask     | changing files and buffers (always asks outside the root) |
+| ~shell~                      | ask     | ~run_shell~                               |
+| ~exec~                       | ask     | ~eval_elisp~, ~write_skill~                |
+| ~web~ ~mcp~                  | ask     | ~web_search~, ~web_fetch~, MCP tools      |
 
-To work in the org document directly instead of the chat, set ~lispm-interface~ to ~org~:
-write under the last ~* User~ heading, send with ~C-c RET~, review calls with ~C-c C-y~, abort
-with ~C-c C-k~.
-
-** Edits, where they happen
-
-An agent's changes show in the buffers it changes. As soon as the model starts writing an edit,
-the file comes into view beside the chat and the change grows there as its text streams in,
-under a tag naming the agent; while the call awaits approval, the lines it would remove are
-struck out and the new ones laid over the buffer, so the change is judged where it would happen.
-A change that runs without asking is typed in behind the agent's cursor; either way, new text
-glows for a moment and removed lines fade. It is all display: the text is only ever what the
-tools make it.
-
-The file takes the place of another file in view, or a window is split off for it; the chat
-stays where it is. ~lispm-show-edits~ turns all of this off, ~lispm-edits-follow~ keeps changes
-to buffers out of view from being brought into it, and ~lispm-edits-speed~,
-~lispm-edits-max-duration~ and ~lispm-edits-fade~ set the pace. A change streams in only when
-the server streams a tool call's input piece by piece, as OpenAI's and Anthropic's APIs do;
-from one that sends it whole, the change shows once it is complete.
-
-* Agents, roles and sessions
-
-- A *role* is a kind of agent: instructions, tools, permission policy, model. ~assistant~ is
-  built in; define more with ~lispm-defrole~, or in role files (below).
-- An *agent* is one conversation carried on by a role in one project: agent and session are
-  the same thing. Its name is ~ROLE@PROJECT~ (~assistant@lispm~, ~assistant@lispm<2>~, ...).
-- A project's ~AGENTS.md~ and ~CLAUDE.md~ join its agents' system prompt, so a project set up
-  for Codex or Claude Code needs nothing more.
-- A conversation that grows long first stops sending the output of older tool calls
-  (~lispm-compact-keep-results~). If it is still too long, it is handed over before the next
-  turn: the agent first saves what should outlive it to memory and tasks, then writes a
-  summary, and the conversation continues in a new file that starts from the summary and the
-  latest turns (~lispm-compact-keep-turns~) and links back to the old one
-  (~lispm-compact-threshold~; ~M-x lispm-compact~ does it on demand).
-- Everything lives under ~lispm-directory~ (~/.emacs.d/lispm/~), a git repository:
-  ~projects/<project>/sessions/~, ~projects/<project>/memory.org~ and ~tasks.org~ (shared by
-  the project's agents), and ~roles/<role>/memory.org~ (what a role learns everywhere). Two
-  things there are kept out of its history: ~projects/<project>/inbox.org~, what waits for the
-  project's agents, and ~journal.git~, the snapshots of the project their turns take (see
-  below).
-- A linked git worktree (~git worktree add~) is the same project as its main checkout: its
-  agents share the main one's sessions, memory and tasks.
-
-#+begin_src emacs-lisp
-(lispm-defrole reviewer
-  "Reviews changes for bugs; never edits."
-  :tools '(read_file search_files list_directory read_buffer recall remember send_message))
-#+end_src
-
-Permission classes: ~read~, ~memory~, ~comm~ and ~lisp~ run automatically by default;
-~write~, ~shell~ and ~exec~ need approval (see ~lispm-default-policy~). Writes outside the
-agent's root always ask, and so does ~write_skill~. ~shell~ (~run_shell~) and ~exec~
-(~eval_elisp~, ~write_skill~) reach all of Emacs and the system, the policy included, so
-approving such a call for good approves that exact call, not every one. A policy that names
-~exec~ but not ~shell~ gives shell commands what it gives ~exec~, as before they had a class of
-their own.
-
-Other programs can check calls too, a security application say: each function of
-~lispm-tool-action-functions~ gets the agent, the tool and the input of a call and answers
-nothing, ~ask~ or ~deny~, with a reason if it likes, which the approval shows and a denial tells
-the model. The strictest answer wins, so a check can make a call ask or be refused but never
-let through one LispM would ask about or deny; a check that fails asks. While a check asks
-about a call, allowing its tool for good does not stop it asking.
-
-#+begin_src emacs-lisp
-(add-hook 'lispm-tool-action-functions
-          (lambda (_agent tool _input)
-            (when (equal (lispm-tool-name tool) "run_shell")
-              '(ask . "Shell commands always ask in this Emacs."))))
-#+end_src
-
-** A root on another machine
-
-An agent's root may be a directory on another machine, as TRAMP names it: ~/ssh:vm:/work/~,
-or ~/docker:box:/work/~ for a container (on a Mac, with colima, say). Its tools then read, edit,
-list and search files there, ~run_shell~ runs commands there, and absolute paths it gives name
-files there; Emacs Lisp still runs in your Emacs. So it can run commands unasked while its Lisp
-asks:
-
-#+begin_src emacs-lisp
-(lispm-defagent builder
-  :root "/docker:box:/work/"
-  :policy '((shell . auto) (write . auto)))
-#+end_src
-
-~M-x lispm~ from a buffer of that machine starts an agent there too. Approving one of its
-commands for good (~2~ in the chat) allows them all, since they run on the other machine; that
-holds only while the machine cannot write your files, so don't mount your home directory into
-the container. Its turns are journaled in memory only, without git snapshots.
-
-** Role files
-
-A role can also be written in an org file, ~NAME.org~ in ~~/.lispm/roles/~
-(~lispm-role-directories~), which defines the role ~NAME~ whenever LispM loads:
-
-#+begin_example
-#+title: Reviewer
-#+description: Reviews changes for bugs; never edits.
-#+tools: (read_file search_files list_directory read_buffer recall remember send_message)
-#+policy: ((write . deny) (exec . deny))
-#+effort: high
-
-Point out bugs with file:line. Do not edit.
-#+end_example
-
-The values of ~#+tools~, ~#+policy~ and ~#+effort~ are Lisp data, as for ~lispm-defrole~; without
-~#+tools~ the role has every tool. The text after the keywords is its instructions. A role file
-names no backend or model: its agents use yours, so a role file can be passed on as it is.
-
-~M-x lispm-install-role~ installs a role file from elsewhere: it shows you the file, or the diff
-against the role file it replaces, and asks first. ~M-x lispm-delete-role~ deletes one, and
-~M-x lispm-load-roles~ reads the directories again. A role defined in Lisp, such as ~assistant~,
-is neither replaced by a role file nor deleted. Live agents of a role that is replaced take the
-new role on; those of a role that is deleted keep what they had from it.
+~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  Other
+packages can hold calls back through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the
+strictest answer wins), as [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
 
 * Standing agents
 
-Agents declared in your configuration are *standing*: each keeps one conversation going, which
-it resumes after Emacs restarts, and hooks and timers can wake it up.
+Agents declared in your configuration keep one conversation going across restarts, and hooks
+and timers can wake them:
 
 #+begin_src emacs-lisp
 (lispm-defagent coder
   "Writes and fixes Emacs Lisp in this repository."
   :root "~/src/lispm/"
-  :instructions "Keep changes small. After editing, run `make test` and report the result."
-  :policy '((write . auto)))          ; writes inside the root run without asking (outside, they still ask)
+  :policy '((write . auto)))           ; edits inside the root run without asking
 
-;; Wake coder when a compilation fails.
 (lispm-watch 'coder 'compilation-finish-functions
   :when (lambda (_buffer status) (string-match-p "abnormally" status))
-  :prompt "The compilation failed. Read *compilation*, find the cause and fix it.")
+  :prompt "The compilation failed.  Read *compilation*, find the cause and fix it.")
 
-;; On a timer.
 (lispm-every 'coder 3600 "Look at your open tasks and move one forward.")
 #+end_src
 
-Agents collaborate through ~ask_agent~ and ~send_message~. ~ask_agent~ delegates to a running
-agent and waits for its reply; given a role instead, it starts a helper of that role in the
-same project, which retires once it has replied (a subagent) and may do no more than the agent
-that asked for it. With the ~worktree~ skill (see Skills), a helper works in a git worktree of
-its own instead, so that several can change the same files at once. What passes between agents
-can be more than text: they name places as ~[[file:PATH::LINE]]~ and buffers as
-~[[buffer:NAME]]~, which their tools take as files and buffers, and a helper can return a value
-with its reply (~return_value~), such as a list of places, which ~ask_agent~ gives as JSON.
-~inspect_agent~ shows an agent in depth, as ~M-x lispm-inspect~ (~/inspect~) shows it to you. Project task lists can
-join your agenda: ~(setq org-agenda-files (append org-agenda-files (lispm-agenda-files)))~.
-
-* When Emacs stops
-
-Agents carry on where they were. A session is saved as each turn starts, before every request
-and whenever calls are recorded; what waits for an agent (a message, an event, what you wrote
-while it was busy) is in its project's ~inbox.org~ until its turn is over. Opening a session
-again takes all of it up:
-
-- calls awaiting approval await it again; calls that were running are recorded as interrupted;
-- a turn Emacs stopped in the middle of waits at a condition, /Turn interrupted/: ~1~ goes on
-  with it, asking the model again, ~2~ stops there. A turn another agent or an event started
-  goes on by itself (~lispm-unattended-condition-handlers~), since someone waits for it;
-- what was queued for the agent is handled next.
-
-A standing agent takes up what it was doing as soon as your configuration declares it again;
-~M-x lispm-resume-agents~ resumes every other agent that was at work. A delegation survives
-too: the caller's ~ask_agent~ call records whom it asked, and the helper's request whom to
-reply to, so opening either session brings the other back, the helper goes on with the request
-(bounded by its caller still, whose ceiling its session records), and its reply settles the
-call.
-
-In a project under git, each turn's changes outlive Emacs as well: snapshots of the work tree
-as a turn begins and ends are kept in a repository of LispM's own, beside the project's memory,
-never in the project's. ~lispm-revert-turn~ and ~lispm-turn-diff~ use them, so they cover what
-shell commands and Lisp changed, and turns from before Emacs restarted; ~C-u~ chooses the turn.
-Files git ignores are left out, and untracked ones larger than ~lispm-journal-max-file-size~;
-~lispm-journal-git~ turns snapshots off.
+Agents work together with ~send_message~ and ~ask_agent~, which delegates and waits; given a role,
+it starts a subagent that may do no more than its caller.  The ~worktree~ skill gives each helper
+a git worktree of its own.
 
 * Backends
 
-LispM speaks two API shapes: OpenAI Chat Completions, which almost every model server
-implements, and Anthropic Messages. It is tied to no provider: a backend names an endpoint, its
-shape and the features to use, and any server speaking either shape can be one. The presets are
-the two first-party APIs:
+LispM speaks OpenAI Chat Completions, which almost every model server implements, and Anthropic
+Messages.  The presets are the two first-party APIs:
 
 | Backend     | Shape            | URL                         | Default model     | Key                 |
 |-------------+------------------+-----------------------------+-------------------+---------------------|
 | ~openai~    | Chat Completions | ~https://api.openai.com/v1~ | ~gpt-5.5~         | ~OPENAI_API_KEY~    |
 | ~anthropic~ | Messages         | ~https://api.anthropic.com~ | ~claude-opus-5-5~ | ~ANTHROPIC_API_KEY~ |
 
-Keys come from the environment or from auth-source. Unless ~lispm-backend~ names one, agents use
-the first backend in ~lispm-backends~ whose key is set in the environment; with none, LispM says
-so when a message is sent. A server that needs no key, such as one on this machine, must be
-named.
+Keys come from the environment or auth-source.  Unless ~lispm-backend~ names one, agents use the
+first backend whose key is set.
 
 #+begin_src emacs-lisp
-(setq lispm-backend 'anthropic)             ; name the backend
-(setq lispm-model "claude-sonnet-5-5")      ; another model than the backend's default
+(setq lispm-backend 'anthropic
+      lispm-model "claude-sonnet-5-5")
 
 ;; Any other Chat Completions server: Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, ...
 (add-to-list 'lispm-backends
              '(ollama :api openai :url "http://localhost:11434/v1"
-                      :model "qwen3-coder"          ; a model you have pulled
-                      :features (streaming)))
-(add-to-list 'lispm-backends
-             '(hosted :api openai :url "https://example.com/v1"
-                      :model "model-name" :key-env "EXAMPLE_API_KEY"
-                      :features (streaming reasoning-effort)))
+                      :model "qwen3-coder" :features (streaming)))
 #+end_src
 
-Each agent can also set its own ~:backend~, ~:model~ and ~:effort~, so agents on different
-providers can work together. ~C-h v lispm-backends~ documents every option; section 9 of
-DESIGN.org explains the translation between the shapes.
+Each agent can set its own ~:backend~, ~:model~ and ~:effort~.  ~C-h v lispm-backends~ documents
+every option.
 
-* Tools: the core layer and the rest
+* Tools and Lisp
 
-An agent carries the tools it commonly needs: reading, editing and searching files and buffers,
-running commands and Lisp, memory, tasks and other agents. Others are /deferred/: they take no
-room in requests until needed. Using one takes two steps: the model finds it with
-~search_tools~, by keywords (~"screenshot click"~), a source's name, or exact names
-(~"select:NAME,NAME"~), which loads what it finds; from its next step on, those tools are
-offered like the others, for the rest of the session, and again when it is resumed. The tools
-of MCP servers are deferred by default; a tool of your own is when its ~lispm-deftool~ says
-~:deferred t~. So are LispM's tools for developing Lisp in the running Emacs (the source
-~lisp~, below), and a tool an agent defines itself, with ~eval_elisp~ or a skill's code,
-always: it is that agent's from its next step on, and other agents find it with ~search_tools~.
-
-* Emacs is the operating system
-
-Whatever Emacs can do, an agent can do with ~eval_elisp~; ~apropos~, ~describe_symbol~ and
-~read_info~ (the Info manuals) let it find out what there is and how it works. Code that
-waits for something ends with ~(lispm-async (lambda (resolve) ...))~. An error in it comes
-back with its backtrace, innermost call first; as that shows the arguments of the calls, set
-~lispm-eval-backtrace~ to nil if they may hold what should not leave Emacs.
-
-~eval_elisp~ is outside the permission model: the Lisp it runs could change the policy
-itself, so it needs your approval every time (unless you allow ~exec~ outright). For Lisp
-that stays under the policy there is ~run_lisp~, in which the agent's tools are functions:
-
-#+begin_src emacs-lisp
-(dolist (file (directory-files "lisp" t "\\.el\\'"))
-  (when (string-search "Copyright (C) 2025" (read_file :path file))
-    (edit_file :path file :old-text "Copyright (C) 2025" :new-text "Copyright (C) 2026")))
-#+end_src
-
-Each call goes through the policy as if the model had made it: the reads run, each edit asks
-you as any edit does (in the chat, under the program's call), and a denial is an error the
-program can handle (~lispm-call-denied~). Otherwise a program only computes: it may call the
-functions Emacs declares free of side effects and pass around lambdas of its own, sets only
-its own variables and changes only buffers it made. Anything else is refused, with the
-reason. A program waiting for a call is run again once the call is decided; the calls it
-made before keep their results.
-
-Agents develop Lisp as on a Lisp Machine: a definition at a time, in the running Emacs.
-~edit_definition~ replaces the form that defines a function, macro, variable or face, in the
-file Emacs has it from, so the model writes the new form and never copies the old one;
-~eval_definition~ evaluates it as C-M-x does, a ~defvar~ or ~defcustom~ reset to what it now
-says; ~ert_run~ runs the tests in Emacs and reports each failure with its condition and the
-innermost calls of its backtrace. ~xref_definitions~, ~xref_references~ and
-~flymake_diagnostics~ work for any language Emacs has xref or flymake for: Emacs Lisp by
-default, a language server's answers with eglot. The byte compiler checks only files you trust
-(~trusted-content~), which LispM never changes, and the result says when it did not. An edit
-is a ~write~: wherever the definition is, Emacs's own sources say, one outside the project
-asks you; evaluating and testing run code, under ~exec~.
-
-A tool's failure goes to the model, which usually knows what to do about it. Set
-~lispm-debug-tool-errors~ (t, or a list of tool names) and it stops the call instead, as
-~debug-on-error~ would: you choose to tell the model, run the call again, give it a result of
-your own, or stop the turn.
+- Common tools are always offered.  The rest (MCP tools, Lisp development tools, tools agents
+  define) are deferred: the model loads them with ~search_tools~ when needed, so they cost no
+  context until then.
+- ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
+  the agent's tools are functions, each call going through the policy as if the model made it.
+- Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
+  ~xref_definitions~, ~xref_references~ and ~flymake_diagnostics~ for any language Emacs supports.
+- ~apropos~, ~describe_symbol~ and ~read_info~ let agents learn Emacs itself.
 
 * Skills
 
-A skill is how to do a kind of thing with Emacs, written down in an org file: a ~#+title~, a
-~#+description~, instructions, and source blocks marked ~:lispm load~ with helper functions
-or tools. Agents see every skill's description and load one when a request needs it. Put
-yours in ~~/.lispm/skills/~ (~NAME.org~, or ~NAME/SKILL.org~ with files beside it).
-
-A project's skills go in its ~.lispm/skills/~. Their code runs only once you have seen it: an
-agent loading one asks you, showing the code, and ~2~ trusts that code for good, until it
-changes. The trust is pinned by a hash of the code (and of the files beside a ~SKILL.org~),
-kept in ~lispm-trusted-skills~ and saved with Customize; ~M-x lispm-trust-skill~ trusts a
-project's skill from Emacs, and with ~C-u~ trusts it no longer.
-
-Agents write skills too. A tool an agent defines with ~eval_elisp~ lasts until Emacs exits;
-~write_skill~ keeps it, with how to use it, as a skill in ~~/.lispm/skills/~
-(~lispm-write-skill-directory~). It always asks you, whatever the policy says, showing the file
-it would write; approved, the skill's code is evaluated, and the file saved if that succeeds.
-From then on every agent can load it.
-
-LispM comes with ~web~: ~web_search~ and ~web_fetch~, which render pages with Emacs's own
-WebKit (xwidgets) when it has it, else fetch them with url.el, and read them as eww's readable
-mode does. They ask for approval (permission class ~web~); allow them for good with
-~(add-to-list 'lispm-default-policy '(web . auto))~.
-
-And ~worktree~, for a project that is a git repository: ~worktree_ask~ delegates to a helper of
-a role, as ~ask_agent~ does, but the helper works in a worktree of its own, on a new branch
-~lispm/NAME~, in ~~/.lispm/worktrees/PROJECT/NAME/~ (~lispm-worktree-directory~). Your checkout
-is untouched until you merge the branch. The result says where the work is: its commits, what
-was left uncommitted, the changes against the base; a helper that changed nothing leaves no
-worktree or branch behind. ~worktree_list~ and ~worktree_remove~ manage the rest. Making a
-worktree is a ~write~, so it asks by default.
-
-** Installing
-
-~M-x lispm-install-skill~ installs a skill from elsewhere, ~NAME.org~ or a directory holding
-~SKILL.org~, among yours in ~~/.lispm/skills/~ (~lispm-write-skill-directory~). Agents that load
-it then run its code without asking, as they do your own skills', so installing a skill is
-trusting it: you see its code first, or the diff against the skill it replaces, files beside it
-included, and are asked. Its code must read, and its name must not be that of one of LispM's own
-skills. ~M-x lispm-delete-skill~ deletes a skill from there, and from nowhere else.
+A skill is an org file of instructions whose source blocks marked ~:lispm load~ define helpers
+and tools; agents load one when a request calls for it.  Yours go in =~/.lispm/skills/=, a
+project's in its =.lispm/skills/=, whose code runs only after you have seen it.  ~write_skill~
+lets an agent keep a tool it wrote, and always asks.  LispM comes with ~web~ (~web_search~,
+~web_fetch~) and ~worktree~; ~M-x lispm-install-skill~ and ~M-x lispm-install-role~ install others,
+such as those of [[https://github.com/LispMachineLab/lispm-store][LispM Store]].
 
 * MCP servers and computer use
-
-Agents use the tools of [[https://modelcontextprotocol.io][Model Context Protocol]] servers as
-their own. List the servers in ~lispm-mcp-servers~, as for mcp.el's ~mcp-hub-servers~, with a
-~:description~ of what they are for, which ~search_tools~ shows the model. A server starts
-when an agent first searches its tools; with ~:defer nil~ it starts with each session instead,
-and all its tools are always offered. Their tools are named ~mcp__SERVER__TOOL~
-(~peekaboo:see~ in the chat) and ask for approval by default (permission class ~mcp~; a
-server's ~:permission~ gives its tools another class). Functions of
-~lispm-mcp-register-functions~ see a server's tools as it lists them, before agents do, and may
-keep some back or have every call of them ask; ~M-x lispm-mcp-refresh~ registers a running
-server's tools again.
-
-For computer use on macOS, [[https://github.com/openclaw/Peekaboo][Peekaboo]] (macOS 15+,
-Node 22+) lets agents see the screen and use applications:
 
 #+begin_src emacs-lisp
 (setq lispm-mcp-servers
       '(("peekaboo" :command "npx" :args ("-y" "@steipete/peekaboo" "mcp")
          :description "See the macOS screen and use its applications (computer use)."
-         :sandbox none)))               ; it drives other applications: see The sandbox
+         :sandbox none)))               ; it drives other applications
 #+end_src
 
-Emacs then needs Screen Recording and Accessibility permission (System Settings > Privacy &
-Security); ~peekaboo:permissions~ reports what is missing. Peekaboo has 26 tools, about 14,000
-tokens; deferred, an agent loads only those it uses. Images that tools return, such as the
-screenshots of ~peekaboo:see~, go to the model and are kept next to the session (out of git);
-~TAB~ on the call shows them in the chat. Requests carry the latest ~lispm-context-images~
-images. ~M-x lispm-mcp-status~, ~lispm-mcp-start~ and ~lispm-mcp-stop~ manage the servers.
+A server starts when an agent first searches its tools, named ~mcp__SERVER__TOOL~, which ask by
+default.  [[https://github.com/openclaw/Peekaboo][Peekaboo]] (macOS 15+) gives agents the screen and
+its applications; Emacs then needs Screen Recording and Accessibility permission.
+~M-x lispm-mcp-status~ manages the servers.
 
 * The sandbox
 
-Agents' shell commands and MCP servers can run in a sandbox the operating system enforces:
-Anthropic's [[https://github.com/anthropics/sandbox-runtime][sandbox runtime]], srt, confines a
-process and everything it starts, with ~sandbox-exec~ on macOS and bubblewrap on Linux, and lets
-it reach the network only through a proxy that checks each domain. Emacs stays outside it and
-holds the configuration: ~lispm-sandbox-level~, one of four levels or your own rules.
+Shell commands and MCP servers can run in Anthropic's
+[[https://github.com/anthropics/sandbox-runtime][sandbox runtime]] (srt: ~sandbox-exec~ on macOS,
+bubblewrap on Linux), reaching the network through a proxy that checks each domain.
 
-| None   | the default: no sandbox, commands may do anything you can                                                                                                     |
-| Low    | read everything but secrets; write the project, temporary files and package caches; reach package registries, code hosts and ~lispm-sandbox-allowed-domains~ |
-| Middle | read everything but secrets; write the project and temporary files; reach only ~lispm-sandbox-allowed-domains~                                                |
-| High   | read only the project, git's configuration and the system; write only the project; no network                                                                |
-| Custom | the rules of ~lispm-sandbox-custom~, below                                                                                                                    |
+| None   | the default: no sandbox                                                             |
+| Low    | read all but secrets; write the project, temporary files and package caches; reach registries, code hosts and ~lispm-sandbox-allowed-domains~ |
+| Middle | read all but secrets; write the project and temporary files; reach only ~lispm-sandbox-allowed-domains~ |
+| High   | read the project and the system; write the project; no network                      |
+| Custom | rules of your own, ~lispm-sandbox-custom~ (~M-x lispm-sandbox-customize~)            |
 
-Choose one with ~M-x lispm-sandbox-set-level~ (~C-u~ saves it for later sessions) or ~/sandbox~
-in a chat, whose header then shows it. Nothing needs restarting: commands started afterwards run
-at the new level, and those already running, an MCP server or a long build, take its network
-rules at once, through srt's control channel. Their file rules were fixed when they started; the
-message says which to restart for those. What counts as a secret (~lispm-sandbox-secrets~), the
-caches, the registries and further writable places (~lispm-sandbox-allow-write~) are lists you
-can change; changes reach running processes as a new level does.
+~M-x lispm-sandbox-set-level~ or ~/sandbox~ switches without restarting: running processes take
+the new network rules at once.  The first level other than None installs srt with npm (Node.js
+22.12+).  The sandbox does not confine ~eval_elisp~, so keep ~exec~ at ~ask~ when it matters.
 
-Custom is for rules of your own. ~M-x lispm-sandbox-customize~ (or ~/sandbox edit~) opens them in
-Customize, starting from Middle's (with ~C-u~, from a level you choose): what commands may not read
-and, inside that, may read after all; where they may write and, inside that, may not; the domains
-they may reach and those refused anyway; and whether they may serve on and reach local ports,
-connect to given Unix sockets, use pseudo-terminals, or send Apple Events and so open applications,
-which then run outside the sandbox. ~C-h v lispm-sandbox-custom~ documents each rule.
-
-#+begin_src emacs-lisp
-(setq lispm-sandbox-custom
-      '(:deny-read ("~/.ssh" "**/.env") :allow-write ("." "~/.npm")
-        :allowed-domains ("github.com" "*.github.com" "registry.npmjs.org")
-        :local-binding t)              ; dev servers and their tests
-      lispm-sandbox-level 'custom)
-#+end_src
-
-The first time a level other than None is used, LispM installs srt (~lispm-sandbox-srt-version~)
-with npm, from Node.js 22.12+, into =sandbox/= under ~lispm-directory~; ~lispm-sandbox-srt-program~
-runs one of your own instead. On Linux srt needs bubblewrap, socat and ripgrep too. Until srt is
-there, a command that should be sandboxed fails with the reason rather than run outside it, and so
-does one whose root is on another machine, which srt cannot confine.
-
-A sandboxed command's result says what its sandbox allowed, so the model knows why a write was
-refused. An MCP server's ~:sandbox~ gives it a level of its own: Peekaboo, which sees the screen
-and drives other applications, needs ~:sandbox none~.
-
-The sandbox does not confine Emacs Lisp: ~eval_elisp~ (class ~exec~) can do whatever Emacs can,
-lowering the level included, so keep ~exec~ at ~ask~ when the sandbox matters. No level lets a
-command write Emacs's configuration or ~lispm-directory~, where srt itself is, but a project it
-may write can hold files your Emacs loads.
-
-* Tests
+* Development
 
 #+begin_src sh
-make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers drive curl and mcp.el
-make compile   # warnings are errors; make deps, which both run first, installs mcp.el into .deps/
+make test      # ERT: a fake model drives whole turns; fake SSE and MCP servers
+make compile   # warnings are errors
+make demo      # record the demo again: a real model and ffmpeg (macOS)
 #+end_src
 
-CI runs both with Emacs 30.1, 30.2, 31.1 and the development snapshot, for every pull request.
-
-~make demo~ records the demo above again (~assets/demo/~) in your own Emacs, with your
-configuration but none of its state, a real model through the backend it chooses, and ffmpeg
-(macOS); [[file:demo/record.el][demo/record.el]] is the script.
-
-* Files
-
-| File                     | Contents                                                         |
-|--------------------------+------------------------------------------------------------------|
-| lisp/lispm.el            | entry commands, dashboard, mode line                             |
-| lisp/lispm-core.el       | agent object model, registry, configuration                      |
-| lisp/lispm-roles.el      | role files: loading, installing and deleting them                |
-| lisp/lispm-transcript.el | byte-exact round trip between org sessions and the Messages API  |
-| lisp/lispm-api.el        | curl transport, the table of API shapes, API keys                |
-| lisp/lispm-openai.el     | the OpenAI Chat Completions shape                                |
-| lisp/lispm-anthropic.el  | the Anthropic Messages shape                                     |
-| lisp/lispm-tools.el      | ~lispm-deftool~, permissions, built-in tools, edit journal       |
-| lisp/lispm-edits.el      | edits shown where they happen: streamed, proposed, typed in      |
-| lisp/lispm-memory.el     | memory.org and tasks.org, git audit trail                        |
-| lisp/lispm-inbox.el      | inbox.org: what waits for agents, kept across restarts           |
-| lisp/lispm-journal.el    | snapshots of a project's work tree, turn by turn, in git         |
-| lisp/lispm-runtime.el    | execution loop, approvals, inbox, triggers, rollback             |
-| lisp/lispm-lisp.el       | run_lisp: Lisp programs whose effects are calls under the policy |
-| lisp/lispm-collab.el     | multi-agent collaboration tools                                  |
-| lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
-| lisp/lispm-sandbox.el    | commands and MCP servers in srt: None to High, or Custom rules   |
-| lisp/lispm-title.el      | sessions titled by the model                                     |
-| lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
-| lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |
-| lisp/lispm-skills.el     | skills: loading, trusting a project's, writing, installing them  |
-| lisp/lispm-inspect.el    | presentations (objects in text to act on), the agent inspector   |
-| lisp/lispm-chat.el       | the chat interface, drawn from the org transcript                |
-| skills/                  | the skills LispM comes with: web, worktree                       |
-| test/                    | ERT suite, fake model, SSE and MCP servers                       |
-| demo/                    | the demo: its script, recorder and sample project                |
-| assets/                  | logo, social card, the demo's video                              |
+CI runs both on Emacs 30.1, 30.2, 31.1 and the development snapshot.  The code is in =lisp/=,
+the bundled skills in =skills/=, the tests in =test/=.
 
 * License
 
