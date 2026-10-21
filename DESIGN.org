@@ -397,7 +397,8 @@ Anthropic's sandbox runtime, srt: ~sandbox-exec~ on macOS, bubblewrap on Linux, 
 checks the domain of every connection. The configuration stays in Emacs, as everything else
 does, and Emacs stays outside the sandbox: what holds the rules must not be confined by them,
 and on macOS a sandboxed process cannot start another under rules of its own. So
-~lispm-sandbox-level~ (None, Low, Middle, High) becomes srt's settings each time ~run_shell~
+~lispm-sandbox-level~ (None, Low, Middle, High, or Custom: the user's own rules, a plist of the
+same few kinds srt has) becomes srt's settings each time ~run_shell~
 starts a command or an MCP server starts, and a change reaches processes already running through
 srt's control channel, a named pipe Emacs keeps open to each: their network rules change at once;
 their file rules were fixed when they started, and the change says which to restart. When srt

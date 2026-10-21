@@ -1291,7 +1291,7 @@ or show the item at point in full."
     ("compact" lispm-chat-compact "Summarize the conversation and continue from the summary")
     ("resume" lispm-chat-resume "Resume a recorded conversation here")
     ("model" lispm-chat-model "Show the model, or switch with /model NAME")
-    ("sandbox" lispm-chat-sandbox "Choose the sandbox level (None, Low, Middle, High)")
+    ("sandbox" lispm-chat-sandbox "Choose the sandbox level; /sandbox edit, the Custom one's rules")
     ("diff" lispm-chat-diff "Show what the agent changed in its last turn")
     ("undo" lispm-chat-undo "Undo what the agent changed in its last turn")
     ("memory" lispm-chat-memory "Open this project's memory")
@@ -1382,10 +1382,11 @@ Return the chat of the new conversation."
     (message "%s now uses %s" (lispm-agent-name agent) argument)))
 
 (defun lispm-chat-sandbox (_agent argument)
-  "Choose the sandbox level of shell commands and MCP servers, or set ARGUMENT."
-  (lispm-sandbox-set-level (if (string-empty-p argument)
-                               (lispm-sandbox-read-level)
-                             (intern (downcase argument)))))
+  "Choose the sandbox level of shell commands and MCP servers, or set ARGUMENT.
+ARGUMENT edit edits the rules of the level Custom instead."
+  (cond ((string-empty-p argument) (lispm-sandbox-set-level (lispm-sandbox-read-level)))
+        ((equal (downcase argument) "edit") (lispm-sandbox-customize))
+        (t (lispm-sandbox-set-level (intern (downcase argument))))))
 
 (defun lispm-chat-diff (agent _argument)
   "Show what AGENT changed in its last turn."

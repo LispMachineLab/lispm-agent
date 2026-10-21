@@ -495,12 +495,13 @@ Agents' shell commands and MCP servers can run in a sandbox the operating system
 Anthropic's [[https://github.com/anthropics/sandbox-runtime][sandbox runtime]], srt, confines a
 process and everything it starts, with ~sandbox-exec~ on macOS and bubblewrap on Linux, and lets
 it reach the network only through a proxy that checks each domain. Emacs stays outside it and
-holds the configuration: ~lispm-sandbox-level~, one of four levels.
+holds the configuration: ~lispm-sandbox-level~, one of four levels or your own rules.
 
 | None   | the default: no sandbox, commands may do anything you can                                                                                                     |
 | Low    | read everything but secrets; write the project, temporary files and package caches; reach package registries, code hosts and ~lispm-sandbox-allowed-domains~ |
 | Middle | read everything but secrets; write the project and temporary files; reach only ~lispm-sandbox-allowed-domains~                                                |
 | High   | read only the project, git's configuration and the system; write only the project; no network                                                                |
+| Custom | the rules of ~lispm-sandbox-custom~, below                                                                                                                    |
 
 Choose one with ~M-x lispm-sandbox-set-level~ (~C-u~ saves it for later sessions) or ~/sandbox~
 in a chat, whose header then shows it. Nothing needs restarting: commands started afterwards run
@@ -509,6 +510,21 @@ rules at once, through srt's control channel. Their file rules were fixed when t
 message says which to restart for those. What counts as a secret (~lispm-sandbox-secrets~), the
 caches, the registries and further writable places (~lispm-sandbox-allow-write~) are lists you
 can change; changes reach running processes as a new level does.
+
+Custom is for rules of your own. ~M-x lispm-sandbox-customize~ (or ~/sandbox edit~) opens them in
+Customize, starting from Middle's (with ~C-u~, from a level you choose): what commands may not read
+and, inside that, may read after all; where they may write and, inside that, may not; the domains
+they may reach and those refused anyway; and whether they may serve on and reach local ports,
+connect to given Unix sockets, use pseudo-terminals, or send Apple Events and so open applications,
+which then run outside the sandbox. ~C-h v lispm-sandbox-custom~ documents each rule.
+
+#+begin_src emacs-lisp
+(setq lispm-sandbox-custom
+      '(:deny-read ("~/.ssh" "**/.env") :allow-write ("." "~/.npm")
+        :allowed-domains ("github.com" "*.github.com" "registry.npmjs.org")
+        :local-binding t)              ; dev servers and their tests
+      lispm-sandbox-level 'custom)
+#+end_src
 
 The first time a level other than None is used, LispM installs srt (~lispm-sandbox-srt-version~)
 with npm, from Node.js 22.12+, into =sandbox/= under ~lispm-directory~; ~lispm-sandbox-srt-program~
@@ -558,7 +574,7 @@ configuration but none of its state, a real model through the backend it chooses
 | lisp/lispm-lisp.el       | run_lisp: Lisp programs whose effects are calls under the policy |
 | lisp/lispm-collab.el     | multi-agent collaboration tools                                  |
 | lisp/lispm-mcp.el        | the tools of MCP servers, through mcp.el                         |
-| lisp/lispm-sandbox.el    | commands and MCP servers in srt, at a level from None to High    |
+| lisp/lispm-sandbox.el    | commands and MCP servers in srt: None to High, or Custom rules   |
 | lisp/lispm-title.el      | sessions titled by the model                                     |
 | lisp/lispm-emacs.el      | apropos and the Info manuals: Emacs, as agents find and learn it |
 | lisp/lispm-develop.el    | Lisp in the image: edit, evaluate, test; xref and flymake        |

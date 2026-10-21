@@ -54,8 +54,9 @@
 ;;   MCP            the tools of Model Context Protocol servers, such as
 ;;                  Peekaboo's for using the computer (lispm-mcp.el);
 ;;   sandbox        shell commands and MCP servers confined by the
-;;                  operating system, at a level from None to High,
-;;                  with Anthropic's srt (lispm-sandbox.el);
+;;                  operating system, at a level from None to High
+;;                  or by rules of your own, with Anthropic's srt
+;;                  (lispm-sandbox.el);
 ;;   Emacs itself   found with apropos and read in its manuals
 ;;                  (lispm-emacs.el), used with eval_elisp;
 ;;   development    definitions edited in their files, evaluated into
