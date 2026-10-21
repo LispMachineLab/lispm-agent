@@ -706,6 +706,70 @@ change any file."
                             (and buffer (buffer-file-name buffer))))
           (error t))))))
 
+(defvar lispm-tool-action-functions nil
+  "Functions that may hold a tool call back for approval, or refuse it.
+Each is called with the agent, the tool (a `lispm-tool') and the input
+of a call LispM's own rules do not deny (see `lispm-tool-action'), and
+returns nil, to leave the call as those rules decide it; `ask', for it
+to await the user's approval; or `deny', to refuse it.  Either may
+come with a reason, as (ask . REASON) or (deny . REASON), REASON a
+sentence: the approval shows it, and a denial tells it the model.
+
+The strictest answer wins, so a function can make a call ask or be
+refused, never let one through that would ask or be refused: what
+the user allowed for good is asked about again while a function asks.
+A function that signals an error, or answers anything else, asks:
+an error never lets a call through.  Functions are called for every
+call before it is decided, and again whenever it is decided anew, so
+they should be quick and answer alike for the same call.")
+
+(defun lispm-tools--answer (function agent tool input)
+  "What FUNCTION of `lispm-tool-action-functions' answers for AGENT's call
+of TOOL on INPUT: nil, or (ACTION . REASON).  An answer without a reason
+gets one naming FUNCTION."
+  (let ((name (if (symbolp function)
+                  (format "`%s'" function)
+                "A function of `lispm-tool-action-functions'")))
+    (condition-case err
+        (pcase (funcall function agent tool input)
+          ('nil nil)
+          ((or (and (or 'ask 'deny) action (let reason nil))
+               (and `(,(and (or 'ask 'deny) action) . ,reason)
+                    (guard (or (null reason) (stringp reason)))))
+           (cons action (or reason (format (if (eq action 'ask) "%s asks about it." "%s refused it.")
+                                           name))))
+          (answer (cons 'ask (format "%s answered %S, which is neither ask nor deny."
+                                     name answer))))
+      (error (cons 'ask (format "%s failed: %s." name (error-message-string err)))))))
+
+(defun lispm-tool-decision (agent tool input)
+  "Whether AGENT may run TOOL on INPUT, and why not: (ACTION . REASONS).
+ACTION is `auto', `ask' or `deny', what LispM's own rules decide (see
+`lispm-tool-action') or, if stricter, what a function of
+`lispm-tool-action-functions' answers.  REASONS are the reasons of the
+functions answering ACTION, a list of strings; LispM's own rules give
+none."
+  (let ((action (lispm-tools--action agent tool input))
+        answers)
+    (unless (eq action 'deny)
+      (run-hook-wrapped 'lispm-tool-action-functions
+                        (lambda (function)
+                          (when-let* ((answer (lispm-tools--answer function agent tool input)))
+                            (push answer answers)
+                            (setq action (lispm--stricter action (car answer))))
+                          nil)))
+    (cons action (delq nil (mapcar (lambda (answer) (and (eq (car answer) action) (cdr answer)))
+                                   (nreverse answers))))))
+
+(defun lispm-tools-denial (agent tool reasons)
+  "What the model is told of AGENT's call of TOOL, denied for REASONS.
+REASONS as `lispm-tool-decision' gives them; with none, the policy
+denied it."
+  (if reasons
+      (concat "Denied: " (string-join reasons " "))
+    (format "Denied by policy: %s may not use %s tools."
+            (lispm-agent-name agent) (lispm-tool-permission tool))))
+
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
 Calls the user allowed for this Emacs session run at once (see
@@ -714,7 +778,14 @@ whatever the policy says: to files named by a `path' argument, visited
 by a buffer a `buffer' argument names, or that the tool's targets
 function returns (see `lispm-deftool'), as a write whose files that
 function cannot tell does.  So do the calls of a tool that always asks
-(see `lispm-deftool'), such as write_skill."
+(see `lispm-deftool'), such as write_skill.  Then the functions of
+`lispm-tool-action-functions' may have a call ask, or deny it; see
+`lispm-tool-decision' for why."
+  (car (lispm-tool-decision agent tool input)))
+
+(defun lispm-tools--action (agent tool input)
+  "What LispM's own rules decide of AGENT's call of TOOL on INPUT.
+See `lispm-tool-action'."
   (let ((action (lispm-policy-action agent (lispm-tool-permission tool))))
     (cond ((lispm-tools--allowed-p agent tool input) 'auto)
           ((and (eq action 'auto) (lispm-tool-always-ask tool)) 'ask)

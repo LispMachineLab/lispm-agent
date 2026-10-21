@@ -36,7 +36,10 @@
 ;; when a session opens instead, and all its tools are always there; a
 ;; request waits for it while it starts.  The tools have the permission
 ;; class `mcp', which asks for approval by default; a server's
-;; :permission gives its tools another class.
+;; :permission gives its tools another class.  Functions of
+;; `lispm-mcp-register-functions' may keep a server's tools back, or
+;; have every call of them ask, as a checker of what servers say of
+;; their tools does.
 ;;
 ;; A server started over stdio runs in the sandbox, at
 ;; `lispm-sandbox-level' (none by default) or at its own :sandbox
@@ -97,6 +100,25 @@ The first start of a server run with npx or uvx downloads it."
 (defvar lispm-mcp--tools (make-hash-table :test #'equal)
   "Tools registered for each server: name -> their LispM names.")
 
+(defvar lispm-mcp--origins (make-hash-table :test #'equal)
+  "Where each tool registered comes from: LispM name -> (SERVER . NAME).")
+
+(defvar lispm-mcp-register-functions nil
+  "Functions that may keep an MCP server's tools back, or have their calls ask.
+Each is called with the name of a server and its tools, as the server
+lists them (plists of :name, :description and :inputSchema, as mcp.el
+decodes them), before they become tools of LispM agents.  It returns
+nil, to leave them be, or an alist (NAME . ACTION) from the names of
+some of them to an action: `ask', for every call of the tool to await
+the user's approval, whatever the policy says (as for `lispm-deftool''s
+:always-ask), or `deny', to keep the tool back: agents never see it.
+An action alone answers for every tool.
+
+The strictest answer for a tool wins.  A function that signals an
+error, or answers anything else, has every tool ask.
+`lispm-mcp-refresh' registers a running server's tools again, the
+functions looking at them afresh.")
+
 ;;;; JSON
 
 (defun lispm-mcp--json-in (value)
@@ -125,38 +147,81 @@ The first start of a server run with npx or uvx downloads it."
   (let ((name (replace-regexp-in-string "[^a-zA-Z0-9_-]" "_" (format "mcp__%s__%s" server tool))))
     (substring name 0 (min 64 (length name)))))
 
+(defun lispm-mcp--answers (server tools)
+  "What the functions of `lispm-mcp-register-functions' answer for SERVER's
+TOOLS: an alist from a tool's name to `ask' or `deny', the strictest."
+  (let ((names (mapcar (lambda (tool) (plist-get tool :name)) tools))
+        answers)
+    (run-hook-wrapped
+     'lispm-mcp-register-functions
+     (lambda (function)
+       (let* ((every (lambda (action) (mapcar (lambda (name) (cons name action)) names)))
+              (answer (condition-case err
+                          (funcall function server tools)
+                        (error (message "LispM: %s failed on the tools of %s, which all ask: %s"
+                                        function server (error-message-string err))
+                               'ask))))
+         (pcase-dolist (`(,name . ,action)
+                        (pcase answer
+                          ('nil nil)
+                          ((or 'ask 'deny) (funcall every answer))
+                          ((and (pred proper-list-p)
+                                (guard (seq-every-p (lambda (entry)
+                                                      (and (consp entry) (memq (cdr entry) '(ask deny))))
+                                                    answer)))
+                           answer)
+                          (_ (funcall every 'ask))))
+           (setf (alist-get name answers nil nil #'equal)
+                 (lispm--stricter action (alist-get name answers 'auto nil #'equal)))))
+       nil))
+    answers))
+
 (defun lispm-mcp--register (server tools)
-  "Make SERVER's TOOLS, as listed by the server, tools of LispM agents."
+  "Make SERVER's TOOLS, as listed by the server, tools of LispM agents.
+Those `lispm-mcp-register-functions' deny are kept back."
   (lispm-mcp--unregister server)
   (let* ((config (alist-get server lispm-mcp-servers nil nil #'equal))
          (permission (or (plist-get config :permission) 'mcp))
          (deferred (lispm-mcp--deferred-p config))
-         names)
+         (answers (lispm-mcp--answers server (append tools nil)))
+         names kept)
     (seq-doseq (tool tools)
       (let* ((tool-name (plist-get tool :name))
              (name (lispm-mcp--tool-name server tool-name))
+             (action (alist-get tool-name answers nil nil #'equal))
              (schema (lispm-mcp--json-in (or (plist-get tool :inputSchema) '(:type "object")))))
         (unless (assq 'properties schema)
           (setq schema (append schema '((properties)))))
-        (push name names)
-        (lispm-register-tool
-         (lispm-tool--create
-          :name name
-          :description (or (plist-get tool :description) (format "%s of %s" tool-name server))
-          :input-schema schema
-          :deferred deferred
-          :permission permission
-          :async t
-          :function (lambda (done input) (lispm-mcp--call server tool-name input done))))))
+        (if (eq action 'deny)
+            (push tool-name kept)
+          (push name names)
+          (puthash name (cons server tool-name) lispm-mcp--origins)
+          (lispm-register-tool
+           (lispm-tool--create
+            :name name
+            :description (or (plist-get tool :description) (format "%s of %s" tool-name server))
+            :input-schema schema
+            :deferred deferred
+            :permission permission
+            :always-ask (eq action 'ask)
+            :async t
+            :function (lambda (done input) (lispm-mcp--call server tool-name input done)))))))
     (puthash server (reverse names) lispm-mcp--tools)
     (remhash server lispm-mcp--starting)
-    (message "LispM: %d tools from MCP server %s" (length names) server)))
+    (message "LispM: %d tools from MCP server %s%s" (length names) server
+             (if kept (format "; kept back: %s" (string-join (nreverse kept) ", ")) ""))))
 
 (defun lispm-mcp--unregister (server)
   "Remove SERVER's tools from those of LispM agents."
   (dolist (name (gethash server lispm-mcp--tools))
-    (remhash name lispm-tools--registry))
+    (remhash name lispm-tools--registry)
+    (remhash name lispm-mcp--origins))
   (remhash server lispm-mcp--tools))
+
+(defun lispm-mcp-tool-origin (tool)
+  "The MCP server TOOL comes from, and its name there: (SERVER . NAME).
+TOOL is a `lispm-tool' or its name.  Nil for a tool of no server's."
+  (gethash (if (lispm-tool-p tool) (lispm-tool-name tool) (format "%s" tool)) lispm-mcp--origins))
 
 (defun lispm-mcp--result (agent result)
   "The tool RESULT of an MCP server as (TEXT ERRORP IMAGES).
@@ -225,7 +290,8 @@ A server started over stdio runs in the sandbox, at its :sandbox
 level or at `lispm-sandbox-level'."
   (remhash server lispm-mcp--failed)
   (puthash server (float-time) lispm-mcp--starting)
-  (let ((connection (gethash server mcp-server-connections)))
+  (let ((connection (gethash server mcp-server-connections))
+        (started (gethash server lispm-mcp--starting)))
     (if (and connection (jsonrpc-running-p connection))
         ;; Started already, by mcp.el's hub for instance.
         (mcp-async-list-tools connection
@@ -241,9 +307,12 @@ level or at `lispm-sandbox-level'."
             (apply #'mcp-connect-server server
                    :initial-callback
                    (lambda (_connection)
-                     ;; A server without tools never lists any: stop waiting.
+                     ;; A server without tools never lists any: stop waiting,
+                     ;; unless it has been started again since.
                      (run-at-time (+ mcp-server-wait-initial-time 15) nil
-                                  (lambda () (remhash server lispm-mcp--starting))))
+                                  (lambda ()
+                                    (when (eql (gethash server lispm-mcp--starting) started)
+                                      (remhash server lispm-mcp--starting)))))
                    :tools-callback (lambda (_connection tools) (lispm-mcp--register server tools))
                    :error-callback (lambda (code message)
                                      (lispm-mcp--failed server (format "%s %s" code message)))
@@ -265,6 +334,17 @@ Deferred tools stay so: search_tools finds them."
   (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
     (when (and (or (null server) (equal server name))
                (not (lispm-mcp--live-p name)))
+      (lispm-mcp--connect name config))))
+
+(defun lispm-mcp-refresh (&optional server)
+  "Register the tools of the running servers again, or of SERVER only.
+Each lists its tools anew, and the functions of
+`lispm-mcp-register-functions' look at them afresh: after a server
+changed its tools, or what those functions go by changed."
+  (interactive)
+  (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
+    (when (and (or (null server) (equal server name))
+               (lispm-mcp--running-p name))
       (lispm-mcp--connect name config))))
 
 (defun lispm-mcp-stop (&optional server)

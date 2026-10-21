@@ -613,8 +613,8 @@ the run before gets the result it had then."
       ;; The program does something else than it did before.
       (setf (lispm-lisp--run-log run) (seq-take (lispm-lisp--run-log run) index))
       (let ((agent (lispm-lisp--run-agent run)))
-        (pcase (lispm-tool-action agent tool input)
-          ('auto
+        (pcase (lispm-tool-decision agent tool input)
+          (`(auto . ,_)
            (let ((running t) result)
              (lispm-lisp--invoke run tool input
                                  (lambda (text errorp)
@@ -627,19 +627,19 @@ the run before gets the result it had then."
                    (t (lispm-lisp--record run index name input
                                           (if (nth 1 result) 'failed 'value) (car result))
                       (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)))))))
-          ('ask (lispm-lisp--stop run (list :ask index tool input)))
-          (_ (lispm-lisp--record run index name input 'denied
-                                 (format "Denied by policy: %s may not use %s tools."
-                                         (lispm-agent-name agent) (lispm-tool-permission tool)))
-             (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)))))))))
+          (`(ask . ,reasons) (lispm-lisp--stop run (list :ask index tool input reasons)))
+          (`(,_ . ,reasons)
+           (lispm-lisp--record run index name input 'denied (lispm-tools-denial agent tool reasons))
+           (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)))))))))
 
 ;;;; Running a program
 
 (defun lispm-lisp--pass (run)
   "Evaluate RUN's program once, the calls it made before getting their results.
-Return (:value VALUE) if it ran to its end, (:ask INDEX TOOL INPUT)
-if it stopped at a call awaiting approval, or (:wait) at one under
-way.  The program's errors are signaled."
+Return (:value VALUE) if it ran to its end, (:ask INDEX TOOL INPUT
+REASONS) if it stopped at a call awaiting approval, REASONS as
+`lispm-tool-decision' gives them, or (:wait) at one under way.  The
+program's errors are signaled."
   (let ((output (generate-new-buffer " *lispm-lisp*" t))
         (tag (list 'lispm-lisp-pass)))
     (setf (lispm-lisp--run-index run) 0
@@ -706,7 +706,7 @@ way.  The program's errors are signaled."
                                         (lispm-lisp--run-output run)
                                         (if (stringp value) (substring-no-properties value) value)))
                            nil))
-      (`(:ask ,index ,tool ,input) (lispm-lisp--ask run index tool input))
+      (`(:ask ,index ,tool ,input ,reasons) (lispm-lisp--ask run index tool input reasons))
       (`(:wait))
       (`(:error ,message)
        (lispm-lisp--finish run (concat (lispm-lisp--calls-text run) message) t))
@@ -725,8 +725,9 @@ ERRORP marks a failure.  Then the program runs again."
       (lispm-lisp--record run index name input (if errorp 'failed 'value) text)
       (lispm-lisp--again run))))
 
-(defun lispm-lisp--ask (run index tool input)
+(defun lispm-lisp--ask (run index tool input &optional reasons)
   "Have RUN's call INDEX, of TOOL on INPUT, await the user's approval.
+REASONS are why it asks, if a check said (see `lispm-tool-decision').
 Once approved it runs, once denied it fails, and the program runs again."
   (let ((name (lispm-tool-name tool)))
     (unless (and (lispm-lisp--run-id run)
@@ -740,7 +741,8 @@ Once approved it runs, once denied it fails, and the program runs again."
                                                 (lispm-lisp--settle run index name input
                                                                     text errorp)))
                         (lispm-lisp--record run index name input 'denied denial)
-                        (lispm-lisp--again run))))))
+                        (lispm-lisp--again run))))
+                  nil reasons))
       (lispm-lisp--record run index name input 'denied
                           "It needs the user's approval, which is asked only in a turn.")
       (lispm-lisp--again run))))

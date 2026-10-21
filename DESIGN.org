@@ -362,6 +362,18 @@ every call of a tool declared ~:always-ask~, such as ~write_skill~ (section 11),
 outlasts the session: what it saves is code that later sessions evaluate, which no policy should
 let an agent decide alone. A policy that denies the tool's class still denies it.
 
+*Checks from outside* (~lispm-tool-action-functions~). What else should hold a call back LispM
+cannot know: which MCP servers the user trusted, what a session has read. So another program,
+a security application, may look at every call LispM's own rules do not deny, with the agent,
+the tool and the input, and answer nothing, ~ask~ or ~deny~, with a reason (~lispm-tool-decision~).
+The strictest answer wins: a check can tighten what LispM decided, never relax it. A check that
+fails, or answers anything else, asks: one that fails open is no check, and an error must never
+let a call through. The reason goes where the user decides, in the call's ~*** Preview~ (so a
+reopened session still has it) and the chat's approval box, and a denial tells the model why.
+Allowing a tool for good does not silence a check: what the user allowed is asked again while a
+check asks, and approving one call for good approves no other waiting call a check still asks
+about. MCP servers' tools have a check of their own when they are registered (section 10).
+
 *Unrestricted code is outside the permission model.* ~eval_elisp~ (~exec~) reaches all of
 Emacs, and ~run_shell~ (~shell~) all of the system, Emacs included, while the agent's root is on
 this machine: what they run can change the policy of the agent running it, lift a helper's
@@ -741,7 +753,12 @@ adds what an agent runtime needs on top:
   two libraries' conventions (alists and ~:false~ here, plists and ~:json-false~ in mcp.el).
 - *Permissions.* MCP tools have the permission class ~mcp~, which asks by default, like
   ~write~, ~shell~ and ~exec~: a server can do anything. A server's ~:permission~ gives its tools
-  another class; "don't ask again" in the chat allows one tool at a time.
+  another class; "don't ask again" in the chat allows one tool at a time. Before a server's
+  tools are registered, the functions of ~lispm-mcp-register-functions~ see them as the server
+  lists them, and may keep some back, so that no agent reads what they say, or have every call
+  of them ask: a server may change what its tools say from one start to the next.
+  ~lispm-mcp-refresh~ registers a running server's tools again, and ~lispm-mcp-tool-origin~
+  tells which server a tool came from.
 - *Deferred tools.* A server's tools are deferred (see below): the server starts when an
   agent first searches them. A server with ~:defer nil~ starts when a session opens instead
   (~lispm-mcp-autostart~), and since its tools should be there from the session's first

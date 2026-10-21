@@ -209,6 +209,20 @@ approving such a call for good approves that exact call, not every one. A policy
 ~exec~ but not ~shell~ gives shell commands what it gives ~exec~, as before they had a class of
 their own.
 
+Other programs can check calls too, a security application say: each function of
+~lispm-tool-action-functions~ gets the agent, the tool and the input of a call and answers
+nothing, ~ask~ or ~deny~, with a reason if it likes, which the approval shows and a denial tells
+the model. The strictest answer wins, so a check can make a call ask or be refused but never
+let through one LispM would ask about or deny; a check that fails asks. While a check asks
+about a call, allowing its tool for good does not stop it asking.
+
+#+begin_src emacs-lisp
+(add-hook 'lispm-tool-action-functions
+          (lambda (_agent tool _input)
+            (when (equal (lispm-tool-name tool) "run_shell")
+              '(ask . "Shell commands always ask in this Emacs."))))
+#+end_src
+
 ** A root on another machine
 
 An agent's root may be a directory on another machine, as TRAMP names it: ~/ssh:vm:/work/~,
@@ -453,7 +467,10 @@ their own. List the servers in ~lispm-mcp-servers~, as for mcp.el's ~mcp-hub-ser
 when an agent first searches its tools; with ~:defer nil~ it starts with each session instead,
 and all its tools are always offered. Their tools are named ~mcp__SERVER__TOOL~
 (~peekaboo:see~ in the chat) and ask for approval by default (permission class ~mcp~; a
-server's ~:permission~ gives its tools another class).
+server's ~:permission~ gives its tools another class). Functions of
+~lispm-mcp-register-functions~ see a server's tools as it lists them, before agents do, and may
+keep some back or have every call of them ask; ~M-x lispm-mcp-refresh~ registers a running
+server's tools again.
 
 For computer use on macOS, [[https://github.com/openclaw/Peekaboo][Peekaboo]] (macOS 15+,
 Node 22+) lets agents see the screen and use applications:

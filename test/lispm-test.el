@@ -837,6 +837,63 @@ stand in."
         (lispm-mcp-stop)
         (should-not (lispm-get-tool "mcp__fake__echo"))))))
 
+(ert-deftest lispm-test-mcp-register-functions ()
+  "Functions may keep a server's tools back, or have their calls always ask.
+The strictest answer for a tool wins; an error, or an answer that is
+not one, has every tool ask."
+  (let* ((tools (mapcar (lambda (name) (list :name name :description (concat name " things")))
+                        '("plain" "asks" "hidden")))
+         (seen nil)
+         (kinds (lambda (server tools)
+                  (push (cons server tools) seen)
+                  '(("asks" . ask) ("hidden" . deny))))
+         (register (lambda (&rest functions)
+                     (let ((lispm-mcp-register-functions functions))
+                       (lispm-mcp--register "srv" (vconcat tools)))
+                     (mapcar (lambda (name)
+                               (let ((tool (lispm-get-tool (concat "mcp__srv__" name))))
+                                 (cond ((null tool) 'kept)
+                                       ((lispm-tool-always-ask tool) 'ask)
+                                       (t 'plain))))
+                             '("plain" "asks" "hidden")))))
+    (unwind-protect
+        (progn
+          (should (equal (funcall register kinds) '(plain ask kept)))
+          ;; The functions get the server and its tools as it lists them.
+          (should (equal seen (list (cons "srv" tools))))
+          (should (equal (lispm-mcp-tool-origin "mcp__srv__asks") '("srv" . "asks")))
+          (should (equal (lispm-mcp-tool-origin (lispm-get-tool "mcp__srv__plain")) '("srv" . "plain")))
+          (should-not (lispm-mcp-tool-origin "mcp__srv__hidden"))
+          (should-not (lispm-mcp-tool-origin "read_file"))
+          (should (string-match-p "2 tools from MCP server srv; kept back: hidden"
+                                  (with-current-buffer "*Messages*"
+                                    (save-excursion (goto-char (point-max))
+                                                    (buffer-substring (line-beginning-position 0)
+                                                                      (point-max))))))
+          ;; The strictest answer wins; an action alone answers for all.
+          (should (equal (funcall register kinds (lambda (&rest _) '(("asks" . deny))))
+                         '(plain kept kept)))
+          (should (equal (funcall register (lambda (&rest _) 'ask)) '(ask ask ask)))
+          (should (equal (funcall register (lambda (&rest _) (error "Broken")) kinds)
+                         '(ask ask kept)))
+          (should (equal (funcall register (lambda (&rest _) '(("asks" . auto)))) '(ask ask ask)))
+          (should (equal (funcall register) '(plain plain plain))))
+      (lispm-mcp--unregister "srv"))
+    (should-not (lispm-get-tool "mcp__srv__plain"))
+    (should-not (lispm-mcp-tool-origin "mcp__srv__plain"))))
+
+(ert-deftest lispm-test-mcp-refresh ()
+  "A running server's tools are registered again, looked at afresh."
+  (lispm-test-with-mcp ()
+    (let ((lispm-mcp-register-functions nil))
+      (lispm-mcp-start "fake")
+      (should (lispm-test--wait (lambda () (lispm-get-tool "mcp__fake__snap")) 15))
+      (add-hook 'lispm-mcp-register-functions (lambda (_server _tools) '(("snap" . deny))))
+      (lispm-mcp-refresh "fake")
+      (should (lispm-test--wait (lambda () (not (lispm-get-tool "mcp__fake__snap"))) 15))
+      (should (lispm-get-tool "mcp__fake__echo"))
+      (should (lispm-mcp--running-p "fake")))))
+
 (ert-deftest lispm-test-tool-search ()
   "Deferred tools are found with search_tools, then offered, also after a resume."
   (lispm-test-env
@@ -6194,6 +6251,128 @@ is denied too, as programs read Emacs."
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal (lispm-agent-allowed agent) '("edit_file")))
       (should (equal (lispm-test--file project "a.txt") "1\n2\n")))))
+
+;;;; Checks of tool calls
+
+(defun lispm-test--watch-paths (_agent _tool input)
+  "A check of tool calls: some files are watched, some refused."
+  (pcase (and (consp input) (alist-get 'path input))
+    ("asked.txt" '(ask . "That file is watched."))
+    ("denied.txt" '(deny . "Not that file."))))
+
+(defun lispm-test--refuse (_agent _tool _input)
+  "A check of tool calls that refuses every call, saying nothing."
+  'deny)
+
+(ert-deftest lispm-test-tool-action-functions ()
+  "Functions may have a call ask or refuse it, never let one through.
+The strictest answer wins, with the reasons of those giving it; an
+error, or an answer that is not one, asks."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester :root project :policy '((write . auto) (shell . deny))))
+           (write (lispm-get-tool "write_file"))
+           (asked '((path . "asked.txt")))
+           (consulted 0)
+           (count (lambda (&rest _) (cl-incf consulted) nil))
+           (lispm-tool-action-functions (list count #'lispm-test--watch-paths)))
+      ;; Nil leaves the call as LispM's rules decide it.
+      (should (equal (lispm-tool-decision agent write '((path . "b.txt"))) '(auto)))
+      (should (equal (lispm-tool-decision agent write asked) '(ask "That file is watched.")))
+      (should (eq (lispm-tool-action agent write asked) 'ask))
+      (should (equal (lispm-tool-decision agent write '((path . "denied.txt"))) '(deny "Not that file.")))
+      (should (equal (lispm-tools-denial agent write '("Not that file.")) "Denied: Not that file."))
+      ;; What LispM's rules deny is denied without asking anyone.
+      (setq consulted 0)
+      (should (equal (lispm-tool-decision agent (lispm-get-tool "run_shell") '((command . "ls")))
+                     '(deny)))
+      (should (= consulted 0))
+      (should (equal (lispm-tools-denial agent (lispm-get-tool "run_shell") nil)
+                     "Denied by policy: tester may not use shell tools."))
+      ;; The strictest answer wins; a bare one is given a reason.
+      (let ((lispm-tool-action-functions (list #'lispm-test--watch-paths #'lispm-test--refuse)))
+        (should (equal (lispm-tool-decision agent write asked)
+                       '(deny "`lispm-test--refuse' refused it."))))
+      ;; An error asks, and so does anything that is not an answer: `auto'
+      ;; would relax what LispM decided.
+      (let ((lispm-tool-action-functions (list (lambda (&rest _) (error "Broken")))))
+        (should (equal (lispm-tool-decision agent write '((path . "b.txt")))
+                       '(ask "A function of `lispm-tool-action-functions' failed: Broken."))))
+      (let ((lispm-tool-action-functions (list (lambda (&rest _) 'auto))))
+        (should (eq (lispm-tool-action agent write '((path . "b.txt"))) 'ask)))
+      ;; A call the user allowed for good is asked about again.
+      (push "write_file" (lispm-agent-allowed agent))
+      (setf (lispm-agent-policy agent) '((write . ask)))
+      (should (eq (lispm-tool-action agent write '((path . "b.txt"))) 'auto))
+      (should (eq (lispm-tool-action agent write asked) 'ask)))))
+
+(ert-deftest lispm-test-tool-action-reasons ()
+  "A call a check refuses tells the model why; one it asks about shows why.
+The reason is in the call's preview, in the chat's approval and in a
+session reopened; approving a call for good approves no other call a
+check still asks about."
+  (lispm-test-env
+    (let* ((lispm-tool-action-functions (list #'lispm-test--watch-paths))
+           (default-directory project)
+           (agent (lispm-start))
+           (chat (lispm-chat agent)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "write_file"
+                                                   '((why . "w") (path . "denied.txt") (content . "x\n")))
+                                 (lispm-test--tool "t2" "write_file"
+                                                   '((why . "w") (path . "b.txt") (content . "b\n")))
+                                 (lispm-test--tool "t3" "write_file"
+                                                   '((why . "w") (path . "asked.txt") (content . "a\n")))))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
+                                                (= (length (lispm-waiting-calls agent)) 2)))))
+      (let ((transcript (lispm-test--transcript agent)))
+        (should (string-match-p "^\\*\\* DENIED write_file  denied\\.txt\n\\(?:.*\n\\)*?Denied: Not that file\\.$"
+                                transcript))
+        (should (string-match-p "^\\*\\*\\* Preview\n- That file is watched\\.\n#\\+begin_src diff\n" transcript)))
+      (should (equal (plist-get (lispm-asked (gethash "t3" (lispm-agent-pending agent))) :reasons)
+                     '("That file is watched.")))
+      ;; Allowing writes for good runs b.txt's, not asked.txt's.
+      (lispm-allow agent "t2")
+      (should (lispm-test--wait (lambda () (equal (lispm-waiting-calls agent) '("t3")))))
+      (should (string-match-p "│   That file is watched\\. +│" (lispm-test--chat-text chat)))
+      ;; Reopened, the session still says why.
+      (let* ((file (lispm-test--crash agent))
+             (revived (lispm-resume-file file)))
+        (should (equal (lispm-waiting-calls revived) '("t3")))
+        (should (equal (plist-get (lispm-asked (gethash "t3" (lispm-agent-pending revived))) :reasons)
+                       '("That file is watched.")))
+        (push `(assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))
+              lispm-test--scripts)
+        (lispm-resolve revived "t3" 'approve)
+        (should (lispm-test--wait (lispm-test--idle-p revived)))
+        (should (equal (lispm-test--file project "asked.txt") "a\n"))
+        (should-not (file-exists-p (expand-file-name "denied.txt" project)))))))
+
+(ert-deftest lispm-test-tool-action-in-programs ()
+  "A program's calls are checked as the model's: refused, or asked about with why."
+  (lispm-test-env
+    (let ((lispm-tool-action-functions (list #'lispm-test--watch-paths))
+          (agent (lispm-defagent tester :root project :policy '((write . auto)))))
+      (should (equal (lispm-test--lisp agent "(condition-case e
+                                                 (write_file :path \"denied.txt\" :content \"x\")
+                                               (lispm-call-denied (cadr e)))")
+                     '("Tool calls:\n- write_file denied.txt (denied)\n\n=> write_file: Denied: Not that file.")))
+      (setq lispm-test--scripts
+            `((tester ,(lispm-test--msg "tool_use"
+                                        (lispm-test--tool "t1" "run_lisp"
+                                                          '((code . "(write_file :path \"asked.txt\" :content \"a\")"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "write")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (equal (plist-get (lispm-asked (gethash "t1" (lispm-agent-pending agent))) :reasons)
+                     '("That file is watched.")))
+      (should (string-match-p "^\\*\\*\\* Asks: write_file  asked\\.txt\n\\(?:.*\n\\)*\\*\\*\\* Preview\n- That file is watched\\.$"
+                              (lispm-test--transcript agent)))
+      (lispm-resolve agent "t1" 'approve)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-test--file project "asked.txt") "a\n")))))
 
 (ert-deftest lispm-test-write-outside-root ()
   "Writes outside an agent's root ask, whatever its policy: by path or by buffer."
