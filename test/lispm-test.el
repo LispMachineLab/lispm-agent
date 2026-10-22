@@ -7073,17 +7073,24 @@ holds no longer.  Run with `make i18n'."
 (defmacro lispm-test--with-agents (agents &rest body)
   "Run BODY with AGENTS, (AGENT . PROPERTIES), the only agents defined,
 their keys bound in keymaps of the test's own: `lispm-agents-map''s
-and that of a list of the agents."
+and that of a list of the agents.  The state of sessions is kept in a
+scratch directory, never the user's."
   (declare (indent 1))
-  `(let ((lispm-agents-defined nil)
-         (lispm-agents--keys nil)
-         (lispm-agents--root-cache (make-hash-table :test #'equal))
-         (lispm-agents-map (make-sparse-keymap))
-         (lispm-test--agent-list-map (make-sparse-keymap))
-         (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map)))
-     (pcase-dolist (`(,agent . ,props) ,agents)
-       (apply #'lispm-agents-define agent props))
-     ,@body))
+  `(let* ((lispm-agents-defined nil)
+          (lispm-agents--keys nil)
+          (lispm-agents--root-cache (make-hash-table :test #'equal))
+          (lispm-agents-map (make-sparse-keymap))
+          (lispm-test--agent-list-map (make-sparse-keymap))
+          (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map))
+          (lispm-test--agents-state (make-temp-file "lispm-test-agents-" t))
+          (lispm-agents-state-file (expand-file-name "agent-sessions.eld" lispm-test--agents-state))
+          (lispm-agents--archived 'unloaded))
+     (unwind-protect
+         (progn
+           (pcase-dolist (`(,agent . ,props) ,agents)
+             (apply #'lispm-agents-define agent props))
+           ,@body)
+       (delete-directory lispm-test--agents-state t))))
 
 (ert-deftest lispm-test-agent-available-p ()
   "An agent run as a CLI can run exactly when its program is on PATH; one
