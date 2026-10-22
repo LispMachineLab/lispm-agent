@@ -19,6 +19,7 @@ implementation:
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
 | Languages                 | words written in English, shown from a catalog per language      | [[file:lisp/lispm-i18n.el][lispm-i18n.el]]: ~lispm-tr~, [[file:i18n/][i18n/]]                    |
 | Presentations, inspector  | text is the objects it shows; one agent shown whole              | [[file:lisp/lispm-inspect.el][lispm-inspect.el]]: ~lispm-act~, ~lispm-inspect~        |
+| Grounding                 | code in replies checked against the running image                | [[file:lisp/lispm-ground.el][lispm-ground.el]]: ~lispm-ground-check~                 |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
@@ -183,6 +184,18 @@ Genera's inspector showed an object: identity, state and model, policy and ceili
 has pending and what they ask for, its inbox, whom it waits on and who waits on it, the files
 its turns changed, its tools and triggers, all of them presentations; agents have it as the tool
 ~inspect_agent~.
+
+*Grounding* ([[file:lisp/lispm-ground.el][lispm-ground.el]]). A model writes a name with the same confidence whether or not
+anything has it, and asking the model again asks the source of the mistake; the image it talks
+to knows. As SWI-Prolog's PceEmacs colours a call to an undefined predicate by asking the
+loaded program, the chat checks the code in a reply against the running Emacs: a symbol no
+loaded code mentions, in a namespace the image has (~lispm-~, ~org-~); a call giving a function
+more or fewer arguments than ~func-arity~ allows; a path to a file that is not there. Such code
+is underlined in ~lispm-ungrounded~ and says why under the mouse; names the reply defines in a
+code block, words Emacs knows (a text property) and libraries on ~load-path~ pass. Reading a
+reply's forms uses an obarray of its own, so made-up names stay unknown to the image. What is
+found is data, ~(undefined NAME)~, ~(arity SYMBOL GIVEN ARITY)~ or ~(missing FILE)~, ready to be
+told to the model as well. ~lispm-ground-code~ turns it off.
 
 * 3. Tool calls as Emacs actions
 

@@ -349,9 +349,11 @@ Lines that wrap are indented by PREFIX too."
   "TEXT with the objects it names presented, to act on with RET or a click."
   (lispm-present-text text (lispm-chat--root)))
 
-(defun lispm-chat--inline (line)
+(defun lispm-chat--inline (line &optional defined)
   "LINE of a reply with its Markdown headings, bold and code shown as faces.
-Code naming a symbol or a file is presented as the object."
+Code naming a symbol or a file is presented as the object, and code
+naming what this Emacs lacks is marked; DEFINED are the names the reply
+defines."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
                 line)))
@@ -360,18 +362,21 @@ Code naming a symbol or a file is presented as the object."
                 (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
     (replace-regexp-in-string
      "`\\([^`\n]+\\)`"
-     (lambda (m) (lispm-present-code (propertize (match-string 1 m) 'face 'lispm-chat-code)
-                                     (lispm-chat--root)))
+     ;; The match data say what of the match to replace: presenting
+     ;; the code must leave them as they are.
+     (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code)))
+                   (save-match-data (lispm-present-code code (lispm-chat--root) defined))))
      line t t)))
 
 (defun lispm-chat--markdown (text)
   "TEXT of a reply, its Markdown shown as faces.
 Code blocks lose their fences and keep their lines as they are."
-  (let (in-code out)
+  (let ((defined (lispm-ground-definitions text))
+        in-code out)
     (dolist (line (split-string text "\n"))
       (cond ((string-match-p "\\`[ \t]*```" line) (setq in-code (not in-code)))
             (in-code (push (propertize (concat "  " line) 'face 'lispm-chat-code) out))
-            (t (push (lispm-chat--inline line) out))))
+            (t (push (lispm-chat--inline line defined) out))))
     (string-join (nreverse out) "\n")))
 
 (defconst lispm-chat--tools
