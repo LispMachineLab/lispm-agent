@@ -45,8 +45,10 @@
 ;;                  policy (lispm-lisp.el);
 ;;   permissions    tool calls are org TODO entries: WAITING until the
 ;;                  user changes their state (lispm-runtime.el);
-;;   memory, tasks  org files under git, per project and per role
-;;                  (lispm-memory.el);
+;;   memory, tasks  org files under git, per project, per role and for
+;;                  the system, which consolidate themselves at idle
+;;                  (lispm-memory.el); what happened, kept by day and
+;;                  rolled up by week and month (lispm-episodes.el);
 ;;   execution      the Emacs event loop: processes, hooks and timers
 ;;                  wake agents up (lispm-runtime.el);
 ;;   collaboration  agents message and delegate to each other
@@ -97,6 +99,7 @@
 (require 'lispm-collab)
 (require 'lispm-mcp)
 (require 'lispm-title)
+(require 'lispm-episodes)
 (require 'lispm-emacs)
 (require 'lispm-develop)
 (require 'lispm-skills)
@@ -306,8 +309,9 @@ AGENT is the running agent of the current project, or a new one."
       (vc-print-root-log))))
 
 (defun lispm-agenda-files ()
-  "Task files of all projects, for `org-agenda-files'."
-  (file-expand-wildcards (expand-file-name "projects/*/tasks.org" lispm-directory)))
+  "Task files of all projects and of the system, for `org-agenda-files'."
+  (append (file-expand-wildcards (expand-file-name "projects/*/tasks.org" lispm-directory))
+          (file-expand-wildcards (expand-file-name "system/tasks.org" lispm-directory))))
 
 (defun lispm-agenda ()
   "Show the tool calls awaiting approval in every live session."

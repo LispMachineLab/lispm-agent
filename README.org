@@ -87,8 +87,12 @@ any other server see [[*Backends][Backends]].
   or an org file in =~/.lispm/roles/=.  An agent is one session of a role in one project, named
   ~ROLE@PROJECT~.  A project's =AGENTS.md= and =CLAUDE.md= join the system prompt.
 - *Memory under git.*  ~lispm-directory~ (=~/.emacs.d/lispm/=) is a git repository of sessions,
-  each project's =memory.org= and =tasks.org=, and each role's memory.  A conversation that
-  grows too long is handed over to a new one starting from a summary (~lispm-compact-threshold~).
+  each project's =memory.org= and =tasks.org=, each role's memory, and the system's, for an
+  agent in no project (~:system t~).  A conversation that grows too long is handed over to a new
+  one starting from a summary (~lispm-compact-threshold~), at idle when it can
+  (~lispm-compact-idle~); the summaries are kept as episodes, rolled up by week and month.
+  Memory past its budget consolidates itself at idle (~lispm-memory-max-entries~), each change a
+  commit.
 - *Nothing is lost when Emacs stops.*  Sessions are saved before every request; pending
   approvals, queued messages and delegations come back with them, and an interrupted turn waits
   to be continued.  Each turn's changes to a git project are snapshotted outside the project,

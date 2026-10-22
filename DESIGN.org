@@ -24,12 +24,13 @@ implementation:
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
 | Errors, recovery          | a turn stopped early waits at a condition heading for a restart  | ~lispm-signal~, ~lispm-restart~, ~lispm-condition-handlers~ |
-| Long-term memory, tasks   | org files (memory.org, tasks.org)                                | [[file:lisp/lispm-memory.el][lispm-memory.el]]                                         |
+| Long-term memory, tasks   | org files (memory.org, tasks.org), consolidated past a budget    | [[file:lisp/lispm-memory.el][lispm-memory.el]]: ~lispm-memory-consolidate~ |
+| Episodes                  | handover summaries by day, rolled up by week and month           | [[file:lisp/lispm-episodes.el][lispm-episodes.el]]      |
 | Audit                     | git: every memory change and every turn is a commit              | ~lispm-git-commit~, ~lispm-history~                      |
 | Rollback                  | undo (each edit is one undo step) plus per-turn snapshots        | ~lispm-journal-snapshot~, ~lispm-revert-turn~            |
 | Persistence               | the transcript, an inbox file, delegation records, git snapshots | [[file:lisp/lispm-inbox.el][lispm-inbox.el]], [[file:lisp/lispm-journal.el][lispm-journal.el]], ~lispm--resume-calls~ |
 | Continuous operation      | hooks and timers wake agents up                                  | ~lispm-watch~, ~lispm-every~                             |
-| Long conversations        | clear old tool output; else memory, summary, then a new file     | ~lispm-compact~                                         |
+| Long conversations        | clear old tool output; else memory, summary, new file; at idle   | ~lispm-compact~, ~lispm-compact-idle~                   |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
 | Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lisp/lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
 | Lisp development          | definitions edited, evaluated and tested in the running image    | [[file:lisp/lispm-develop.el][lispm-develop.el]]: ~edit_definition~, ~ert_run~          |
@@ -351,14 +352,41 @@ files under ~lispm-directory~:
 - ~roles/<role>/memory.org~: what agents of a role learn that holds everywhere, such as the
   user's preferences (~remember~ with ~scope: "role"~).
 
-One heading per fact, with tags and ~CREATED~/~UPDATED~ properties. ~recall~ searches the
-project's memory, then the role's (or another role's); ~forget~ deletes. Each project also has a
-TODO list, ~projects/<project>/tasks.org~ (~TODO NEXT BLOCKED | DONE CANCELLED~) with short IDs:
-~task_add~, ~task_update~, ~task_list~. Add ~(lispm-agenda-files)~ to ~org-agenda-files~ and the
-agents' tasks show up in the user's own agenda; writing a TODO there by hand hands agents work.
+An agent of the whole system (~lispm-defagent~ with ~:system t~), such as the agent of a
+system-wide prompt, works in no project: its own memory, tasks and episodes are the system's,
+~system/memory.org~ and so on, in place of a project's. Agents of projects do not see them.
 
-When a session starts, the memory titles and the project's open tasks are snapshotted into the
-system prompt; details are fetched on demand with ~recall~.
+One heading per fact, with tags and ~CREATED~/~UPDATED~ properties, and ~RECALLED~/~RECALLS~: when
+~recall~ last returned it, and how often. ~recall~ searches the agent's own memory, then the
+role's (or another role's); ~forget~ deletes. Each project, and the system, also has a TODO list,
+~tasks.org~ (~TODO NEXT BLOCKED | DONE CANCELLED~) with short IDs: ~task_add~, ~task_update~,
+~task_list~. Add ~(lispm-agenda-files)~ to ~org-agenda-files~ and the agents' tasks show up in the
+user's own agenda; writing a TODO there by hand hands agents work.
+
+When a session starts, the memory titles and the open tasks are snapshotted into the system
+prompt; details are fetched on demand with ~recall~. A memory lists at most
+~lispm-memory-max-entries~ titles (default 200), those used most lately, followed by a line
+saying how many more there are: nothing is left out unseen.
+
+*Consolidation.* Memory that only grows would outgrow any prompt, so it compresses itself. Once a
+turn has ended, a memory past its budget, ~lispm-memory-max-entries~ entries or
+~lispm-memory-max-tokens~ tokens (default 30k), is consolidated when Emacs is idle
+(~lispm-idle-delay~, 5 seconds). A model, ~lispm-memory-model~ if set (a small one does), gets
+every entry with its history and returns a plan to bring the memory to three quarters of its
+budget: entries that say the same thing merged, old entries seldom recalled folded into summary
+entries by topic, stale ones dropped with a reason. The plan is checked (every entry it names
+exists and is named once, a drop has a reason) and carried out only if the memory did not
+change meanwhile; entries it does not name stay as they were. A merged entry keeps the earliest
+~CREATED~, the latest ~RECALLED~, the sum of ~RECALLS~, and names its sources in ~MERGED~. The
+change is one commit by the agent, whose message names every entry merged or dropped and why,
+so ~git revert~ undoes it. A memory is not tried again until it changes.
+
+*Episodes.* Memory holds what is known; episodes, what happened. The summary of every handover
+(section 8) is kept in ~episodes/YYYY-MM-DD.org~ beside the agent's own memory. Once a week is
+over its days are rolled up, by a model at idle, into ~episodes/YYYY-Www.org~, and once a month is
+over its weeks into ~episodes/YYYY-MM.org~ (a week belongs to the month of its Thursday); the
+files rolled up are removed in the same commit. A new session of an agent of the whole system
+starts with the latest episode in its system prompt (~lispm-episodes~).
 
 The whole ~lispm-directory~ is a git repository. Memory and task changes are committed in
 bursts (the tool calls of one response become one commit whose message lists each change), and
@@ -697,6 +725,15 @@ If that does not bring the session under the threshold, the next turn first hand
    never all of them; the old file ends with a link forward, and the system prompt is rebuilt,
    so memory saved in step 1 is in it; the session keeps its title in session lists;
 4. the input that triggered the handover starts the first turn there.
+
+*At idle.* So that the request after a long turn does not wait for all this, a session past
+~lispm-compact-idle~ of the threshold (default 0.75) when a turn ends is compacted once Emacs is
+idle: older tool output is cleared, and if that is not enough, the agent saves memory in a turn
+of its own (step 1) and the summary (step 2) is written in the background while the agent stays
+free. Input given it meanwhile starts at once in the session as it is, and the summary, out of
+date, is thrown away; so is one that comes once the session changed. Otherwise the session is
+handed over as in step 3, with no input to start. A session the user is writing in is left
+alone, and one still past the threshold when a turn starts is handed over then, as above.
 
 ~M-x lispm-compact~ hands over on demand, like Claude Code's ~/compact~. This is the "simple
 compaction" model vendors recommend, with the latest turns kept so that the work under way

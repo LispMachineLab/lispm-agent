@@ -125,6 +125,13 @@ over latency and cost."
   "Maximum number of model requests within one turn."
   :type 'integer)
 
+(defcustom lispm-idle-delay 5
+  "Seconds Emacs is idle before LispM does its background work.
+That is handing a long session over (`lispm-compact-idle'), keeping
+memory within its budget (`lispm-memory-max-entries') and rolling up
+episodes (`lispm-episodes'), each once a turn has ended."
+  :type 'number)
+
 (defcustom lispm-default-policy
   '((read . auto) (memory . auto) (comm . auto) (lisp . auto) (write . ask) (shell . ask)
     (exec . ask) (mcp . ask) (web . ask))
@@ -168,6 +175,11 @@ found, or tools its own code or a skill it loaded defined.")
 
 (defvar lispm-turn-end-functions nil
   "Abnormal hook run with an agent and its final reply after each turn.")
+
+(defvar lispm-handover-functions nil
+  "Abnormal hook run when an agent's session was handed over.
+Each is called with the agent, the summary the new session starts
+from, and the file of the session handed over.")
 
 (defvar lispm-agent-declared-functions nil
   "Abnormal hook run with a standing agent once it is declared.
@@ -254,7 +266,9 @@ A role defined again in Lisp is no longer one of them.")
   context                    ; (TOKENS . BYTES): session size the latest response reported, bytes then
   request-bytes              ; session size in bytes the request in flight was made from
   triggers                   ; hook and timer subscriptions
-  (usage (list 0 0 0)))      ; input, output, cache-read tokens
+  (usage (list 0 0 0))       ; input, output, cache-read tokens
+  ;; Last, so that code compiled against fewer slots still reads the others.
+  system)                    ; non-nil for an agent of the whole system, in no project
 
 (defvar lispm--agents nil
   "Alist of (NAME . AGENT) of the live agents, oldest first.")
@@ -375,10 +389,13 @@ PROPS are as for `lispm-register-role'.
       (setq name (format "%s<%d>" base (cl-incf n))))
     (intern name)))
 
-(cl-defun lispm-make-agent (role root &key name id standing)
+(cl-defun lispm-make-agent (role root &key name id standing system)
   "Make a live agent of ROLE working in ROOT, and return it.
 NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id.
-STANDING non-nil makes it a standing agent, as `lispm-defagent' does."
+STANDING non-nil makes it a standing agent, as `lispm-defagent' does.
+SYSTEM non-nil makes it an agent of the whole system, as the agent of
+a system-wide prompt is: it works in no project, and its memory, tasks
+and episodes are the system's (see `lispm-system-directory')."
   (let* ((role (lispm-get-role role))
          (agent (lispm-agent--create
                  :name (or name (lispm--free-name
@@ -386,7 +403,8 @@ STANDING non-nil makes it a standing agent, as `lispm-defagent' does."
                                          (lispm--project-name root))))
                  :id (or id (lispm--new-id))
                  :root (file-name-as-directory (expand-file-name root))
-                 :standing standing)))
+                 :standing standing
+                 :system system)))
     (lispm--apply-role agent role)
     (setq lispm--agents (append lispm--agents
                                 (list (cons (lispm-agent-name agent) agent))))
@@ -398,20 +416,22 @@ STANDING non-nil makes it a standing agent, as `lispm-defagent' does."
 
 (defun lispm-register-agent (name &rest props)
   "Declare the standing agent NAME and return it.
-PROPS are :root (default home) and either :role, the name of a role,
-or role properties as for `lispm-register-role', which then define a
-role NAME.  Redeclaring a live agent keeps its runtime state."
+PROPS are :root (default home), :system, non-nil for an agent of the
+whole system (see `lispm-make-agent'), and either :role, the name of a
+role, or role properties as for `lispm-register-role', which then
+define a role NAME.  Redeclaring a live agent keeps its runtime state."
   (let* ((role (if (plist-get props :role)
                    (lispm-get-role (plist-get props :role))
                  (apply #'lispm-register-role name
                         (cl-loop for (key value) on props by #'cddr
-                                 unless (memq key '(:role :root))
+                                 unless (memq key '(:role :root :system))
                                  append (list key value)))))
          (root (file-name-as-directory (expand-file-name (or (plist-get props :root) "~/"))))
          (agent (or (alist-get name lispm--agents)
                     (lispm-make-agent role root :name name :standing t))))
     (setf (lispm-agent-root agent) root
-          (lispm-agent-standing agent) t)
+          (lispm-agent-standing agent) t
+          (lispm-agent-system agent) (and (plist-get props :system) t))
     (lispm--apply-role agent role)
     (run-hook-with-args 'lispm-agent-declared-functions agent)
     agent))
@@ -530,6 +550,21 @@ linked git worktree has its main worktree's."
     (make-directory dir t)
     dir))
 
+(defun lispm-system-directory ()
+  "Directory of the memory, tasks and episodes of the system, created on demand.
+They are those of agents of the whole system (see `lispm-make-agent'),
+which work in no project."
+  (let ((dir (expand-file-name "system/" lispm-directory)))
+    (make-directory dir t)
+    dir))
+
+(defun lispm-home-directory (agent)
+  "Directory of AGENT's own memory, tasks and episodes.
+The system's for an agent of the whole system, else its project's."
+  (if (lispm-agent-system agent)
+      (lispm-system-directory)
+    (lispm-project-directory (lispm-agent-root agent))))
+
 (defconst lispm--policy-actions '(deny ask auto)
   "Policy actions, from the strictest to the most permissive.")
 
@@ -620,6 +655,23 @@ way: `thinking', `retry' or `waiting' (for what STATUS names), or
   (not (memq (lispm-agent-state agent) '(idle waiting))))
 
 ;;;; Utilities
+
+(defvar lispm--idle-work (make-hash-table :test #'equal)
+  "Idle timers of the background work waiting to be done, by key.")
+
+(defun lispm-when-idle (key function &rest args)
+  "Call FUNCTION with ARGS once Emacs has been idle for `lispm-idle-delay' seconds.
+Work waiting under KEY already, such as the same work for the same
+agent, is replaced.  Errors are reported, not raised."
+  (when-let* ((timer (gethash key lispm--idle-work)))
+    (cancel-timer timer))
+  (puthash key
+           (run-with-idle-timer lispm-idle-delay nil
+                                (lambda ()
+                                  (remhash key lispm--idle-work)
+                                  (with-demoted-errors "LispM: background work: %S"
+                                    (apply function args))))
+           lispm--idle-work))
 
 (defun lispm--json-encode (object)
   "Encode OBJECT as a JSON string (decoded text, not bytes)."
