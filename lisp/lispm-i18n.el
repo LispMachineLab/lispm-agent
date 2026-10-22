@@ -290,6 +290,17 @@ formatted with ARGS, or with COUNT when there are none."
                      (t plural))))
     (apply #'format text (or args (list count)))))
 
+(defconst lispm-i18n-locales
+  '((en-US . "en_US.UTF-8") (en-GB . "en_GB.UTF-8") (de . "de_DE.UTF-8") (fr . "fr_FR.UTF-8")
+    (ja . "ja_JP.UTF-8") (zh-Hans . "zh_CN.UTF-8") (zh-Hant . "zh_TW.UTF-8"))
+  "The locale each language names months and days in: (TAG . LOCALE).")
+
+(defun lispm-format-time (format &optional time)
+  "Return TIME, by default now, as FORMAT, translated, says it, the names
+of months and days in the current language; see `format-time-string'."
+  (let ((system-time-locale (alist-get (lispm-current-language) lispm-i18n-locales)))
+    (format-time-string (lispm-tr format) time)))
+
 ;;;; Changing the language
 
 (defvar lispm-language-changed-hook nil

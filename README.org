@@ -26,8 +26,8 @@ LispM.app: =curl -fsSL https://lispm.ai/install.sh | sh= (see LispM Desktop).
 * Installation
 
 Emacs 30.1+, curl, and a model behind an OpenAI Chat Completions or Anthropic Messages
-endpoint.  MELPA must be in ~package-archives~ for the one dependency,
-[[https://github.com/lizqwerscott/mcp.el][mcp.el]].
+endpoint.  MELPA must be in ~package-archives~ for the dependencies,
+[[https://github.com/lizqwerscott/mcp.el][mcp.el]] and [[https://codeberg.org/akib/emacs-eat][Eat]], the terminals of Claude Code, Codex and other agents.
 
 #+begin_src emacs-lisp
 (use-package lispm
@@ -131,6 +131,28 @@ and timers can wake them:
 Agents work together with ~send_message~ and ~ask_agent~, which delegates and waits; given a role,
 it starts a subagent that may do no more than its caller.  The ~worktree~ skill gives each helper
 a git worktree of its own.
+
+* Claude Code, Codex and other agents
+
+Agents that are programs of their own run in terminals beside LispM's: Claude Code and Codex
+come with it (=lisp/lispm-agents-claude.el=, =lisp/lispm-agents-codex.el=), and
+[[https://github.com/LispMachineLab/lispm-hermes][Hermes]] is a package of its own.  Their sessions are listed together, newest first, and
+resume in the directory they ran in.  Each terminal gets a server showing its agent what only
+Emacs knows, the selection, the files open and unsaved, Flymake's diagnostics: Claude's IDE
+protocol for Claude Code, MCP for the others.
+
+#+begin_src emacs-lisp
+(require 'lispm-agents-claude)
+(require 'lispm-agents-codex)
+(lispm-agents-setup-claude)   ; takes part while claude is on PATH
+(lispm-agents-setup-codex)    ; and codex
+(keymap-global-set "C-c a" lispm-agents-map)   ; c Claude, x Codex, s sessions, r the region
+#+end_src
+
+They run in [[https://codeberg.org/akib/emacs-eat][Eat]]'s terminals and show with ~pop-to-buffer~.  A program drawing an interface
+around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
+~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface
+section; the agents know nothing of it.  Another agent is one call of ~lispm-agents-define~.
 
 * Backends
 
