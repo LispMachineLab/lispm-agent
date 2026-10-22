@@ -459,4 +459,5 @@
   ("%s more · %s chat · %s close" . "%s 展開 · %s 對話 · %s 關閉")
   ("asked once LispM has a model" . "LispM 有模型後再詢問")
   ("Find applications, skills and tools, or ask LispM." . "尋找應用程式、技能和工具，或詢問 LispM。")
-  ("LispM asks to use %s: %s to answer" . "LispM 請求使用 %s：按 %s 回答")))
+  ("LispM asks to use %s: %s to answer" . "LispM 請求使用 %s：按 %s 回答")
+  ("Find skills and tools, or ask LispM." . "尋找技能和工具，或詢問 LispM。")))

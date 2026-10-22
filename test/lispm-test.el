@@ -7492,6 +7492,20 @@ Stickies, whose opening `opened' records."
           (should-not (lispm-system-agent-p other))
           (should (eq (lispm--project-agent) other)))))))
 
+(ert-deftest lispm-test-bar-alone ()
+  "With LispM Agent alone, the bar finds LispM's own skills and tools and
+speaks of nothing else: no applications, no screen of a desktop."
+  (lispm-test-with-bar
+    (let ((lispm-bar-source-functions (list #'lispm-bar-skills #'lispm-bar-tools))
+          (lispm-bar--open t))
+      (lispm-bar--gather)
+      (should-not (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application)) lispm-bar--things))
+      (should (lispm-bar-open-p))
+      (should (string-match-p "^Find skills and tools, or ask LispM\\.$"
+                              (substring-no-properties (lispm-bar--text))))
+      (should-not (string-match-p "screen\\|desktop\\|menu bar" lispm-bar--instructions))
+      (should (eq (symbol-function 'ai) #'lispm-ai)))))
+
 (ert-deftest lispm-test-bar-finds ()
   "The bar finds applications, skills and tools as search_tools ranks them."
   (lispm-test-with-bar

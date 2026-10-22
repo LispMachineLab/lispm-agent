@@ -27,13 +27,13 @@
 ;; conversation going.  The chat shows the same conversation, all of it
 ;; (`lispm-ai-chat').
 ;;
-;;   ❯ Ask LispM “take a note”
-;;     Stickies                                        Application
-;;     Using Stickies   Notes on the desktop…                Skill
+;;   ❯ Ask LispM “web”                                          ↩
+;;     Browse the web  Search the web and read pages, …     Skill
 ;;   ▸ C-o more · C-c C-o chat · C-g close
-;;   λ take a note█
+;;   λ web█
 ;;
-;; Return on an application opens it and closes the bar; on anything
+;; Return on a thing that opens (what other packages add, as a
+;; desktop's applications) opens it and closes the bar; on anything
 ;; else it asks LispM, naming the skill or tool chosen.  The field stays
 ;; open: the reply streams in over it, under a line saying what LispM
 ;; does, and a call awaiting approval is answered there, y or n.  C-o
@@ -43,11 +43,12 @@
 ;;
 ;; What the bar finds comes from `lispm-bar-source-functions', ranked as
 ;; search_tools ranks (`lispm-tools-search-score'): the skills and tools
-;; here, and what a desktop adds, as its applications.  Where it shows
-;; is up to `lispm-bar-read-function', `lispm-bar-show-function' and
-;; `lispm-bar-hide-function': in plain Emacs and on a terminal, the
-;; minibuffer and a window over it; a desktop may drop it from its menu
-;; bar instead.  With no model to ask, the bar still opens what it
+;; LispM has, and whatever other packages add.  It shows in the
+;; minibuffer and a window over it, in plain Emacs as on a terminal;
+;; `lispm-bar-read-function', `lispm-bar-show-function' and
+;; `lispm-bar-hide-function' let another package show it elsewhere.
+;; Nothing here needs more than LispM Agent.  With no model to ask, the
+;; bar still opens what it
 ;; finds, and "Ask LispM" becomes "Set up a model…"
 ;; (`lispm-bar-setup-function'); what was asked waits until a model
 ;; works (`lispm-bar-model-ready').
@@ -101,7 +102,7 @@
   :group 'lispm-bar)
 
 (defconst lispm-bar--instructions
-  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar, a field at the top of the screen, and from a chat; both are this one conversation. You open applications, find what the system and its apps can do (search_tools finds their skills, the manuals with their tools), change settings, and answer questions. Your reply first shows in a small panel under the field: lead with the answer or with what you did, and keep it short unless asked for more."
+  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar, a one-line field with a small window for your reply, and from a chat; both are this one conversation. You act for the user across Emacs and the computer: find what the system and what is installed can do (search_tools finds their skills, the manuals with their tools), open and change things, and answer questions. Your reply first shows in that small window: lead with the answer or with what you did, and keep it short unless asked for more."
   "What LispM itself is told it is, beyond what every agent is told.")
 
 (lispm-defrole system
@@ -156,7 +157,8 @@ of plists, one for each thing:
   :ask     for another, a sentence for LispM about it, which Return
            adds to what the user asks, as \"Use the skill notes.\"
 Things of the sources earlier in the list come first among those the
-words match as well.  A desktop adds its applications here.")
+words match as well.  LispM's own are its skills and tools; another
+package may add more, as a desktop its applications.")
 
 (defconst lispm-bar-kinds
   `((application ,(lispm-tr-noop "Application") ,(lispm-tr-noop "Applications"))
@@ -216,9 +218,12 @@ Return asks LispM, naming the tool chosen."
 (defun lispm-bar-find (text &optional limit)
   "What the bar finds for TEXT, best first, at most LIMIT things.
 The things are plists, as `lispm-bar-source-functions' give them, ranked
-as search_tools ranks what it finds; none for TEXT without a word."
+as search_tools ranks what it finds; none for TEXT without a word.
+While the bar is open, they are what the sources gave as it opened."
   (when-let* ((words (lispm-tools-search-words text)))
-    (lispm-tools--rank words (or lispm-bar--things (lispm-bar--gather))
+    (lispm-tools--rank words (if (and (lispm-bar-open-p) lispm-bar--things)
+                                 lispm-bar--things
+                               (lispm-bar--gather))
                        (or limit lispm-bar-results)
                        (lambda (thing)
                          (or (plist-get thing :fields) `((3 . ,(plist-get thing :name))))))))
@@ -339,6 +344,14 @@ Nil if nothing was, else `queued', `working' or `done'."
 
 (defvar lispm-bar-map)
 (defvar lispm-bar-show-function)
+
+(defun lispm-bar-open-p ()
+  "Non-nil while the bar is open."
+  (and lispm-bar--open t))
+
+(defun lispm-bar-expanded-p ()
+  "Non-nil while the bar is opened out, see `lispm-bar-toggle'."
+  lispm-bar--expanded)
 
 (defun lispm-bar-ready-p ()
   "Non-nil if LispM has a model to ask, see `lispm-bar-ready-function'."
@@ -609,7 +622,11 @@ way to go on from where its turn stopped; nil if it asks nothing."
                   (propertize (concat (lispm-bar--indent (car lispm-bar--waiting) "λ ") "\n"
                                       "  ⎿  " (lispm-tr "asked once LispM has a model") "\n")
                               'face 'lispm-bar-dim))
-                (propertize (concat (lispm-tr "Find applications, skills and tools, or ask LispM.") "\n")
+                (propertize (concat (if (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application))
+                                                  lispm-bar--things)
+                                        (lispm-tr "Find applications, skills and tools, or ask LispM.")
+                                      (lispm-tr "Find skills and tools, or ask LispM."))
+                                    "\n")
                             'face 'lispm-bar-dim))))
      (lispm-bar--question agent)
      (lispm-bar--activity agent)
@@ -901,12 +918,12 @@ Typed in a field holding text, n is typed."
 ;;;###autoload
 (defun lispm-ai ()
   "Open the LispM bar: find what is installed, or ask LispM itself.
-Type to find applications, skills and tools; Return opens the one
-chosen, or asks LispM, the system's own agent, which replies under the
-field.  \\<lispm-bar-map>\\[lispm-bar-toggle] opens the bar out: the conversation
-and more of what is found.  \\[lispm-bar-chat] shows the conversation in
-a chat; \\[lispm-bar-close] or C-g closes the bar.  Opened while open, it
-closes.
+Type to find skills, tools and what other packages add, as a
+desktop's applications; Return opens the one chosen, or asks LispM,
+the system's own agent, which replies by the field.
+\\<lispm-bar-map>\\[lispm-bar-toggle] opens the bar out: the conversation and more
+of what is found.  \\[lispm-bar-chat] shows the conversation in a chat;
+\\[lispm-bar-close] or C-g closes the bar.  Opened while open, it closes.
 
 To open it with a key, bind it, as
   (keymap-global-set \"C-c SPC\" #\\='lispm-ai)"
@@ -935,8 +952,9 @@ To open it with a key, bind it, as
         (setq lispm-bar--then nil)
         (funcall then)))))
 
+;; M-x ai, unless another package has the name.
 ;;;###autoload
-(defalias 'ai #'lispm-ai)
+(unless (fboundp 'ai) (defalias 'ai #'lispm-ai))
 
 (provide 'lispm-bar)
 ;;; lispm-bar.el ends here

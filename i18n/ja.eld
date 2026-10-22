@@ -459,4 +459,5 @@
   ("%s more · %s chat · %s close" . "%s 拡大 · %s チャット · %s 閉じる")
   ("asked once LispM has a model" . "LispMにモデルができ次第尋ねます")
   ("Find applications, skills and tools, or ask LispM." . "アプリケーション、スキル、ツールを探すか、LispMに尋ねます。")
-  ("LispM asks to use %s: %s to answer" . "LispMが%sの使用を求めています。%sで回答します")))
+  ("LispM asks to use %s: %s to answer" . "LispMが%sの使用を求めています。%sで回答します")
+  ("Find skills and tools, or ask LispM." . "スキルやツールを探すか、LispMに尋ねます。")))

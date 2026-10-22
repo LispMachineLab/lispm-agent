@@ -459,4 +459,5 @@
   ("%s more · %s chat · %s close" . "%s mehr · %s Chat · %s schließen")
   ("asked once LispM has a model" . "wird gefragt, sobald LispM ein Modell hat")
   ("Find applications, skills and tools, or ask LispM." . "Programme, Skills und Tools finden oder LispM fragen.")
-  ("LispM asks to use %s: %s to answer" . "LispM möchte %s verwenden: %s zum Antworten")))
+  ("LispM asks to use %s: %s to answer" . "LispM möchte %s verwenden: %s zum Antworten")
+  ("Find skills and tools, or ask LispM." . "Skills und Tools finden oder LispM fragen.")))
