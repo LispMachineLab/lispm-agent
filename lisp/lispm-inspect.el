@@ -37,7 +37,9 @@
 ;; the tool's definition, show the call in the transcript.  The chat
 ;; presents what it draws: the arguments of calls, the file:line places
 ;; and org links in replies and results, the code in them that names a
-;; symbol, the agents named.
+;; symbol, the agents named.  Code naming what this Emacs lacks, a
+;; symbol nothing defines or a file that is not there, is marked
+;; instead; see lispm-ground.el.
 ;;
 ;; The inspector is a buffer showing one agent whole, as Genera's
 ;; inspector showed an object: its identity, state, model, policy and
@@ -50,6 +52,7 @@
 (require 'lispm-core)
 (require 'lispm-tools)
 (require 'lispm-runtime)
+(require 'lispm-ground)
 
 (declare-function lispm-show "lispm" (agent))
 (declare-function lispm-chat-transcript "lispm-chat" (agent &optional argument))
@@ -217,18 +220,33 @@ presenting something is left as it is."
             (setq start end)))))
     text))
 
-(defun lispm-present-code (code &optional root)
+(defun lispm-present-code (code &optional root defined)
   "CODE, a word set as code in a reply, presented if it names an object.
-A symbol that is a function, a variable or a face, or a file (relative
-to ROOT), with a line after a colon or not."
-  (let ((symbol (intern-soft code)))
-    (cond ((and symbol (or (fboundp symbol) (boundp symbol) (facep symbol)))
-           (lispm-present code (list 'symbol symbol)))
-          ((string-match "\\`\\([^:\n]+\\)\\(?::\\([0-9]+\\)\\)?\\'" code)
-           (let ((file (lispm-present--file (match-string 1 code) (or root default-directory)))
-                 (line (and (match-string 2 code) (string-to-number (match-string 2 code)))))
-             (if file (lispm-present code (list 'file file line)) code)))
-          (t code))))
+A symbol that is a function, a variable or a face, quoted or not, a call
+of a function, or a file (relative to ROOT), with a line after a colon
+or not.  While `lispm-ground-code' is on, code naming what this Emacs
+lacks is marked as such (see lispm-ground.el); DEFINED are the names
+the reply defines."
+  (let* ((call (and (string-match "\\`(\\([^][ \t\n()'\"]+\\)" code) (match-string 1 code)))
+         (symbol (intern-soft (cond (call)
+                                    ((string-match "\\`#?'\\([^']+\\)\\'" code) (match-string 1 code))
+                                    (t code))))
+         (object
+          (cond ((and symbol (if call
+                                 (fboundp symbol)
+                               (or (fboundp symbol) (boundp symbol) (facep symbol))))
+                 (list 'symbol symbol))
+                ((string-match "\\`\\([^:\n]+\\)\\(?::\\([0-9]+\\)\\)?\\'" code)
+                 ;; The line first: looking for the file can change the
+                 ;; match data, through a file name handler.
+                 (let* ((line (and (match-string 2 code) (string-to-number (match-string 2 code))))
+                        (file (lispm-present--file (match-string 1 code) (or root default-directory))))
+                   (and file (list 'file file line))))))
+         (presented (if object (lispm-present code object) code))
+         ;; A file presented is there to see.
+         (finding (and lispm-ground-code (not (eq (car object) 'file))
+                       (lispm-ground-check code root defined))))
+    (if finding (lispm-ground-mark presented finding) presented)))
 
 ;;;; The inspector
 
