@@ -1152,8 +1152,9 @@ ITEMS are the session's items, where the call's preview is."
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
         (lispm-chat--redraw)))))
 
-(defun lispm-chat--language-changed ()
-  "Draw every chat again, whole, in the language now spoken."
+(defun lispm-chat--draw-all-again ()
+  "Draw every chat again, whole: in the language now spoken, with code
+checked or not as `lispm-ground-code' now says."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
@@ -1165,7 +1166,8 @@ ITEMS are the session's items, where the call's preview is."
 (add-hook 'lispm-state-change-functions #'lispm-chat--state-changed)
 (add-hook 'lispm-session-end-functions #'lispm-chat--session-ended)
 (add-hook 'lispm-sandbox-change-hook #'lispm-chat--sandbox-changed)
-(add-hook 'lispm-language-changed-hook #'lispm-chat--language-changed)
+(add-hook 'lispm-language-changed-hook #'lispm-chat--draw-all-again)
+(add-hook 'lispm-ground-change-hook #'lispm-chat--draw-all-again)
 
 ;;;; Input
 

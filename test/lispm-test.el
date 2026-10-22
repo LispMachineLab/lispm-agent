@@ -5729,14 +5729,30 @@ Emacs knows and names the reply defines pass."
     (should (equal (lispm-ground-check "(lispm-test-made-up-zz 1)") '(undefined "lispm-test-made-up-zz")))
     ;; Checking reads no made-up name into this Emacs.
     (should-not (intern-soft "lispm-test-made-up-zz"))
-    ;; Defined, a word Emacs knows, no namespace here, or defined by the reply.
+    ;; The namespace of cl-lib is cl-.
+    (should (equal (lispm-ground-check "cl-test-made-up-zz") '(undefined "cl-test-made-up-zz")))
+    ;; Defined, a word Emacs knows, no library's namespace, or defined by the
+    ;; reply, with the names made from it.
     (should-not (lispm-ground-check "lispm-ground-check"))
     (should-not (lispm-ground-check "help-echo"))
-    (should-not (lispm-ground-check "zzq-branch-name"))
-    (should-not (lispm-ground-check "lispm-test-made-up-zz" nil
-                                    (lispm-ground-definitions
-                                     "```\n(defun lispm-test-made-up-zz ()\n  nil)\n```")))
-    ;; Calls.
+    (dolist (word '("zzq-branch-name" "text-align" "font-size" "justify-content" "make-test" "emacs-plus"))
+      (should-not (lispm-ground-check word)))
+    (let ((defined (lispm-ground-definitions
+                    "```\n(define-minor-mode lispm-test-made-up-zz\n  \"Doc.\")\n```")))
+      (should-not (lispm-ground-check "lispm-test-made-up-zz" nil defined))
+      (should-not (lispm-ground-check "lispm-test-made-up-zz-hook" nil defined)))
+    ;; Not taken for symbols whatever the case of the buffer.
+    (let ((case-fold-search t))
+      (should-not (lispm-ground-check "Lispm-Test-Made-Up-Zz")))
+    ;; A library on the load path, once it is there.
+    (lispm-test--write (expand-file-name "lib/lispm-test-lib-zz.el" project) ";; Nothing.\n")
+    (should (lispm-ground-check "lispm-test-lib-zz"))
+    (let ((load-path (cons (expand-file-name "lib" project) load-path)))
+      (should-not (lispm-ground-check "lispm-test-lib-zz")))
+    ;; Calls: of a name some code mentions but nothing defines.
+    (intern "lispm-test-mentioned-zz")
+    (should-not (lispm-ground-check "lispm-test-mentioned-zz"))
+    (should (equal (lispm-ground-check "(lispm-test-mentioned-zz)") '(undefined "lispm-test-mentioned-zz")))
     (should (equal (lispm-ground-check "(car x y)") '(arity car 2 (1 . 1))))
     (should (equal (lispm-ground-check "(message)") '(arity message 0 (1 . many))))
     (should-not (lispm-ground-check "(car x)"))
@@ -5791,7 +5807,13 @@ not what the reply defines itself."
         (search-forward "(car 1 2)")
         (should (equal (get-text-property (1- (point)) 'lispm-ground) '(arity car 2 (1 . 1))))
         (search-forward "lispm-test-defined-zz")
-        (should-not (get-text-property (1- (point)) 'lispm-ground))))))
+        (should-not (get-text-property (1- (point)) 'lispm-ground)))
+      ;; Turned off, the chat drawn shows none.
+      (unwind-protect
+          (progn (customize-set-variable 'lispm-ground-code nil)
+                 (with-current-buffer chat
+                   (should-not (text-property-not-all (point-min) (point-max) 'lispm-ground nil))))
+        (customize-set-variable 'lispm-ground-code t)))))
 
 (ert-deftest lispm-test-inspector ()
   "The inspector shows an agent whole, for the user and for agents."
@@ -6824,9 +6846,9 @@ inspector's text; the user is told in the language spoken."
            (chat (lispm-chat agent)))
       (should (string-match-p "Welcome to LispM!" (lispm-test--chat-text chat)))
       (lispm-test--in-french
-        (lispm-chat--language-changed)
+        (lispm-chat--draw-all-again)
         (should (string-match-p "Bienvenue dans LispM !" (lispm-test--chat-text chat))))
-      (lispm-chat--language-changed)
+      (lispm-chat--draw-all-again)
       (should (string-match-p "Welcome to LispM!" (lispm-test--chat-text chat))))))
 
 (defun lispm-test-report-catalogs ()

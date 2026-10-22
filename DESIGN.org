@@ -189,13 +189,15 @@ its turns changed, its tools and triggers, all of them presentations; agents hav
 anything has it, and asking the model again asks the source of the mistake; the image it talks
 to knows. As SWI-Prolog's PceEmacs colours a call to an undefined predicate by asking the
 loaded program, the chat checks the code in a reply against the running Emacs: a symbol no
-loaded code mentions, in a namespace the image has (~lispm-~, ~org-~); a call giving a function
-more or fewer arguments than ~func-arity~ allows; a path to a file that is not there. Such code
-is underlined in ~lispm-ungrounded~ and says why under the mouse; names the reply defines in a
-code block, words Emacs knows (a text property) and libraries on ~load-path~ pass. Reading a
-reply's forms uses an obarray of its own, so made-up names stay unknown to the image. What is
-found is data, ~(undefined NAME)~, ~(arity SYMBOL GIVEN ARITY)~ or ~(missing FILE)~, ready to be
-told to the model as well. ~lispm-ground-code~ turns it off.
+loaded code mentions, in the namespace of a loaded library (~lispm-~, ~org-~, ~cl-~ of cl-lib); a
+call of a function nothing defines, or giving it more or fewer arguments than ~func-arity~
+allows; a path to a file that is not there. Such code is underlined in ~lispm-ungrounded~ and
+says why under the mouse or with ~C-h .~; names the reply defines in a code block (and their
+-hook, their accessors), words Emacs knows (a text property), libraries on ~load-path~ and the
+dashed words of other languages (~text-align~) pass. Reading a reply's forms uses an obarray of
+its own, so made-up names stay unknown to the image. What is found is data, ~(undefined NAME)~,
+~(arity SYMBOL GIVEN ARITY)~ or ~(missing FILE)~, ready to be told to the model as well.
+~lispm-ground-code~ turns it off, and the open chats are drawn again without it.
 
 * 3. Tool calls as Emacs actions
 

@@ -231,19 +231,22 @@ the reply defines."
          (symbol (intern-soft (cond (call)
                                     ((string-match "\\`#?'\\([^']+\\)\\'" code) (match-string 1 code))
                                     (t code))))
-         (presented
+         (object
           (cond ((and symbol (if call
                                  (fboundp symbol)
                                (or (fboundp symbol) (boundp symbol) (facep symbol))))
-                 (lispm-present code (list 'symbol symbol)))
+                 (list 'symbol symbol))
                 ((string-match "\\`\\([^:\n]+\\)\\(?::\\([0-9]+\\)\\)?\\'" code)
-                 (let ((file (lispm-present--file (match-string 1 code) (or root default-directory)))
-                       (line (and (match-string 2 code) (string-to-number (match-string 2 code)))))
-                   (and file (lispm-present code (list 'file file line)))))))
-         (finding (and lispm-ground-code (lispm-ground-check code root defined))))
-    (cond (finding (lispm-ground-mark (or presented code) finding))
-          (presented)
-          (t code))))
+                 ;; The line first: looking for the file can change the
+                 ;; match data, through a file name handler.
+                 (let* ((line (and (match-string 2 code) (string-to-number (match-string 2 code))))
+                        (file (lispm-present--file (match-string 1 code) (or root default-directory))))
+                   (and file (list 'file file line))))))
+         (presented (if object (lispm-present code object) code))
+         ;; A file presented is there to see.
+         (finding (and lispm-ground-code (not (eq (car object) 'file))
+                       (lispm-ground-check code root defined))))
+    (if finding (lispm-ground-mark presented finding) presented)))
 
 ;;;; The inspector
 

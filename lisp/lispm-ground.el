@@ -27,23 +27,28 @@
 ;; the loaded program itself; LispM asks the running image the same of
 ;; the code in a reply:
 ;;
-;;   `lispm-chat-frob'     a symbol no loaded code mentions, in a
-;;                         namespace this Emacs has (lispm-, org-, ...)
+;;   `lispm-chat-frob'     a symbol no loaded code mentions, in the
+;;                         namespace of a loaded library (lispm-, org-,
+;;                         cl- of cl-lib, ...)
+;;   `(lispm-frob x)'      a call of a function nothing defines
 ;;   `(car x y)'           a call giving a function more or fewer
 ;;                         arguments than it takes
 ;;   `lisp/nothere.el'     a path to a file that is not there
 ;;
 ;; A symbol some loaded code mentions is a word this Emacs knows (a text
-;; property, a plist key) and passes, defined or not; so does a name the
-;; reply defines itself, in a code block, or a library on `load-path'.
-;; What is found is data, (undefined NAME), (arity SYMBOL GIVEN ARITY)
-;; or (missing FILE); the chat shows such code in `lispm-ungrounded' and
-;; says why under the mouse.  Only what is not there is found: a
-;; function that exists but does something else passes, as it would in
-;; PceEmacs.
+;; property, a plist key) and passes unless it is called; so do a name
+;; the reply defines itself in a code block, and the names made from
+;; it (a mode's -hook, a struct's accessors), a library on `load-path',
+;; and words of other languages written with dashes, text-align say,
+;; which no library's namespace holds.  What is found is data,
+;; (undefined NAME), (arity SYMBOL GIVEN ARITY) or (missing FILE); the
+;; chat shows such code in `lispm-ungrounded' and says why under the
+;; mouse (or with C-h .).  Only what is not there is found: a function
+;; that exists but does something else passes, as it would in PceEmacs.
 
 ;;; Code:
 
+(require 'seq)
 (require 'subr-x)
 (require 'lispm-i18n)
 
@@ -53,13 +58,20 @@
   "Face added to code in replies that names what this Emacs lacks."
   :group 'lispm)
 
+(defvar lispm-ground-change-hook nil
+  "Hook run after `lispm-ground-code' is set, to draw replies again.")
+
 (defcustom lispm-ground-code t
   "Whether code in replies is checked against this Emacs.
 Code naming a symbol nothing defines, calling a function with the wrong
 number of arguments or naming a file that is not there is then shown in
-`lispm-ungrounded'; see lispm-ground.el."
+`lispm-ungrounded'; see lispm-ground.el.  Set it with `setopt' or
+Customize for the chats open to follow."
   :type 'boolean
-  :group 'lispm)
+  :group 'lispm
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (run-hooks 'lispm-ground-change-hook)))
 
 (defconst lispm-ground--symbol-re
   "\\`\\(?:#?'\\)?\\([a-z][a-z0-9]*\\(?:--?[a-z0-9]+\\)+[?!*]?\\)\\'"
@@ -71,40 +83,47 @@ by dashes, quoted or not.")
   "A definition, `defun', `cl-defmethod' or `lispm-deftool' alike, and
 the name it defines.")
 
-(defvar lispm-ground--namespaces (make-hash-table :test #'equal)
-  "Prefixes, a word and a dash, of the symbols this Emacs defines, as
-they are found.")
-
-(defvar lispm-ground--libraries (make-hash-table :test #'equal)
-  "Names looked up on `load-path', to whether a library has the name.")
-
-(defun lispm-ground--defined-p (symbol)
-  "Whether SYMBOL is a function, a variable, a face or a feature."
-  (or (fboundp symbol) (boundp symbol) (facep symbol) (featurep symbol)))
+(defvar lispm-ground--libraries nil
+  "The `load-path' names were last looked up on, and a hash table from
+those names to whether a library there has the name.")
 
 (defun lispm-ground--namespace-p (name)
-  "Whether symbols this Emacs defines start as NAME does, to its first dash."
-  (let ((prefix (substring name 0 (1+ (string-search "-" name)))))
-    (or (gethash prefix lispm-ground--namespaces)
-        (and (try-completion prefix obarray #'lispm-ground--defined-p)
-             (puthash prefix t lispm-ground--namespaces)))))
+  "Whether NAME is in the namespace of a library loaded.
+That is, it starts with the name of a feature and a dash, as org-agenda
+does; or with the prefix of a feature called PREFIX-lib, as cl-incf
+does with cl-lib's.  The feature `emacs' has no namespace."
+  (seq-some (lambda (feature)
+              (let ((library (symbol-name feature)))
+                (and (not (eq feature 'emacs))
+                     (string-prefix-p (concat (string-remove-suffix "-lib" library) "-") name))))
+            features))
 
 (defun lispm-ground--library-p (name)
   "Whether a library on `load-path' is called NAME."
-  (let ((found (gethash name lispm-ground--libraries 'unknown)))
+  (unless (eq (car lispm-ground--libraries) load-path)
+    (setq lispm-ground--libraries (cons load-path (make-hash-table :test #'equal))))
+  (let* ((libraries (cdr lispm-ground--libraries))
+         (found (gethash name libraries 'unknown)))
     (when (eq found 'unknown)
       (setq found (and (locate-library name) t))
-      (puthash name found lispm-ground--libraries))
+      (puthash name found libraries))
     found))
+
+(defun lispm-ground--defined-by (name defined)
+  "Whether NAME is among DEFINED, the names the reply defines, or made
+from one: the -hook of a mode, the accessor of a struct."
+  (seq-some (lambda (definition)
+              (or (equal name definition) (string-prefix-p (concat definition "-") name)))
+            defined))
 
 (defun lispm-ground--undefined-p (name defined)
   "Whether NAME, the name of a symbol, names nothing in this Emacs.
-No loaded code mentions it, it is not among DEFINED, the names the reply
-defines, nor a library's; yet symbols this Emacs defines start as it
-does.  Words with no namespace here, a branch name say, are not taken
-for symbols."
+No loaded code mentions it, the reply does not define it (DEFINED are
+the names it does), no library has the name, and it is in the namespace
+of a library loaded: words of other languages, text-align or a branch
+name say, are not taken for symbols."
   (and (not (intern-soft name))
-       (not (member name defined))
+       (not (lispm-ground--defined-by name defined))
        (lispm-ground--namespace-p name)
        (not (lispm-ground--library-p name))))
 
@@ -125,11 +144,14 @@ arguments than FORM gives it.  DEFINED are the names the reply defines."
   (when (and (consp form) (symbolp (car form)) (proper-list-p form))
     (let* ((name (symbol-name (car form)))
            (symbol (intern-soft name)))
-      (cond ((null symbol)
+      (cond ((not (and symbol (fboundp symbol)))
+             ;; Called, a name some code mentions is no less wanting:
+             ;; the call of a made-up function an agent tried, say.
              (and (string-match-p lispm-ground--symbol-re name)
-                  (lispm-ground--undefined-p name defined)
+                  (not (lispm-ground--defined-by name defined))
+                  (lispm-ground--namespace-p name)
                   (list 'undefined name)))
-            ((fboundp symbol)
+            (t
              (let ((function (indirect-function symbol))
                    (given (1- (length form))))
                ;; An autoload's arity is known only once its file is
@@ -158,7 +180,9 @@ scheme or remote host."
 
 (defun lispm-ground-definitions (text)
   "The names TEXT defines in code, as strings."
-  (let (names (start 0))
+  (let ((case-fold-search nil)
+        (start 0)
+        names)
     (while (string-match lispm-ground--definition-re text start)
       (push (match-string 1 text) names)
       (setq start (match-end 0)))
@@ -171,7 +195,8 @@ That is (undefined NAME), a symbol nothing defines, see lispm-ground.el;
 whose `func-arity' is ARITY; or (missing FILE), a path, relative to
 ROOT (by default `default-directory'), to a file that is not there.
 DEFINED are the names the reply defines."
-  (let ((code (string-trim (substring-no-properties code))))
+  (let ((code (string-trim (substring-no-properties code)))
+        (case-fold-search nil))
     (cond ((string-prefix-p "(" code)
            (lispm-ground--call (lispm-ground--read code) defined))
           ((string-match lispm-ground--symbol-re code)
