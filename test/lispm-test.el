@@ -5643,6 +5643,27 @@ handed over once nothing more can be."
     (goto-char (point-max))
     (call-interactively (keymap-lookup lispm-chat-mode-map key))))
 
+(ert-deftest lispm-test-chat-italics ()
+  "Replies show Markdown emphasis, *TEXT* or _TEXT_, in italics, but not
+inside words, as in 2*3*4 or snake_case, nor inside code."
+  (let ((italic (lambda (text)
+                  (let ((shown (lispm-chat--inline text)))
+                    (list (substring-no-properties shown)
+                          (apply #'string (seq-filter (lambda (i) (memq 'italic (ensure-list (get-text-property i 'face shown))))
+                                                      (number-sequence 0 (1- (length shown)))))
+                          shown)))))
+    (pcase-let ((`(,text ,_ ,shown) (funcall italic "Playing *Calm* from _Quiet Rooms_.")))
+      (should (equal text "Playing Calm from Quiet Rooms."))
+      (should (memq 'italic (ensure-list (get-text-property 8 'face shown))))
+      (should (memq 'italic (ensure-list (get-text-property 18 'face shown))))
+      (should-not (get-text-property 0 'face shown)))
+    (dolist (plain '("2*3*4 is 24" "run_shell and snake_case_names" "* a list item" "code `a*b*c` stays"))
+      (pcase-let ((`(,text ,_ ,shown) (funcall italic plain)))
+        (should (equal text (string-replace "`" "" plain)))
+        (should-not (seq-some (lambda (i) (memq 'italic (ensure-list (get-text-property i 'face shown))))
+                              (number-sequence 0 (1- (length shown)))))))
+    (should (equal (car (funcall italic "**bold** and *it* and *more*")) "bold and it and more"))))
+
 (ert-deftest lispm-test-chat-items ()
   "The chat reads the conversation, and only it, out of the org document."
   (with-temp-buffer
