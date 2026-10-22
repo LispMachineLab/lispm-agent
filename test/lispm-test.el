@@ -19,6 +19,8 @@
 (setq tramp-persistency-file-name nil)
 (require 'ert-x)
 (require 'lispm)
+(require 'lispm-agents-claude)
+(require 'lispm-agents-codex)
 
 ;; The words as the code writes them, whatever the computer's language:
 ;; a language without a catalog.  The tests of i18n speak others.
@@ -6609,7 +6611,8 @@ check still asks about."
   "Return the messages the code gives to translate: a hash table from a
 catalog key (see `lispm-i18n--key') to a plist: :message, :context,
 :plural, the plural's English, and :places, where the message is
-written, as FILE:LINE."
+written, as FILE:LINE; and :time for a time format, as
+`lispm-format-time' takes."
   (let ((messages (make-hash-table :test #'equal)))
     (dolist (file (lispm-test--source-files))
       (with-temp-buffer
@@ -6617,7 +6620,8 @@ written, as FILE:LINE."
         (emacs-lisp-mode)
         (let ((name (file-name-nondirectory file)))
           (goto-char (point-min))
-          (while (re-search-forward "(\\(lispm-tr\\(?:-n\\|-in\\|-noop\\)?\\)[ \t\n]+\"" nil t)
+          (while (re-search-forward
+                  "(\\(lispm-\\(?:tr\\(?:-n\\|-in\\|-noop\\)?\\|format-time\\)\\)[ \t\n]+\"" nil t)
             (let ((function (intern (match-string 1)))
                   (start (match-beginning 0)))
               (unless (nth 8 (save-excursion (syntax-ppss start)))
@@ -6633,6 +6637,7 @@ written, as FILE:LINE."
                            (list :message message :context context
                                  :plural (or (plist-get entry :plural)
                                              (and (eq function 'lispm-tr-n) (nth 1 args)))
+                                 :time (or (plist-get entry :time) (eq function 'lispm-format-time))
                                  :places (append (plist-get entry :places) (list (format "%s:%d" name line))))
                            messages))))))))
     messages))
@@ -6691,11 +6696,13 @@ message the code no longer gives."
                    messages))))))
 
 (ert-deftest lispm-test-i18n-keeps-arguments ()
-  "A translation takes the arguments its message takes, in any order."
+  "A translation takes the arguments its message takes, in any order; a
+time format, its own."
   (let ((messages (lispm-test--messages)))
     (dolist (language (mapcar #'car lispm-languages))
       (maphash (lambda (key translation)
-                 (when-let* ((entry (gethash key messages)))
+                 (when-let* ((entry (gethash key messages))
+                             ((not (plist-get entry :time))))
                    (let ((expected (lispm-test--format-arguments (plist-get entry :message))))
                      (dolist (text (ensure-list translation))
                        (let ((arguments (lispm-test--format-arguments text)))
@@ -6887,6 +6894,357 @@ holds no longer.  Run with `make i18n'."
                      (princ (format "%s: stale %S\n" language key))))
                  catalog)
         (princ (format "%s: %d missing, %d stale\n" language missing stale))))))
+
+;;;; The editor's agents
+
+(defvar lispm-test--agent-list-map (make-sparse-keymap)
+  "A keymap of a list of the agents, where their keys are bound too.")
+
+(defmacro lispm-test--with-agents (agents &rest body)
+  "Run BODY with AGENTS, (AGENT . PROPERTIES), the only agents defined,
+their keys bound in keymaps of the test's own: `lispm-agents-map''s
+and that of a list of the agents."
+  (declare (indent 1))
+  `(let ((lispm-agents-defined nil)
+         (lispm-agents--keys nil)
+         (lispm-agents--root-cache (make-hash-table :test #'equal))
+         (lispm-agents-map (make-sparse-keymap))
+         (lispm-test--agent-list-map (make-sparse-keymap))
+         (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map)))
+     (pcase-dolist (`(,agent . ,props) ,agents)
+       (apply #'lispm-agents-define agent props))
+     ,@body))
+
+(ert-deftest lispm-test-agent-available-p ()
+  "An agent run as a CLI can run exactly when its program is on PATH; one
+running inside Emacs always can; one never defined cannot."
+  (lispm-test--with-agents
+      '((claude :name "Claude Code" :program "lispm-test-no-such-program")
+        (codex :name "Codex" :program "emacs")
+        (lispm :name "LispM" :new ignore))
+    (should-not (lispm-agents-available-p 'claude))
+    (should (lispm-agents-available-p 'codex))
+    (should (lispm-agents-available-p 'lispm))
+    (should-not (lispm-agents-available-p 'hermes))
+    (should (equal (mapcar #'car (lispm-agents-available)) '(codex lispm)))))
+
+(ert-deftest lispm-test-agents-built-in-first ()
+  "Agents are offered those built in first, then in the order defined."
+  (lispm-test--with-agents
+      '((hermes :name "Hermes" :new ignore)
+        (lispm :name "LispM" :new ignore :built-in t)
+        (claude :name "Claude Code" :new ignore :built-in t))
+    (should (equal (mapcar #'car (lispm-agents-available)) '(lispm claude hermes)))
+    (lispm-agents-define 'hermes :name "Hermes, again" :new #'ignore)
+    (should (equal (mapcar #'car lispm-agents-defined) '(hermes lispm claude)))
+    (lispm-agents-undefine 'lispm)
+    (should (equal (mapcar #'car (lispm-agents-available)) '(claude hermes)))))
+
+(ert-deftest lispm-test-agent-keys-follow-the-agent ()
+  "An agent's key starts it, in its keymaps and a list's of the agents, while
+it can run; it does nothing once its program is gone or it is undefined."
+  (let ((program "emacs"))
+    (lispm-test--with-agents
+        `((codex :name "Codex" :program "emacs" :key "x" :command lispm-agents-codex-new))
+      (should (eq (keymap-lookup lispm-agents-map "x") 'lispm-agents-codex-new))
+      (should (eq (keymap-lookup lispm-test--agent-list-map "x") 'lispm-agents-codex-new))
+      (setf (plist-get (alist-get 'codex lispm-agents-defined) :program) "lispm-test-no-such-program")
+      (should-not (keymap-lookup lispm-agents-map "x"))
+      (setf (plist-get (alist-get 'codex lispm-agents-defined) :program) program)
+      (lispm-agents-undefine 'codex)
+      (should-not (keymap-lookup lispm-agents-map "x"))
+      (should-not (keymap-lookup lispm-test--agent-list-map "x")))))
+
+(ert-deftest lispm-test-agent-keys-leave-other-commands-be ()
+  "An agent's key taken by another command stays that command's, and its
+parent's bindings do not count; an agent taking another's key gives it
+back when it goes."
+  (lispm-test--with-agents nil
+    (keymap-set lispm-agents-map "r" #'lispm-agents-send-region)
+    (set-keymap-parent lispm-test--agent-list-map special-mode-map)
+    (let ((inhibit-message t))
+      (lispm-agents-define 'greedy :name "Greedy" :new #'ignore :key "r" :command #'ignore))
+    (should (eq (keymap-lookup lispm-agents-map "r") 'lispm-agents-send-region))
+    (lispm-agents-undefine 'greedy)
+    (should (eq (keymap-lookup lispm-agents-map "r") 'lispm-agents-send-region))
+    ;; h is the list's parent's, describe-mode: Hermes may have it.
+    (lispm-agents-define 'hermes :name "Hermes" :new #'ignore :key "h" :command 'lispm-hermes-new)
+    (should (eq (keymap-lookup lispm-test--agent-list-map "h") 'lispm-hermes-new))
+    (lispm-agents-define 'other :name "Other" :new #'ignore :key "h" :command 'other-new)
+    (should (eq (keymap-lookup lispm-agents-map "h") 'other-new))
+    (lispm-agents-undefine 'other)
+    (should (eq (keymap-lookup lispm-agents-map "h") 'lispm-hermes-new))
+    (should (eq (keymap-lookup lispm-test--agent-list-map "h") 'lispm-hermes-new))
+    (lispm-agents-undefine 'hermes)
+    (should-not (keymap-lookup lispm-agents-map "h"))
+    (should (eq (keymap-lookup lispm-test--agent-list-map "h") 'describe-mode))))
+
+(ert-deftest lispm-test-launch-requires-installed-cli ()
+  "Starting an agent whose CLI is missing, or no agent at all, is a user
+error, before anything runs."
+  (lispm-test--with-agents
+      '((claude :name "Claude Code" :program "lispm-test-no-such-program"))
+    (should-error (lispm-agents--launch 'claude temporary-file-directory "x" nil)
+                  :type 'user-error)
+    (should-error (lispm-agents-new 'hermes temporary-file-directory) :type 'user-error)))
+
+(ert-deftest lispm-test-sessions-skip-missing-agents ()
+  "No record of an agent whose CLI is missing is read or listed."
+  (let ((read nil))
+    (lispm-test--with-agents
+        `((claude :name "Claude Code" :program "lispm-test-no-such-program"
+                  :sessions ,(lambda () (setq read t) nil)))
+      (should (null (lispm-agents-sessions-list)))
+      (should-not read))))
+
+(ert-deftest lispm-test-sessions-of-every-agent ()
+  "Every agent's sessions are listed, newest first; an agent whose
+sessions cannot be read lists none, and the others still list theirs."
+  (lispm-test--with-agents
+      `((lispm :name "LispM" :new ignore
+               :sessions ,(lambda ()
+                            (list (list :agent 'lispm :id "a" :time 1.0)
+                                  (list :agent 'lispm :id "b" :time 3.0))))
+        (codex :name "Codex" :program "emacs"
+               :sessions ,(lambda () (list (list :agent 'codex :id "c" :time 2.0))))
+        (broken :name "Broken" :new ignore :sessions ,(lambda () (error "No store"))))
+    (let ((inhibit-message t))
+      (should (equal (mapcar (lambda (s) (plist-get s :id)) (lispm-agents-sessions-list))
+                     '("b" "c" "a"))))))
+
+(ert-deftest lispm-test-session-readers-feed-lists-only ()
+  "A list's sessions come from an agent's session reader where it has
+one, without waiting: an agent whose reader has nothing yet is pending,
+one whose reader fails lists none, and agents without a reader are read
+as they are.  The session list and the picker never ask a reader."
+  (let ((lispm-agents--session-readers nil)
+        (lispm-agents--candidates nil)
+        (lispm-agents-sessions-arrived-hook nil)
+        (arrived 0))
+    (add-hook 'lispm-agents-sessions-arrived-hook (lambda () (setq arrived (1+ arrived))))
+    (cl-flet ((session (agent id time title)
+                (list :agent agent :id id :time time :title title :cwd "/tmp/project/")))
+      (lispm-test--with-agents
+          `((lispm :name "LispM" :new ignore
+                   :sessions ,(lambda () (list (session 'lispm "l" 2.0 "L"))))
+            (codex :name "Codex" :new ignore
+                   :sessions ,(lambda () (list (session 'codex "c" 3.0 "C"))))
+            (claude :name "Claude Code" :new ignore
+                    :sessions ,(lambda () (list (session 'claude "a" 1.0 "A"))))
+            (hermes :name "Hermes" :new ignore
+                    :sessions ,(lambda () (list (session 'hermes "h" 5.0 "H")))))
+        (should (eq (lispm-agents-add-session-reader 'codex (lambda () 'pending)) 'codex))
+        (lispm-agents-add-session-reader
+         'claude (lambda () (list (session 'claude "a" 4.0 "A, read") nil)))
+        (lispm-agents-add-session-reader 'hermes (lambda () (error "No store")))
+        ;; Each change of readers draws the lists again.
+        (should (= arrived 3))
+        (let ((inhibit-message t))
+          (pcase-let ((`(,sessions . ,pending) (lispm-agents-sessions-snapshot)))
+            (should (equal (mapcar (lambda (s) (plist-get s :title)) sessions) '("A, read" "L")))
+            (should (equal pending '(codex)))))
+        ;; One reader per agent: a new one replaces the old.
+        (dolist (agent '(codex claude hermes))
+          (lispm-agents-add-session-reader agent (lambda () (error "A reader was asked"))))
+        (should (= (length lispm-agents--session-readers) 3))
+        (should (equal (mapcar (lambda (s) (plist-get s :id)) (lispm-agents-sessions-list))
+                       '("h" "c" "l" "a")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _) (car (all-completions "" table)))))
+          (should (equal (plist-get (lispm-agents--read-session "Agent session: ") :id) "h")))
+        (lispm-agents-remove-session-reader 'codex)
+        (lispm-agents-remove-session-reader 'claude)
+        (lispm-agents-remove-session-reader 'hermes)
+        (lispm-agents-remove-session-reader 'hermes)
+        (should-not lispm-agents--session-readers)
+        (should (= arrived 9))
+        (should (equal (lispm-agents-sessions-snapshot)
+                       (cons (lispm-agents-sessions-list) nil)))))))
+
+(ert-deftest lispm-test-agent-worktrees-join-their-projects ()
+  "A Claude worktree joins its repository and a Codex worktree the known
+project of its name; the Codex app's scratch tree holds chats."
+  (lispm-test--with-agents nil
+    (lispm-agents-setup-claude)
+    (lispm-agents-setup-codex)
+    (let* ((repo (make-temp-file "lispm-test-repo" t))
+           (claude (expand-file-name ".claude/worktrees/feature" repo))
+           (codex (expand-file-name (format "~/.codex/worktrees/1a2b/%s" (file-name-nondirectory repo))))
+           (scratch (expand-file-name "2026-10-20/chat" lispm-agents-codex-chats-directory)))
+      (unwind-protect
+          (progn
+            (make-directory claude t)
+            (let ((roots (lispm-agents--resolve-roots (list repo claude codex scratch))))
+              (should (equal (cdr (assoc claude roots)) (directory-file-name repo)))
+              (should (equal (cdr (assoc codex roots)) (directory-file-name repo)))
+              (should (eq (cdr (assoc scratch roots)) 'chats)))
+            (should (equal (lispm-agents-location-label claude (directory-file-name repo))
+                           "⎇ feature"))
+            (should (equal (lispm-agents-location-label codex (directory-file-name repo))
+                           "⎇ codex worktree")))
+        (clrhash lispm-agents--root-cache)
+        (delete-directory repo t)))))
+
+(ert-deftest lispm-test-agent-archive-survives-an-unreadable-state ()
+  "Archived sessions are kept across starts; a state file that does not
+read is moved aside, not replaced by the next archiving."
+  (let* ((directory (make-temp-file "lispm-test-state" t))
+         (lispm-agents-state-file (expand-file-name "agent-sessions.eld" directory))
+         (lispm-agents--archived 'unloaded)
+         (cut-short "(:archived (\"claude:1\" \"cod")
+         (one '(:agent claude :id "1"))
+         (two '(:agent codex :id "2")))
+    (unwind-protect
+        (progn
+          (lispm-agents--set-archived one t)
+          (should-not (file-exists-p (concat lispm-agents-state-file ".part")))
+          (setq lispm-agents--archived 'unloaded)
+          (should (lispm-agents-archived-p one))
+          (should-not (lispm-agents-archived-p two))
+          ;; A write cut short leaves a file that does not read.
+          (with-temp-file lispm-agents-state-file (insert cut-short))
+          (setq lispm-agents--archived 'unloaded)
+          (let ((inhibit-message t))
+            (should-not (lispm-agents-archived-p one)))
+          (lispm-agents--set-archived two t)
+          (should (equal (with-temp-buffer
+                           (insert-file-contents (concat lispm-agents-state-file ".unreadable"))
+                           (buffer-string))
+                         cut-short))
+          (setq lispm-agents--archived 'unloaded)
+          (should (equal (lispm-agents--archived-keys) '("codex:2"))))
+      (delete-directory directory t))))
+
+(ert-deftest lispm-test-codex-sessions-named-by-the-index ()
+  "A Codex session is titled by its thread name in the index, else by its
+first prompt; context Codex injects is no prompt."
+  (let* ((home (make-temp-file "lispm-test-codex" t))
+         (lispm-agents-codex-sessions-directory (expand-file-name "sessions/" home))
+         (lispm-agents-codex-index-file (expand-file-name "session_index.jsonl" home))
+         (file (expand-file-name "2026/10/20/rollout-1.jsonl" lispm-agents-codex-sessions-directory)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0199\",\"cwd\":\"/tmp\",\"timestamp\":\"2026-10-20T08:00:00Z\"}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions\"}]}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Fix the build\"}}\n"))
+          (let ((session (car (lispm-agents-codex-sessions))))
+            (should (equal (plist-get session :title) "Fix the build"))
+            (should (equal (plist-get session :id) "0199"))
+            (should (numberp (plist-get session :started))))
+          (lispm-agents-codex--rename (list :id "0199") "Build fix")
+          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Build fix")))
+      (remhash file lispm-agents--session-cache)
+      (delete-directory home t))))
+
+(ert-deftest lispm-test-claude-sessions-titled-by-their-name ()
+  "A Claude session is titled by its first prompt until it is named.  The
+name lives beside the transcript, which Claude rewrites, and a blank one
+names nothing.  A transcript without a prompt is no session."
+  (let* ((lispm-agents-claude-projects-directory (make-temp-file "lispm-test-claude" t))
+         (file (expand-file-name "-tmp/0199.jsonl" lispm-agents-claude-projects-directory))
+         (empty (expand-file-name "-tmp/0200.jsonl" lispm-agents-claude-projects-directory))
+         (title (lambda () (plist-get (car (lispm-agents-claude-sessions)) :title))))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file
+            (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"message\":{\"role\":\"user\",\"content\":\"Fix the build\"}}\n"))
+          (with-temp-file empty
+            (insert "{\"type\":\"system\",\"cwd\":\"/tmp\"}\n"))
+          (should (= (length (lispm-agents-claude-sessions)) 1))
+          (should (equal (funcall title) "Fix the build"))
+          (lispm-agents-claude--rename (car (lispm-agents-claude-sessions)) "Build fix")
+          (should (equal (funcall title) "Build fix"))
+          (lispm-agents-claude--rename (car (lispm-agents-claude-sessions)) " ")
+          (should (equal (funcall title) "Fix the build")))
+      (remhash file lispm-agents--session-cache)
+      (remhash empty lispm-agents--session-cache)
+      (delete-directory lispm-agents-claude-projects-directory t))))
+
+(ert-deftest lispm-test-age-short-date ()
+  "Old sessions are dated, short; recent ones by their age."
+  (let ((now (float-time (encode-time '(0 0 12 13 10 2026 nil -1 nil)))))
+    (should (equal (lispm-agents-age (- now 120) now) "2m"))
+    (should (equal (lispm-agents-age (float-time (encode-time '(0 0 12 13 5 2026 nil -1 nil))) now)
+                   "5/13/26"))))
+
+(ert-deftest lispm-test-local-http-content-type ()
+  "A local server's answer is JSON unless its handler names its type."
+  (let ((sent nil))
+    (cl-letf (((symbol-function 'process-send-string) (lambda (_ string) (push string sent)))
+              ((symbol-function 'process-send-eof) #'ignore))
+      (lispm-local-http--reply 'connection '("200 OK" "{}"))
+      (lispm-local-http--reply 'connection '("200 OK" "<p>" "text/html; charset=utf-8")))
+    (should (string-search "Content-Type: application/json\r\n" (nth 1 sent)))
+    (should (string-search "Content-Type: text/html; charset=utf-8\r\n" (nth 0 sent)))))
+
+(ert-deftest lispm-test-agents-interface-is-emacs ()
+  "Without a program drawing an interface around them, the agents run in
+Eat's terminals, are shown with `pop-to-buffer', start in the selected
+window's project and ask with `yes-or-no-p'; such a program says other
+ways, which are followed."
+  (should (eq lispm-agents-terminal-make-function #'lispm-agents-eat-make))
+  (should (eq lispm-agents-show-function #'pop-to-buffer))
+  (should (eq lispm-agents-main-window-function #'selected-window))
+  (should (eq lispm-agents-confirm-function #'lispm-agents-yes-or-no-p))
+  (let* ((made nil) (shown nil) (asked nil) (deleted nil) (answer nil)
+         (lispm-agents-terminal-make-function
+          (lambda (name program &rest args)
+            (setq made (cons program args))
+            (get-buffer-create (format "*%s*" name))))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-show-function (lambda (buffer) (setq shown buffer)))
+         (lispm-agents-confirm-function (lambda (question _detail action)
+                                          (push (cons question action) asked)
+                                          answer)))
+    (lispm-test--with-agents
+        `((tool :name "Tool" :program "emacs"
+                :new-arguments ,(lambda () (cons "0199" '("--new")))
+                :delete ,(lambda (session) (push (plist-get session :id) deleted))))
+      (let ((buffer (lispm-agents-new 'tool temporary-file-directory)))
+        (unwind-protect
+            (progn
+              (should (equal made '("emacs" "--new")))
+              (should (eq shown buffer))
+              (should (equal (buffer-local-value 'lispm-agents-buffer-session-id buffer) "0199"))
+              (should (string-prefix-p "New Tool · " (lispm-agents-buffer-label buffer))))
+          (kill-buffer buffer)))
+      (let ((session '(:agent tool :id "0200" :title "Old work")))
+        (lispm-agents-delete-session session)
+        (should (equal (car asked) '("Delete the Tool session “Old work”?" . "Delete")))
+        (should-not deleted)
+        (setq answer t)
+        (lispm-agents-delete-session session)
+        (should (equal deleted '("0200")))))))
+
+(ert-deftest lispm-test-agents-list-claims-sessions ()
+  "Listing the sessions tells a terminal started fresh which session it
+runs, the first of its agent begun there since it started, with no list
+of the agents drawn: so it is shown again rather than resumed twice."
+  (let* ((launched (float-time))
+         (buffer (generate-new-buffer "*codex:project*"))
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p))
+    (unwind-protect
+        (lispm-test--with-agents
+            `((codex :name "Codex" :program "emacs"
+                     :sessions ,(lambda ()
+                                  (list (list :agent 'codex :id "0199" :cwd "/tmp/project/"
+                                              :title "Fix the build" :time 2.0
+                                              :started (+ launched 1))))))
+          (with-current-buffer buffer
+            (setq default-directory "/tmp/project/"
+                  lispm-agents-buffer-agent 'codex
+                  lispm-agents-buffer-launched launched))
+          (should-not (lispm-agents-session-buffer "0199"))
+          (lispm-agents-sessions-list)
+          (should (equal (buffer-local-value 'lispm-agents-buffer-session-id buffer) "0199"))
+          (should (equal (lispm-agents-buffer-label buffer) "Fix the build"))
+          (should (eq (lispm-agents-session-buffer "0199") buffer)))
+      (kill-buffer buffer))))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

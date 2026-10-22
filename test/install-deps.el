@@ -15,6 +15,7 @@
 (require 'package)
 (setq package-user-dir (expand-file-name ".deps")
       package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
+                         ("nongnu" . "https://elpa.nongnu.org/nongnu/")
                          ("melpa" . "https://melpa.org/packages/")))
 (package-initialize)
 (let ((missing (seq-remove (lambda (dep)

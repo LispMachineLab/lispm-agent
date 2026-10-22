@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "30.1") (mcp "0.1"))
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -71,6 +71,11 @@
 ;;   persistence    what agents were doing outlives Emacs: turns,
 ;;                  inboxes (lispm-inbox.el), delegations, snapshots
 ;;                  (`lispm-resume-agents').
+;;
+;; Agents that are programs of their own, as Claude Code and Codex, run
+;; in terminals beside them, their sessions listed and resumed as one
+;; (lispm-agents.el), shown Emacs's state over MCP or Claude's IDE
+;; protocol (lispm-agents-context.el).
 ;;
 ;; Start with M-x lispm.  See README.org and DESIGN.org.
 
