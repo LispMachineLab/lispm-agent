@@ -102,6 +102,7 @@
   ("Choose above with its number, or write to stop and send" . "在上方按编号选择，或直接输入以停止并发送")
   ("Answer above with 1, 2 or 3" . "在上方用 1、2 或 3 回答")
   ("/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt" . "/ 命令 · RET 发送 · S-RET 换行 · TAB 展开 · C-c C-c 中断")
+  ("/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt" . "/ 命令 · RET 发送 · C-j 换行 · TAB 展开 · C-c C-c 中断")
   ("Nothing to interrupt" . "没有可中断的内容")
   ("List commands and keys" . "列出命令和按键")
   ("Start a new conversation (this one stays on record)" . "开始新对话（此对话保留在记录中）")

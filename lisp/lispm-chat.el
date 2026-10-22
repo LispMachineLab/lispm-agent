@@ -1199,7 +1199,10 @@ checked or not as `lispm-ground-code' now says."
                                    'face 'lispm-chat-dim)
                      " ")
                    "\n" (lispm-chat--rule) "\n"
-                   (propertize (concat "  " (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt"))
+                   (propertize (concat "  " (if (display-graphic-p)
+                                                (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt")
+                                              ;; A text terminal sends Return alike with Shift held.
+                                              (lispm-tr "/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt")))
                                'face 'lispm-chat-dim))))
       ;; The footer is drawn at the end of the input, where point usually
       ;; is, and Emacs would draw the cursor after it, below the hints.

@@ -102,6 +102,7 @@
   ("Choose above with its number, or write to stop and send" . "Choisissez ci-dessus par son numéro, ou écrivez pour arrêter et envoyer")
   ("Answer above with 1, 2 or 3" . "Répondez ci-dessus avec 1, 2 ou 3")
   ("/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt" . "/ pour les commandes · RET envoyer · S-RET nouvelle ligne · TAB développer · C-c C-c interrompre")
+  ("/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt" . "/ pour les commandes · RET envoyer · C-j nouvelle ligne · TAB développer · C-c C-c interrompre")
   ("Nothing to interrupt" . "Rien à interrompre")
   ("List commands and keys" . "Lister les commandes et les touches")
   ("Start a new conversation (this one stays on record)" . "Commencer une nouvelle conversation (celle-ci reste enregistrée)")

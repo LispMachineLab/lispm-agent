@@ -102,6 +102,7 @@
   ("Choose above with its number, or write to stop and send" . "請用編號選擇上方的選項，或直接輸入以停止並傳送")
   ("Answer above with 1, 2 or 3" . "請用 1、2 或 3 回答上方的問題")
   ("/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt" . "/ 指令 · RET 傳送 · S-RET 換行 · TAB 展開 · C-c C-c 中斷")
+  ("/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt" . "/ 指令 · RET 傳送 · C-j 換行 · TAB 展開 · C-c C-c 中斷")
   ("Nothing to interrupt" . "沒有可中斷的項目")
   ("List commands and keys" . "列出指令和按鍵")
   ("Start a new conversation (this one stays on record)" . "開始新的對話（目前的對話會留下紀錄）")

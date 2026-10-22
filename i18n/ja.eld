@@ -102,6 +102,7 @@
   ("Choose above with its number, or write to stop and send" . "上から番号で選ぶか、メッセージを入力すると停止して送信します")
   ("Answer above with 1, 2 or 3" . "上の確認に1、2、3で答えてください")
   ("/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt" . "/ コマンド · RET 送信 · S-RET 改行 · TAB 展開 · C-c C-c 中断")
+  ("/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt" . "/ コマンド · RET 送信 · C-j 改行 · TAB 展開 · C-c C-c 中断")
   ("Nothing to interrupt" . "中断するものはありません")
   ("List commands and keys" . "コマンドとキーを一覧表示")
   ("Start a new conversation (this one stays on record)" . "新しい会話を開始（この会話は記録に残ります）")
