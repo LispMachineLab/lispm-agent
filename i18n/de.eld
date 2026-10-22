@@ -379,6 +379,7 @@
   ("Skill %s was not deleted" . "Skill %s wurde nicht gelöscht")
   ("LispM: skill %s: a project's skill whose code you have not trusted as it is now, so it was not evaluated again (see `lispm-trust-skill')" . "LispM: Skill %s: ein Projekt-Skill, dessen Code Sie in seiner jetzigen Form nicht vertraut haben, daher wurde er nicht erneut ausgewertet (siehe `lispm-trust-skill')")
   ("LispM: skill %s: %s" . "LispM: Skill %s: %s")
+  ("LispM: a source of skills failed: %s" . "LispM: Eine Quelle von Skills ist fehlgeschlagen: %s")
   ("LispM: could not title %s: %s" . "LispM: Kein Titel für %s: %s")
   ("No agent is running; start one with M-x lispm" . "Kein Agent läuft; starten Sie einen mit M-x lispm")
   ("Role" . "Rolle")

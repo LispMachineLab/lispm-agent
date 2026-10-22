@@ -1375,8 +1375,10 @@ This runs ERT inside the ERT run of this suite."
   (with-temp-file file (insert text)))
 
 (ert-deftest lispm-test-skills ()
-  "Skills are listed, loaded with their code and tools, and restored on resume.
-A project's skill asks before its code runs; refused, its text is loaded alone."
+  "Skills are found, loaded with their code and tools, and restored on resume.
+search_tools finds a skill and names its tools without loading them; the
+skill tool lists none.  A project's skill asks before its code runs;
+refused, its text is loaded alone."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "user-skills/" project))
            (lispm-skill-directories (list user-skills))
@@ -1396,6 +1398,7 @@ A project's skill asks before its code runs; refused, its text is loaded alone."
       (setf (lispm-agent-policy agent) '((exec . auto)))
       (setq lispm-test--scripts
             `((assistant@project
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t0" "search_tools" '((query . "greet peple"))))
                ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "skill" '((name . "greet"))))
                ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "greet_tool" '((who . "Lisp"))))
                ,(lispm-test--msg "tool_use" (lispm-test--tool "t3" "skill" '((name . "local"))))
@@ -1412,10 +1415,16 @@ A project's skill asks before its code runs; refused, its text is loaded alone."
             (let ((requests (reverse lispm-test--requests)))
               (let ((skill (seq-find (lambda (tool) (equal (alist-get 'name tool) "skill"))
                                      (alist-get 'tools (nth 0 requests)))))
-                (should (string-match-p "- greet: Greet people warmly\\." (alist-get 'description skill)))
-                (should (string-match-p "- local: A project's own skill\\." (alist-get 'description skill))))
+                (should-not (string-match-p "greet\\|local" (alist-get 'description skill))))
+              ;; The search names the skill's tool, but leaves it to the skill.
               (should-not (member "greet_tool" (funcall names (nth 0 requests))))
-              (should (member "greet_tool" (funcall names (nth 1 requests)))))
+              (should-not (member "greet_tool" (funcall names (nth 1 requests))))
+              (should (member "greet_tool" (funcall names (nth 2 requests)))))
+            (let ((transcript (lispm-test--transcript agent)))
+              (should (string-match-p (concat "^- skill greet: Greet people warmly\\. "
+                                              "Its tools: greet_tool\\. Load it with skill\\.$")
+                                      transcript))
+              (should-not (string-match-p "^Tools now available: greet_tool" transcript)))
             (let ((transcript (lispm-test--transcript agent)))
               (should (string-match-p "^Skill greet loaded; tools now available: greet_tool\\.$" transcript))
               (should (string-match-p "^Use greet_tool\\.$" transcript))
@@ -1436,6 +1445,180 @@ A project's skill asks before its code runs; refused, its text is loaded alone."
                 (should (member "greet_tool" (mapcar #'lispm-tool-name (lispm-agent-tools* revived)))))))
         (remhash "greet_tool" lispm-tools--registry)
         (fmakunbound 'lispm-test-greet-helper)))))
+
+(defconst lispm-test--music-skill
+  (concat "#+title: Play music\n"
+          "#+description: Play music with EMMS: files, playlists and streams.\n\n"
+          "* What is there\nThe playlist.\n\n* Playing :care:\nAsk first.\n\n"
+          "#+begin_src emacs-lisp :lispm load\n"
+          "(defun lispm-test-music-helper () t)\n"
+          "(lispm-deftool music_play ((what string \"What.\")) \"Play WHAT with EMMS.\nMore.\"\n"
+          "  :permission media :async t\n  (funcall done what))\n"
+          "(progn (lispm-deftool music_status () \"Say what plays.\" \"silence\"))\n"
+          "(with-eval-after-load 'emms\n"
+          "  (lispm-register-tool (lispm-tool--create :name \"music_seek\" :description \"Seek.\"\n"
+          "                                           :permission 'write)))\n"
+          "#+end_src\n")
+  "A skill like LispM Store's music skill, for the tests of finding skills.")
+
+(ert-deftest lispm-test-skill-sources ()
+  "Programs register directories of skills; the user's replace theirs by name.
+A failing source is passed over; a source's skills carry its origin."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "user-skills/" project))
+           (desktop (expand-file-name "desktop-skills/" project))
+           (store (expand-file-name "store-skills/" project))
+           (lispm-skill-directories (list user-skills))
+           (lispm-write-skill-directory nil)
+           (lispm-skill-sources
+            (list (lambda () (list (list :directory desktop :origin "Test Desktop")))
+                  (lambda () (error "Broken"))
+                  (lambda () (list (list :directory store :origin "Test Store"))))))
+      (lispm-test--write (expand-file-name "windows.org" desktop)
+                         "#+title: Windows\n#+description: Arrange windows.\n")
+      (lispm-test--write (expand-file-name "music.org" store) lispm-test--music-skill)
+      (lispm-test--write (expand-file-name "windows.org" user-skills)
+                         "#+title: My windows\n#+description: The user's own.\n")
+      (let ((agent (lispm-defagent tester :root project)))
+        (should (equal (mapcar #'car (lispm-skills-directories agent))
+                       (list (file-name-as-directory desktop) (file-name-as-directory store)
+                             (file-name-as-directory user-skills)
+                             (expand-file-name ".lispm/skills/" project))))
+        (let ((skills (lispm-skills agent)))
+          (should (equal (mapcar (lambda (skill) (plist-get skill :name)) skills) '("music" "windows")))
+          (should (equal (plist-get (car skills) :origin) "Test Store"))
+          ;; The user's skill replaced the desktop's.
+          (should (equal (plist-get (cadr skills) :title) "My windows"))
+          (should-not (plist-get (cadr skills) :origin)))
+        ;; A source naming one of the user's directories brings nothing twice.
+        (let ((lispm-skill-sources (list (lambda () (list (list :directory user-skills :origin "X"))))))
+          (should (equal (mapcar #'car (lispm-skills-directories agent))
+                         (list (file-name-as-directory user-skills)
+                               (expand-file-name ".lispm/skills/" project)))))))))
+
+(ert-deftest lispm-test-skill-index ()
+  "A skill's tools are read from its code without evaluating it, until it changes."
+  (lispm-test-env
+    (let* ((user-skills (expand-file-name "user-skills/" project))
+           (file (expand-file-name "music.org" user-skills))
+           (lispm-skill-directories (list user-skills)))
+      (lispm-test--write file lispm-test--music-skill)
+      (let ((index (lispm-skills--index (lispm-skills--find "music" nil))))
+        (should (equal (plist-get index :tools)
+                       '(("music_play" media "Play WHAT with EMMS.")
+                         ("music_status" read "Say what plays.")
+                         ("music_seek" write "Seek."))))
+        (should (equal (plist-get index :headings) '("What is there" "Playing"))))
+      (should-not (fboundp 'lispm-test-music-helper))
+      (should-not (lispm-get-tool "music_play"))
+      ;; Changed, it is read again; code that does not read defines no tools.
+      (lispm-test--write file (concat "#+title: Play music\n#+description: Play.\n\n"
+                                      "* Broken\n#+begin_src emacs-lisp :lispm load\n"
+                                      "(lispm-deftool music_play () \"Play.\"\n#+end_src\n"))
+      (set-file-times file (time-add nil 10))
+      (let ((index (lispm-skills--index (lispm-skills--find "music" nil))))
+        (should-not (plist-get index :tools))
+        (should (equal (plist-get index :headings) '("Broken")))))))
+
+(ert-deftest lispm-test-search-score ()
+  "The search is fuzzy: parts of words, misspellings, names taken apart at _."
+  (let ((score (lambda (query fields) (lispm-tools-search-score (lispm-tools-search-words query) fields))))
+    (should (equal (lispm-tools-search-words "Play the music, please") '("play" "music" "please")))
+    (should (equal (lispm-tools-search-words "a") '("a")))
+    ;; The same word, the start of one, one misspelt.
+    (should (= (funcall score "music" '((1 . "Music"))) 1.0))
+    (should (> (funcall score "play" '((1 . "the playlist"))) 0))
+    (should (> (funcall score "musik" '((1 . "music"))) 0))
+    (should (> (funcall score "playing" '((1 . "play"))) 0))
+    (should (> (funcall score "play" '((1 . "music_play"))) 0))
+    (should (= (funcall score "weather" '((1 . "Play music"))) 0))
+    ;; One letter off a short word is another word, not a misspelling.
+    (should (= (funcall score "chat" '((1 . "what"))) 0))
+    (should (= (funcall score "music" '((1 . "basic"))) 0))
+    ;; Exact beats a prefix beats a misspelling.
+    (should (> (funcall score "play" '((1 . "play"))) (funcall score "play" '((1 . "playlist")))))
+    (should (> (funcall score "music" '((1 . "musical"))) (funcall score "musik" '((1 . "music")))))
+    ;; Matching every word beats matching one well.
+    (should (> (funcall score "play music" '((1 . "play some music")))
+               (funcall score "play music" '((3 . "play")))))
+    ;; A field's weight counts.
+    (should (> (funcall score "music" '((3 . "music"))) (funcall score "music" '((1 . "music")))))))
+
+(ert-deftest lispm-test-search-cutoff ()
+  "What a search finds by chance, far below the best, is left out."
+  (let ((candidates '(("app-store" . "Find applications in the App Store and install them.")
+                      ("eval_definition" . "Evaluate a definition again, to restore it.")))
+        (fields (lambda (candidate) `((3 . ,(car candidate)) (1.5 . ,(cdr candidate))))))
+    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "install an app from the store")
+                                                    candidates 5 fields))
+                   '("app-store")))
+    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "restore") candidates 5 fields))
+                   '("eval_definition")))))
+
+(ert-deftest lispm-test-search-finds-skills ()
+  "search_tools finds skills and the tools of their code, which it leaves to them.
+A misspelt or partial word finds them; select: names the skill holding a tool;
+a role is kept to; one without the skill tool is shown no skills."
+  (lispm-test-env
+    (let* ((store (expand-file-name "store-skills/" project))
+           (lispm-skill-directories nil)
+           (lispm-write-skill-directory (expand-file-name "user-skills/" project))
+           (lispm-skill-sources (list (lambda () (list (list :directory store :origin "Test Store")))))
+           (agent (lispm-defagent tester :root project))
+           (lines (lambda (found) (mapcar (lambda (other) (plist-get other :line)) (cdr found)))))
+      (lispm-test--write (expand-file-name "music.org" store) lispm-test--music-skill)
+      (lispm-register-tool (lispm-tool--create :name "test_playground" :description "A sandbox to play in."
+                                               :deferred t :function #'ignore))
+      (unwind-protect
+          (progn
+            (let ((found (lispm-tools--discover agent "playing musik" 5)))
+              (should (equal (funcall lines found)
+                             '("- skill music (Test Store): Play music with EMMS: files, playlists and streams. Its tools: music_play, music_status, music_seek. Load it with skill.")))
+              ;; A tool matching by chance, far below the skill, is left out ...
+              (should-not (car found)))
+            ;; ... and found when it matches.
+            (should (member "test_playground"
+                            (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "play sandbox" 5)))))
+            ;; A tool of a skill's code is found by its name, as its skill.
+            (should (equal (length (funcall lines (lispm-tools--discover agent "music_status" 5))) 1))
+            (should (equal (length (funcall lines (lispm-tools--discover agent "select:music_seek" 5))) 1))
+            (should-not (car (lispm-tools--discover agent "select:music_seek" 5)))
+            ;; Even registered, the tools of a skill come with it.
+            (lispm-register-tool (lispm-tool--create :name "music_play" :description "Play." :deferred t
+                                                     :function #'ignore))
+            (should-not (member "music_play" (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "play" 5)))))
+            ;; A role gives the tools it names, and search_tools with skill.
+            (setf (lispm-agent-tools agent) '(read_file skill))
+            (should (member "search_tools" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
+            (let ((found (lispm-tools--discover agent "play" 5)))
+              (should-not (car found))
+              (should (cdr found)))
+            (setf (lispm-agent-tools agent) '(read_file search_tools test_*))
+            (let ((found (lispm-tools--discover agent "play" 5)))
+              (should (equal (mapcar #'lispm-tool-name (car found)) '("test_playground")))
+              (should-not (cdr found)))
+            ;; A skill missed by name gets the nearest.
+            (let ((lispm-current-agent agent))
+              (setf (lispm-agent-tools agent) t)
+              (should (string-match-p "No skill named musc (nearest: music)"
+                                      (condition-case err
+                                          (funcall (lispm-tool-function (lispm-get-tool "skill"))
+                                                   #'ignore '((name . "musc")))
+                                        (error (error-message-string err)))))))
+        (remhash "test_playground" lispm-tools--registry)
+        (remhash "music_play" lispm-tools--registry)))))
+
+(ert-deftest lispm-test-core-tools ()
+  "Common tools are offered at once; the others are found with search_tools."
+  (lispm-test-env
+    (let ((names (mapcar #'lispm-tool-name (lispm-agent-tools* (lispm-defagent tester :root project)))))
+      (dolist (name '("read_file" "edit_file" "run_shell" "eval_elisp" "apropos" "describe_symbol"
+                      "remember" "recall" "task_add" "task_update" "task_list" "ask_agent"
+                      "send_message" "return_value" "run_lisp" "search_tools" "skill"))
+        (should (member name names)))
+      (dolist (name '("write_skill" "read_info" "inspect_agent" "forget" "list_agents"))
+        (should-not (member name names))
+        (should (lispm-tool-deferred (lispm-get-tool name)))))))
 
 (defun lispm-test--tool-names (request)
   "Names of the tools REQUEST offers."
@@ -1617,7 +1800,8 @@ longer.  Code changed while the user is asked is not evaluated."
 
 (ert-deftest lispm-test-write-skill ()
   "An agent writes a skill: always asked, previewed as its file, then evaluated and saved.
-Its tools are the agent's at once, deferred; a resumed session loads it again."
+write_skill is deferred, found with search_tools.  The skill's tools are
+the agent's at once, deferred; a resumed session loads it again."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "user-skills/" project))
            (lispm-skill-directories (list user-skills))
@@ -1629,6 +1813,8 @@ Its tools are the agent's at once, deferred; a resumed session loads it again."
       (setf (lispm-agent-policy agent) '((exec . auto) (write . auto)))
       (setq lispm-test--scripts
             `((assistant@project
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t0" "search_tools"
+                                                             '((query . "write a skill"))))
                ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "write_skill"
                                                              `((name . "shout")
                                                                (description . "Shout things.\nLoudly.")
@@ -1656,9 +1842,11 @@ Its tools are the agent's at once, deferred; a resumed session loads it again."
               (should (string-match-p "^Saved as .*/user-skills/shout\\.org: " transcript))
               (should (string-match-p "^HI$" transcript)))
             (let ((requests (reverse lispm-test--requests)))
-              (should (member "write_skill" (lispm-test--tool-names (nth 0 requests))))
-              (should-not (member "shout_tool" (lispm-test--tool-names (nth 0 requests))))
-              (should (member "shout_tool" (lispm-test--tool-names (nth 1 requests)))))
+              ;; Deferred: found with search_tools first.
+              (should-not (member "write_skill" (lispm-test--tool-names (nth 0 requests))))
+              (should (member "write_skill" (lispm-test--tool-names (nth 1 requests))))
+              (should-not (member "shout_tool" (lispm-test--tool-names (nth 1 requests))))
+              (should (member "shout_tool" (lispm-test--tool-names (nth 2 requests)))))
             ;; Deferred: another agent does not carry it until it loads the skill.
             (should (lispm-tool-deferred (lispm-get-tool "shout_tool")))
             (should-not (member "shout_tool" (mapcar #'lispm-tool-name
@@ -6903,17 +7091,24 @@ holds no longer.  Run with `make i18n'."
 (defmacro lispm-test--with-agents (agents &rest body)
   "Run BODY with AGENTS, (AGENT . PROPERTIES), the only agents defined,
 their keys bound in keymaps of the test's own: `lispm-agents-map''s
-and that of a list of the agents."
+and that of a list of the agents.  The state of sessions is kept in a
+scratch directory, never the user's."
   (declare (indent 1))
-  `(let ((lispm-agents-defined nil)
-         (lispm-agents--keys nil)
-         (lispm-agents--root-cache (make-hash-table :test #'equal))
-         (lispm-agents-map (make-sparse-keymap))
-         (lispm-test--agent-list-map (make-sparse-keymap))
-         (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map)))
-     (pcase-dolist (`(,agent . ,props) ,agents)
-       (apply #'lispm-agents-define agent props))
-     ,@body))
+  `(let* ((lispm-agents-defined nil)
+          (lispm-agents--keys nil)
+          (lispm-agents--root-cache (make-hash-table :test #'equal))
+          (lispm-agents-map (make-sparse-keymap))
+          (lispm-test--agent-list-map (make-sparse-keymap))
+          (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map))
+          (lispm-test--agents-state (make-temp-file "lispm-test-agents-" t))
+          (lispm-agents-state-file (expand-file-name "agent-sessions.eld" lispm-test--agents-state))
+          (lispm-agents--archived 'unloaded))
+     (unwind-protect
+         (progn
+           (pcase-dolist (`(,agent . ,props) ,agents)
+             (apply #'lispm-agents-define agent props))
+           ,@body)
+       (delete-directory lispm-test--agents-state t))))
 
 (ert-deftest lispm-test-agent-available-p ()
   "An agent run as a CLI can run exactly when its program is on PATH; one

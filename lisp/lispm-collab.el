@@ -70,7 +70,7 @@
   "The agent NAME designates, which must not be CALLER (default: the acting agent).
 NAME is as for `lispm-get-agent'."
   (let ((agent (or (lispm-get-agent name t)
-                   (error "No agent or role named %s; list_agents shows them" name))))
+                   (error "No agent or role named %s; list_agents, which search_tools finds, shows them" name))))
     (when (eq agent (or caller lispm-current-agent))
       (error "That is you"))
     agent))
@@ -229,6 +229,7 @@ Then it stays, to answer them, as an agent of its own."
   "List the running agents (role, project, state, activity) and the roles
 helpers can be started from."
   :permission comm
+  :deferred t
   (concat "Running agents:\n"
           (mapconcat (lambda (a)
                        (format "- %s%s (%s, in %s) [%s%s]" (lispm-agent-name a)
@@ -253,7 +254,7 @@ when you need the answer to continue."
             (if (lispm-agent-busy-p target) ", who is busy and will read it next" ""))))
 
 (lispm-deftool ask_agent
-    ((agent string "A running agent, or a role to start a helper from (see list_agents).")
+    ((agent string "A running agent, or a role to start a helper from (list_agents, which search_tools finds, shows them).")
      (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Delegate a request and wait for the final reply, which becomes the
 result of this call.  Ask a running agent better placed for it, or

@@ -61,7 +61,9 @@
   "Find what this Emacs can do: the functions, commands, variables and
 faces whose names match PATTERN, each with the first line of its
 documentation.  Then learn one with describe_symbol, or its manual
-with read_info, and use it with eval_elisp."
+with read_info, which search_tools finds, and use it with eval_elisp.
+For the parts and apps of this system, their skills say more:
+search_tools finds them too."
   :permission read
   (let* ((words (split-string pattern "[ \t]+" t))
          (regexp (and (null (cdr words))
@@ -106,6 +108,7 @@ with read_info, and use it with eval_elisp."
 with examples.  Start at a manual's Top node, follow the names in its
 menus, or look a term up in its index."
   :permission read
+  :deferred t
   (with-temp-buffer
     (Info-mode)
     (let ((manual (or manual (if search "emacs" "dir"))))

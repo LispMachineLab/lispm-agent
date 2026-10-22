@@ -404,6 +404,7 @@ the current task."
     ((title string "Exact title of the memory to delete."))
   "Delete an entry from long-term memory, e.g. when it is wrong or obsolete."
   :permission memory
+  :deferred t
   (lispm-memory-forget lispm-current-agent title))
 
 (lispm-deftool task_add
