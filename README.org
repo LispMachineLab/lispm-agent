@@ -183,8 +183,9 @@ every option.
 * Tools and Lisp
 
 - Common tools are always offered.  The rest (MCP tools, Lisp development tools, tools agents
-  define) are deferred: the model loads them with ~search_tools~ when needed, so they cost no
-  context until then.
+  define, seldom needed ones such as ~read_info~ and ~write_skill~) are deferred: the model
+  finds them with ~search_tools~ when needed, so they cost no context until then.  The search
+  is fuzzy: a word may be part of a longer one, or misspelt.
 - ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
   the agent's tools are functions, each call going through the policy as if the model made it.
 - Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
@@ -194,11 +195,21 @@ every option.
 * Skills
 
 A skill is an org file of instructions whose source blocks marked ~:lispm load~ define helpers
-and tools; agents load one when a request calls for it.  Yours go in =~/.lispm/skills/=, a
-project's in its =.lispm/skills/=, whose code runs only after you have seen it.  ~write_skill~
-lets an agent keep a tool it wrote, and always asks.  LispM comes with ~web~ (~web_search~,
-~web_fetch~) and ~worktree~; ~M-x lispm-install-skill~ and ~M-x lispm-install-role~ install others,
-such as those of [[https://github.com/LispMachineLab/lispm-store][LispM Store]].
+and tools: the manual of a part of the system or of an app.  Agents find skills with
+~search_tools~, by what they say and the tools they define, and load one when a request calls
+for it; no list of them fills the context.  Yours go in =~/.lispm/skills/=, a project's in its
+=.lispm/skills/=, whose code runs only after you have seen it.  ~write_skill~ lets an agent keep
+a tool it wrote, and always asks.  LispM comes with ~web~ (~web_search~, ~web_fetch~) and
+~worktree~; ~M-x lispm-install-skill~ and ~M-x lispm-install-role~ install others, such as those
+of [[https://github.com/LispMachineLab/lispm-store][LispM Store]].
+
+Other programs bring skills through ~lispm-skill-sources~, as LispM Desktop does for the system
+it ships and for the apps its App Store installs:
+
+#+begin_src emacs-lisp
+(add-hook 'lispm-skill-sources
+          (lambda () (list (list :directory "~/src/my-app/skills/" :origin "My App"))))
+#+end_src
 
 * MCP servers and computer use
 

@@ -36,12 +36,17 @@
 ;; ~/.lispm/skills/ for the user's own, and .lispm/skills/ in a project.
 ;; A skill is NAME.org, or NAME/SKILL.org with files of its own beside.
 ;;
-;; Agents see each skill's name and description in the description of
-;; the skill tool, and load one when a request calls for it: its text
-;; becomes the call's result, so the conversation holds it from then
-;; on, and its code is evaluated, so its functions exist and its tools
-;; are the agent's: deferred tools, loaded for it.  A resumed session
-;; evaluates again the code of the skills it had loaded.
+;; Other programs bring skills too, the manuals of their parts and
+;; apps: they say where theirs are through `lispm-skill-sources'.
+;;
+;; Agents find skills with search_tools, which reads every skill's
+;; title, description, headings and the tools its code defines, without
+;; evaluating anything (`lispm-skills--index'), and load one with the
+;; skill tool when a request calls for it: its text becomes the call's
+;; result, so the conversation holds it from then on, and its code is
+;; evaluated, so its functions exist and its tools are the agent's:
+;; deferred tools, loaded for it.  A resumed session evaluates again
+;; the code of the skills it had loaded.
 ;;
 ;; A project may come from anywhere, so the code of its skills is
 ;; evaluated only once the user has seen it and agreed, asked when an
@@ -101,6 +106,34 @@ entry, as `lispm-trust-skill' does; both save it with Customize."
   :type '(alist :key-type file :value-type string)
   :group 'lispm)
 
+(defvar lispm-skill-sources nil
+  "Functions saying where the skills other programs bring are.
+Each is called with no arguments and returns a list of plists, one
+per directory of skills:
+  :directory  the directory, holding skills as those of
+              `lispm-skill-directories' do
+  :origin     who brings them, a short name shown with them, such as
+              that of the program they come with
+Their code is evaluated unasked, as that of the program bringing
+them is.  A skill of `lispm-skill-directories', of the directory
+write_skill saves in or of the agent's project replaces one of
+theirs of the same name.")
+
+(defun lispm-skills--sourced ()
+  "The directories `lispm-skill-sources' names: (DIRECTORY . ORIGIN), in order."
+  (let (directories)
+    (dolist (source lispm-skill-sources)
+      (when (functionp source)
+        (condition-case err
+            (dolist (entry (funcall source))
+              (when-let* ((directory (plist-get entry :directory)))
+                (push (cons (file-name-as-directory (expand-file-name directory))
+                            (plist-get entry :origin))
+                      directories)))
+          (error (message "%s" (lispm-tr "LispM: a source of skills failed: %s"
+                                         (error-message-string err)))))))
+    (nreverse directories)))
+
 (defun lispm-skills--read (file)
   "The skill in FILE: a plist (:name :title :description :file)."
   (with-temp-buffer
@@ -133,31 +166,39 @@ entry, as `lispm-trust-skill' does; both save it with Customize."
    (expand-file-name (or lispm-write-skill-directory (car (last lispm-skill-directories))
                          "~/.lispm/skills/"))))
 
-(defun lispm-skills--directories (agent)
+(defun lispm-skills-directories (&optional agent)
   "The directories of the skills AGENT can load, in order: (DIRECTORY . PROJECT).
-Those of `lispm-skill-directories', the one write_skill saves in, then
-AGENT's project's .lispm/skills/, PROJECT non-nil for that one alone.
-It is left out if it is one of the others, as it is for an agent
-working in the home directory: what the user keeps there is theirs."
+Those `lispm-skill-sources' names, those of `lispm-skill-directories',
+the one write_skill saves in, then AGENT's project's .lispm/skills/,
+PROJECT non-nil for that one alone.  A skill of a later one replaces
+one of the same name of an earlier one.  The project's is left out if
+it is one of the others, as it is for an agent working in the home
+directory: what the user keeps there is theirs."
   (let* ((directories (mapcar (lambda (directory) (file-name-as-directory (expand-file-name directory)))
                               lispm-skill-directories))
          (directories (if (member (lispm-skills--write-directory) directories)
                           directories
                         (append directories (list (lispm-skills--write-directory)))))
+         (directories (append (seq-remove (lambda (directory) (member directory directories))
+                                          (seq-uniq (mapcar #'car (lispm-skills--sourced))))
+                              directories))
          (project (and agent (expand-file-name ".lispm/skills/" (lispm-agent-root agent)))))
     (append (mapcar (lambda (directory) (cons directory nil)) directories)
             (and project (not (member project directories)) (list (cons project t))))))
 
 (defun lispm-skills (&optional agent)
   "The skills AGENT can load, by name: a list of plists.
-Each has :name, :title, :description, :file and :project, non-nil for
-a skill of AGENT's project, whose code is evaluated only once the user
-trusts it (see `lispm-skill-trusted-p')."
-  (let ((skills nil))
-    (pcase-dolist (`(,directory . ,project) (lispm-skills--directories agent))
+Each has :name, :title, :description, :file, :origin, the origin of
+the skills of its directory as `lispm-skill-sources' gives it, if it
+does, and :project, non-nil for a skill of AGENT's project, whose code
+is evaluated only once the user trusts it (see `lispm-skill-trusted-p')."
+  (let ((origins (lispm-skills--sourced))
+        (skills nil))
+    (pcase-dolist (`(,directory . ,project) (lispm-skills-directories agent))
       (dolist (skill (lispm-skills--in directory))
         (setf (alist-get (plist-get skill :name) skills nil nil #'equal)
-              (plist-put skill :project project))))
+              (plist-put (plist-put skill :project project)
+                         :origin (cdr (assoc directory origins))))))
     (sort (mapcar #'cdr skills)
           (lambda (a b) (string< (plist-get a :name) (plist-get b :name))))))
 
@@ -210,6 +251,113 @@ code is evaluated as written or not at all."
 (defun lispm-skills--forms (text)
   "The Lisp forms of the blocks of the skill TEXT marked :lispm load."
   (mapcan #'lispm-skills--read-code (lispm-skills--blocks text)))
+
+;;;; What searches find skills by
+
+(defvar lispm-skills--indexed (make-hash-table :test #'equal)
+  "File -> (STAMP . ENTRY), what `lispm-skills--index' read of a skill's file.")
+
+(defun lispm-skills--stamp (file)
+  "What changes when FILE does: its modification time and size, or nil."
+  (when-let* ((attributes (file-attributes file)))
+    (list (file-attribute-modification-time attributes) (file-attribute-size attributes))))
+
+(defun lispm-skills--headings (text)
+  "The titles of the org headings of TEXT, without their tags."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((case-fold-search nil) headings)
+      (while (re-search-forward "^\\*+[ \t]+\\(.*?\\)\\(?:[ \t]+:[[:alnum:]_@#%:]+:\\)?[ \t]*$" nil t)
+        (push (match-string-no-properties 1) headings))
+      (nreverse headings))))
+
+(defun lispm-skills--tool-forms (form)
+  "The tools FORM defines, read, not evaluated: (NAME PERMISSION SUMMARY)s.
+FORM is one of the code of a skill.  It defines those of its
+`lispm-deftool' and `lispm-register-tool' forms that name the tool and
+describe it literally, and those of the forms it holds as `progn',
+`with-eval-after-load', `when' and `unless' do.  SUMMARY is the first
+line of the tool's description."
+  (let ((summary (lambda (doc) (if (stringp doc) (car (split-string doc "\n")) ""))))
+    (pcase form
+      (`(lispm-deftool ,(and name (pred symbolp)) ,_params ,(and doc (pred stringp)) . ,body)
+       (let ((permission 'read))
+         (while (keywordp (car-safe body))
+           (if (eq (pop body) :permission)
+               (setq permission (pop body))
+             (pop body)))
+         (list (list (symbol-name name) permission (funcall summary doc)))))
+      (`(lispm-register-tool (lispm-tool--create . ,(and spec (pred plistp))))
+       (when (stringp (plist-get spec :name))
+         (list (list (plist-get spec :name)
+                     (pcase (plist-get spec :permission) (`(quote ,class) class) (_ 'read))
+                     (funcall summary (plist-get spec :description))))))
+      (`(progn . ,body) (mapcan #'lispm-skills--tool-forms body))
+      (`(,(or 'with-eval-after-load 'when 'unless) ,_ . ,body)
+       (mapcan #'lispm-skills--tool-forms body)))))
+
+(defun lispm-skills--index (skill)
+  "What a search finds SKILL by, read from its file, its code not evaluated.
+A plist: :headings, the titles of its headings, and :tools, the tools
+its code defines, as `lispm-skills--tool-forms' tells them; code that
+does not read defines none.  Kept until the file changes."
+  (let* ((file (plist-get skill :file))
+         (stamp (lispm-skills--stamp file))
+         (kept (gethash file lispm-skills--indexed)))
+    (if (and kept (equal (car kept) stamp))
+        (cdr kept)
+      (let* ((text (lispm-skills--file-text file))
+             (entry (list :headings (lispm-skills--headings text)
+                          :tools (condition-case nil
+                                     (mapcan #'lispm-skills--tool-forms (lispm-skills--forms text))
+                                   (error nil)))))
+        (puthash file (cons stamp entry) lispm-skills--indexed)
+        entry))))
+
+(defun lispm-skills--found-line (skill tools)
+  "How a search_tools result tells of SKILL, whose code defines TOOLS."
+  (format "- skill %s%s: %s.%s Load it with skill."
+          (plist-get skill :name)
+          (cond ((plist-get skill :project) " (this project's)")
+                ((plist-get skill :origin) (format " (%s)" (plist-get skill :origin)))
+                (t ""))
+          (string-remove-suffix "." (plist-get skill :description))
+          (if tools (format " Its tools: %s." (string-join (mapcar #'car tools) ", ")) "")))
+
+(defun lispm-skills--search (agent)
+  "The skills AGENT can load, as things for search_tools to find.
+See `lispm-tool-search-functions'.  None if AGENT may not load skills."
+  (when (lispm-tools-allowed-p agent "skill")
+    (mapcar (lambda (skill)
+              (let* ((index (lispm-skills--index skill))
+                     (tools (plist-get index :tools)))
+                (list :fields `((3 . ,(plist-get skill :name))
+                                (2 . ,(plist-get skill :title))
+                                (1.5 . ,(plist-get skill :description))
+                                ,@(mapcar (lambda (heading) (cons 1 heading)) (plist-get index :headings))
+                                ,@(mapcan (lambda (tool) (list (cons 3 (car tool)) (cons 1 (nth 2 tool))))
+                                          tools))
+                      :line (lispm-skills--found-line skill tools)
+                      :tools (mapcar #'car tools))))
+            (lispm-skills agent))))
+
+(add-hook 'lispm-tool-search-functions #'lispm-skills--search)
+
+(defun lispm-skills--nearest (name agent)
+  "The names of the skills AGENT can load nearest to NAME, at most five."
+  (let ((words (lispm-tools-search-words name)))
+    (mapcar #'car
+            (seq-take (seq-filter (lambda (entry) (> (cdr entry) 0))
+                                  (cl-stable-sort
+                                   (mapcar (lambda (skill)
+                                             (cons (plist-get skill :name)
+                                                   (lispm-tools-search-score
+                                                    words `((3 . ,(plist-get skill :name))
+                                                            (2 . ,(plist-get skill :title))))))
+                                           (lispm-skills agent))
+                                   #'> :key #'cdr))
+                      5))))
 
 (defun lispm-skills--evaluate (skill agent forms)
   "Evaluate FORMS, the code of SKILL, for AGENT; return the tools it defines.
@@ -461,17 +609,13 @@ is shown before you decide."
  (lispm-tool--create
   :name "skill"
   :description
-  (lambda ()
-    (concat "Load a skill: how to do a kind of thing with Emacs, which is your operating system. "
-            "Load one when a request calls for it; its instructions are then yours, and its tools "
-            "too, from your next step on. The code of a skill of your project (.lispm/skills/ in "
-            "your root) runs only if the user lets it: else you get the instructions alone. To keep "
-            "what you worked out, such as a tool you defined, for later sessions, write a skill "
-            "with write_skill.\n"
-            "Skills:\n"
-            (mapconcat (lambda (skill)
-                         (format "- %s: %s" (plist-get skill :name) (plist-get skill :description)))
-                       (lispm-skills lispm-current-agent) "\n")))
+  (concat "Load a skill that search_tools found, by its name. A skill is the manual of a part of "
+          "this system or of an app: how to do a kind of thing with Emacs, which is your operating "
+          "system, often with tools to do it. Load one when a request calls for it; its "
+          "instructions are then yours, and its tools too, from your next step on. The code of a "
+          "skill of your project (.lispm/skills/ in your root) runs only if the user lets it: else "
+          "you get the instructions alone. To keep what you worked out, such as a tool you "
+          "defined, for later sessions, write a skill with write_skill, which search_tools finds.")
   :input-schema
   '((type . "object")
     (properties (name (type . "string") (description . "The skill to load.")))
@@ -484,8 +628,9 @@ is shown before you decide."
            (name (alist-get 'name input))
            (skill (lispm-skills--find name agent)))
       (unless skill
-        (error "No skill named %s; there are: %s" name
-               (mapconcat (lambda (s) (plist-get s :name)) (lispm-skills agent) ", ")))
+        (let ((nearest (and (stringp name) (lispm-skills--nearest name agent))))
+          (error "No skill named %s%s; search_tools finds skills by what they do" name
+                 (if nearest (format " (nearest: %s)" (string-join nearest ", ")) ""))))
       (let* ((text (lispm-skills--file-text (plist-get skill :file)))
              (problem nil)
              (forms (condition-case err
@@ -564,6 +709,7 @@ the user's skills, its tools yours from your next step on.  Writing a
 skill of the same name you wrote before replaces it.  Test the code
 with eval_elisp first."
   :permission exec
+  :deferred t
   :always-ask t
   :preview #'lispm-skills--write-preview
   (let* ((agent lispm-current-agent)

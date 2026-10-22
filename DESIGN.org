@@ -249,11 +249,12 @@ its own, so made-up names stay unknown to the image. What is found is data, ~(un
   Emacs regexps lack (lookaround) rather than silently matching something else.
 - Built-in tools, the core layer every agent carries (section 10 explains the deferred others
   and ~search_tools~): ~read_file~ ~list_directory~ ~search_files~ ~list_buffers~ ~read_buffer~
-  ~describe_symbol~ ~apropos~ ~read_info~ ~skill~ (read); ~edit_file~ ~write_file~
-  ~edit_buffer~ (write); ~run_shell~ (shell); ~eval_elisp~ ~write_skill~ (exec); ~run_lisp~ (lisp);
-  memory, task and collaboration tools are described below. Deferred, for Lisp in the image
-  (below): ~xref_definitions~ ~xref_references~ ~flymake_diagnostics~ (read);
-  ~edit_definition~ (write); ~eval_definition~ ~ert_run~ (exec).
+  ~describe_symbol~ ~apropos~ ~search_tools~ ~skill~ (read); ~edit_file~ ~write_file~
+  ~edit_buffer~ (write); ~run_shell~ (shell); ~eval_elisp~ (exec); ~run_lisp~ (lisp); the
+  memory, task and collaboration tools described below. Deferred, as seldom needed:
+  ~read_info~ (read), ~write_skill~ (exec), ~forget~ (memory), ~list_agents~ ~inspect_agent~
+  (comm); and for Lisp in the image (below): ~xref_definitions~ ~xref_references~
+  ~flymake_diagnostics~ (read); ~edit_definition~ (write); ~eval_definition~ ~ert_run~ (exec).
 - *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
   ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
   what an agent lacks is knowing what there is. It finds out as a person would: ~apropos~
@@ -625,7 +626,8 @@ Agents share one Emacs: the same buffers, the same files, the same event loop. C
 needs only three tools, and two more to see each other and to answer with data:
 
 - ~list_agents~: who is running, in which project, doing what, and which roles exist
-  (~inspect_agent~ shows one in depth);
+  (~inspect_agent~ shows one in depth); both are deferred, since the system prompt already
+  names the running agents and the roles;
 - ~send_message~: delivered to the other agent's inbox, where it becomes a
   ~* Message from X~ turn;
 - ~ask_agent~: *delegation*. The caller's tool call stays pending (an asynchronous tool); when
@@ -786,8 +788,12 @@ adds what an agent runtime needs on top:
 tokens, and a few servers would crowd out the conversation. So an agent carries a core layer,
 the tools it commonly needs, and the others are deferred: offered only once the model has
 found them with ~search_tools~, which lists the sources of deferred tools (an MCP server, with
-its ~:description~) and searches their tools by keywords, scoring names above descriptions, or
-takes exact names (~select:A,B~). The tools it finds are loaded for the agent and offered from
+its ~:description~) and searches their tools by keywords, or takes exact names
+(~select:A,B~). The search is fuzzy (~lispm-tools-search-score~): a word matches one it equals,
+begins, is begun by or holds, or one it misspells by a letter or two, names are taken apart at
+~_~ and ~-~, a name counts above a description, and what matches every word comes before what
+matches one well. It finds skills too, and whatever else ~lispm-tool-search-functions~ offers
+(section 11). The tools it finds are loaded for the agent and offered from
 its next request on, for the rest of the session (~lispm-agent-loaded-tools~); the tool list
 changes then, which costs the cached request prefix once. A resumed session loads them again
 from its transcript, which records the searches and the calls. Sources register through
@@ -829,11 +835,29 @@ LispM's own ~skills/~, the user's ~~/.lispm/skills/~, then the agent's project's
 ~.lispm/skills/~, a later skill replacing an earlier one of the same name. For an agent working
 in the home directory, ~~/.lispm/skills/~ is the user's, not a project's.
 
-Skills are loaded in two steps too. The ~skill~ tool's description lists every skill's name
-and description; when a request calls for one, the model loads it, its text becomes the
-call's result, so the conversation holds it from then on without changing the request's tool
-list, and its code is evaluated. A resumed session evaluates again the code of the skills it
-loaded.
+*Skills are the system's manuals.* Every part and app of the system brings the skill that
+says how to use it, with the tools to do so. Programs other than LispM register theirs through
+~lispm-skill-sources~: functions returning the directories of their skills, each with its
+~:origin~, a name shown with them. They come before ~lispm-skill-directories~, so the user's
+own skill replaces one of theirs of the same name, and their code is evaluated unasked, as the
+program bringing them is. LispM Desktop registers so the skills of the system it ships and
+those its App Store installs with the apps they drive; LispM knows nothing of either.
+~lispm-skills-directories~ tells every directory, for tools such as LispM Security's
+inventory.
+
+Skills are found and loaded in two steps too. No list of them is sent: there may be many, and
+a list would change the request prefix whenever one is installed. ~search_tools~ finds them,
+by their name, title, description and headings and by the tools their code defines, read
+from the code without evaluating it (~lispm-skills--index~, kept until the file changes): a
+~lispm-deftool~ form, or a ~lispm-register-tool~ one naming its tool literally, at top level
+or in ~progn~, ~with-eval-after-load~, ~when~ or ~unless~. It names each skill with its
+origin and its tools, and loads none of those tools: a skill's tools come with the skill, so
+the model reads how to use them first. The role's tools are kept to: a skill is shown only
+to an agent whose role gives it ~skill~, which gives ~search_tools~ with it. When a request
+calls for a skill, the model loads it with ~skill~, by name (a name missed gets the nearest),
+its text becomes the call's result, so the conversation holds it from then on without
+changing the request's tool list, and its code is evaluated. A resumed session evaluates
+again the code of the skills it loaded.
 
 *A project's skills* may come from anywhere, as a cloned repository does, so their code runs
 only once the user has seen it and agreed. Loading one asks, through the call of ~skill~, as a

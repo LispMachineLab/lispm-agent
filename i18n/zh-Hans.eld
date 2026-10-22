@@ -379,6 +379,7 @@
   ("Skill %s was not deleted" . "未删除技能 %s")
   ("LispM: skill %s: a project's skill whose code you have not trusted as it is now, so it was not evaluated again (see `lispm-trust-skill')" . "LispM：技能 %s：这是项目的技能，你尚未信任其当前代码，因此没有再次求值（参见 `lispm-trust-skill'）")
   ("LispM: skill %s: %s" . "LispM：技能 %s：%s")
+  ("LispM: a source of skills failed: %s" . "LispM：一个技能来源出错：%s")
   ("LispM: could not title %s: %s" . "LispM：无法为 %s 生成标题：%s")
   ("No agent is running; start one with M-x lispm" . "没有正在运行的智能体；请用 M-x lispm 启动一个")
   ("Role" . "角色")

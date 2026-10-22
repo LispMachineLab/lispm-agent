@@ -543,6 +543,7 @@ Interactively, the agent of the current session or chat, or one read."
 what they wait for, its inbox, whom it waits on and who waits on it,
 its policy and ceiling, and the files its turns changed."
   :permission comm
+  :deferred t
   (lispm-inspect-text (if agent
                           (or (lispm-get-agent agent t)
                               (error "No agent named %s; list_agents shows them" agent))

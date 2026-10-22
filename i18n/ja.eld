@@ -379,6 +379,7 @@
   ("Skill %s was not deleted" . "スキル%sは削除されませんでした")
   ("LispM: skill %s: a project's skill whose code you have not trusted as it is now, so it was not evaluated again (see `lispm-trust-skill')" . "LispM：スキル%s：現在のコードが信頼されていないプロジェクトのスキルのため、再評価しませんでした（`lispm-trust-skill'を参照）")
   ("LispM: skill %s: %s" . "LispM：スキル%s：%s")
+  ("LispM: a source of skills failed: %s" . "LispM：スキルの提供元でエラーが起きました：%s")
   ("LispM: could not title %s: %s" . "LispM：%sにタイトルを付けられませんでした：%s")
   ("No agent is running; start one with M-x lispm" . "実行中のエージェントはありません。M-x lispmで開始してください")
   ("Role" . "役割")
