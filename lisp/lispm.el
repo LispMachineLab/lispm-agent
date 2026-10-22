@@ -101,6 +101,7 @@
 (require 'lispm-develop)
 (require 'lispm-skills)
 (require 'lispm-inspect)
+(require 'lispm-settings)
 (require 'lispm-chat)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
