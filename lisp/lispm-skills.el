@@ -345,16 +345,20 @@ See `lispm-tool-search-functions'.  None if AGENT may not load skills."
 (add-hook 'lispm-tool-search-functions #'lispm-skills--search)
 
 (defun lispm-skills--nearest (name agent)
-  "The names of the skills AGENT can load nearest to NAME, at most five."
-  (let ((words (lispm-tools-search-words name)))
+  "The names of the skills AGENT can load nearest to NAME, at most five.
+Those a search for NAME finds, and those whose names are NAME a few
+letters off, as a name mistyped is."
+  (let ((words (lispm-tools-search-words name))
+        (near (lambda (other) (<= (string-distance name other) (max 1 (/ (length other) 3))))))
     (mapcar #'car
             (seq-take (seq-filter (lambda (entry) (> (cdr entry) 0))
                                   (cl-stable-sort
                                    (mapcar (lambda (skill)
-                                             (cons (plist-get skill :name)
-                                                   (lispm-tools-search-score
-                                                    words `((3 . ,(plist-get skill :name))
-                                                            (2 . ,(plist-get skill :title))))))
+                                             (let ((other (plist-get skill :name)))
+                                               (cons other
+                                                     (+ (lispm-tools-search-score
+                                                         words `((3 . ,other) (2 . ,(plist-get skill :title))))
+                                                        (if (funcall near other) 1 0)))))
                                            (lispm-skills agent))
                                    #'> :key #'cdr))
                       5))))

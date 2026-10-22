@@ -790,9 +790,12 @@ the tools it commonly needs, and the others are deferred: offered only once the 
 found them with ~search_tools~, which lists the sources of deferred tools (an MCP server, with
 its ~:description~) and searches their tools by keywords, or takes exact names
 (~select:A,B~). The search is fuzzy (~lispm-tools-search-score~): a word matches one it equals,
-begins, is begun by or holds, or one it misspells by a letter or two, names are taken apart at
-~_~ and ~-~, a name counts above a description, and what matches every word comes before what
-matches one well. It finds skills too, and whatever else ~lispm-tool-search-functions~ offers
+begins, is begun by or holds, or, if five letters long or more, one it misspells by a letter or
+two after the same first letter (one letter off a shorter word is another word: "chat" and
+"what"); names are taken apart at ~_~ and ~-~, a name counts above a description, and what
+matches every word comes before what matches one well. What scores under a third of the best
+is left out (~lispm-tools--search-cutoff~): it matched by chance, and a tool found is offered
+in every request after. It finds skills too, and whatever else ~lispm-tool-search-functions~ offers
 (section 11). The tools it finds are loaded for the agent and offered from
 its next request on, for the rest of the session (~lispm-agent-loaded-tools~); the tool list
 changes then, which costs the cached request prefix once. A resumed session loads them again

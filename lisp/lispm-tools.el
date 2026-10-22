@@ -486,8 +486,8 @@ one per thing it can find:
 ;;;;; Fuzzy search
 
 (defconst lispm-tools--search-stop-words
-  '("a" "an" "and" "any" "can" "do" "for" "how" "i" "in" "is" "it" "me" "my" "of" "on" "or"
-    "some" "the" "to" "with")
+  '("a" "an" "and" "any" "as" "at" "be" "by" "can" "do" "for" "from" "how" "i" "in" "into" "is"
+    "it" "me" "my" "of" "on" "or" "some" "the" "to" "use" "with")
   "Words of a search that say nothing of what it looks for.")
 
 (defun lispm-tools-search-words (query)
@@ -518,7 +518,9 @@ Words holding _ or - are taken apart too."
           ((and (>= lw 3) (string-prefix-p word token)) 0.8)
           ((and (>= lt 4) (string-prefix-p token word)) 0.7)
           ((and (>= lw 4) (string-search word token)) 0.5)
-          ((and (>= lw 4) (>= lt 4)
+          ;; A misspelling: the same first letter, a word long enough that
+          ;; one letter off is no other word, as "chat" is "what".
+          ((and (>= lw 5) (>= lt 5) (eq (aref word 0) (aref token 0))
                 (let ((most (if (>= lw 8) 2 1)))
                   (and (<= (abs (- lw lt)) most) (<= (string-distance word token) most))))
            0.4)
@@ -555,21 +557,28 @@ may be nil."
   "What a search finds TOOL by, as `lispm-tools-search-score' takes it."
   `((3 . ,(lispm-tool-name tool)) (1.5 . ,(lispm-tools--description tool))))
 
+(defconst lispm-tools--search-cutoff 0.3
+  "The least share of the best score a thing a search finds must score.
+What scores less matches by chance, as a word found inside another
+does, and would cost a request room for nothing.")
+
 (defun lispm-tools--rank (words candidates limit fields)
   "The CANDIDATES the search WORDS match best, at most LIMIT, best first.
-FIELDS is a function of a candidate, what it is found by.  With no
-WORDS, the first LIMIT of the candidates; equal ones keep their order."
+FIELDS is a function of a candidate, what it is found by.  Those
+scoring less than `lispm-tools--search-cutoff' of the best are left
+out.  With no WORDS, the first LIMIT of the candidates; equal ones
+keep their order."
   (if (null words)
       (seq-take candidates limit)
-    (mapcar #'cdr
-            (seq-take (cl-stable-sort
-                       (seq-filter (lambda (pair) (> (car pair) 0))
-                                   (mapcar (lambda (candidate)
-                                             (cons (lispm-tools-search-score words (funcall fields candidate))
-                                                   candidate))
-                                           candidates))
-                       #'> :key #'car)
-                      limit))))
+    (let* ((scored (cl-stable-sort
+                    (seq-filter (lambda (pair) (> (car pair) 0))
+                                (mapcar (lambda (candidate)
+                                          (cons (lispm-tools-search-score words (funcall fields candidate))
+                                                candidate))
+                                        candidates))
+                    #'> :key #'car))
+           (least (* lispm-tools--search-cutoff (or (caar scored) 0))))
+      (mapcar #'cdr (seq-take (seq-take-while (lambda (pair) (>= (car pair) least)) scored) limit)))))
 
 (defun lispm-tools--named-sources (query sources)
   "The SOURCES a word of QUERY names, and QUERY's other words: (NAMED . WORDS)."

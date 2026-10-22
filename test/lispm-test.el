@@ -1532,6 +1532,9 @@ A failing source is passed over; a source's skills carry its origin."
     (should (> (funcall score "playing" '((1 . "play"))) 0))
     (should (> (funcall score "play" '((1 . "music_play"))) 0))
     (should (= (funcall score "weather" '((1 . "Play music"))) 0))
+    ;; One letter off a short word is another word, not a misspelling.
+    (should (= (funcall score "chat" '((1 . "what"))) 0))
+    (should (= (funcall score "music" '((1 . "basic"))) 0))
     ;; Exact beats a prefix beats a misspelling.
     (should (> (funcall score "play" '((1 . "play"))) (funcall score "play" '((1 . "playlist")))))
     (should (> (funcall score "music" '((1 . "musical"))) (funcall score "musik" '((1 . "music")))))
@@ -1540,6 +1543,17 @@ A failing source is passed over; a source's skills carry its origin."
                (funcall score "play music" '((3 . "play")))))
     ;; A field's weight counts.
     (should (> (funcall score "music" '((3 . "music"))) (funcall score "music" '((1 . "music")))))))
+
+(ert-deftest lispm-test-search-cutoff ()
+  "What a search finds by chance, far below the best, is left out."
+  (let ((candidates '(("app-store" . "Find applications in the App Store and install them.")
+                      ("eval_definition" . "Evaluate a definition again, to restore it.")))
+        (fields (lambda (candidate) `((3 . ,(car candidate)) (1.5 . ,(cdr candidate))))))
+    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "install an app from the store")
+                                                    candidates 5 fields))
+                   '("app-store")))
+    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "restore") candidates 5 fields))
+                   '("eval_definition")))))
 
 (ert-deftest lispm-test-search-finds-skills ()
   "search_tools finds skills and the tools of their code, which it leaves to them.
@@ -1560,7 +1574,11 @@ a role is kept to; one without the skill tool is shown no skills."
             (let ((found (lispm-tools--discover agent "playing musik" 5)))
               (should (equal (funcall lines found)
                              '("- skill music (Test Store): Play music with EMMS: files, playlists and streams. Its tools: music_play, music_status, music_seek. Load it with skill.")))
-              (should (member "test_playground" (mapcar #'lispm-tool-name (car found)))))
+              ;; A tool matching by chance, far below the skill, is left out ...
+              (should-not (car found)))
+            ;; ... and found when it matches.
+            (should (member "test_playground"
+                            (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "play sandbox" 5)))))
             ;; A tool of a skill's code is found by its name, as its skill.
             (should (equal (length (funcall lines (lispm-tools--discover agent "music_status" 5))) 1))
             (should (equal (length (funcall lines (lispm-tools--discover agent "select:music_seek" 5))) 1))
