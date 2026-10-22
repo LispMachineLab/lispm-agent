@@ -21,7 +21,8 @@
 
 ;; LispM Agent's words are written in English in the code, and shown in
 ;; the language `lispm-current-language' names: `lispm-language' if set,
-;; else LispM Desktop's when the desktop runs, else the computer's own.
+;; else the language of the program LispM Agent runs in, if it says one
+;; (see `lispm-language-functions'), else the computer's own.
 ;; Every word a person reads passes through one of:
 ;;
 ;;   (lispm-tr MESSAGE ARGS...)      MESSAGE translated, then formatted
@@ -45,7 +46,7 @@
 ;; `lispm-in-english'.
 ;;
 ;; The translations are the catalogs of i18n/, one per language, named by
-;; its tag, as zh-Hans.eld, in LispM Desktop's format:
+;; its tag, as zh-Hans.eld:
 ;;
 ;;   (:name "NAME" :messages ((MESSAGE . TRANSLATION) ...))
 ;;
@@ -73,15 +74,15 @@ CONTEXT carries it, and `lispm-tr' translates it so."
     (ja ,(lispm-tr-noop "Japanese"))
     (zh-Hans ,(lispm-tr-noop "Chinese, Simplified"))
     (zh-Hant ,(lispm-tr-noop "Chinese, Traditional")))
-  "The languages LispM Agent speaks, those of LispM Desktop:
-\(TAG ENGLISH-NAME).  TAG names the catalog of i18n/.")
+  "The languages LispM Agent speaks: (TAG ENGLISH-NAME).  TAG names the
+catalog of i18n/.")
 
 (defcustom lispm-language nil
   "The language LispM Agent speaks: a tag of `lispm-languages', or nil.
-Nil follows LispM Desktop's language (`lispm-desktop-language') while
-the desktop runs, else the computer's (see `lispm-system-language').
-A new value shows at once."
-  :type `(choice (const :tag "LispM Desktop's, else the computer's language" nil)
+Nil follows the program LispM Agent runs in, if it says its language
+\(see `lispm-language-functions'), else the computer's (see
+`lispm-system-language').  A new value shows at once."
+  :type `(choice (const :tag "The computer's language, or that of the program around" nil)
                  ,@(mapcar (pcase-lambda (`(,tag ,name)) `(const :tag ,name ,tag))
                            lispm-languages))
   :group 'lispm)
@@ -179,14 +180,21 @@ data is kept."
             (cons languages (or (seq-some #'lispm-i18n-language-of languages) 'en-US)))))
   (cdr lispm-i18n--system-language))
 
-(declare-function lispm-desktop-current-language "lispm-desktop-i18n" ())
+(defvar lispm-language-functions nil
+  "Functions saying the language of the program LispM Agent runs in, for
+it to speak while `lispm-language' is nil.  Each is called with no
+arguments and returns a language tag, or nil; the first tag of
+`lispm-languages' returned is spoken, else the computer's language.  A
+program adding one calls `lispm-language-changed' once its language
+changes.")
 
 (defun lispm-current-language ()
   "Return the language LispM Agent speaks now, a tag: `lispm-language',
-else LispM Desktop's while it runs, else the computer's."
+else the first a function of `lispm-language-functions' returns that it
+speaks, else the computer's."
   (or lispm-language
-      (and (fboundp 'lispm-desktop-current-language)
-           (car (assq (lispm-desktop-current-language) lispm-languages)))
+      (run-hook-wrapped 'lispm-language-functions
+                        (lambda (function) (car (assq (funcall function) lispm-languages))))
       (lispm-system-language)))
 
 ;;;; Catalogs
@@ -303,9 +311,8 @@ it ends; else nil.")
 (defun lispm-i18n--changed (_symbol _value operation where)
   "Run `lispm-language-changed-hook' once a language setting is set, as
 the command setting it ends, when the language spoken changes: once for
-all the settings it set.  This is a variable watcher of `lispm-language'
-and `lispm-desktop-language'; OPERATION and WHERE are those of
-`add-variable-watcher'."
+all the settings it set.  This is a variable watcher of `lispm-language';
+OPERATION and WHERE are those of `add-variable-watcher'."
   (when (and (eq operation 'set) (null where) (null lispm-i18n--spoken))
     (setq lispm-i18n--spoken (lispm-current-language))
     (run-at-time 0 nil #'lispm-i18n--speak)))
@@ -318,8 +325,15 @@ than `lispm-i18n--spoken'."
     (unless (eq from (lispm-current-language))
       (run-hooks 'lispm-language-changed-hook))))
 
+(defun lispm-language-changed ()
+  "Draw again what shows words, now that the language a function of
+`lispm-language-functions' returns has changed, unless `lispm-language'
+chooses one: a program saying its language calls this once it speaks
+another."
+  (unless (or lispm-language lispm-i18n--spoken)
+    (run-hooks 'lispm-language-changed-hook)))
+
 (add-variable-watcher 'lispm-language #'lispm-i18n--changed)
-(add-variable-watcher 'lispm-desktop-language #'lispm-i18n--changed)
 
 (provide 'lispm-i18n)
 ;;; lispm-i18n.el ends here

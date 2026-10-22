@@ -15,12 +15,13 @@ editor and the system were one.  [[file:DESIGN.org][DESIGN.org]] explains the de
 * The LispM projects
 
 | *lispm-agent*   | AI agents inside Emacs (this repository)                         |
-| [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]] | Emacs as a Mac OS 9 desktop, set up as a workspace for agents     |
+| [[https://github.com/LispMachineLab/lispm-desktop][lispm-desktop]] | Emacs as a classic-style desktop, set up as a workspace for agents |
 | [[https://github.com/LispMachineLab/lispm-browser][lispm-browser]] | a WebKit browser in Emacs, with keyboard hints and Chrome extensions |
 | [[https://github.com/LispMachineLab/lispm-store][lispm-store]]   | the catalog LispM Desktop's App Store installs from               |
 
-The agents need none of the others.  To get all of them at once on macOS, install LispM.app:
-=curl -fsSL https://lispm.ai/install.sh | sh= (see LispM Desktop).
+The agents need none of the others, and know nothing of the desktop's interface or themes: the
+chat takes the faces of whatever theme Emacs has.  To get all of them at once on macOS, install
+LispM.app: =curl -fsSL https://lispm.ai/install.sh | sh= (see LispM Desktop).
 
 * Installation
 
@@ -210,9 +211,10 @@ the new network rules at once.  The first level other than None installs srt wit
 * Languages
 
 The chat, its approvals and / commands, the sandbox's levels and LispM's messages speak English
-(US or UK), German, French, Japanese, and Simplified or Traditional Chinese: LispM Desktop's
-language while the desktop runs, else the computer's (macOS's preferred languages, or
-=LANGUAGE=, =LC_ALL=, =LC_MESSAGES= and =LANG=).  What models read stays English: tool
+(US or UK), German, French, Japanese, and Simplified or Traditional Chinese: the computer's
+language (macOS's preferred languages, or =LANGUAGE=, =LC_ALL=, =LC_MESSAGES= and =LANG=), unless
+the program LispM runs in says its own through ~lispm-language-functions~, as LispM Desktop
+does.  What models read stays English: tool
 descriptions and results, system prompts, transcripts.
 
 #+begin_src emacs-lisp
@@ -220,7 +222,7 @@ descriptions and results, system prompts, transcripts.
 #+end_src
 
 The code writes its words in English through ~lispm-tr~ and its kin (see =lisp/lispm-i18n.el=);
-=i18n/= holds a catalog per language, in LispM Desktop's format.
+=i18n/= holds a catalog per language.
 
 * Development
 
