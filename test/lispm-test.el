@@ -6766,8 +6766,8 @@ a message said in a context is looked up in it; in English, as written."
     (should (equal (match-beginning 0) 1))))
 
 (ert-deftest lispm-test-i18n-language ()
-  "The language spoken is `lispm-language', else LispM Desktop's while it
-runs, else the computer's: the first of its preferred languages LispM
+  "The language spoken is `lispm-language', else that of the program LispM
+runs in, else the computer's: the first of its preferred languages LispM
 speaks, Chinese by script, else by region, English American in the
 United States, else British, American English when none is spoken."
   (should (equal (mapcar #'lispm-i18n-language-of
@@ -6782,20 +6782,21 @@ United States, else British, American English when none is spoken."
   (let ((lispm-i18n--system-languages '("zh-Hant-TW"))
         (lispm-language nil))
     (should (eq (lispm-current-language) 'zh-Hant))
-    (cl-letf (((symbol-function 'lispm-desktop-current-language) (lambda () 'de)))
+    (let ((lispm-language-functions (list #'ignore (lambda () 'de))))
       (should (eq (lispm-current-language) 'de))
       (let ((lispm-language 'fr))
         (should (eq (lispm-current-language) 'fr))))
-    ;; A desktop language LispM Agent does not speak is not followed.
-    (cl-letf (((symbol-function 'lispm-desktop-current-language) (lambda () 'en)))
+    ;; A program's language LispM Agent does not speak is not followed.
+    (let ((lispm-language-functions (list (lambda () 'en))))
       (should (eq (lispm-current-language) 'zh-Hant)))))
 
 (ert-deftest lispm-test-i18n-language-changed ()
-  "Setting the language, LispM Agent's or the desktop's, runs
-`lispm-language-changed-hook' once the command ends, when the language
-spoken changes."
+  "Setting `lispm-language' runs `lispm-language-changed-hook' once the
+command ends, when the language spoken changes; so does a program saying
+its language changed, unless `lispm-language' chooses one."
   (let ((lispm-language 'en)
         (lispm-language-changed-hook nil)
+        (lispm-i18n--system-languages '("ja-JP"))
         (drawn 0))
     (add-hook 'lispm-language-changed-hook (lambda () (setq drawn (1+ drawn))))
     (unwind-protect
@@ -6804,8 +6805,23 @@ spoken changes."
           (should (lispm-test--wait (lambda () (= drawn 1)) 1))
           (setq lispm-language 'de)
           (accept-process-output nil 0.05)
-          (should (= drawn 1)))
+          (should (= drawn 1))
+          (lispm-language-changed)
+          (should (= drawn 1))
+          (setq lispm-language nil)
+          (should (lispm-test--wait (lambda () (= drawn 2)) 1))
+          (lispm-language-changed)
+          (should (= drawn 3)))
       (setq lispm-language 'en))))
+
+(ert-deftest lispm-test-knows-no-desktop ()
+  "LispM Agent stands alone: no file of lisp/ names LispM Desktop's code,
+which hooks into the agents' instead."
+  (dolist (file (directory-files (expand-file-name "../lisp" lispm-test--dir) t "\\.el\\'"))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (should-not (and (re-search-forward "lispm-desktop\\|platinum" nil t)
+                       (format "%s:%d" (file-name-nondirectory file) (line-number-at-pos)))))))
 
 (ert-deftest lispm-test-i18n-sandbox-levels ()
   "The sandbox levels are named and described in the language spoken, and
