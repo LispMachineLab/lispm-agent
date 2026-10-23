@@ -59,12 +59,161 @@
 ;; What does need care is waiting: ask_agent refuses a request that
 ;; would make agents wait on each other in a cycle.  An agent that asks
 ;; several in one response waits on all of them at once.
+;;
+;; Agents of other programs work in the same Emacs too, as Claude Code
+;; and Codex do in their terminals (lispm-agents-bridge.el): peers.  The
+;; three tools reach them as they reach LispM's agents, and peers reach
+;; every agent in turn.  What comes to a peer is put to it as its user's
+;; next message: [Message from X], [Request R1 from X], which it answers
+;; with a reply of its own, and [Reply from X to request R1].  Requests
+;; asked of peers live as long as Emacs.
 
 ;;; Code:
 
 (require 'lispm-core)
 (require 'lispm-tools)
 (require 'lispm-runtime)
+
+;;;; Peers: agents of other programs
+
+(cl-defstruct (lispm-peer (:constructor lispm-peer-create)
+                          (:copier nil))
+  "An agent of another program working in this Emacs, as Claude Code.
+NAME, a string, names it to the agents; KIND says what it is, \"Claude
+Code\"; ROOT is the directory it works in; STATE, a function, returns
+what it is doing, as \"idle\"; DELIVER is a function of a text putting
+the text to it as its user's next message, once it is free for it,
+which returns non-nil if it was given the text at once."
+  name kind root state deliver)
+
+(defvar lispm-peer-functions nil
+  "Functions returning peers, the agents of other programs in this Emacs.
+Each is called with no argument and returns a list of `lispm-peer's,
+whose names are those of no agent of LispM's.")
+
+(defun lispm-peers ()
+  "Return the peers working in this Emacs."
+  (seq-mapcat #'funcall lispm-peer-functions))
+
+(defun lispm-get-peer (name)
+  "Return the peer called NAME, a string or a symbol, or nil."
+  (let ((name (format "%s" name)))
+    (seq-find (lambda (peer) (equal (lispm-peer-name peer) name)) (lispm-peers))))
+
+(defvar lispm-collab--requests nil
+  "Requests asked of peers, awaiting their reply: (ID PEER CALLBACK).
+PEER is the name of the peer asked; CALLBACK takes its reply and, when
+it ended without one, non-nil.")
+
+(defvar lispm-collab--request-count 0
+  "Requests asked by or of peers since Emacs started.")
+
+(defun lispm-collab-new-request-id ()
+  "Return the id of a new request asked by or of a peer: R1, R2...."
+  (format "R%d" (cl-incf lispm-collab--request-count)))
+
+(defun lispm-tell-peer (peer text from)
+  "Give PEER the message TEXT from FROM, the name of an agent or a peer.
+Return non-nil if PEER was given it at once, rather than once free."
+  (funcall (lispm-peer-deliver peer)
+           (format "[Message from %s]\n%s\n\n(Answer, if need be, with your send_message tool, to %s.)"
+                   from text from)))
+
+(cl-defun lispm-ask-peer (peer request from callback &key id)
+  "Ask PEER REQUEST on behalf of FROM, a name; return the request's id.
+CALLBACK is called with PEER's reply, or with a text saying it ended
+without one and non-nil.  ID is the request's id, a new one by default."
+  (let ((id (or id (lispm-collab-new-request-id))))
+    (push (list id (lispm-peer-name peer) callback) lispm-collab--requests)
+    (condition-case err
+        (funcall (lispm-peer-deliver peer)
+                 (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: give it with your reply tool, request %s.)"
+                         id from request from id))
+      (error (setq lispm-collab--requests (cl-remove id lispm-collab--requests :key #'car :test #'equal))
+             (signal (car err) (cdr err))))
+    id))
+
+(defun lispm-peer-reply (peer id text)
+  "Settle the request ID asked of PEER with its reply TEXT.
+An error if no request ID awaits PEER's reply."
+  (let ((entry (assoc id lispm-collab--requests)))
+    (unless (and entry (equal (nth 1 entry) (lispm-peer-name peer)))
+      (error "No request %s awaits your reply" id))
+    (setq lispm-collab--requests (delq entry lispm-collab--requests))
+    (funcall (nth 2 entry) text)))
+
+(defun lispm-collab-peer-ended (name)
+  "Settle the requests asked of the peer NAME, which ended without replying."
+  (dolist (entry (seq-filter (lambda (entry) (equal (nth 1 entry) name)) lispm-collab--requests))
+    (setq lispm-collab--requests (delq entry lispm-collab--requests))
+    (with-demoted-errors "lispm request callback: %S"
+      (funcall (nth 2 entry) (format "%s ended without replying." name) t))))
+
+(defun lispm-collab--name (sender)
+  "The name of SENDER, an agent or the name of a peer, as a string."
+  (if (lispm-agent-p sender) (symbol-name (lispm-agent-name sender)) sender))
+
+(defun lispm-collab-send (from to text)
+  "Send TEXT from FROM, an agent or a peer's name, to the agent or peer TO.
+Return what the sender is told."
+  (let ((agent (lispm-get-agent to t))
+        (name (lispm-collab--name from)))
+    (cond
+     ((or (eq agent from) (equal (format "%s" to) name)) (error "That is you"))
+     (agent
+      (lispm-tell agent text :from name)
+      (format "Delivered to %s%s." to
+              (if (lispm-agent-busy-p agent) ", who is busy and will read it next" "")))
+     ((lispm-get-peer to)
+      (if (lispm-tell-peer (lispm-get-peer to) text name)
+          (format "Delivered to %s." to)
+        (format "%s is busy: it gets your message as soon as it is free." to)))
+     (t (error "No agent named %s; list_agents, which search_tools finds, shows them" to)))))
+
+(defun lispm-collab-ask-for-peer (caller peer target request)
+  "Ask TARGET REQUEST for PEER, acting in LispM as CALLER; return its id.
+TARGET is an agent, a role or a peer, by name.  The reply comes to PEER
+as a message: [Reply from X to request ID]."
+  (let* ((id (lispm-collab-new-request-id))
+         (answer (lambda (from reply)
+                   (funcall (lispm-peer-deliver peer)
+                            (format "[Reply from %s to request %s]\n%s" from id reply)))))
+    (cond
+     ((equal (format "%s" target) (lispm-peer-name peer)) (error "That is you"))
+     ((and (not (lispm-get-agent target t)) (lispm-get-peer target))
+      (lispm-ask-peer (lispm-get-peer target) request (lispm-peer-name peer)
+                      (lambda (reply &optional _ended) (funcall answer target reply))
+                      :id id))
+     (t (lispm-delegate caller target request
+                        (lambda (agent reply)
+                          (funcall answer (symbol-name (lispm-agent-name agent)) reply)))))
+    id))
+
+(defun lispm-collab--peer-lines (&optional self)
+  "Lines naming the peers, SELF, a peer's name, marked as the reader; or nil."
+  (when-let* ((peers (lispm-peers)))
+    (concat "\nAgents of other programs, reached the same way:\n"
+            (mapconcat (lambda (peer)
+                         (format "- %s%s (%s, in %s) [%s]" (lispm-peer-name peer)
+                                 (if (equal (lispm-peer-name peer) self) " (you)" "")
+                                 (lispm-peer-kind peer)
+                                 (abbreviate-file-name (lispm-peer-root peer))
+                                 (funcall (lispm-peer-state peer))))
+                       peers "\n"))))
+
+(defun lispm-collab-agents-text (&optional self)
+  "What list_agents tells SELF, an agent or a peer's name, of who is here."
+  (concat "Running agents:\n"
+          (mapconcat (lambda (a)
+                       (format "- %s%s (%s, in %s) [%s%s]" (lispm-agent-name a)
+                               (if (eq a self) " (you)" "")
+                               (lispm-agent-role a)
+                               (abbreviate-file-name (lispm-agent-root a))
+                               (lispm-agent-state a)
+                               (if (lispm-agent-status a) (concat ", " (lispm-agent-status a)) "")))
+                     (lispm-agents) "\n")
+          (or (lispm-collab--peer-lines (and (stringp self) self)) "")
+          "\nRoles:\n" (lispm-collab--roles)))
 
 (defun lispm-collab--target (name &optional caller)
   "The agent NAME designates, which must not be CALLER (default: the acting agent).
@@ -226,20 +375,12 @@ Then it stays, to answer them, as an agent of its own."
 (add-hook 'lispm-system-prompt-functions #'lispm-collab--prompt)
 
 (lispm-deftool list_agents ()
-  "List the running agents (role, project, state, activity) and the roles
+  "List the running agents (role, project, state, activity), the agents
+of other programs in this Emacs, such as Claude Code, and the roles
 helpers can be started from."
   :permission comm
   :deferred t
-  (concat "Running agents:\n"
-          (mapconcat (lambda (a)
-                       (format "- %s%s (%s, in %s) [%s%s]" (lispm-agent-name a)
-                               (if (eq a lispm-current-agent) " (you)" "")
-                               (lispm-agent-role a)
-                               (abbreviate-file-name (lispm-agent-root a))
-                               (lispm-agent-state a)
-                               (if (lispm-agent-status a) (concat ", " (lispm-agent-status a)) "")))
-                     (lispm-agents) "\n")
-          "\nRoles:\n" (lispm-collab--roles)))
+  (lispm-collab-agents-text lispm-current-agent))
 
 (lispm-deftool send_message
     ((to string "Name of the receiving agent.")
@@ -248,10 +389,7 @@ helpers can be started from."
 reaches them as a new turn as soon as they are free.  Use ask_agent
 when you need the answer to continue."
   :permission comm
-  (let ((target (lispm-collab--target to)))
-    (lispm-tell target text :from (lispm-agent-name lispm-current-agent))
-    (format "Delivered to %s%s." to
-            (if (lispm-agent-busy-p target) ", who is busy and will read it next" ""))))
+  (lispm-collab-send lispm-current-agent to text))
 
 (lispm-deftool ask_agent
     ((agent string "A running agent, or a role to start a helper from (list_agents, which search_tools finds, shows them).")
@@ -264,11 +402,16 @@ as a list of places, ask for it: they can return a value with their
 reply (return_value), which follows it as JSON."
   :permission comm
   :async t
-  (lispm-delegate lispm-current-agent agent request
-                  (lambda (target reply)
-                    (funcall done (lispm-collab--replied target reply)))
-                  ;; A call the model made, not one a Lisp program does.
-                  :call lispm-current-call)
+  (if-let* ((peer (and (not (lispm-get-agent agent t)) (lispm-get-peer agent))))
+      (lispm-ask-peer peer request (symbol-name (lispm-agent-name lispm-current-agent))
+                      (lambda (reply &optional ended)
+                        (funcall done (if ended reply (format "%s replied:\n%s" agent reply))
+                                 ended)))
+    (lispm-delegate lispm-current-agent agent request
+                    (lambda (target reply)
+                      (funcall done (lispm-collab--replied target reply)))
+                    ;; A call the model made, not one a Lisp program does.
+                    :call lispm-current-call))
   nil)
 
 (lispm-register-tool

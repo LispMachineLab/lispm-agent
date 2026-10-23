@@ -32,15 +32,20 @@
 ;; - It is given its session's id from the start, so its terminal knows
 ;;   the session at once.
 ;; - It sees Emacs's state through its IDE protocol, lispm-agents-ide.el.
+;;   Claude shows its model only two tools of an IDE, so the tools LispM
+;;   serves (`lispm-agents-mcp-extra-tools') come over an MCP server of
+;;   their own, `lispm', which a config file of its terminal names.
 ;; - It looks light or dark as Emacs does, unless its user chose a theme.
 ;; - Its worktrees, REPO/.claude/worktrees/NAME, join REPO's project.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'lispm-agents)
 (require 'lispm-agents-ide)
+(require 'lispm-agents-mcp)
 
 (defface lispm-agents-claude-icon '((t :foreground "#D97757"))
   "Face of Claude's mark: its terra cotta.
@@ -152,6 +157,96 @@ Claude Code places worktrees under REPO/.claude/worktrees/NAME."
     (list :root (match-string 1 directory)
           :label (concat "⎇ " (file-name-nondirectory (directory-file-name directory))))))
 
+;;;; Waiting for its user
+
+(defun lispm-agents-claude--transcript (terminal)
+  "Return the transcript of the session the Claude TERMINAL runs, or nil.
+Claude writes it once the session's first message is sent."
+  (when-let* ((id (buffer-local-value 'lispm-agents-buffer-session-id terminal)))
+    (car (file-expand-wildcards
+          (expand-file-name (format "*/%s.jsonl" id) lispm-agents-claude-projects-directory)))))
+
+(defun lispm-agents-claude-turn-ended-p (objects)
+  "Return non-nil if OBJECTS, the last records of a Claude transcript, end a
+turn: their last message is Claude's answer, or its user's interruption."
+  (let ((last (seq-find (lambda (object) (member (plist-get object :type) '("user" "assistant")))
+                        (reverse objects))))
+    (pcase (plist-get last :type)
+      ("assistant"
+       (member (plist-get (plist-get last :message) :stop_reason)
+               '("end_turn" "stop_sequence" "max_tokens" "refusal")))
+      ("user"
+       (let ((content (plist-get (plist-get last :message) :content)))
+         (seq-some (lambda (text)
+                     (and (stringp text) (string-prefix-p "[Request interrupted by user" text)))
+                   (if (stringp content)
+                       (list content)
+                     (mapcar (lambda (block) (plist-get block :text)) content))))))))
+
+(defun lispm-agents-claude--ready-p (terminal)
+  "Return non-nil when the Claude of TERMINAL waits for its user's next message."
+  (when-let* ((file (lispm-agents-claude--transcript terminal)))
+    (lispm-agents-claude-turn-ended-p (lispm-agents-read-json-tail file))))
+
+;;;; LispM's tools, over MCP
+
+(cl-defstruct (lispm-agents-claude-mcp (:include lispm-agents-mcp)
+                                       (:constructor lispm-agents-claude-mcp--make))
+  "The MCP server of a Claude terminal serving the tools LispM serves.
+CONFIG is the file naming it to Claude, readable by its owner only."
+  config)
+
+(defconst lispm-agents-claude-tool-timeout 1800000
+  "Milliseconds Claude waits for a call of a tool of its server `lispm'.
+A call of a LispM tool may wait for the user's approval.")
+
+(cl-defmethod lispm-agents-mcp-served-tools ((_server lispm-agents-claude-mcp))
+  "The tools LispM serves alone: the IDE server shows Emacs's state."
+  lispm-agents-mcp-extra-tools)
+
+(cl-defmethod lispm-agents-context-environment ((_server lispm-agents-claude-mcp))
+  "Have Claude reach the server without a proxy."
+  (list (lispm-agents-mcp-bypass-proxy "NO_PROXY")
+        (lispm-agents-mcp-bypass-proxy "no_proxy")))
+
+(cl-defmethod lispm-agents-context-arguments ((server lispm-agents-claude-mcp))
+  "Have Claude load SERVER's config, besides its own servers, and allow its
+tools: they talk with agents, or run LispM's tools under LispM's policy,
+which asks the user itself."
+  (list "--mcp-config" (lispm-agents-claude-mcp-config server)
+        "--allowedTools" "mcp__lispm"))
+
+(cl-defmethod lispm-agents-context-stop ((server lispm-agents-claude-mcp))
+  "Stop SERVER and delete its config."
+  (ignore-errors (delete-file (lispm-agents-claude-mcp-config server)))
+  (cl-call-next-method))
+
+(defun lispm-agents-claude--mcp-start (directory)
+  "Serve LispM's tools to a Claude terminal running in DIRECTORY."
+  (let ((server (lispm-agents-mcp-start "claude-mcp" #'lispm-agents-claude-mcp--make directory)))
+    (setf (lispm-agents-claude-mcp-config server)
+          (with-file-modes #o600
+            (make-temp-file "lispm-claude-mcp-" nil ".json"
+                            (json-serialize
+                             `((mcpServers
+                                . ((lispm
+                                    . ((type . "http")
+                                       (url . ,(format "http://127.0.0.1:%d/mcp"
+                                                       (lispm-agents-mcp-port server)))
+                                       (headers
+                                        . ((Authorization
+                                            . ,(concat "Bearer " (lispm-agents-mcp-token server)))))
+                                       (timeout . ,lispm-agents-claude-tool-timeout))))))))))
+    server))
+
+(defun lispm-agents-claude--context (directory)
+  "Serve Emacs's state to a Claude terminal running in DIRECTORY.
+Its IDE server shows Emacs's state; while LispM serves tools, an MCP
+server serves them."
+  (cons (lispm-agents-ide-start directory)
+        (when lispm-agents-mcp-extra-tools
+          (list (lispm-agents-claude--mcp-start directory)))))
+
 ;;;; Running it
 
 (defun lispm-agents-claude--chosen-theme (directory)
@@ -203,7 +298,8 @@ the id it is given, so its terminal knows its session from the start."
    :new-arguments #'lispm-agents-claude--new-arguments
    :resume-arguments (lambda (id) (list "--resume" id))
    :arguments #'lispm-agents-claude--arguments
-   :context #'lispm-agents-ide-start))
+   :context #'lispm-agents-claude--context
+   :ready #'lispm-agents-claude--ready-p))
 
 (provide 'lispm-agents-claude)
 ;;; lispm-agents-claude.el ends here

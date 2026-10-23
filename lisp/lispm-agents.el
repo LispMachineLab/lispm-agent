@@ -72,6 +72,7 @@
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function eat-make "eat" (name program &optional startfile &rest switches))
 (declare-function eat-term-send-string-as-yank "eat" (terminal args))
+(declare-function eat-term-send-string "eat" (terminal string))
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
 (defvar lispm-agents--root-cache)
@@ -86,7 +87,8 @@
 PROGRAM and its ARGS, it returns the buffer *NAME* it runs in.  By
 default an Eat terminal; a program with terminals of its own sets this,
 `lispm-agents-terminal-live-p-function',
-`lispm-agents-terminal-paste-function' and
+`lispm-agents-terminal-paste-function',
+`lispm-agents-terminal-send-function' and
 `lispm-agents-terminal-modes' together.")
 
 (defvar lispm-agents-terminal-live-p-function #'lispm-agents-process-live-p
@@ -96,6 +98,10 @@ runs.")
 (defvar lispm-agents-terminal-paste-function #'lispm-agents-eat-paste
   "Function of a terminal's buffer and a text pasting the text into its
 program, as pasted.")
+
+(defvar lispm-agents-terminal-send-function #'lispm-agents-eat-send
+  "Function of a terminal's buffer and a text sending the text to its
+program, as typed: \"\\r\" is the Return key.")
 
 (defvar lispm-agents-terminal-modes '(eat-mode)
   "Major modes of the terminals agents run in.")
@@ -136,6 +142,11 @@ name of the action, as \"Delete\", and returns non-nil to go on.")
   (with-current-buffer buffer
     (eat-term-send-string-as-yank eat-terminal (list text))))
 
+(defun lispm-agents-eat-send (buffer text)
+  "Send TEXT to the program of the Eat terminal BUFFER, as typed."
+  (with-current-buffer buffer
+    (eat-term-send-string eat-terminal text)))
+
 (defun lispm-agents-terminal-make (name program &rest args)
   "Run PROGRAM with ARGS in a terminal named *NAME*; return its buffer.
 The terminal is what `lispm-agents-terminal-make-function' makes."
@@ -148,6 +159,36 @@ The terminal is what `lispm-agents-terminal-make-function' makes."
 (defun lispm-agents-terminal-paste (buffer text)
   "Paste TEXT into the program of terminal BUFFER, as pasted."
   (funcall lispm-agents-terminal-paste-function buffer text))
+
+(defun lispm-agents-terminal-send (buffer text)
+  "Send TEXT to the program of terminal BUFFER, as typed."
+  (funcall lispm-agents-terminal-send-function buffer text))
+
+(defvar lispm-agents-submit-delay 0.3
+  "Seconds between pasting a message into an agent and pressing Return.
+An agent's composer takes a paste in as it comes; a Return arriving with
+it would be a line of the text.")
+
+(defun lispm-agents-terminal-submit (buffer text)
+  "Give the agent of terminal BUFFER TEXT as its user's next message.
+TEXT is pasted into its composer, then sent with Return; an agent at
+work keeps it for when it is done, as a message typed meanwhile."
+  (lispm-agents-terminal-paste buffer text)
+  (run-at-time lispm-agents-submit-delay nil
+               (lambda ()
+                 (when (lispm-agents-terminal-live-p buffer)
+                   (lispm-agents-terminal-send buffer "\r")))))
+
+(defun lispm-agents-terminal-ready-p (terminal)
+  "Return non-nil when the agent of TERMINAL waits for its user's next
+message, as its :ready says; nil when it has no :ready, see
+`lispm-agents-define'."
+  (when-let* ((agent (or (buffer-local-value 'lispm-agents-buffer-agent terminal)
+                         (lispm-agents-terminal-agent terminal)))
+              (ready (plist-get (lispm-agents-props agent) :ready)))
+    (and (lispm-agents-terminal-live-p terminal)
+         (funcall ready terminal)
+         t)))
 
 (defun lispm-agents-terminal-p (buffer)
   "Return non-nil when BUFFER is a terminal agents run in, its program
@@ -217,7 +258,13 @@ An agent run as a CLI in a terminal has these:
   :arguments   function of a directory returning the arguments of every
                run there
   :context     function of a directory returning a server showing the
-               agent Emacs's state, see `lispm-agents-context', or nil
+               agent Emacs's state, see `lispm-agents-context', a list
+               of servers, or nil
+  :ready       function of the agent's terminal returning non-nil when
+               the agent waits for its user's next message: its session
+               has begun and its latest turn has ended, so what is typed
+               goes to its composer, not to a dialog.  Other agents'
+               messages wait for it; an agent without one is given none
 
 An agent running inside Emacs has these instead:
 
@@ -418,6 +465,15 @@ When TRUNCATED, the last line is partial and is skipped."
           (push object objects)))
       (forward-line 1))
     (nreverse objects)))
+
+(defconst lispm-agents-tail-bytes (* 256 1024)
+  "Bytes at the end of a transcript `lispm-agents-read-json-tail' reads.")
+
+(defun lispm-agents-read-json-tail (file)
+  "Return the JSON objects on the complete lines at the end of FILE.
+They are those of its last `lispm-agents-tail-bytes', oldest first."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (lispm-agents-read-json-region file (max 0 (- size lispm-agents-tail-bytes)) size)))
 
 (defun lispm-agents-read-transcript (file)
   "Return the JSON objects at the head and tail of transcript FILE as a cons."
@@ -752,26 +808,26 @@ Agents and shells started from Emacs are independent top-level sessions."
 The terminal is what `lispm-agents-terminal-make' makes.
 The terminal records the session ID and TITLE for labels and lists.
 The agent runs as an independent session whatever environment Emacs itself
-inherited, and with its :context server showing it Emacs's state and its
+inherited, and with its :context servers showing it Emacs's state and its
 :arguments, see `lispm-agents-define'.  A running terminal with the
 same NAME is returned instead of restarted."
   (let ((props (lispm-agents--check-available agent)))
     (unless (file-directory-p directory)
       (user-error (lispm-tr "Working directory no longer exists: %s") directory))
     (let* ((default-directory (file-name-as-directory directory))
-           ;; A new agent gets a server showing it Emacs's state; a running
-           ;; terminal returned as is keeps the one it has.
-           (server (unless (lispm-agents-running-p (get-buffer (format "*%s*" name)))
-                     (when-let* ((context (plist-get props :context)))
-                       (funcall context default-directory))))
-           (process-environment (append (and server (lispm-agents-context-environment server))
+           ;; A new agent gets servers showing it Emacs's state; a running
+           ;; terminal returned as is keeps those it has.
+           (servers (unless (lispm-agents-running-p (get-buffer (format "*%s*" name)))
+                      (when-let* ((context (plist-get props :context)))
+                        (delq nil (ensure-list (funcall context default-directory))))))
+           (process-environment (append (seq-mapcat #'lispm-agents-context-environment servers)
                                         (lispm-agents-independent-environment process-environment)))
            (buffer (apply #'lispm-agents-terminal-make name (plist-get props :program)
-                          (append (and server (lispm-agents-context-arguments server))
+                          (append (seq-mapcat #'lispm-agents-context-arguments servers)
                                   (when-let* ((arguments (plist-get props :arguments)))
                                     (funcall arguments default-directory))
                                   args))))
-      (when server
+      (dolist (server servers)
         (lispm-agents-context-bind server buffer))
       (with-current-buffer buffer
         (setq lispm-agents-buffer-agent agent
@@ -832,6 +888,22 @@ directory take the sessions in the order they began."
                         candidates)))
             (setq lispm-agents-buffer-session-id (plist-get session :id))
             (push (plist-get session :id) claimed)))))))
+
+(defvar-local lispm-agents--claimed-at nil
+  "When this terminal last had the sessions listed to learn its own.")
+(put 'lispm-agents--claimed-at 'permanent-local t)
+
+(defun lispm-agents-terminal-session-id (terminal)
+  "Return the id of the session the agent TERMINAL runs, or nil if unknown.
+A terminal started fresh for an agent that assigns its own ids learns it
+once the agent recorded the session, from a list of the sessions, see
+`lispm-agents-claim-sessions'; one is made at most every ten seconds."
+  (with-current-buffer terminal
+    (unless (or lispm-agents-buffer-session-id
+                (and lispm-agents--claimed-at (< (- (float-time) lispm-agents--claimed-at) 10)))
+      (setq lispm-agents--claimed-at (float-time))
+      (lispm-agents-sessions-list))
+    lispm-agents-buffer-session-id))
 
 (defun lispm-agents-refresh-buffer-titles (sessions)
   "Update the titles of running agent terminals from SESSIONS.

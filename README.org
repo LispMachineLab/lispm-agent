@@ -211,6 +211,20 @@ protocol for Claude Code, MCP for the others.
 (keymap-global-set "C-c a" lispm-agents-map)   ; c Claude, x Codex, s sessions, r the region
 #+end_src
 
+While LispM runs, they work with its agents and each other, and use what LispM's agents use
+(=lisp/lispm-agents-bridge.el=).  Over their servers they get seven tools:
+
+- ~list_agents~, ~send_message~, ~ask_agent~ and ~reply~ reach every agent, LispM's and theirs.
+  A message reaches one of them as its user's next message, =[Message from codex]=; a
+  request, =[Request R1 from lispm]=, waits for its ~reply~; asking a role starts a LispM
+  helper.  A message is typed into an agent's terminal only once its transcript shows the
+  agent waiting for input, never into a dialog: until then it waits.
+- ~search_tools~ and ~skill~ find and load LispM's skills, the manuals of its parts and of the
+  App Store's apps; ~call_tool~ runs any LispM tool a skill names.  In LispM each of these
+  agents acts as an agent of ~lispm-default-role~ (or ~lispm-agents-bridge-role~) in its
+  terminal's directory, so its calls go by that role's policy: reading runs at once, writing
+  and shell commands ask you in Emacs.
+
 They run in [[https://codeberg.org/akib/emacs-eat][Eat]]'s terminals and show with ~pop-to-buffer~.  A program drawing an interface
 around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
 ~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface

@@ -79,9 +79,16 @@
          (let ((text (lispm-agents-content-text (plist-get payload :content))))
            (and (lispm-agents-human-text-p text) text)))))))
 
+(defconst lispm-agents-codex-prompt-bytes (* 1024 1024)
+  "Bytes at the start of a Codex rollout its first prompt is looked for in,
+when its head holds none.")
+
 (defun lispm-agents-codex--session (file objects)
   "Return the Codex session recorded in FILE given its head/tail OBJECTS.
-Its title is the first prompt, or nil when there is none; a thread name from
+Its title is the first prompt, or nil when there is none: Codex may record
+tools and instructions over the whole head before it, so it is looked for
+in the first `lispm-agents-codex-prompt-bytes' then, else in the tail; a
+thread name from
 the Codex index overrides it later, see `lispm-agents-codex--named',
 since the index changes without the transcript and so is no part of what is
 memoized per transcript.  Its :started time, float seconds, is when the
@@ -95,7 +102,12 @@ metadata."
               (id (plist-get payload :id))
               (cwd (plist-get payload :cwd)))
     (list :agent 'codex :id id :cwd cwd
-          :title (seq-some #'lispm-agents-codex--prompt (car objects))
+          :title (or (seq-some #'lispm-agents-codex--prompt (car objects))
+                     (seq-some #'lispm-agents-codex--prompt
+                               (lispm-agents-read-json-region
+                                file 0 (min (file-attribute-size (file-attributes file))
+                                            lispm-agents-codex-prompt-bytes)))
+                     (seq-some #'lispm-agents-codex--prompt (cdr objects)))
           :started (when-let* ((stamp (plist-get payload :timestamp)))
                      (ignore-errors (float-time (parse-iso8601-time-string stamp))))
           :file file)))
@@ -156,6 +168,44 @@ the main checkout, so NAME is matched against known projects."
   (when (string-match "/\\.codex/worktrees/[^/]+/\\([^/]+\\)" directory)
     (list :name (match-string 1 directory) :label (concat "⎇ " (lispm-tr "codex worktree")))))
 
+;;;; Waiting for its user
+
+(defvar-local lispm-agents-codex--rollout nil
+  "The rollout of the session this Codex terminal runs, once found.")
+(put 'lispm-agents-codex--rollout 'permanent-local t)
+
+(defun lispm-agents-codex--terminal-rollout (terminal)
+  "Return the rollout of the session the Codex TERMINAL runs, or nil.
+Codex writes it once the session's first message is sent, which tells
+the terminal which it is, see `lispm-agents-terminal-session-id'."
+  (with-current-buffer terminal
+    (when-let* ((id (lispm-agents-terminal-session-id terminal)))
+      (unless (and lispm-agents-codex--rollout
+                   (string-suffix-p (concat id ".jsonl") lispm-agents-codex--rollout)
+                   (file-exists-p lispm-agents-codex--rollout))
+        (setq lispm-agents-codex--rollout
+              (car (sort (seq-filter (lambda (file) (string-suffix-p (concat id ".jsonl") file))
+                                     (lispm-agents-codex--files))
+                         (lambda (a b) (> (lispm-agents-file-time a) (lispm-agents-file-time b)))))))
+      lispm-agents-codex--rollout)))
+
+(defun lispm-agents-codex-turn-ended-p (objects)
+  "Return non-nil if OBJECTS, the last records of a Codex rollout, end a turn:
+the last turn they tell of was completed or aborted."
+  (let ((last (seq-find (lambda (object)
+                          (and (equal (plist-get object :type) "event_msg")
+                               (member (plist-get (plist-get object :payload) :type)
+                                       '("task_started" "turn_started" "task_complete"
+                                         "turn_complete" "turn_aborted"))))
+                        (reverse objects))))
+    (member (plist-get (plist-get last :payload) :type)
+            '("task_complete" "turn_complete" "turn_aborted"))))
+
+(defun lispm-agents-codex--ready-p (terminal)
+  "Return non-nil when the Codex of TERMINAL waits for its user's next message."
+  (when-let* ((file (lispm-agents-codex--terminal-rollout terminal)))
+    (lispm-agents-codex-turn-ended-p (lispm-agents-read-json-tail file))))
+
 ;;;; Emacs's state, over MCP
 
 (defconst lispm-agents-codex-token-variable "LISPM_EMACS_MCP_TOKEN"
@@ -165,28 +215,27 @@ the main checkout, so NAME is matched against known projects."
                                       (:constructor lispm-agents-codex-mcp--make))
   "The MCP server of a Codex terminal.")
 
-(defun lispm-agents-codex--bypass-proxy (variable)
-  "Return the entry of the proxy exclusion VARIABLE with loopback added.
-Codex's HTTP client follows the system proxy, which otherwise receives
-the requests to this server too and refuses them."
-  (format "%s=%s" variable
-          (string-join (delete-dups (append (split-string (or (getenv variable) "") "," t)
-                                            '("127.0.0.1")))
-                       ",")))
-
 (cl-defmethod lispm-agents-context-environment ((server lispm-agents-codex-mcp))
   "Hand Codex SERVER's token, and reach SERVER without a proxy."
   (list (format "%s=%s" lispm-agents-codex-token-variable (lispm-agents-mcp-token server))
-        (lispm-agents-codex--bypass-proxy "NO_PROXY")
-        (lispm-agents-codex--bypass-proxy "no_proxy")))
+        (lispm-agents-mcp-bypass-proxy "NO_PROXY")
+        (lispm-agents-mcp-bypass-proxy "no_proxy")))
+
+(defconst lispm-agents-codex-tool-timeout 1800
+  "Seconds Codex waits for a call of a tool of its server `emacs'.
+A call of a LispM tool may wait for the user's approval.")
 
 (cl-defmethod lispm-agents-context-arguments ((server lispm-agents-codex-mcp))
   "Configure SERVER as Codex's MCP server `emacs' for this run only.
-Codex passes its whole environment to the commands it runs unless told
-otherwise, so the token variable is excluded from them.  The exclusion
-replaces any `shell_environment_policy.exclude' of config.toml."
+Its tools are approved in Codex: they read Emacs's state, talk with
+agents, or run LispM's tools under LispM's policy, which asks the user
+itself.  Codex passes its whole environment to the commands it runs
+unless told otherwise, so the token variable is excluded from them.  The
+exclusion replaces any `shell_environment_policy.exclude' of config.toml."
   (list "-c" (format "mcp_servers.emacs.url=\"http://127.0.0.1:%d/mcp\""
                      (lispm-agents-mcp-port server))
+        "-c" (format "mcp_servers.emacs.tool_timeout_sec=%d" lispm-agents-codex-tool-timeout)
+        "-c" "mcp_servers.emacs.default_tools_approval_mode=\"approve\""
         "-c" (format "mcp_servers.emacs.bearer_token_env_var=\"%s\""
                      lispm-agents-codex-token-variable)
         "-c" (format "shell_environment_policy.exclude=[\"%s\"]"
@@ -221,7 +270,8 @@ replaces any `shell_environment_policy.exclude' of config.toml."
    :worktree #'lispm-agents-codex--worktree
    :chats (list lispm-agents-codex-chats-directory)
    :resume-arguments (lambda (id) (list "resume" id))
-   :context #'lispm-agents-codex--context))
+   :context #'lispm-agents-codex--context
+   :ready #'lispm-agents-codex--ready-p))
 
 (provide 'lispm-agents-codex)
 ;;; lispm-agents-codex.el ends here
