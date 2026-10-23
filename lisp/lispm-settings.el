@@ -54,12 +54,14 @@
 (require 'lispm-roles)
 (require 'lispm-runtime)
 (require 'lispm-memory)
+(require 'lispm-episodes)
 (require 'lispm-skills)
 
 (defconst lispm-settings-variables
   '(lispm-backends lispm-backend lispm-model lispm-effort
     lispm-default-policy lispm-trusted-skills
-    lispm-compact-threshold lispm-compact-save-memory lispm-git
+    lispm-compact-threshold lispm-compact-idle lispm-compact-save-memory lispm-git
+    lispm-memory-max-entries lispm-memory-max-tokens lispm-memory-model lispm-episodes
     lispm-default-role lispm-role-directories lispm-skill-directories)
   "LispM's settings, as `lispm-settings-set' sets them and
 `lispm-settings-change-hook' watches them.")
@@ -363,6 +365,74 @@ and SAVE it.  See `lispm-compact-threshold'."
                                                lispm-compact-sizes ", "))))
   (lispm-settings-set 'lispm-compact-threshold (nth 1 (assq size lispm-compact-sizes)) save))
 
+(defun lispm-set-compact-idle (on &optional save)
+  "Have long conversations summed up at idle when ON, else only as a turn
+starts, and SAVE it.  See `lispm-compact-idle'."
+  (lispm-settings-set 'lispm-compact-idle
+                      (and on (if (numberp lispm-compact-idle)
+                                  lispm-compact-idle
+                                (eval (car (get 'lispm-compact-idle 'standard-value)) t)))
+                      save))
+
+(defconst lispm-memory-sizes
+  `((small 100 15000 ,(lispm-tr-noop "Small" "memory size")
+           ,(lispm-tr-noop "consolidated past 100 entries or 15,000 tokens: shorter prompts"))
+    (medium 200 30000 ,(lispm-tr-noop "Medium" "memory size")
+            ,(lispm-tr-noop "consolidated past 200 entries or 30,000 tokens"))
+    (large 400 60000 ,(lispm-tr-noop "Large" "memory size")
+           ,(lispm-tr-noop "consolidated past 400 entries or 60,000 tokens: more remembered"))
+    (unlimited nil nil ,(lispm-tr-noop "No limit" "memory size")
+               ,(lispm-tr-noop "never consolidated; prompts list every title")))
+  "The sizes a memory may grow to before it consolidates itself, as a
+window of settings offers them: (SIZE ENTRIES TOKENS NAME NOTE), ENTRIES
+and TOKENS the values of `lispm-memory-max-entries' and
+`lispm-memory-max-tokens', NAME and NOTE in English; see
+`lispm-memory-size-name' and `lispm-memory-size-note'.")
+
+(defun lispm-memory-size ()
+  "The size of `lispm-memory-sizes' the memory's budget is, or nil when it
+is one of the user's own."
+  (car (seq-find (lambda (size) (and (equal (nth 1 size) lispm-memory-max-entries)
+                                     (equal (nth 2 size) lispm-memory-max-tokens)))
+                 lispm-memory-sizes)))
+
+(defun lispm-memory-size-name (size)
+  "SIZE, one of `lispm-memory-sizes', named in the language spoken."
+  (lispm-tr (nth 3 (assq size lispm-memory-sizes))))
+
+(defun lispm-memory-size-note (size)
+  "What SIZE, one of `lispm-memory-sizes', means, in the language spoken."
+  (lispm-tr (nth 4 (assq size lispm-memory-sizes))))
+
+(defun lispm-set-memory-size (size &optional save)
+  "Have memories consolidated past SIZE, one of `lispm-memory-sizes', and
+SAVE it.  See `lispm-memory-max-entries'."
+  (unless (assq size lispm-memory-sizes)
+    (user-error "%s" (lispm-tr "No size %s: it is one of %s"
+                               size (mapconcat (lambda (entry) (symbol-name (car entry)))
+                                               lispm-memory-sizes ", "))))
+  (let ((entry (assq size lispm-memory-sizes)))
+    (lispm-settings-set 'lispm-memory-max-entries (nth 1 entry) save)
+    (lispm-settings-set 'lispm-memory-max-tokens (nth 2 entry) save)))
+
+(defun lispm-memory-model-choices ()
+  "The models offered to consolidate memory with, as strings: those of
+`lispm-model-choices' on the backend agents use, which is the one they
+consolidate on."
+  (let ((backend (lispm-backend-name)))
+    (delete-dups (delq nil (mapcar (lambda (choice)
+                                     (and (eq (plist-get choice :backend) backend)
+                                          (plist-get choice :model)))
+                                   (lispm-model-choices))))))
+
+(defun lispm-set-memory-model (model &optional save)
+  "Have memory consolidated and episodes rolled up with MODEL, on the
+backend agents use, and SAVE it; nil is each agent's own model.  See
+`lispm-memory-model'."
+  (lispm-settings-set 'lispm-memory-model
+                      (and model (not (string-blank-p model)) (string-trim model))
+                      save))
+
 (defun lispm-settings--title (file)
   "The title of the org FILE, or its name in `lispm-directory'."
   (let ((line (lispm--first-line file)))
@@ -373,9 +443,10 @@ and SAVE it.  See `lispm-compact-threshold'."
 (defun lispm-memory-files ()
   "The memory files and task lists there are under `lispm-directory', as
 \(TITLE . FILE), the one changed last first: projects' memory and tasks,
-roles' memory."
+roles' memory, and the system's memory and tasks."
   (let ((files (mapcan (lambda (pattern) (file-expand-wildcards (expand-file-name pattern lispm-directory)))
-                       '("projects/*/memory.org" "projects/*/tasks.org" "roles/*/memory.org"))))
+                       '("projects/*/memory.org" "projects/*/tasks.org" "roles/*/memory.org"
+                         "system/memory.org" "system/tasks.org"))))
     (mapcar (lambda (file) (cons (lispm-settings--title file) file))
             (sort files (lambda (a b)
                           (time-less-p (file-attribute-modification-time (file-attributes b))
