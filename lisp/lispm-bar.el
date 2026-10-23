@@ -114,11 +114,13 @@
 It is declared when first needed.  It works in `lispm-system-agent-root',
 the home directory, with the role `system', and keeps one conversation
 going across Emacs sessions, which the bar and the chat both show.  It
-is not one of a project's agents."
+is not one of a project's agents: its memory, tasks and episodes are
+the system's (see `lispm-system-directory')."
   (let ((agent (lispm-get-agent lispm-system-agent-name t)))
     (if (and agent (lispm-agent-standing agent))
         agent
-      (lispm-register-agent lispm-system-agent-name :role 'system :root lispm-system-agent-root))))
+      (lispm-register-agent lispm-system-agent-name :role 'system :root lispm-system-agent-root
+                            :system t))))
 
 (defun lispm-system-agent-p (agent)
   "Non-nil if AGENT is LispM itself, see `lispm-system-agent'."

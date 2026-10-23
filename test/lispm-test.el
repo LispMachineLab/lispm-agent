@@ -102,6 +102,9 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm-api-function #'lispm-test--fake-api)
           (lispm-test--scripts nil)
           (lispm-test--requests nil)
+          ;; Work waiting for idle time stays in the test, never to run
+          ;; on in the user's Emacs once the scratch directory is gone.
+          (lispm--idle-work (make-hash-table :test #'equal))
           ;; Run from git (a hook, rebase -x), the tests' git commands
           ;; would act on that repository rather than on their own.
           (process-environment (lispm--git-environment)))
@@ -109,6 +112,7 @@ BODY can use `project', a scratch directory for agents to work in."
      (unwind-protect
          (progn ,@body)
        (dolist (a (lispm-agents)) (lispm-unwatch a))
+       (maphash (lambda (_ timer) (cancel-timer timer)) lispm--idle-work)
        ;; Snapshots still being taken would outlive their project.
        (dolist (p (process-list))
          (when (string-prefix-p "lispm-journal" (process-name p))
@@ -5590,6 +5594,535 @@ handed over once nothing more can be."
         (should-not (equal (shell-command-to-string "git symbolic-ref --short HEAD")
                            "inherited\n"))))))
 
+;;;; Memory that compresses itself
+
+(defmacro lispm-test--when-idle-now (&rest body)
+  "Run BODY with work waiting for Emacs to be idle done at once.
+A batch Emacs is never idle."
+  (declare (indent 0))
+  `(cl-letf (((symbol-function 'run-with-idle-timer)
+              (lambda (_seconds repeat function &rest args)
+                (apply #'run-at-time 0.01 repeat function args))))
+     ,@body))
+
+(defun lispm-test--last-text (body)
+  "The text of the last block of the last message of the request BODY."
+  (let* ((messages (alist-get 'messages body))
+         (content (alist-get 'content (aref messages (1- (length messages))))))
+    (if (stringp content)
+        content
+      (alist-get 'text (aref content (1- (length content)))))))
+
+(ert-deftest lispm-test-compact-idle ()
+  "A session near the threshold when a turn ends is handed over at idle:
+memory is saved, then a summary written, and the next input starts at
+once from the summary."
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let ((lispm-compact-threshold 6000)
+            (lispm-compact-idle 0.5)
+            (agent (lispm-defagent tester "Test agent." :root project)))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "A long answer.")) 4000)
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Saved."))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "The summary."))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Next.")))))
+        (lispm-tell agent "first")
+        (should (lispm-test--wait (lambda () (string-match-p "^\\* Summary\nThe summary\\.\n"
+                                                             (lispm-test--transcript agent)))))
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (let ((requests (reverse lispm-test--requests)))
+          (should (= (length requests) 3))
+          ;; Memory is saved first, in a turn; the summary is asked for without tools.
+          (should (string-suffix-p lispm--save-memory-prompt (lispm-test--last-text (nth 1 requests))))
+          (should-not (assq 'tools (nth 2 requests)))
+          (should (equal (lispm-test--last-text (nth 2 requests)) lispm--summary-prompt)))
+        ;; The next input goes at once, after the summary alone.
+        (lispm-tell agent "second")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (= (length lispm-test--requests) 4))
+        (should (equal (alist-get 'messages (car lispm-test--requests))
+                       [((role . "user")
+                         (content . [((type . "text")
+                                      (text . "[Summary of the earlier conversation, handed over to this session]\nThe summary."))
+                                     ((type . "text") (text . "second"))]))]))))))
+
+(ert-deftest lispm-test-compact-idle-yields ()
+  "Input given while a summary is written at idle starts at once, and the
+summary, out of date when it comes, is thrown away.  A session the user
+is writing in is not compacted under them."
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let* ((lispm-compact-threshold 6000)
+             (lispm-compact-idle 0.5)
+             (lispm-compact-save-memory nil)
+             (agent (lispm-defagent tester "Test agent." :root project))
+             (summaries nil)
+             (lispm-api-function
+              (lambda (backend body betas &rest callbacks)
+                (if (equal (lispm-test--last-text body) lispm--summary-prompt)
+                    (progn (push (plist-get callbacks :on-done) summaries) nil)
+                  (apply #'lispm-test--fake-api backend body betas callbacks)))))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Long.")) 4000)
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Short.")))))
+        (lispm-tell agent "first")
+        (should (lispm-test--wait (lambda () summaries)))
+        (let ((buffer (lispm-agent-buffer agent)))
+          ;; The agent is free while the summary is written.
+          (should (eq (lispm-agent-state agent) 'idle))
+          (lispm-tell agent "second")
+          (should (lispm-test--wait (lambda () (= (length lispm-test--requests) 2))))
+          (should (lispm-test--wait (lispm-test--idle-p agent)))
+          (funcall (car summaries) (lispm-test--msg "end_turn" (lispm-test--text "A stale summary.")))
+          (should (eq (lispm-agent-buffer agent) buffer))
+          (should-not (string-match-p "stale summary" (lispm-test--transcript agent)))
+          (should-not (lispm-agent-compacting agent))
+          ;; Given up at idle: it is left to a turn's start.
+          (should-not (lispm--idle-handover-p agent))
+          ;; Large again, but with a draft of the user's in it.
+          (remhash agent lispm--idle-given-up)
+          (lispm--in-session agent (insert "a draft"))
+          (setf (lispm-agent-context agent) (cons 4000 (lispm--session-bytes agent)))
+          (lispm--compact-idle agent)
+          (should (= (length summaries) 1))
+          (should (string-suffix-p "* User\na draft" (lispm-test--transcript agent))))))))
+
+(ert-deftest lispm-test-compact-idle-stopped ()
+  "Stopping the turn that saves memory for a handover at idle gives the
+handover at idle up: no summary is asked for, nor tried again in that
+session."
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let ((lispm-compact-threshold 6000)
+            (lispm-compact-idle 0.5)
+            (agent (lispm-defagent tester "Test agent." :root project)))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Long.")) 4000)
+                        hang
+                        ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Next.")) 4000))))
+        (lispm-tell agent "first")
+        (should (lispm-test--wait (lambda () (= (length lispm-test--requests) 2))))
+        (let ((buffer (lispm-agent-buffer agent)))
+          (should (eq (gethash agent lispm--idle-handovers) 'saving))
+          (lispm-abort agent)
+          (should (lispm-test--wait (lispm-test--idle-p agent)))
+          (accept-process-output nil 0.1)
+          (should (= (length lispm-test--requests) 2))
+          (should-not (gethash agent lispm--idle-handovers))
+          (should-not (lispm--idle-handover-p agent))
+          (should-not (lispm--memory-saved-p agent))
+          ;; Still large after the next turn: left to a turn's start.
+          (lispm-tell agent "second")
+          (should (lispm-test--wait (lispm-test--idle-p agent)))
+          (accept-process-output nil 0.1)
+          (should (= (length lispm-test--requests) 3))
+          (should (eq (lispm-agent-buffer agent) buffer)))))))
+
+(ert-deftest lispm-test-compact-idle-fallback ()
+  "A turn starting past the threshold while the summary is written at
+idle waits for that summary, and memory is not saved again."
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let* ((lispm-compact-threshold 6000)
+             (lispm-compact-idle 0.5)
+             (agent (lispm-defagent tester "Test agent." :root project))
+             (summaries nil)
+             (lispm-api-function
+              (lambda (backend body betas &rest callbacks)
+                (if (equal (lispm-test--last-text body) lispm--summary-prompt)
+                    (progn (push (plist-get callbacks :on-done) summaries) nil)
+                  (apply #'lispm-test--fake-api backend body betas callbacks)))))
+        (setq lispm-test--scripts
+              `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Long.")) 7000)
+                        ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Saved.")) 7000)
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Next.")))))
+        (lispm-tell agent "first")
+        (should (lispm-test--wait (lambda () summaries)))
+        (should (lispm--memory-saved-p agent))
+        ;; Past the threshold: the turn waits for the summary on its way.
+        (lispm-tell agent "second")
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'compacting))))
+        (should (= (length lispm-test--requests) 2))
+        (funcall (car summaries) (lispm-test--msg "end_turn" (lispm-test--text "The summary.")))
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (= (length summaries) 1))
+        (should (= (length lispm-test--requests) 3))
+        (should (equal (alist-get 'messages (car lispm-test--requests))
+                       [((role . "user")
+                         (content . [((type . "text")
+                                      (text . "[Summary of the earlier conversation, handed over to this session]\nThe summary."))
+                                     ((type . "text") (text . "second"))]))]))
+        ;; A new session: it may be handed over at idle again.
+        (should (lispm--idle-handover-p agent))
+        (should-not (lispm--memory-saved-p agent))))))
+
+(defun lispm-test--memory-entry (title created &optional recalled recalls body)
+  "A memory file's entry TITLE, saved at CREATED, last RECALLED, RECALLS times."
+  (concat "* " title "\n:PROPERTIES:\n:CREATED:  " created "\n"
+          (if recalled (concat ":RECALLED: " recalled "\n") "")
+          (if recalls (format ":RECALLS:  %d\n" recalls) "")
+          ":END:\n" (or body (concat "About " title ".")) "\n"))
+
+(ert-deftest lispm-test-memory-prompt-budget ()
+  "A system prompt lists a memory's titles up to its budget, those used
+most lately, and says how many more there are: none is left out unseen.
+Recalling an entry records when, and how often."
+  (lispm-test-env
+    (let* ((lispm-memory-max-entries 2)
+           (agent (lispm-defagent keeper :root project))
+           (file (lispm-memory-file agent)))
+      (with-temp-file file
+        (insert "#+title: Memory\n"
+                (lispm-test--memory-entry "Alpha" "[2026-01-01 Thu 10:00]")
+                (lispm-test--memory-entry "Beta" "[2026-02-01 Sun 10:00]")
+                (lispm-test--memory-entry "Gamma" "[2026-03-01 Sun 10:00]")))
+      (should (string-match-p "\n- Beta\n- Gamma\n- (1 more, used less lately, not listed here: `recall` finds them)\\'"
+                              (lispm-memory--prompt agent)))
+      (should (equal (car (lispm-test--call agent "recall" '((query . "alpha")))) "## Alpha\nAbout Alpha."))
+      (lispm-test--call agent "recall" '((query . "alpha")))
+      (let ((alpha (car (lispm-memory--scope-entries agent 'project))))
+        (should (= (plist-get alpha :recalls) 2))
+        (should (equal (plist-get alpha :recalled) (lispm-memory--stamp)))
+        (should (equal (plist-get alpha :body) "About Alpha.")))
+      (should (string-match-p "\n- Alpha\n- Gamma\n- (1 more, used less lately, not listed here: `recall` finds them)\\'"
+                              (lispm-memory--prompt agent)))
+      (let ((lispm-memory-max-entries nil))
+        (should (string-match-p "\n- Alpha\n- Beta\n- Gamma\\'" (lispm-memory--prompt agent))))
+      ;; The budget is for all the memories listed, the role's too.
+      (let ((role (lispm-memory-file agent 'role)))
+        (with-temp-file role
+          (insert "#+title: Memory\n" (lispm-test--memory-entry "Delta" "[2026-09-01 Tue 10:00]")))
+        (should (string-match-p (concat "\n- Alpha\n- (2 more, used less lately, not listed here: `recall` finds them)"
+                                        "\n- Delta (role memory)\\'")
+                                (lispm-memory--prompt agent)))
+        (delete-file role)
+        (kill-buffer (find-buffer-visiting role)))
+      ;; An update keeps what is known of an entry's past.
+      (lispm-memory-remember agent "Alpha" "New facts.")
+      (let ((alpha (car (lispm-memory--scope-entries agent 'project))))
+        (should (equal (plist-get alpha :created) "[2026-01-01 Thu 10:00]"))
+        (should (= (plist-get alpha :recalls) 2))
+        (should (plist-get alpha :updated))))))
+
+(ert-deftest lispm-test-memory-consolidation ()
+  "A memory past its budget is consolidated at idle once a turn ends, as
+a model plans: duplicates merged, old entries folded, stale ones dropped,
+every change named in a commit, and the rest left as it was."
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let* ((lispm-git (executable-find "git"))
+             (lispm-memory-max-entries 4)
+             (lispm-memory-max-tokens nil)
+             (agent (lispm-defagent keeper "Keeps." :root project))
+             (file (lispm-memory-file agent))
+             (plan "{\"replace\": [{\"ids\": [1, 2], \"title\": \"Indentation\", \"tags\": [\"style\"],
+                                    \"content\": \"Two spaces, never tabs.\"},
+                                   {\"ids\": [3, 4], \"title\": \"Old operations\",
+                                    \"content\": \"Builds ran with make; deploys with rsync.\"}],
+                     \"drop\": [{\"id\": 6, \"reason\": \"The staging server is gone.\"}]}")
+             (asked nil)
+             (lispm-api-function
+              (lambda (backend body betas &rest callbacks)
+                (if (not (string-prefix-p "You keep the long-term memory" (alist-get 'system body)))
+                    (apply #'lispm-test--fake-api backend body betas callbacks)
+                  (push body asked)
+                  ;; Recalled while the plan is made: the plan still holds.
+                  (lispm-memory-recall agent "emacs")
+                  (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                               (lispm-test--msg "end_turn" (lispm-test--text (concat "The plan:\n" plan))))
+                  nil))))
+        (with-temp-file file
+          (insert "#+title: Memory\n"
+                  (lispm-test--memory-entry "Indent with spaces  :style:" "[2026-01-02 Fri 10:00]"
+                                            "[2026-03-01 Sun 09:00]" 2 "Use spaces.")
+                  (lispm-test--memory-entry "Indentation" "[2026-02-01 Sun 10:00]"
+                                            "[2026-04-01 Wed 09:00]" 1 "Two spaces.")
+                  (lispm-test--memory-entry "Build" "[2026-01-05 Mon 10:00]" nil nil "Run make.")
+                  (lispm-test--memory-entry "Deploy" "[2026-01-06 Tue 10:00]" nil nil "Use rsync.")
+                  (lispm-test--memory-entry "Editor" "[2026-10-01 Thu 10:00]" nil 3 "Emacs 31.")
+                  (lispm-test--memory-entry "Staging server" "[2026-01-07 Wed 10:00]" nil nil
+                                            "staging.example.invalid")))
+        (lispm-git-commit agent "keeper: remember six things")
+        (should (lispm-test--wait #'lispm-test--git-settled-p 10))
+        (setq lispm-test--scripts `((keeper ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+        (lispm-tell agent "hello")
+        (should (lispm-test--wait (lambda () (and asked (not (gethash file lispm-memory--consolidating))))))
+        ;; The session began with the four titles used most lately, and a count of the rest.
+        (should (string-match-p (concat "- Indent with spaces \\[style\\]\n- Indentation\n- Editor\n- Staging server\n"
+                                        "- (2 more, used less lately, not listed here: `recall` finds them)")
+                                (alist-get 'system (car (last lispm-test--requests)))))
+        ;; The model saw every entry, numbered, with its past, and the budget.
+        (let ((request (car asked)))
+          (should (= (length asked) 1))
+          (should (string-match-p "Make it fit in 3 entries by" (alist-get 'system request)))
+          (should (string-match-p (regexp-quote "[1] Indent with spaces [tags: style]\nsaved 2026-01-02, last used 2026-03-01, recalled 2 times\nUse spaces.\n")
+                                  (lispm-test--last-text request)))
+          (should (string-match-p (regexp-quote "[6] Staging server\nsaved 2026-01-07, last used 2026-01-07, recalled 0 times\n")
+                                  (lispm-test--last-text request))))
+        (let ((entries (lispm-memory--scope-entries agent 'project)))
+          (should (equal (mapcar (lambda (e) (plist-get e :title)) entries)
+                         '("Indentation" "Old operations" "Editor")))
+          (should (equal (mapcar (lambda (key) (plist-get (car entries) key))
+                                 '(:tags :created :recalled :recalls :body))
+                         '(("style") "[2026-01-02 Fri 10:00]" "[2026-04-01 Wed 09:00]" 3
+                           "Two spaces, never tabs.")))
+          (should (equal (mapcar (lambda (key) (plist-get (cadr entries) key)) '(:created :recalled :recalls))
+                         '("[2026-01-05 Mon 10:00]" nil 0)))
+          (should (equal (mapcar (lambda (key) (plist-get (nth 2 entries) key)) '(:recalls :body))
+                         '(4 "Emacs 31."))))
+        (let ((text (lispm--file-text file)))
+          (should (string-match-p "^:MERGED: +Indent with spaces | Indentation$" text))
+          (should (string-match-p "^:MERGED: +Build | Deploy$" text)))
+        ;; One commit says what went where, and why; what was dropped stays in history.
+        (should (lispm-test--wait #'lispm-test--git-settled-p 10))
+        (let ((default-directory lispm-directory))
+          (should (string-match-p
+                   (regexp-quote (concat "keeper: consolidate project memory, 6 entries to 3\n\n"
+                                         "merge \"Indent with spaces\", \"Indentation\" into \"Indentation\"\n"
+                                         "merge \"Build\", \"Deploy\" into \"Old operations\"\n"
+                                         "drop \"Staging server\": The staging server is gone."))
+                   (shell-command-to-string "git log -1 --format=%B")))
+          (should (equal (shell-command-to-string "git log -1 --format=%an") "keeper\n"))
+          (should (string-match-p "^-staging.example.invalid$"
+                                  (shell-command-to-string "git log -1 -p --format="))))))))
+
+(ert-deftest lispm-test-memory-consolidation-checked ()
+  "A plan naming an entry that is not there, or one twice, dropping one
+without a reason, leaving two entries of one title, or not bringing the
+memory nearer its budget, changes nothing; nor does a plan once the
+memory changed meanwhile.  A memory tried is not tried again before it
+says something new, nor for a while after a pass that failed; when its
+entries were recalled is nothing new.  Without git, it is not tried."
+  (should-error (lispm-memory--read-plan "{\"drop\": [{\"id\": 4, \"reason\": \"Stale.\"}]}" 3))
+  (should-error (lispm-memory--read-plan "{\"replace\": [{\"ids\": [1, 2], \"title\": \"T\", \"content\": \"C\"}],
+                                           \"drop\": [{\"id\": 2, \"reason\": \"Stale.\"}]}" 3))
+  (should-error (lispm-memory--read-plan "{\"drop\": [{\"id\": 1}]}" 3))
+  (should-error (lispm-memory--read-plan "{\"replace\": [{\"ids\": [1], \"title\": \" \", \"content\": \"C\"}]}" 3))
+  (should-error (lispm-memory--read-plan "No plan today." 3))
+  (should (equal (lispm-memory--read-plan
+                  "```json\n{\"replace\": [{\"ids\": [3, 1], \"title\": \"T\", \"tags\": [\"a\"], \"content\": \"C\"}],
+                   \"drop\": null}\n```" 3)
+                 '((((3 1) "T" ("a") "C")))))
+  (let ((lispm-memory-max-entries 2)
+        (lispm-memory-max-tokens 1000))
+    ;; Past the entries: fewer are needed, whatever the tokens.
+    (should (lispm-memory--progress-p '(4 . 500) '(3 . 600)))
+    (should-not (lispm-memory--progress-p '(4 . 500) '(4 . 100)))
+    ;; Past both: fewer of both.
+    (should-not (lispm-memory--progress-p '(4 . 2000) '(3 . 2000)))
+    (should (lispm-memory--progress-p '(4 . 2000) '(3 . 1500))))
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let* ((lispm-git (executable-find "git"))
+             (lispm-memory-max-entries 2)
+             (lispm-memory-max-tokens nil)
+             (agent (lispm-defagent keeper :root project))
+             (file (lispm-memory-file agent))
+             (asked 0)
+             (reply "{\"replace\": [], \"drop\": []}")
+             (meanwhile nil)
+             (lispm-api-function
+              (lambda (_backend _body _betas &rest callbacks)
+                (cl-incf asked)
+                (when meanwhile (funcall meanwhile))
+                (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                             (lispm-test--msg "end_turn" (lispm-test--text reply)))
+                nil))
+             (tried (lambda (n)
+                      (lispm-test--wait (lambda () (and (= asked n)
+                                                        (not (gethash file lispm-memory--consolidating)))))))
+             (wait-over (lambda () (setcdr (gethash file lispm-memory--tried) 0)))
+             (titles (lambda () (mapcar (lambda (e) (plist-get e :title))
+                                        (lispm-memory--scope-entries agent 'project))))
+             before)
+        (dolist (title '("A" "B" "C"))
+          (lispm-memory-remember agent title (concat "About " title ".")))
+        ;; Without git, a consolidation could keep nothing of what it drops.
+        (let ((lispm-git nil))
+          (lispm-memory--maintain agent nil)
+          (lispm-memory-consolidate agent)
+          (accept-process-output nil 0.1)
+          (should (= asked 0)))
+        (setq before (lispm--file-text file))
+        ;; A plan doing nothing frees nothing: the memory stays, and is
+        ;; not tried again for a while, though it says something new.
+        (lispm-memory--maintain agent nil)
+        (should (funcall tried 1))
+        (should (equal (lispm--file-text file) before))
+        (lispm-memory-remember agent "D" "About D.")
+        (lispm-memory--maintain agent nil)
+        (accept-process-output nil 0.1)
+        (should (= asked 1))
+        ;; Once the while is over: a plan that does not hold.
+        (funcall wait-over)
+        (setq before (lispm--file-text file)
+              reply "{\"drop\": [{\"id\": 3}]}")
+        (lispm-memory--maintain agent nil)
+        (should (funcall tried 2))
+        (should (equal (lispm--file-text file) before))
+        ;; Recalling says nothing new.
+        (funcall wait-over)
+        (lispm-memory-recall agent "about")
+        (should-not (equal (lispm--file-text file) before))
+        (lispm-memory--maintain agent nil)
+        (accept-process-output nil 0.1)
+        (should (= asked 2))
+        ;; Two entries of one title, or none fewer: nothing changes.
+        (lispm-memory-remember agent "D" "About D, again.")
+        (setq reply "{\"replace\": [{\"ids\": [1, 2], \"title\": \"c\", \"content\": \"A and B.\"}]}")
+        (lispm-memory--maintain agent nil)
+        (should (funcall tried 3))
+        (funcall wait-over)
+        (lispm-memory-remember agent "D" "About D, once more.")
+        (setq reply "{\"replace\": [{\"ids\": [1], \"title\": \"A\", \"content\": \"All about A.\"}]}")
+        (lispm-memory--maintain agent nil)
+        (should (funcall tried 4))
+        (should (equal (funcall titles) '("A" "B" "C" "D")))
+        (should (string-match-p "^About A\\.$" (lispm--file-text file)))
+        ;; The memory changed while the plan was made: nothing changes but that.
+        (funcall wait-over)
+        (lispm-memory-remember agent "D" "About D, at last.")
+        (setq reply "{\"drop\": [{\"id\": 1, \"reason\": \"Stale.\"}]}"
+              meanwhile (lambda () (lispm-memory-remember agent "E" "About E.")))
+        (lispm-memory--maintain agent nil)
+        (should (funcall tried 5))
+        (should (equal (funcall titles) '("A" "B" "C" "D" "E")))))))
+
+(ert-deftest lispm-test-system-scope ()
+  "An agent of the whole system has the system's memory and tasks, in
+place of a project's; an agent of a project neither sees nor changes
+them."
+  (lispm-test-env
+    (let ((bar (lispm-defagent bar "The system's agent." :root project :system t))
+          (coder (lispm-defagent coder "Codes." :root project))
+          (memory (expand-file-name "system/memory.org" lispm-directory))
+          (tasks (expand-file-name "system/tasks.org" lispm-directory)))
+      (should (lispm-agent-system bar))
+      (should-not (lispm-agent-system coder))
+      (should (equal (lispm-memory-file bar) memory))
+      (should (equal (car (lispm-test--call bar "remember" '((title . "Wallpaper") (content . "Blue."))))
+                     "Saved system memory \"Wallpaper\"."))
+      (should (string-match-p "\\`#\\+title: Memory of the system\n\\* Wallpaper\n" (lispm--file-text memory)))
+      (should (string-match-p "Added task T" (car (lispm-test--call bar "task_add" '((title . "Tidy the downloads"))))))
+      (should (string-match-p "\\`#\\+title: Tasks of the system\n" (lispm--file-text tasks)))
+      (should (member tasks (lispm-agenda-files)))
+      (should (equal (car (lispm-test--call bar "recall" '((query . "blue")))) "## Wallpaper\nBlue."))
+      (let ((prompt (lispm-system-prompt bar)))
+        (should (string-match-p "# Your long-term memory\n.*\n- Wallpaper$" prompt))
+        (should (string-match-p "# Open tasks\nT[0-9a-f]+ TODO Tidy the downloads" prompt)))
+      ;; A project's agent has its project's.
+      (lispm-test--call coder "remember" '((title . "Build") (content . "make")))
+      (should-not (string-match-p "Wallpaper\\|Tidy" (lispm-system-prompt coder)))
+      (should-not (string-match-p "Build" (lispm--file-text memory)))
+      (should (equal (car (lispm-test--call coder "recall" '((query . "blue")))) "Nothing matches. All memories:\n- Build"))
+      ;; Its sessions say so, and one resumed from its file is again the system's.
+      (let* ((agent (lispm-make-agent 'assistant project :system t))
+             (file (buffer-file-name (lispm-session-buffer agent))))
+        (should (equal (cdr (assoc "system" (lispm--file-keywords file))) "t"))
+        (lispm-retire agent)
+        (should (lispm-agent-system (lispm-resume-file file)))))))
+
+(ert-deftest lispm-test-episodes ()
+  "The summary a session is handed over with is kept as an episode of the
+day.  A new session of an agent of the whole system starts with the
+latest; the one handed over to begins with it already."
+  (lispm-test-env
+    (let* ((lispm-compact-save-memory nil)
+           (bar (lispm-defagent bar "The system's agent." :root project :system t)))
+      (setq lispm-test--scripts
+            `((bar ,(lispm-test--msg "end_turn" (lispm-test--text "Hello."))
+                   ,(lispm-test--msg "end_turn" (lispm-test--text "We said hello.")))))
+      (lispm-tell bar "hi")
+      (should (lispm-test--wait (lispm-test--idle-p bar)))
+      (let ((old (buffer-file-name (lispm-agent-buffer bar))))
+        (lispm-compact bar)
+        (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p bar))
+                                                  (not (equal (buffer-file-name (lispm-agent-buffer bar)) old))))))
+        (let* ((day (expand-file-name (format-time-string "system/episodes/%Y-%m-%d.org") lispm-directory))
+               (entries (lispm-episodes--entries day)))
+          (should (= (length entries) 1))
+          (should (string-match-p "\\`[0-9][0-9]:[0-9][0-9] bar\\'" (plist-get (car entries) :title)))
+          (should (equal (plist-get (car entries) :body) "We said hello."))
+          (should (string-match-p (regexp-quote (format ":SESSION:  [[file:%s]]" (abbreviate-file-name old)))
+                                  (lispm--file-text day))))
+        (should-not (string-match-p "What happened lately" (lispm-test--transcript bar)))
+        (should (string-match-p (concat "# What happened lately\nThe latest summary of your earlier conversations "
+                                        "([0-9-]+ [0-9:]+ bar):\nWe said hello\\.")
+                                (lispm-system-prompt bar)))
+        (should-not (string-match-p "What happened lately"
+                                    (lispm-system-prompt (lispm-defagent coder "Codes." :root project))))))))
+
+(ert-deftest lispm-test-episodes-roll-up ()
+  "Days of a week that is over are rolled up into it, and weeks of a month
+that is over into the month, each by a model, in a commit; the days of
+this week stay as they are."
+  (should (equal (lispm-episodes--week "2026-01-05") "2026-W02"))
+  (should (equal (lispm-episodes--week "2027-01-01") "2026-W53"))
+  (should (equal (lispm-episodes--week "2024-12-30") "2025-W01"))
+  (should (equal (lispm-episodes--month "2025-W01") "2025-01"))
+  (should (equal (lispm-episodes--month "2026-W05") "2026-01"))
+  (should (equal (lispm-episodes--month "2026-W06") "2026-02"))
+  (should (equal (lispm-episodes--month "2026-W53") "2026-12"))
+  (skip-unless (executable-find "git"))
+  (lispm-test-env
+    (lispm-test--when-idle-now
+      (let* ((lispm-git (executable-find "git"))
+             (bar (lispm-defagent bar "The system's agent." :root project :system t))
+             (dir (lispm-episodes-directory bar))
+             (today (format-time-string "%Y-%m-%d.org"))
+             (asked nil)
+             (lispm-api-function
+              (lambda (backend body betas &rest callbacks)
+                (let ((system (alist-get 'system body)))
+                  (if (not (string-prefix-p "You condense" system))
+                      (apply #'lispm-test--fake-api backend body betas callbacks)
+                    (push body asked)
+                    (string-match "summary of the \\(?:week\\|month\\) \\([0-9W-]+\\)," system)
+                    (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                                 (lispm-test--msg "end_turn" (lispm-test--text
+                                                              (format "All of %s." (match-string 1 system)))))
+                    nil)))))
+        (make-directory dir t)
+        (pcase-dolist (`(,day . ,text) '(("2026-01-05" . "Monday's work.")
+                                         ("2026-01-07" . "Wednesday's work.")
+                                         ("2026-01-13" . "The next week's work.")))
+          (with-temp-file (expand-file-name (concat day ".org") dir)
+            (insert "#+title: Episodes of " day "\n"
+                    (lispm-test--memory-entry "10:00 bar" (format "[%s 10:00]" day) nil nil text))))
+        (lispm-episodes-record bar "Today's work." nil)
+        ;; Without git, a rollup could keep nothing of the days it removes.
+        (let ((lispm-git nil))
+          (lispm-episodes--maintain bar nil)
+          (should-not (gethash (cons 'episodes dir) lispm--idle-work)))
+        (lispm-git-commit bar "bar: episodes")
+        (should (lispm-test--wait #'lispm-test--git-settled-p 10))
+        (setq lispm-test--scripts `((bar ,(lispm-test--msg "end_turn" (lispm-test--text "Hi.")))))
+        (lispm-tell bar "hi")
+        (should (lispm-test--wait (lambda () (and (= (length asked) 3)
+                                                  (not (gethash dir lispm-episodes--rolling))))
+                                  10))
+        (should (equal (directory-files dir nil "\\.org\\'") (list "2026-01.org" today)))
+        (let ((requests (reverse asked)))
+          (should (string-match-p "summary of the week 2026-W02," (alist-get 'system (nth 0 requests))))
+          (should (equal (lispm-test--last-text (nth 0 requests))
+                         "## 2026-01-05 10:00 bar\nMonday's work.\n\n## 2026-01-07 10:00 bar\nWednesday's work."))
+          (should (string-match-p "summary of the week 2026-W03," (alist-get 'system (nth 1 requests))))
+          (should (string-match-p "summary of the month 2026-01," (alist-get 'system (nth 2 requests))))
+          (should (equal (lispm-test--last-text (nth 2 requests))
+                         "## 2026-W02\nAll of 2026-W02.\n\n## 2026-W03\nAll of 2026-W03.")))
+        (should (string-match-p "^:SOURCES: +2026-W02 | 2026-W03$"
+                                (lispm--file-text (expand-file-name "2026-01.org" dir))))
+        (should (equal (cdr (lispm-episodes-latest bar)) "Today's work."))
+        (should (lispm-test--wait #'lispm-test--git-settled-p 10))
+        (let* ((default-directory lispm-directory)
+               (log (shell-command-to-string "git log -p --format=%B")))
+          (should (string-match-p "bar: roll up the episodes of 2026-W02 (2026-01-05, 2026-01-07)" log))
+          (should (string-match-p "bar: roll up the episodes of 2026-01 (2026-W02, 2026-W03)" log))
+          (should (string-match-p "^-Monday's work\\.$" log)))))))
+
 ;;;; Commands
 
 (ert-deftest lispm-test-commands ()
@@ -7723,6 +8256,9 @@ Stickies, whose opening `opened' records."
       (should (eq (lispm-agent-role agent) 'system))
       (should (equal (lispm-agent-root agent) (file-name-as-directory project)))
       (should (string-match-p "You are LispM itself" (lispm-system-prompt agent)))
+      ;; Its memory and tasks are the system's.
+      (should (lispm-agent-system agent))
+      (should (equal (lispm-memory-file agent) (expand-file-name "system/memory.org" lispm-directory)))
       ;; The project's own agents are others.
       (let ((default-directory project))
         (should-not (lispm--project-agent))
