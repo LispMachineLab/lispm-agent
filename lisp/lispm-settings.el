@@ -97,6 +97,15 @@ sets it; SAVE it for later starts too."
 
 ;;;; Model
 
+(defun lispm-settings--call (function &rest arguments)
+  "Call FUNCTION, of another program's hook, with ARGUMENTS: an error of
+its is shown as a message and answers nil, so that it breaks no window
+of settings."
+  (condition-case err
+      (apply function arguments)
+    (error (message "%s: %s" function (error-message-string err))
+           nil)))
+
 (defvar lispm-model-choices-functions nil
   "Functions offering models to choose from, besides the backends' own.
 Each is called with no arguments and returns a list of plists:
@@ -149,7 +158,7 @@ names, those of `lispm-model-choices-functions', and the one chosen."
                          lispm-backends)))
     (run-hook-wrapped 'lispm-model-choices-functions
                       (lambda (function)
-                        (setq choices (append choices (funcall function)))
+                        (setq choices (append choices (lispm-settings--call function)))
                         nil))
     (when-let* ((name (lispm-backend-name))
                 (model (lispm-default-model)))
@@ -166,8 +175,10 @@ follows the backend's own.  Running agents take it from their next
 request on, unless their role names a model or they switched to one."
   (when (and backend (not (assq backend lispm-backends)))
     (user-error "%s" (lispm-tr "Unknown backend %s (see `lispm-backends')" backend)))
-  (let ((own (plist-get (alist-get (or backend (lispm-backend-name)) lispm-backends) :model)))
-    (lispm-settings-set 'lispm-backend backend save)
+  (lispm-settings-set 'lispm-backend backend save)
+  ;; The backend's own model, once chosen: with BACKEND nil, the one the
+  ;; environment then picks.
+  (let ((own (plist-get (alist-get (lispm-backend-name) lispm-backends) :model)))
     (lispm-settings-set 'lispm-model (unless (equal model own) model) save)))
 
 (defun lispm-set-effort (effort &optional save)
@@ -226,10 +237,13 @@ The first of `lispm-backend-status-functions' answering tells the
 state.  Nothing here asks for a key: auth-source may want a passphrase."
   (let* ((name (lispm-backend-name))
          (backend (alist-get name lispm-backends))
-         (status (or (run-hook-with-args-until-success 'lispm-backend-status-functions name backend)
+         (status (or (run-hook-wrapped 'lispm-backend-status-functions
+                                       (lambda (function)
+                                         (lispm-settings--call function name backend)))
                      (lispm-settings--backend-status name backend))))
     (list :backend name :model (and backend (lispm-default-model)) :effort lispm-effort
-          :state (plist-get status :state) :message (plist-get status :message))))
+          :state (plist-get status :state)
+          :message (or (plist-get status :message) (format "%s" (plist-get status :state))))))
 
 (defun lispm-backend-actions ()
   "What can be done about the backend agents use, as the functions of
@@ -238,7 +252,7 @@ state.  Nothing here asks for a key: auth-source may want a passphrase."
         (actions nil))
     (run-hook-wrapped 'lispm-backend-action-functions
                       (lambda (function)
-                        (setq actions (append actions (funcall function name)))
+                        (setq actions (append actions (lispm-settings--call function name)))
                         nil))
     actions))
 
@@ -381,6 +395,11 @@ Interactively, it is chosen by its title, the one changed last first."
   (pop-to-buffer (find-file-noselect file)))
 
 ;;;; Roles and skills
+
+(defun lispm-default-role-choices ()
+  "The roles agents may start with by default: every role but `system',
+which only LispM itself has (see `lispm-system-agent')."
+  (seq-remove (lambda (role) (eq (lispm-role-name role) 'system)) (lispm-roles)))
 
 (defun lispm-set-default-role (role &optional save)
   "Have agents started without choosing a role be of ROLE, and SAVE it."

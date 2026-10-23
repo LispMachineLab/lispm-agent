@@ -6906,7 +6906,18 @@ program tells it; and what programs offer to do about it."
     (should (equal (plist-get (lispm-model-status) :message) "Starting the gateway."))
     (add-hook 'lispm-backend-action-functions
               (lambda (name) (list (list (format "Set Up %s…" (or name "a Backend")) #'ignore))))
-    (should (equal (lispm-backend-actions) '(("Set Up a Backend…" ignore))))))
+    (should (equal (lispm-backend-actions) '(("Set Up a Backend…" ignore))))
+    ;; Another program's hook that fails breaks nothing; one telling no
+    ;; message has its state said.
+    (let ((inhibit-message t))
+      (add-hook 'lispm-backend-status-functions (lambda (&rest _) (error "Broken")) -90)
+      (add-hook 'lispm-backend-action-functions (lambda (_) (error "Broken")) -90)
+      (add-hook 'lispm-model-choices-functions (lambda () (error "Broken")))
+      (should (equal (plist-get (lispm-model-status) :message) "Starting the gateway."))
+      (should (equal (lispm-backend-actions) '(("Set Up a Backend…" ignore))))
+      (should (listp (lispm-model-choices)))
+      (add-hook 'lispm-backend-status-functions (lambda (&rest _) '(:state starting)) -95)
+      (should (equal (plist-get (lispm-model-status) :message) "starting")))))
 
 (ert-deftest lispm-test-settings-change-hook ()
   "The change hook runs once a setting changed, once for changes made
@@ -6989,6 +7000,13 @@ last, once, and taken out, LispM's own told from the others."
     (lispm-set-default-role "assistant" t)
     (should (eq lispm-default-role 'assistant))
     (should-error (lispm-set-default-role 'nobody) :type 'user-error)
+    ;; LispM's own role is no default for other agents.
+    (should (lispm-get-role 'system t))
+    (should (memq 'assistant (mapcar #'lispm-role-name (lispm-default-role-choices))))
+    (should-not (memq 'system (mapcar #'lispm-role-name (lispm-default-role-choices))))
+    ;; A skill's name, from a file of its own or a directory's SKILL.org.
+    (should (equal (lispm-skill-name "~/p/.lispm/skills/a.org") "a"))
+    (should (equal (lispm-skill-name "~/q/.lispm/skills/b/SKILL.org") "b"))
     (let ((dir (file-name-as-directory (make-temp-file "lispm-skills-" t))))
       (unwind-protect
           (progn
