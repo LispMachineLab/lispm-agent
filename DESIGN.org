@@ -17,6 +17,7 @@ implementation:
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
+| Terminal                  | a frame of sessions, a listener and a who line, keys only        | [[file:lisp/lispm-terminal.el][lispm-terminal.el]]: ~lispm-terminal~                   |
 | Languages                 | words written in English, shown from a catalog per language      | [[file:lisp/lispm-i18n.el][lispm-i18n.el]]: ~lispm-tr~, [[file:i18n/][i18n/]]                    |
 | Presentations, inspector  | text is the objects it shows; one agent shown whole              | [[file:lisp/lispm-inspect.el][lispm-inspect.el]]: ~lispm-act~, ~lispm-inspect~        |
 | Grounding                 | code in replies checked against the running image                | [[file:lisp/lispm-ground.el][lispm-ground.el]]: ~lispm-ground-check~                 |
@@ -172,6 +173,14 @@ area is not part of the context, so a draft is never sent by accident. Tool call
 kind (~Read(path)~ with a line count, ~Update(path)~ with its diff, ~Bash(command)~ with its
 first lines of output), and ~TAB~ shows any of them in full. ~/transcript~ opens the org
 document for the edits above; ~lispm-interface~ set to ~org~ makes it the interface again.
+
+*A terminal, as the Lisp Machine had* ([[file:lisp/lispm-terminal.el][lispm-terminal.el]]). A Lisp Machine's console was a
+listener and a who line, the system reached by typing at it. LispM's terminal is the same: a
+frame with no bars, the sessions on the left, the listener on the right, which is the chat of
+one session, and a who line along the bottom. It adds no state of its own: the sessions are
+~lispm-agents~ and ~lispm-sessions~, the listener is ~lispm-chat~, and it is drawn again from
+the hooks the chat already listens to. LispM itself, the system's own agent, comes first, so
+that with no project at hand there is still someone to ask.
 
 *Objects, not strings* ([[file:lisp/lispm-inspect.el][lispm-inspect.el]]). On a Lisp Machine the screen showed objects: Genera's
 presentations made a pathname or an instance on the screen the object itself, with commands by
