@@ -350,23 +350,45 @@ Lines that wrap are indented by PREFIX too."
   (lispm-present-text text (lispm-chat--root)))
 
 (defun lispm-chat--inline (line &optional defined)
-  "LINE of a reply with its Markdown headings, bold and code shown as faces.
-Code naming a symbol or a file is presented as the object, and code
-naming what this Emacs lacks is marked; DEFINED are the names the reply
-defines."
+  "LINE of a reply with its Markdown headings, bold, italics and code shown
+as faces.  Code naming a symbol or a file is presented as the object,
+and code naming what this Emacs lacks is marked; DEFINED are the names
+the reply defines."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
                 line)))
     (setq line (replace-regexp-in-string
                 "\\*\\*\\([^*\n]+\\)\\*\\*"
                 (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
-    (replace-regexp-in-string
-     "`\\([^`\n]+\\)`"
-     ;; The match data say what of the match to replace: presenting
-     ;; the code must leave them as they are.
-     (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code)))
-                   (save-match-data (lispm-present-code code (lispm-chat--root) defined))))
-     line t t)))
+    (lispm-chat--italics
+     (replace-regexp-in-string
+      "`\\([^`\n]+\\)`"
+      ;; The match data say what of the match to replace: presenting
+      ;; the code must leave them as they are.
+      (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
+                    (save-match-data (lispm-present-code code (lispm-chat--root) defined))))
+      line t t))))
+
+(defun lispm-chat--italics (line)
+  "LINE with its Markdown emphasis, *TEXT* or _TEXT_, in italics.
+Not inside a word, as in 2*3*4 or snake_case, nor inside code, which
+the code's `lispm-chat-code' property marks."
+  (let ((start 0) (parts nil))
+    (while (string-match "\\([*_]\\)\\([^*_[:space:]]\\(?:[^\n]*?[^[:space:]]\\)?\\)\\1" line start)
+      (let* ((beg (match-beginning 0))
+             (end (match-end 0))
+             (text (match-string 2 line))
+             (word-p (lambda (pos) (and (>= pos 0) (< pos (length line))
+                                        (string-match-p "[[:alnum:]*_]" (string (aref line pos)))))))
+        (if (or (funcall word-p (1- beg)) (funcall word-p end)
+                (text-property-not-all beg end 'lispm-chat-code nil line))
+            (progn (push (substring line start (1+ beg)) parts)
+                   (setq start (1+ beg)))
+          (add-face-text-property 0 (length text) 'italic t text)
+          (push (substring line start beg) parts)
+          (push text parts)
+          (setq start end))))
+    (apply #'concat (nreverse (cons (substring line start) parts)))))
 
 (defun lispm-chat--markdown (text)
   "TEXT of a reply, its Markdown shown as faces.
