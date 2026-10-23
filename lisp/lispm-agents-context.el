@@ -76,6 +76,15 @@
 MCP clients may show it the model, as Claude Code does."
   (ignore server))
 
+(cl-defstruct (lispm-agents-context-presence (:constructor lispm-agents-context-presence-make))
+  "A server serving nothing, for an agent shown nothing of Emacs: bound to
+its terminal, it has the terminal's end noticed all the same, see
+`lispm-agents-context-release-functions'.")
+
+(cl-defmethod lispm-agents-context-stop ((_server lispm-agents-context-presence))
+  "Stop nothing: the server holds nothing."
+  nil)
+
 (defvar lispm-agents-context--servers nil
   "Live servers, as (TERMINAL . SERVER), a terminal's first bound first.")
 

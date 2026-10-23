@@ -1,0 +1,93 @@
+#!/bin/sh
+# Copyright (C) 2026  Ryan.K
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# lispm-tool: call the tools LispM serves an agent, from the agent's shell.
+#
+#   lispm-tool               who you are among the agents, and the tools
+#   lispm-tool NAME [INPUT]  call the tool NAME; INPUT is a JSON object,
+#                            or - to read it from standard input
+#
+# An agent with a shell but no MCP client, as Holon, runs it.  It finds
+# the agent's server in the directory $LISPM_PEERS, ~/.lispm/peers by
+# default: LispM (lispm-agents-mcp.el) writes there, to a file named
+# VARIABLE=VALUE, the address and token of the server of the agent whose
+# commands have VARIABLE set to VALUE.  $LISPM_TOOL_SERVER names such a
+# file directly.  The result is printed; the exit status is 1 when the
+# tool failed, 2 when no server answered.
+
+set -u
+peers=${LISPM_PEERS:-$HOME/.lispm/peers}
+nl='
+'
+
+usage() {
+  sed -n '7,9p' "$0" | sed 's/^# *//'
+}
+
+# The file naming this agent's server.
+server_file() {
+  if [ -n "${LISPM_TOOL_SERVER:-}" ]; then
+    printf '%s\n' "$LISPM_TOOL_SERVER"
+    return 0
+  fi
+  for file in "$peers"/*=*; do
+    [ -f "$file" ] || continue
+    name=${file##*/}
+    variable=${name%%=*}
+    value=${name#*=}
+    case $variable in
+      '' | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
+    esac
+    eval "current=\${$variable-}"
+    if [ -n "$current" ] && [ "$current" = "$value" ]; then
+      printf '%s\n' "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+case ${1-} in
+  -h | --help) usage; exit 0 ;;
+esac
+
+file=$(server_file) || {
+  echo "lispm-tool: LispM serves this agent nothing: it runs outside LispM, or LispM has stopped" >&2
+  exit 2
+}
+{ read -r url && read -r token; } < "$file" || {
+  echo "lispm-tool: cannot read $file" >&2
+  exit 2
+}
+
+# The token goes in a header read from a file descriptor, not in argv.
+if [ $# -eq 0 ]; then
+  curl -sS --noproxy '*' -H @/dev/fd/3 "$url/tools" 3<<EOF || exit 2
+Authorization: Bearer $token
+EOF
+  exit 0
+fi
+
+name=$1
+case $name in
+  '' | *[!A-Za-z0-9_.-]*) echo "lispm-tool: not the name of a tool: $name" >&2; exit 2 ;;
+esac
+if [ $# -lt 2 ]; then
+  input='{}'
+elif [ "$2" = - ]; then
+  input=$(cat)
+else
+  input=$2
+fi
+
+response=$(printf '%s' "$input" |
+  curl -sS --noproxy '*' -H @/dev/fd/3 -H 'Content-Type: application/json' \
+       --data-binary @- -w '\n%{http_code}' "$url/call/$name" 3<<EOF
+Authorization: Bearer $token
+EOF
+) || exit 2
+status=${response##*"$nl"}
+body=${response%"$nl"*}
+printf '%s\n' "${body%"$nl"}"
+[ "$status" = 200 ] || exit 1

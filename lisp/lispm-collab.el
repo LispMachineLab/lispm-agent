@@ -65,7 +65,9 @@
 ;; three tools reach them as they reach LispM's agents, and peers reach
 ;; every agent in turn.  What comes to a peer is put to it as its user's
 ;; next message: [Message from X], [Request R1 from X], which it answers
-;; with a reply of its own, and [Reply from X to request R1].  Requests
+;; with a reply of its own, and [Reply from X to request R1].  A peer
+;; with no tools to reply with, as an OpenClaw whose Gateway cannot reach
+;; Emacs, answers a request with its final reply to it instead.  Requests
 ;; asked of peers live as long as Emacs.
 
 ;;; Code:
@@ -83,8 +85,11 @@ NAME, a string, names it to the agents; KIND says what it is, \"Claude
 Code\"; ROOT is the directory it works in; STATE, a function, returns
 what it is doing, as \"idle\"; DELIVER is a function of a text putting
 the text to it as its user's next message, once it is free for it,
-which returns non-nil if it was given the text at once."
-  name kind root state deliver)
+which returns non-nil if it was given the text at once.  ANSWER, for a
+peer with no tools to reply with, is a function of a text and a function
+of a text: it puts the text to the peer as DELIVER does and calls the
+function with the peer's final reply to it."
+  name kind root state deliver answer)
 
 (defvar lispm-peer-functions nil
   "Functions returning peers, the agents of other programs in this Emacs.
@@ -116,19 +121,30 @@ it ended without one, non-nil.")
   "Give PEER the message TEXT from FROM, the name of an agent or a peer.
 Return non-nil if PEER was given it at once, rather than once free."
   (funcall (lispm-peer-deliver peer)
-           (format "[Message from %s]\n%s\n\n(Answer, if need be, with your send_message tool, to %s.)"
-                   from text from)))
+           (if (lispm-peer-answer peer)
+               (format "[Message from %s]\n%s" from text)
+             (format "[Message from %s]\n%s\n\n(Answer, if need be, with your send_message tool, to %s.)"
+                     from text from))))
 
 (cl-defun lispm-ask-peer (peer request from callback &key id)
   "Ask PEER REQUEST on behalf of FROM, a name; return the request's id.
 CALLBACK is called with PEER's reply, or with a text saying it ended
-without one and non-nil.  ID is the request's id, a new one by default."
-  (let ((id (or id (lispm-collab-new-request-id))))
+without one and non-nil.  ID is the request's id, a new one by default.
+A peer with no tools to reply with answers with its final reply."
+  (let ((id (or id (lispm-collab-new-request-id)))
+        (answer (lispm-peer-answer peer)))
     (push (list id (lispm-peer-name peer) callback) lispm-collab--requests)
     (condition-case err
-        (funcall (lispm-peer-deliver peer)
-                 (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: give it with your reply tool, request %s.)"
-                         id from request from id))
+        (if answer
+            (funcall answer
+                     (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: your reply to this message is it.)"
+                             id from request from)
+                     (lambda (reply)
+                       (when (assoc id lispm-collab--requests)
+                         (lispm-peer-reply peer id reply))))
+          (funcall (lispm-peer-deliver peer)
+                   (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: give it with your reply tool, request %s.)"
+                           id from request from id)))
       (error (setq lispm-collab--requests (cl-remove id lispm-collab--requests :key #'car :test #'equal))
              (signal (car err) (cdr err))))
     id))
