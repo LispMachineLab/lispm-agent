@@ -37,6 +37,11 @@
 (defconst lispm-local-http-max-request (* 64 1024 1024)
   "Largest request body, in bytes, the server reads.")
 
+(defvar lispm-local-http-respond nil
+  "While a server's handler runs, a function sending the request a response.
+It takes (STATUS BODY TYPE), as the handler returns it.  A handler that
+answers later keeps it and returns `deferred'.")
+
 (defun lispm-local-http-headers (head)
   "Return the headers of the HTTP request HEAD as an alist of downcased names."
   (let (headers)
@@ -51,7 +56,8 @@ AUTHORIZE is called with a request's headers, an alist of downcased names
 to values, and must return non-nil to admit it.  HANDLER is called with
 the method, the path, the headers and the decoded body, and returns
 \(STATUS BODY TYPE): an HTTP status such as \"200 OK\", a unibyte body, or
-nil for none, and the body's content type, JSON when left out.  The port
+nil for none, and the body's content type, JSON when left out; or
+`deferred', to send it later with `lispm-local-http-respond'.  The port
 is `(process-contact SERVER :service)'."
   (make-network-process
    :name name
@@ -84,13 +90,18 @@ is `(process-contact SERVER :service)'."
          ((>= (length input) (+ end 4 length))
           (process-put connection :input nil)
           (pcase-let ((`(,method ,path) (split-string (car (split-string head "\r\n")) " ")))
-            (lispm-local-http--reply
-             connection
-             (if (funcall authorize headers)
-                 (funcall handler method path headers
-                          (decode-coding-string (substring input (+ end 4) (+ end 4 length))
-                                                'utf-8))
-               '("401 Unauthorized"))))))))
+            (let* ((lispm-local-http-respond
+                    (lambda (response)
+                      (when (process-live-p connection)
+                        (lispm-local-http--reply connection response))))
+                   (response
+                    (if (funcall authorize headers)
+                        (funcall handler method path headers
+                                 (decode-coding-string (substring input (+ end 4) (+ end 4 length))
+                                                       'utf-8))
+                      '("401 Unauthorized"))))
+              (unless (eq response 'deferred)
+                (lispm-local-http--reply connection response))))))))
      ((> (length input) 16384)
       (lispm-local-http--reply connection '("431 Request Header Fields Too Large"))))))
 

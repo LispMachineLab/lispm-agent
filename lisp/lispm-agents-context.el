@@ -34,8 +34,11 @@
 ;;   terminal --launch--> server --bind--> stops with its terminal
 ;;   request --`lispm-agents-context-handle'--> tool (directory, arguments)
 ;;
-;; Every tool is read-only, and an agent sees only files under the
-;; directory its terminal runs in.
+;; Every tool here is read-only, and an agent sees only files under the
+;; directory its terminal runs in.  A terminal may have several servers,
+;; as Claude's IDE server and its MCP server for LispM's tools
+;; (lispm-agents-bridge.el); a tool may answer later, see
+;; `lispm-agents-context-answer'.
 
 ;;; Code:
 
@@ -68,33 +71,63 @@
 (cl-defgeneric lispm-agents-context-stop (server)
   "Stop SERVER and release what it holds.")
 
+(cl-defgeneric lispm-agents-context-instructions (server)
+  "Return what an agent is told of SERVER when it connects, or nil.
+MCP clients may show it the model, as Claude Code does."
+  (ignore server))
+
 (defvar lispm-agents-context--servers nil
-  "Live servers, as (TERMINAL . SERVER).")
+  "Live servers, as (TERMINAL . SERVER), a terminal's first bound first.")
 
 (defvar-local lispm-agents-context-server nil
-  "The server bound to this agent terminal.")
+  "The first server bound to this agent terminal.")
 (put 'lispm-agents-context-server 'permanent-local t)
+
+(defvar lispm-agents-context-answer nil
+  "While a tool runs, a function answering its request later.
+It takes the text items of the result and, when the tool failed,
+non-nil.  A tool that answers later keeps it and returns `deferred'.")
 
 (defun lispm-agents-context-bind (server terminal)
   "Bind SERVER to the agent TERMINAL buffer: it stops when the terminal's
 process exits, when the terminal is killed, or when Emacs exits."
-  (push (cons terminal server) lispm-agents-context--servers)
+  (setq lispm-agents-context--servers
+        (append lispm-agents-context--servers (list (cons terminal server))))
   (with-current-buffer terminal
-    (setq lispm-agents-context-server server)
+    (unless lispm-agents-context-server
+      (setq lispm-agents-context-server server))
     (add-hook 'kill-buffer-hook #'lispm-agents-context--terminal-killed nil t))
   (add-hook 'eat-exit-hook #'lispm-agents-context--terminal-exited)
   (add-hook 'kill-emacs-hook #'lispm-agents-context-release-all)
   (add-hook 'post-command-hook #'lispm-agents-context--note-selection))
 
+(defvar lispm-agents-context-release-functions nil
+  "Functions called with an agent terminal whose servers are about to stop:
+its program exited, or it was killed.")
+
 (defun lispm-agents-context-release (terminal)
-  "Stop the server bound to TERMINAL, if any."
-  (when-let* ((entry (assq terminal lispm-agents-context--servers)))
-    (setq lispm-agents-context--servers (delq entry lispm-agents-context--servers))
+  "Stop the servers bound to TERMINAL, if any."
+  (when-let* ((entries (seq-filter (lambda (entry) (eq (car entry) terminal))
+                                   lispm-agents-context--servers)))
+    (with-demoted-errors "lispm-agents: releasing a terminal: %S"
+      (run-hook-with-args 'lispm-agents-context-release-functions terminal))
+    (setq lispm-agents-context--servers
+          (seq-difference lispm-agents-context--servers entries #'eq))
     (when (buffer-live-p terminal)
       (with-current-buffer terminal (setq lispm-agents-context-server nil)))
     (unless lispm-agents-context--servers
       (remove-hook 'post-command-hook #'lispm-agents-context--note-selection))
-    (lispm-agents-context-stop (cdr entry))))
+    (dolist (entry entries)
+      (lispm-agents-context-stop (cdr entry)))))
+
+(defun lispm-agents-context-terminal (server)
+  "Return the agent terminal SERVER is bound to, or nil."
+  (car (rassq server lispm-agents-context--servers)))
+
+(defun lispm-agents-context-servers (terminal)
+  "Return the servers bound to the agent TERMINAL, the first bound first."
+  (mapcar #'cdr (seq-filter (lambda (entry) (eq (car entry) terminal))
+                            lispm-agents-context--servers)))
 
 (defun lispm-agents-context-release-all ()
   "Stop every agent server."
@@ -364,6 +397,12 @@ request id."
   "Return the JSON-RPC response to request ID carrying RESULT."
   `((jsonrpc . "2.0") (id . ,id) (result . ,result)))
 
+(defun lispm-agents-context-tool-result (id texts &optional errorp)
+  "Return the response to the tool call ID whose result is TEXTS.
+ERRORP, non-nil, marks the call failed."
+  (lispm-agents-context-result id `((content . ,(lispm-agents-context-content texts))
+                                    ,@(when errorp '((isError . t))))))
+
 (defun lispm-agents-context-error (id code text)
   "Return the JSON-RPC error response to request ID with CODE and TEXT."
   `((jsonrpc . "2.0") (id . ,id) (error . ((code . ,code) (message . ,text)))))
@@ -386,7 +425,9 @@ caller handles; or `deferred' when a tool answers later itself."
            (lispm-agents-context-result
             id `((protocolVersion . ,(or (alist-get 'protocolVersion params) "2025-06-18"))
                  (capabilities . ((tools . ((listChanged . :false)))))
-                 (serverInfo . ((name . "Emacs") (version . ,emacs-version))))))
+                 (serverInfo . ((name . "Emacs") (version . ,emacs-version)))
+                 ,@(when-let* ((instructions (lispm-agents-context-instructions server)))
+                     `((instructions . ,instructions))))))
           ("tools/list"
            (lispm-agents-context-result
             id `((tools . ,(vconcat
@@ -406,8 +447,7 @@ caller handles; or `deferred' when a tool answers later itself."
                (let ((result (funcall (nth 1 tool) server (alist-get 'arguments params) id)))
                  (if (eq result 'deferred)
                      'deferred
-                   (lispm-agents-context-result
-                    id `((content . ,(lispm-agents-context-content result)))))))))
+                   (lispm-agents-context-tool-result id result))))))
           ("ping" (lispm-agents-context-result id (make-hash-table)))
           (_ (when (and id method)
                (lispm-agents-context-error id -32601 (format "Method not found: %s" method)))))

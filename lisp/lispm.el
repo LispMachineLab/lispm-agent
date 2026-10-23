@@ -77,7 +77,9 @@
 ;; Agents that are programs of their own, as Claude Code and Codex, run
 ;; in terminals beside them, their sessions listed and resumed as one
 ;; (lispm-agents.el), shown Emacs's state over MCP or Claude's IDE
-;; protocol (lispm-agents-context.el).
+;; protocol (lispm-agents-context.el).  While LispM runs they are peers
+;; of its agents, which they message and ask, and they use its skills
+;; and tools (lispm-agents-bridge.el).
 ;;
 ;; Start with M-x lispm.  See README.org and DESIGN.org.
 
@@ -427,6 +429,10 @@ AGENT is the running agent of the current project, or a new one."
     (if lispm-mode-line-mode
         (add-to-list 'global-mode-string entry t)
       (setq global-mode-string (delete entry global-mode-string)))))
+
+;; The editor's agents get LispM's tools whenever they are about.
+(with-eval-after-load 'lispm-agents-mcp
+  (require 'lispm-agents-bridge))
 
 (provide 'lispm)
 ;;; lispm.el ends here

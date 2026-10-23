@@ -8283,7 +8283,16 @@ first prompt; context Codex injects is no prompt."
             (should (equal (plist-get session :id) "0199"))
             (should (numberp (plist-get session :started))))
           (lispm-agents-codex--rename (list :id "0199") "Build fix")
-          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Build fix")))
+          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Build fix"))
+          ;; Codex may record more than the head holds before the first prompt.
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0201\",\"cwd\":\"/tmp\",\"timestamp\":\"2026-10-20T08:00:00Z\"}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"additional_tools\",\"tools\":\""
+                    (make-string (* 2 lispm-agents-transcript-head-bytes) ?x) "\"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship it\"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":\""
+                    (make-string (* 2 lispm-agents-transcript-tail-bytes) ?y) "\"}}\n"))
+          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Ship it")))
       (remhash file lispm-agents--session-cache)
       (delete-directory home t))))
 
@@ -8394,6 +8403,408 @@ of the agents drawn: so it is shown again rather than resumed twice."
           (should (equal (lispm-agents-buffer-label buffer) "Fix the build"))
           (should (eq (lispm-agents-session-buffer "0199") buffer)))
       (kill-buffer buffer))))
+
+;;;; The editor's agents as peers
+
+(defun lispm-test--http-post (port token body)
+  "POST the JSON BODY to /mcp of the local server on PORT with TOKEN.
+Return the response's body, once the server has closed the connection."
+  (let* ((response "")
+         (process (make-network-process
+                   :name "lispm-test-http" :host "127.0.0.1" :service port :coding 'binary
+                   :filter (lambda (_process bytes) (setq response (concat response bytes)))
+                   :sentinel #'ignore))
+         (bytes (encode-coding-string body 'utf-8)))
+    (process-send-string
+     process (format "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer %s\r\n\
+Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                     token (length bytes) bytes))
+    (lispm-test--wait (lambda () (not (process-live-p process))))
+    (delete-process process)
+    (when-let* ((end (string-search "\r\n\r\n" response)))
+      (decode-coding-string (substring response (+ end 4)) 'utf-8))))
+
+(ert-deftest lispm-test-local-http-deferred ()
+  "A handler may answer later, keeping `lispm-local-http-respond'."
+  (let* ((server (lispm-local-http-serve
+                  "lispm-test-deferred" #'always
+                  (lambda (_method _path _headers body)
+                    (let ((respond lispm-local-http-respond))
+                      (run-at-time 0.05 nil (lambda () (funcall respond (list "200 OK" body)))))
+                    'deferred)))
+         (port (process-contact server :service)))
+    (unwind-protect
+        (should (equal (lispm-test--http-post port "x" "{\"later\":true}") "{\"later\":true}"))
+      (delete-process server))))
+
+(defvar lispm-test--typed nil
+  "What fake agent terminals were given, newest first: (BUFFER . TEXT).")
+
+(defvar lispm-test--busy nil
+  "The fake agent terminals whose agents are at work, not waiting for input.")
+
+(defvar lispm-test--notes nil
+  "The notes of the skill of `lispm-test--notes-skill'.")
+
+(defconst lispm-test--notes-skill
+  (concat "#+title: Notes\n"
+          "#+description: Keep short notes for the user.\n\n"
+          "Count the notes with lispm_test_notes_count; add one with lispm_test_notes_add.\n\n"
+          "#+begin_src emacs-lisp :lispm load\n"
+          "(lispm-deftool lispm_test_notes_count () \"Count the notes.\" :permission read\n"
+          "  (format \"%d notes\" (length lispm-test--notes)))\n"
+          "(lispm-deftool lispm_test_notes_add ((text string \"The note.\")) \"Add a note.\"\n"
+          "  :permission write\n  (push text lispm-test--notes) \"Added.\")\n"
+          "#+end_src\n")
+  "A skill with a reading tool and a writing one, for the editor's agents.")
+
+(defmacro lispm-test-with-peers (&rest body)
+  "Run BODY in `lispm-test-env' with fake terminals of the editor's agents.
+`lispm-test--peer' makes one, with an MCP server; what it is given is
+in `lispm-test--typed'."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((lispm-test--typed nil)
+           (lispm-test--busy nil)
+           (lispm-test--notes nil)
+           (lispm-agents-bridge-poll-interval 0.02)
+           (lispm-agents-bridge-settle-time 0)
+           (lispm-agents-bridge--timer nil)
+           (lispm-agents-terminal-modes '(fundamental-mode))
+           (lispm-agents-terminal-live-p-function #'buffer-live-p)
+           (lispm-agents-terminal-paste-function
+            (lambda (buffer text) (push (cons buffer text) lispm-test--typed)))
+           (lispm-agents-terminal-send-function
+            (lambda (buffer text) (push (cons buffer text) lispm-test--typed)))
+           (lispm-agents-submit-delay 0)
+           (lispm-agents-context--servers nil)
+           (lispm-collab--requests nil)
+           (lispm-collab--request-count 0))
+       (lispm-test--with-agents
+           `((codex :name "Codex" :program "codex"
+                    :ready ,(lambda (terminal) (not (memq terminal lispm-test--busy))))
+             (hermes :name "Hermes" :program "hermes"
+                     :ready ,(lambda (terminal) (not (memq terminal lispm-test--busy))))
+             (mute :name "Mute" :program "mute"))
+         (unwind-protect
+             (progn ,@body)
+           (dolist (terminal (delete-dups (mapcar #'car lispm-agents-context--servers)))
+             (kill-buffer terminal)))))))
+
+(defun lispm-test--peer (agent directory)
+  "Make a fake terminal of AGENT in DIRECTORY, with an MCP server; return it."
+  (let ((terminal (generate-new-buffer (format "*%s:test*" agent))))
+    (with-current-buffer terminal
+      (setq default-directory directory
+            lispm-agents-buffer-agent agent))
+    (lispm-agents-context-bind
+     (lispm-agents-mcp-start "lispm-test-mcp" #'lispm-agents-codex-mcp--make directory) terminal)
+    terminal))
+
+(defun lispm-test--mcp (terminal method &optional params)
+  "Send METHOD with PARAMS to the MCP server of TERMINAL; return the response."
+  (let ((server (lispm-agents-bridge--server terminal)))
+    (lispm-agents-context-handle server (lispm-agents-mcp-served-tools server)
+                                 `((jsonrpc . "2.0") (id . 1) (method . ,method)
+                                   ,@(when params `((params . ,params)))))))
+
+(defun lispm-test--peer-call (terminal tool &optional arguments)
+  "Call TOOL with ARGUMENTS as the agent of TERMINAL; return (TEXT . ERRORP).
+A tool answering later is waited for."
+  (let* ((result nil)
+         (lispm-agents-context-answer
+          (lambda (texts &optional errorp) (setq result (cons (string-join texts "\n") errorp))))
+         (response (lispm-test--mcp terminal "tools/call"
+                                    `((name . ,tool) (arguments . ,arguments)))))
+    (unless (eq response 'deferred)
+      (setq result (if-let* ((answer (alist-get 'result response)))
+                       (cons (alist-get 'text (aref (alist-get 'content answer) 0))
+                             (alist-get 'isError answer))
+                     (cons (alist-get 'message (alist-get 'error response)) t))))
+    (lispm-test--wait (lambda () result))
+    result))
+
+(defun lispm-test--given (terminal)
+  "What TERMINAL's agent was given as messages, oldest first: the texts
+pasted, each sent with Return."
+  (let (texts)
+    (pcase-dolist (`(,buffer . ,text) (reverse lispm-test--typed))
+      (when (eq buffer terminal)
+        (if (equal text "\r")
+            (setf (car texts) (concat (car texts) "⏎"))
+          (push text texts))))
+    (nreverse texts)))
+
+(defun lispm-test--sent (terminal count)
+  "Wait until TERMINAL's agent was sent COUNT messages; return them."
+  (lispm-test--wait (lambda ()
+                      (let ((given (lispm-test--given terminal)))
+                        (and (= (length given) count)
+                             (string-suffix-p "⏎" (car (last given)))))))
+  (lispm-test--given terminal))
+
+(ert-deftest lispm-test-agents-several-servers ()
+  "An agent's :context may give several servers: each points the agent at
+itself, and all stop with the terminal."
+  (let* ((made nil)
+         (servers nil)
+         (lispm-agents-context--servers nil)
+         (lispm-agents-terminal-make-function
+          (lambda (name program &rest args)
+            (setq made (cons program args))
+            (get-buffer-create (format "*%s*" name))))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-show-function #'ignore))
+    (lispm-test--with-agents
+        `((tool :name "Tool" :program "emacs"
+                :context ,(lambda (directory)
+                            (setq servers
+                                  (list (lispm-agents-mcp-start "lispm-test-a" #'lispm-agents-codex-mcp--make directory)
+                                        (lispm-agents-mcp-start "lispm-test-b" #'lispm-agents-codex-mcp--make directory))))))
+      (let* ((process-environment (copy-sequence process-environment))
+             (buffer (lispm-agents-new 'tool temporary-file-directory)))
+        (should (equal (lispm-agents-context-servers buffer) servers))
+        (should (= (seq-count (lambda (arg) (string-prefix-p "mcp_servers.emacs.url=" arg)) (cdr made)) 2))
+        (should (eq (lispm-agents-context-terminal (cadr servers)) buffer))
+        (kill-buffer buffer)
+        (should-not lispm-agents-context--servers)
+        (should-not (seq-some (lambda (server) (process-live-p (lispm-agents-mcp-server server))) servers))))))
+
+(ert-deftest lispm-test-agents-turn-ended ()
+  "Claude's and Codex's transcripts tell when their turn ended: an answer
+or an interruption ends it; a call of a tool, awaiting approval or
+running, does not; nor does a session not begun."
+  (let ((claude (lambda (&rest records) (lispm-agents-claude-turn-ended-p records)))
+        (codex (lambda (&rest types)
+                 (lispm-agents-codex-turn-ended-p
+                  (mapcar (lambda (type) `(:type "event_msg" :payload (:type ,type))) types)))))
+    (should (funcall claude '(:type "user" :message (:content "Hi."))
+                     '(:type "assistant" :message (:stop_reason "end_turn"))
+                     '(:type "last-prompt")))
+    (should-not (funcall claude '(:type "assistant" :message (:stop_reason "tool_use"))))
+    (should-not (funcall claude '(:type "assistant" :message (:stop_reason "tool_use"))
+                         '(:type "user" :message (:content ((:type "tool_result"))))))
+    (should (funcall claude '(:type "assistant" :message (:stop_reason "tool_use"))
+                     '(:type "user" :message (:content ((:type "tool_result")
+                                                        (:type "text" :text "[Request interrupted by user for tool use]"))))))
+    (should-not (funcall claude))
+    (should (funcall codex "task_started" "token_count" "task_complete"))
+    (should (funcall codex "task_started" "turn_aborted"))
+    (should-not (funcall codex "task_complete" "task_started" "exec_approval_request"))
+    (should-not (funcall codex))))
+
+(ert-deftest lispm-test-peers-named-and-listed ()
+  "The editor's agents with a server are peers, named after their agent, a
+number added to a name taken; each sees who is here, itself marked, as
+LispM's agents see them; and is told so when it connects."
+  (lispm-test-with-peers
+    (let* ((boss (lispm-defagent boss "Delegates." :root project))
+           (codex (lispm-test--peer 'codex project))
+           (codex-2 (lispm-test--peer 'codex project))
+           (hermes (lispm-test--peer 'hermes project)))
+      (should (equal (mapcar #'lispm-peer-name (lispm-peers)) '("codex" "codex-2" "hermes")))
+      (let ((listed (car (lispm-test--peer-call codex-2 "list_agents"))))
+        (should (string-search "- boss (boss, in " listed))
+        (should (string-search "- codex (Codex, in " listed))
+        (should (string-search "- codex-2 (you) (Codex, in " listed))
+        (should (string-match-p "- hermes (Hermes, in [^\n]*) \\[idle\\]" listed)))
+      (push hermes lispm-test--busy)
+      (should (string-match-p "- hermes (Hermes, in [^\n]*) \\[busy\\]"
+                              (car (lispm-test--call boss "list_agents" nil))))
+      (should (string-search "among them you are hermes."
+                             (alist-get 'instructions
+                                        (alist-get 'result (lispm-test--mcp hermes "initialize")))))
+      ;; Every tool of LispM is served besides the read tools.
+      (should (equal (seq-difference
+                      (mapcar (lambda (tool) (alist-get 'name tool))
+                              (alist-get 'tools (alist-get 'result (lispm-test--mcp codex "tools/list"))))
+                      (mapcar #'car lispm-agents-mcp-tools))
+                     '("list_agents" "send_message" "ask_agent" "reply" "search_tools" "skill" "call_tool")))
+      ;; An ended terminal is a peer no more; a new one takes no name in use.
+      (kill-buffer codex)
+      (should (equal (mapcar #'lispm-peer-name (lispm-peers)) '("codex-2" "hermes")))
+      (should (equal (lispm-peer-name (lispm-agents-bridge--peer (lispm-test--peer 'codex project)))
+                     "codex")))))
+
+(ert-deftest lispm-test-peers-message ()
+  "LispM's agents and the editor's message each other; a message reaches an
+editor's agent as its user's next one, sent."
+  (lispm-test-with-peers
+    (let ((boss (lispm-defagent boss :root project))
+          (codex (lispm-test--peer 'codex project))
+          (hermes (lispm-test--peer 'hermes project)))
+      (setq lispm-test--scripts `((boss ,(lispm-test--msg "end_turn" (lispm-test--text "Noted.")))))
+      (should (equal (lispm-test--call boss "send_message" '((to . "codex") (text . "Hello.")))
+                     '("Delivered to codex." . nil)))
+      (should (equal (lispm-test--sent codex 1)
+                     '("[Message from boss]\nHello.\n\n(Answer, if need be, with your send_message tool, to boss.)⏎")))
+      (should (equal (lispm-test--peer-call codex "send_message" '((to . "boss") (text . "Hi.")))
+                     '("Delivered to boss." . nil)))
+      (should (lispm-test--wait (lambda () (funcall (lispm-test--idle-p boss)))))
+      (should (string-match-p "\\* Message from codex\nHi\\." (lispm-test--transcript boss)))
+      (lispm-test--peer-call codex "send_message" '((to . "hermes") (text . "Psst.")))
+      (should (string-prefix-p "[Message from codex]\nPsst." (car (lispm-test--sent hermes 1))))
+      (should (cdr (lispm-test--peer-call codex "send_message" '((to . "codex") (text . "Me.")))))
+      (should (cdr (lispm-test--peer-call codex "send_message" '((to . "nobody") (text . "?"))))))))
+
+(ert-deftest lispm-test-peers-wait-till-free ()
+  "An editor's agent is given a message only once it waits for its user's:
+till then, as while a dialog of its own is up, messages queue, and it is
+given them one at a time, each once it was seen at work on the last.  One
+that cannot tell when it waits takes none."
+  (lispm-test-with-peers
+    (let ((boss (lispm-defagent boss :root project))
+          (codex (lispm-test--peer 'codex project))
+          (mute (lispm-test--peer 'mute project))
+          (lispm-agents-bridge-settle-time 3600))
+      (push codex lispm-test--busy)
+      (should (equal (lispm-test--call boss "send_message" '((to . "codex") (text . "One.")))
+                     '("codex is busy: it gets your message as soon as it is free." . nil)))
+      (lispm-test--call boss "send_message" '((to . "codex") (text . "Two.")))
+      (lispm-test--wait (lambda () nil) 0.1)
+      (should-not (lispm-test--given codex))
+      ;; Free, it is given the first, and not the second till seen at work.
+      (setq lispm-test--busy nil)
+      (should (string-prefix-p "[Message from boss]\nOne." (car (lispm-test--sent codex 1))))
+      (lispm-test--wait (lambda () nil) 0.1)
+      (should (= (length (lispm-test--given codex)) 1))
+      (push codex lispm-test--busy)
+      (lispm-test--wait (lambda () nil) 0.1)
+      (setq lispm-test--busy nil)
+      (should (string-prefix-p "[Message from boss]\nTwo." (cadr (lispm-test--sent codex 2))))
+      (should-not (buffer-local-value 'lispm-agents-bridge--queue codex))
+      (should-not lispm-agents-bridge--timer)
+      ;; One whose agent has no :ready is sent nothing, nor asked.
+      (should (string-search "takes no messages"
+                             (car (lispm-test--call boss "send_message" '((to . "mute") (text . "Hi."))))))
+      (should (string-search "takes no messages"
+                             (car (lispm-test--peer-call codex "ask_agent" '((agent . "mute") (request . "?"))))))
+      (should-not lispm-collab--requests)
+      (should-not (lispm-test--given mute)))))
+
+(ert-deftest lispm-test-peers-ask ()
+  "Agents of every kind ask each other: a LispM agent's call waits for an
+editor's agent's reply; an editor's agent gets its reply as a message;
+a request asked of one that ends is settled."
+  (lispm-test-with-peers
+    (let ((boss (lispm-defagent boss :root project))
+          (helper (lispm-defagent helper :root project))
+          (codex (lispm-test--peer 'codex project))
+          (hermes (lispm-test--peer 'hermes project)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "codex") (request . "2+2?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "It is 4.")))
+              (helper ,(lispm-test--msg "end_turn" (lispm-test--text "6")))))
+      ;; A LispM agent asks an editor's agent, which replies.
+      (lispm-tell boss "ask codex")
+      (should (equal (car (lispm-test--sent codex 1))
+                     "[Request R1 from boss]\n2+2?\n\n(boss waits for your answer: give it with your reply tool, request R1.)⏎"))
+      (should (cdr (lispm-test--peer-call hermes "reply" '((request . "R1") (text . "5")))))
+      (should (equal (lispm-test--peer-call codex "reply" '((request . "R1") (text . "4")))
+                     '("Your reply to request R1 is delivered." . nil)))
+      (should (lispm-test--wait (lambda () (funcall (lispm-test--idle-p boss)))))
+      (should (string-match-p "codex replied:\n4" (lispm-test--transcript boss)))
+      ;; An editor's agent asks a LispM agent; the reply comes as a message.
+      (should (string-prefix-p "Asked helper (request R2)."
+                               (car (lispm-test--peer-call codex "ask_agent"
+                                                           '((agent . "helper") (request . "2*3?"))))))
+      (should (equal (cadr (lispm-test--sent codex 2)) "[Reply from helper to request R2]\n6⏎"))
+      (should (string-match-p "\\* Message from codex\n2\\*3\\?" (lispm-test--transcript helper)))
+      ;; An editor's agent asks another.
+      (lispm-test--peer-call codex "ask_agent" '((agent . "hermes") (request . "Ready?")))
+      (should (string-prefix-p "[Request R3 from codex]\nReady?" (car (lispm-test--sent hermes 1))))
+      (lispm-test--peer-call hermes "reply" '((request . "R3") (text . "Yes.")))
+      (should (equal (nth 2 (lispm-test--sent codex 3)) "[Reply from hermes to request R3]\nYes.⏎"))
+      ;; One that ends leaves no request waiting.
+      (lispm-test--peer-call codex "ask_agent" '((agent . "hermes") (request . "Still there?")))
+      (kill-buffer hermes)
+      (should (equal (nth 3 (lispm-test--sent codex 4))
+                     "[Reply from hermes to request R4]\nhermes ended without replying.⏎"))
+      (should-not lispm-collab--requests))))
+
+(ert-deftest lispm-test-peers-skills-and-tools ()
+  "The editor's agents find and load LispM's skills, and call their tools
+under LispM's policy: reading at once, writing once the user allows it."
+  (lispm-test-with-peers
+    (let* ((store (expand-file-name "store-skills/" project))
+           (lispm-skill-directories nil)
+           (lispm-skill-sources (list (lambda () (list (list :directory store :origin "Test Store")))))
+           (codex (lispm-test--peer 'codex project))
+           (asked nil)
+           (allow nil)
+           (lispm-agents-confirm-function (lambda (question detail action)
+                                            (push (list question detail action) asked)
+                                            allow)))
+      (lispm-test--write (expand-file-name "notes.org" store) lispm-test--notes-skill)
+      (let ((found (lispm-test--peer-call codex "search_tools" '((query . "short notes")))))
+        (should-not (cdr found))
+        (should (string-prefix-p "Skills, which you load with skill:\n- skill notes (Test Store): Keep short notes"
+                                 (car found))))
+      (let ((loaded (car (lispm-test--peer-call codex "skill" '((name . "notes"))))))
+        (should (string-prefix-p "Skill notes loaded; tools now available: lispm_test_notes_add, lispm_test_notes_count." loaded))
+        (should (string-search "Call its tools with call_tool:\n- lispm_test_notes_add: Add a note.\n  input: {" loaded))
+        (should (string-search "Count the notes with lispm_test_notes_count" loaded)))
+      (should (equal (lispm-test--peer-call codex "call_tool" '((name . "lispm_test_notes_count")))
+                     '("0 notes" . nil)))
+      ;; A write waits for the user, who may refuse it.
+      (should (equal (lispm-test--peer-call codex "call_tool"
+                                            '((name . "lispm_test_notes_add") (input . ((text . "Buy milk.")))))
+                     '("Denied: the user did not approve this call." . t)))
+      (should (equal (car (car asked)) "Codex wants to run lispm_test_notes_add"))
+      (should (string-search "Buy milk." (nth 1 (car asked))))
+      (should-not lispm-test--notes)
+      (setq allow t)
+      ;; The input may come as the text of an object.
+      (should (equal (lispm-test--peer-call codex "call_tool"
+                                            '((name . "lispm_test_notes_add") (input . "{\"text\": \"Buy milk.\"}")))
+                     '("Added." . nil)))
+      (should (equal lispm-test--notes '("Buy milk.")))
+      ;; LispM's agent of the terminal is none of LispM's running agents.
+      (should-not (lispm-agents))
+      ;; What is the agent's own, and what is not there, is not called so.
+      (should (string-search "a tool of your own"
+                             (car (lispm-test--peer-call codex "call_tool" '((name . "send_message"))))))
+      (should (cdr (lispm-test--peer-call codex "call_tool" '((name . "no_such_tool")))))
+      (should (cdr (lispm-test--peer-call codex "skill" '((name . "no-such-skill")))))
+      ;; Over HTTP, a call answered later is answered on its connection.
+      (let* ((server (lispm-agents-bridge--server codex))
+             (response (json-parse-string
+                        (lispm-test--http-post
+                         (lispm-agents-mcp-port server) (lispm-agents-mcp-token server)
+                         (json-serialize '((jsonrpc . "2.0") (id . 7) (method . "tools/call")
+                                           (params . ((name . "call_tool")
+                                                      (arguments . ((name . "lispm_test_notes_count"))))))))
+                        :object-type 'alist)))
+        (should (equal (alist-get 'id response) 7))
+        (should (equal (alist-get 'text (aref (alist-get 'content (alist-get 'result response)) 0))
+                       "1 notes"))))))
+
+(ert-deftest lispm-test-claude-mcp-server ()
+  "A Claude terminal gets LispM's tools over an MCP server of its own,
+which a config file readable by its owner alone names, deleted with it."
+  (lispm-test--with-agents nil
+    (lispm-agents-setup-claude)
+    (should (eq (plist-get (lispm-agents-props 'claude) :context) #'lispm-agents-claude--context)))
+  (should (featurep 'lispm-agents-bridge))
+  (let* ((server (lispm-agents-claude--mcp-start temporary-file-directory))
+         (config (lispm-agents-claude-mcp-config server)))
+    (unwind-protect
+        (progn
+          (should (equal (lispm-agents-context-arguments server)
+                         (list "--mcp-config" config "--allowedTools" "mcp__lispm")))
+          (should (= (file-modes config) #o600))
+          (let ((lispm (alist-get 'lispm (alist-get 'mcpServers (json-read-file config)))))
+            (should (equal (alist-get 'url lispm)
+                           (format "http://127.0.0.1:%d/mcp" (lispm-agents-mcp-port server))))
+            (should (equal (alist-get 'Authorization (alist-get 'headers lispm))
+                           (concat "Bearer " (lispm-agents-mcp-token server))))
+            (should (equal (alist-get 'timeout lispm) lispm-agents-claude-tool-timeout)))
+          (should (equal (lispm-agents-mcp-served-tools server) lispm-agents-mcp-extra-tools)))
+      (lispm-agents-context-stop server))
+    (should-not (file-exists-p config))))
 
 ;;;; The LispM bar
 
