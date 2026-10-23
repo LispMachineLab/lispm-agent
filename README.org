@@ -124,6 +124,12 @@ In the sessions, ~n~ and ~p~ move, ~RET~ talks to the session at point and ~SPC~
 ~o~ opens a new one, ~k~ ends an agent (its session stays on record), ~r~ renames a session, ~/~
 jumps to one, ~g~ lists them again, ~q~ goes back to the listener and ~?~ lists the keys.
 
+Or ask: tell LispM, in the chat or the bar, to enter the terminal, or console or TUI mode, and it
+does; ask for desktop mode, or to leave the terminal, and it leaves it.  That is the skill
+=terminal=, whose tools are ~terminal_enter~ and ~terminal_leave~.  A program that enters the
+terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-function~ and
+~lispm-terminal-leave-function~.
+
 * How it works
 
 - *The transcript is the context.*  Each conversation is an org file under ~lispm-directory~;

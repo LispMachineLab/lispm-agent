@@ -59,7 +59,9 @@
 ;; listener, ? lists the keys.
 ;;
 ;; From a shell, emacs -nw -f lispm-terminal starts Emacs as LispM's
-;; terminal.
+;; terminal; from anywhere, asking LispM for the terminal, or console or
+;; TUI mode, enters it, and asking to leave it leaves it (the skill
+;; terminal).
 
 ;;; Code:
 
@@ -731,12 +733,13 @@ gives the frame back as it was."
   (lispm-terminal-redraw))
 
 ;;;###autoload
-(defun lispm-terminal ()
+(defun lispm-terminal (&optional agent)
   "Make the selected frame LispM's terminal: the sessions on the left, the
 listener on the right, the who line at the bottom, and nothing else.
-The listener talks to LispM itself, or to the agent it talked to last.
-Run it again to lay the terminal out again; \\[lispm-terminal-quit]
-leaves it.  From a shell, emacs -nw -f lispm-terminal starts Emacs so."
+The listener talks to AGENT, or else to the agent it talked to last, or
+to LispM itself.  Run it again to lay the terminal out again;
+\\[lispm-terminal-quit] leaves it.  From a shell, emacs -nw -f
+lispm-terminal starts Emacs so."
   (interactive)
   (let ((frame (selected-frame)))
     (unless (eq frame lispm-terminal--frame)
@@ -753,8 +756,10 @@ leaves it.  From a shell, emacs -nw -f lispm-terminal starts Emacs so."
     (unless inhibit-startup-hooks
       (setq inhibit-startup-screen t))
     (modify-frame-parameters frame lispm-terminal--bare)
-    (let ((agent (or (lispm-terminal-agent) (lispm-system-agent)))
+    (let ((agent (or agent (lispm-terminal-agent) (lispm-system-agent)))
           (window (frame-selected-window frame)))
+      (when (window-minibuffer-p window)
+        (setq window (frame-first-window frame)))
       ;; Side windows too, whoever's they are.
       (let ((ignore-window-parameters t))
         (delete-other-windows window))
@@ -765,6 +770,64 @@ leaves it.  From a shell, emacs -nw -f lispm-terminal starts Emacs so."
       (lispm-terminal-mode 1)
       (lispm-terminal-show agent)
       (lispm-terminal--panes))))
+
+;;;; Asked of an agent
+;;
+;; The skill terminal (skills/terminal.org) gives agents the tools
+;; terminal_enter and terminal_leave, so that LispM enters the terminal
+;; and leaves it when asked to, in whatever words.  Another program may
+;; enter and leave it its own way, as in a frame of its own: it says how
+;; through the two variables below.
+
+(defvar lispm-terminal-enter-function #'lispm-terminal-enter
+  "Function entering LispM's terminal for the tool terminal_enter.
+It is called with the agent asked, for the listener to show, and
+returns what to tell that agent, a string, or nil for the usual words.")
+
+(defvar lispm-terminal-leave-function #'lispm-terminal-leave
+  "Function leaving LispM's terminal for the tool terminal_leave.
+It is called with the agent asked, and returns what to tell it, a
+string, or nil for the usual words.")
+
+(defun lispm-terminal--soon (function)
+  "Call FUNCTION once the command or the tool call under way is over, and
+nothing is read in the minibuffer: the LispM bar, if open, is closed
+for it, as what it asked for replaces it."
+  (run-at-time 0 nil
+               (lambda ()
+                 (cond ((lispm-bar-open-p) (lispm-bar-close-then function))
+                       ((active-minibuffer-window)
+                        (letrec ((once (lambda ()
+                                         (remove-hook 'minibuffer-exit-hook once)
+                                         (run-at-time 0 nil function))))
+                          (add-hook 'minibuffer-exit-hook once)))
+                       (t (funcall function))))))
+
+(defun lispm-terminal-enter (agent)
+  "Enter LispM's terminal in the selected frame, its listener talking to
+AGENT: what terminal_enter does unless `lispm-terminal-enter-function'
+says otherwise."
+  (lispm-terminal--soon (lambda () (lispm-terminal agent)))
+  nil)
+
+(defun lispm-terminal-leave (_agent)
+  "Leave LispM's terminal, its frame as it was: what terminal_leave does
+unless `lispm-terminal-leave-function' says otherwise."
+  (if (not (frame-live-p lispm-terminal--frame))
+      "LispM's terminal is not open: there is nothing to leave."
+    (lispm-terminal--soon #'lispm-terminal-quit)
+    nil))
+
+(defun lispm-terminal-tool-enter (agent)
+  "Enter LispM's terminal as AGENT was asked to; what to tell it."
+  (or (funcall lispm-terminal-enter-function agent)
+      "LispM's terminal opens now: the sessions on the left, this conversation in the \
+listener on the right, the who line below.  Go on there."))
+
+(defun lispm-terminal-tool-leave (agent)
+  "Leave LispM's terminal as AGENT was asked to; what to tell it."
+  (or (funcall lispm-terminal-leave-function agent)
+      "LispM's terminal closes now: what was there before it comes back."))
 
 (defun lispm-terminal-quit ()
   "Leave LispM's terminal: its frame as it was before, the agents at work."

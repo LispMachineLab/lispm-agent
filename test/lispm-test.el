@@ -8623,5 +8623,64 @@ elsewhere awaits an answer."
         (lispm-terminal-end (list :kind 'system :agent (lispm-system-agent))))
       (should (memq (lispm-system-agent) (lispm-agents))))))
 
+(ert-deftest lispm-test-terminal-skill ()
+  "Asked for the terminal, or console or TUI mode, LispM finds the skill
+terminal; its tools enter the terminal, the listener showing the agent
+asked, and leave it, the frame as it was."
+  (lispm-test-env
+    (let* ((lispm-skill-directories (list lispm-skills--builtin))
+           (lispm-system-agent-root project)
+           (lispm-terminal--frame nil) (lispm-terminal--saved nil)
+           (lispm-terminal--listener nil) (lispm-terminal--agent nil)
+           (agent (lispm-start nil project))
+           (lines (lambda (words)
+                    (mapconcat (lambda (found) (plist-get found :line))
+                               (cdr (lispm-tools--discover agent words 5)) "\n"))))
+      (unwind-protect
+          (progn
+            (dolist (words '("console mode" "tui mode" "terminal" "keyboard mode" "desktop mode"))
+              (should (string-match-p "^- skill terminal: .* Its tools: terminal_enter, terminal_leave\\."
+                                      (funcall lines words))))
+            (should (string-match-p "tools now available: terminal_enter, terminal_leave"
+                                    (car (lispm-test--call agent "skill" '((name . "terminal"))))))
+            (should (equal (lispm-test--call agent "terminal_leave" nil)
+                           '("LispM's terminal is not open: there is nothing to leave." . nil)))
+            (should (string-match-p "\\`LispM's terminal opens now"
+                                    (car (lispm-test--call agent "terminal_enter" nil))))
+            (should (lispm-test--wait #'lispm-terminal-p))
+            (should (eq (lispm-terminal-agent) agent))
+            (should (eq (window-buffer (selected-window)) (lispm-agent-view agent)))
+            (should (string-match-p "\\`LispM's terminal closes now"
+                                    (car (lispm-test--call agent "terminal_leave" nil))))
+            (should (lispm-test--wait (lambda () (not lispm-terminal-mode))))
+            (should-not (get-buffer lispm-terminal--sessions-name))
+            ;; Another program enters and leaves it its own way, and says so.
+            (let* ((asked nil)
+                   (lispm-terminal-enter-function
+                    (lambda (who) (push (cons 'enter who) asked) "In a frame of its own."))
+                   (lispm-terminal-leave-function
+                    (lambda (who) (push (cons 'leave who) asked) nil)))
+              (should (equal (car (lispm-test--call agent "terminal_enter" nil)) "In a frame of its own."))
+              (should (string-match-p "\\`LispM's terminal closes now"
+                                      (car (lispm-test--call agent "terminal_leave" nil))))
+              (should (equal asked `((leave . ,agent) (enter . ,agent))))))
+        (when lispm-terminal-mode
+          (lispm-terminal-quit))))))
+
+(ert-deftest lispm-test-terminal-closes-bar ()
+  "Asked from the LispM bar, the terminal waits for the bar to close: what
+was asked takes its place."
+  (let ((closed nil) (called nil))
+    (cl-letf (((symbol-function 'lispm-bar-open-p) (lambda () t))
+              ((symbol-function 'lispm-bar-close-then)
+               (lambda (function) (setq closed t) (funcall function))))
+      (lispm-terminal--soon (lambda () (setq called t)))
+      (should (lispm-test--wait (lambda () called)))
+      (should closed)))
+  ;; With the bar closed, what follows it happens at once.
+  (let ((lispm-bar--open nil) (called nil))
+    (lispm-bar-close-then (lambda () (setq called t)))
+    (should called)))
+
 (provide 'lispm-test)
 ;;; lispm-test.el ends here
