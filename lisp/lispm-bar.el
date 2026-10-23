@@ -886,11 +886,20 @@ Typed in a field holding text, n is typed."
     (when (lispm-agent-busy-p agent)
       (lispm-abort agent))))
 
+(defun lispm-bar-close-then (function)
+  "Close the bar, then call FUNCTION, as for what takes the bar's place: a
+chat, a frame laid out anew.  With the bar closed, call it now."
+  (if-let* ((lispm-bar--open)
+            (field (active-minibuffer-window)))
+      (progn (setq lispm-bar--then function)
+             (with-selected-window field
+               (exit-minibuffer)))
+    (funcall function)))
+
 (defun lispm-bar-chat ()
   "Close the bar and show the conversation with LispM in a chat."
   (interactive)
-  (setq lispm-bar--then #'lispm-ai-chat)
-  (exit-minibuffer))
+  (lispm-bar-close-then #'lispm-ai-chat))
 
 (defun lispm-bar-close ()
   "Close the bar; LispM goes on with what it does."

@@ -55,6 +55,8 @@ any other server see [[*Backends][Backends]].
 |--------------------+----------------------------------------------------------|
 | ~RET~              | send, or answer the prompt shown                         |
 | ~S-RET~, ~C-j~     | new line                                                 |
+| ~/~                | a menu of the commands under the input, as you type their name |
+| ~C-n~, ~C-p~       | choose in that menu (also the answer to an approval prompt) |
 | ~TAB~              | expand or fold the item at point; complete ~/~ commands  |
 | ~RET~ on an object | visit the file at its line, inspect the agent, describe the symbol |
 | ~M-p~, ~M-n~       | previous, next message sent                              |
@@ -75,6 +77,7 @@ any other server see [[*Backends][Backends]].
 | ~lispm-resume-agents~ | resume every agent that was at work when Emacs stopped     |
 | ~lispm-ai~, ~ai~      | the LispM bar: find what is installed, or ask LispM itself |
 | ~lispm-ai-chat~       | the conversation with LispM itself, in a chat              |
+| ~lispm-terminal~      | the LispM terminal: sessions, a listener, a who line       |
 
 * The LispM bar
 
@@ -99,6 +102,35 @@ Desktop drops it from its menu bar.  Bind a key of your own:
 Packages add what the bar finds with ~lispm-bar-source-functions~, say what a tool call does
 with ~lispm-bar-activity-functions~, and show the bar elsewhere with ~lispm-bar-read-function~,
 ~lispm-bar-show-function~ and ~lispm-bar-hide-function~.
+
+* The LispM terminal
+
+~M-x lispm-terminal~ makes the frame LispM's terminal, after the Lisp Machine's console: no
+menu bar, tool bar, tabs or scroll bars, only the keyboard and conversations.  The sessions are
+on the left: LispM itself first, then the agents alive, then the recorded sessions, an agent's
+state (~✻~ at work, ~!~ awaiting you) or a session's age beside each.  The listener, on the
+right, is the chat of one of them, where everything is done by asking.  The who line at the
+bottom says, as the Lisp Machine's did, the time, who you are, the project and agent the
+listener talks to, what it is doing, and its model.  It works the same in a window and in a
+text terminal; from a shell, =emacs -nw -f lispm-terminal= starts Emacs as the terminal.
+
+| Key       | In the terminal                                       |
+|-----------+-------------------------------------------------------|
+| ~C-c C-s~ | the sessions, and back to the listener                |
+| ~C-c C-n~ | the next agent alive; ~C-c C-p~ the previous one      |
+| ~C-c C-j~ | any session, chosen by its title                      |
+| ~C-c C-o~ | a new session, in a project (~C-u~: of a role chosen) |
+| ~C-c C-q~ | leave the terminal: the frame as it was               |
+
+In the sessions, ~n~ and ~p~ move, ~RET~ talks to the session at point and ~SPC~ only shows it,
+~o~ opens a new one, ~k~ ends an agent (its session stays on record), ~r~ renames a session, ~/~
+jumps to one, ~g~ lists them again, ~q~ goes back to the listener and ~?~ lists the keys.
+
+Or ask: tell LispM, in the chat or the bar, to enter the terminal, or console or TUI mode, and it
+does; ask for desktop mode, or to leave the terminal, and it leaves it.  That is the skill
+=terminal=, whose tools are ~terminal_enter~ and ~terminal_leave~.  A program that enters the
+terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-function~ and
+~lispm-terminal-leave-function~.
 
 * How it works
 

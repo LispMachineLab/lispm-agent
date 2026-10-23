@@ -1,0 +1,46 @@
+#+title: LispM's terminal
+#+description: Enter LispM's terminal (console mode, TUI mode, terminal mode, keyboard-only mode), where Emacs shows only the sessions, a listener and a who line, used from the keyboard; and leave it again, back to the desktop or the windows as they were.
+
+LispM's terminal is LispM used from the keyboard alone, as a Lisp Machine's console was: the
+whole frame holds the sessions on the left, the listener on the right (the chat of one session,
+where the user asks for everything) and a who line along the bottom.  There are no menus, bars
+or desktop.  Users call it the terminal, the console, terminal, console or TUI mode, keyboard
+mode, or the listener, in any language.
+
+* Entering it
+
+When the user asks for it, in whatever words, call ~terminal_enter~.  The listener then shows
+this conversation: say in one short line that the terminal is open, and go on there.  Asked
+from inside the terminal, it only lays the terminal out again.
+
+* Leaving it
+
+When the user asks to leave it, call ~terminal_leave~: to go back to the desktop or to desktop
+mode, to the normal windows, or out of the terminal or console.  What comes back is what was
+there before it, a desktop if Emacs has one.  Say in one short line that it is done.
+
+* Its keys
+
+Only when the user asks how to use it:
+
+- ~C-c C-s~ the sessions, and back to the listener;
+- ~C-c C-n~ and ~C-c C-p~ the next and previous agent alive;
+- ~C-c C-j~ any session, by its title; ~C-c C-o~ a new session in a project;
+- ~C-c C-q~ leaves the terminal;
+- in the sessions, ~n~ and ~p~ move, ~RET~ talks to a session, ~k~ ends an agent, ~r~ renames.
+
+* The code
+
+#+begin_src emacs-lisp :lispm load
+(require 'lispm-terminal)
+
+(lispm-deftool terminal_enter ()
+  "Enter LispM's terminal (console, TUI or keyboard mode): the sessions,
+a listener showing this conversation, and a who line fill the frame."
+  (lispm-terminal-tool-enter lispm-current-agent))
+
+(lispm-deftool terminal_leave ()
+  "Leave LispM's terminal: what was there before it comes back, the
+desktop or the windows as they were."
+  (lispm-terminal-tool-leave lispm-current-agent))
+#+end_src

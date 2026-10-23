@@ -21,6 +21,7 @@
 (require 'lispm)
 (require 'lispm-agents-claude)
 (require 'lispm-agents-codex)
+(require 'lispm-terminal)
 
 ;; The words as the code writes them, whatever the computer's language:
 ;; a language without a catalog.  The tests of i18n speak others.
@@ -6735,6 +6736,47 @@ not what the reply defines itself."
         (with-current-buffer (lispm)
           (should (bound-and-true-p lispm-session-mode)))))))
 
+(ert-deftest lispm-test-chat-command-menu ()
+  "A / shows the commands under the input as their name is written, the
+first chosen; C-n and C-p choose, TAB completes, RET runs the one chosen."
+  (lispm-test-env
+    (let ((default-directory project))
+      (with-current-buffer (lispm)
+        (let ((footer (lambda () (substring-no-properties (overlay-get lispm-chat--footer 'after-string))))
+              (help nil))
+          (should-not (lispm-chat--menu))
+          (should (string-match-p "/ for commands" (funcall footer)))
+          (lispm-chat-set-input "/")
+          (should (= (length (lispm-chat--menu)) (length lispm-chat-commands)))
+          (should (string-match-p "^❯ /help +List commands and keys\n  /clear " (funcall footer)))
+          (should-not (string-match-p "/ for commands" (funcall footer)))
+          ;; At most `lispm-chat-menu-lines' show, around the one chosen.
+          (should (= (length (split-string (funcall footer) "^  ?/\\|^❯ /")) (1+ lispm-chat-menu-lines)))
+          (execute-kbd-macro (kbd "C-n C-n"))
+          (should (string-match-p "^❯ /compact " (funcall footer)))
+          (execute-kbd-macro (kbd "C-p"))
+          (should (string-match-p "^❯ /clear " (funcall footer)))
+          ;; Writing chooses the first again; names starting so come first.
+          (execute-kbd-macro (kbd "C-e c o"))
+          (should (equal (mapcar #'car (lispm-chat--menu)) '("compact" "cost")))
+          (should (string-match-p "^❯ /compact " (funcall footer)))
+          (execute-kbd-macro (kbd "<down> TAB"))
+          (should (equal (lispm-chat--input) "/cost "))
+          (should-not (lispm-chat--menu))
+          (should (string-match-p "/ for commands" (funcall footer)))
+          ;; Elsewhere in a name too; a name that matches none shows no menu.
+          (lispm-chat-set-input "/script")
+          (should (equal (mapcar #'car (lispm-chat--menu)) '("transcript")))
+          (lispm-chat-set-input "/zz")
+          (should-not (lispm-chat--menu))
+          ;; RET runs the command chosen.
+          (cl-letf (((symbol-function 'lispm-chat-help) (lambda (&rest _) (setq help t))))
+            (lispm-chat-set-input "/he")
+            (execute-kbd-macro (kbd "RET")))
+          (should help)
+          (should (equal (lispm-chat--input) ""))
+          (should (equal (car lispm-chat--history) "/help")))))))
+
 ;;;; Edits shown where they happen
 
 (defun lispm-test--apply-hunks (old new hunks)
@@ -8466,6 +8508,239 @@ so, while it is closed a message names the key opening it."
         (should-not (lispm-bar-model-ready-p (lispm-system-agent)))
         (setenv "LISPM_TEST_KEY" "secret")
         (should (lispm-bar-model-ready-p (lispm-system-agent)))))))
+
+;;;; The terminal
+
+(defmacro lispm-test-with-terminal (&rest body)
+  "Run BODY in `lispm-test-env' with LispM's terminal in the selected
+frame, LispM itself working in `project'; leave the terminal after."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((lispm-system-agent-root project)
+           (lispm-terminal--frame nil) (lispm-terminal--saved nil)
+           (lispm-terminal--listener nil) (lispm-terminal--agent nil)
+           (lispm-terminal--recorded nil))
+       (unwind-protect
+           (progn (lispm-terminal) ,@body)
+         (lispm-terminal-quit)))))
+
+(defun lispm-test--terminal-text ()
+  "The sessions of the terminal, drawn now, as plain text."
+  (lispm-terminal-redraw)
+  (with-current-buffer lispm-terminal--sessions-name
+    (substring-no-properties (buffer-string))))
+
+(defun lispm-test--terminal-who-line ()
+  "The who line of the terminal, drawn now, as plain text."
+  (lispm-terminal-redraw)
+  (with-current-buffer lispm-terminal--who-name
+    (substring-no-properties (buffer-string))))
+
+(defun lispm-test--terminal-recorded-session (root text)
+  "An agent of ROOT told TEXT, answered, and ended: a recorded session."
+  (let ((agent (lispm-start nil root)))
+    (setq lispm-test--scripts
+          `((,(lispm-agent-name agent) ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+    (lispm-tell agent text)
+    (should (lispm-test--wait (lispm-test--idle-p agent)))
+    (lispm-retire agent)
+    agent))
+
+(ert-deftest lispm-test-terminal-layout ()
+  "The terminal is the sessions, the listener talking to LispM itself, and
+the who line, in a frame with no bars; leaving it gives the frame back."
+  (let ((frame (selected-frame)))
+    (lispm-test-with-terminal
+      (let* ((listener (selected-window))
+             (sessions (get-buffer-window lispm-terminal--sessions-name))
+             (who (get-buffer-window lispm-terminal--who-name)))
+        (should (lispm-terminal-p))
+        (should (eq (lispm-terminal-agent) (lispm-system-agent)))
+        (should (eq (window-buffer listener) (lispm-agent-view (lispm-system-agent))))
+        (should (eq (window-parameter listener 'mode-line-format) 'none))
+        (should (eq (window-parameter sessions 'window-side) 'left))
+        (should (eq (window-parameter who 'window-side) 'bottom))
+        (should (= (window-total-height who) 1))
+        (should (= (frame-parameter frame 'menu-bar-lines) 0))
+        ;; The terminal's keys, in the listener as in the sessions.
+        (should (eq (key-binding (kbd "C-c C-s")) #'lispm-terminal-sessions))
+        (should (eq (key-binding (kbd "RET")) #'lispm-chat-return))
+        (with-current-buffer lispm-terminal--sessions-name
+          (should (eq (key-binding (kbd "C-c C-n")) #'lispm-terminal-next))
+          (should (eq (key-binding (kbd "RET")) #'lispm-terminal-talk)))
+        ;; Laid out again, whatever was done to the windows.
+        (delete-other-windows)
+        (lispm-terminal)
+        (should (get-buffer-window lispm-terminal--sessions-name))
+        (should (eq (lispm-terminal-agent) (lispm-system-agent)))))
+    (should-not lispm-terminal-mode)
+    (should-not (get-buffer lispm-terminal--sessions-name))
+    (should-not (get-buffer lispm-terminal--who-name))
+    (should (equal (frame-parameter frame 'menu-bar-lines)
+                   (cdr (assq 'menu-bar-lines (frame-parameters frame)))))
+    (should-not (seq-find (lambda (buffer) (buffer-local-value 'lispm-terminal-keys-mode buffer))
+                          (buffer-list)))))
+
+(ert-deftest lispm-test-terminal-sessions ()
+  "The sessions list LispM itself, the agents alive and the recorded
+sessions; RET on a recorded one resumes it in the listener."
+  (lispm-test-with-terminal
+    (let* ((done (lispm-test--terminal-recorded-session project "Fix the build"))
+           (alive (lispm-start nil project)))
+      (setq lispm-terminal--recorded nil)
+      (should (string-match-p
+               (concat "\\`Sessions \\? keys\n\n▸ λ LispM *\n\n"
+                       "  Agents\n  New session *\n    assistant@project\n\n"
+                       "  Recent\n  Fix the build 0m\n    assistant@project\n\\'")
+               (lispm-test--terminal-text)))
+      (with-current-buffer lispm-terminal--sessions-name
+        (goto-char (point-min))
+        (let ((kinds nil))
+          (dotimes (_ 4)
+            (lispm-terminal-next-entry)
+            (push (plist-get (lispm-terminal--entry-at) :kind) kinds))
+          (should (equal kinds '(recorded recorded agent system))))
+        (lispm-terminal-previous-entry)
+        (should (eq (plist-get (lispm-terminal--entry-at) :agent) alive))
+        (lispm-terminal-next-entry)
+        (lispm-terminal-talk (lispm-terminal--entry-at)))
+      (let ((resumed (lispm-terminal-agent)))
+        (should (equal (lispm-agent-id resumed) (lispm-agent-id done)))
+        (should (eq (window-buffer (selected-window)) (lispm-agent-view resumed)))
+        (should (string-match-p "  Agents\n▸ Fix the build *\n    assistant@project<2>\n  New session"
+                                (lispm-test--terminal-text)))
+        (lispm-terminal-rename (list :kind 'agent :agent resumed) "Build fixed")
+        (should (string-match-p "▸ Build fixed" (lispm-test--terminal-text)))))))
+
+(ert-deftest lispm-test-terminal-next ()
+  "C-c C-n and C-c C-p go round the agents alive, as the sessions list them."
+  (lispm-test-with-terminal
+    (let* ((first (lispm-start nil project))
+           (second (lispm-start nil project)))
+      (lispm-terminal-next)
+      (should (eq (lispm-terminal-agent) second))
+      (lispm-terminal-next)
+      (should (eq (lispm-terminal-agent) first))
+      (lispm-terminal-next)
+      (should (eq (lispm-terminal-agent) (lispm-system-agent)))
+      (lispm-terminal-previous)
+      (should (eq (lispm-terminal-agent) first))
+      (should (eq (window-buffer (selected-window)) (lispm-agent-view first)))
+      (should (buffer-local-value 'lispm-terminal-keys-mode (lispm-agent-view first))))))
+
+(ert-deftest lispm-test-terminal-who-line ()
+  "The who line says who talks to whom and what it does, and that an agent
+elsewhere awaits an answer."
+  (lispm-test-with-terminal
+    (let ((agent (lispm-start nil project)))
+      (should (string-match-p "\\` .* +[^ ]+ +.*/project/ +lispm +idle +test-model via test \n\\'"
+                              (lispm-test--terminal-who-line)))
+      (setq lispm-test--scripts
+            `((,(lispm-agent-name agent)
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_shell"
+                                                              '((command . "echo hi") (why . "To greet."))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Said hi.")))))
+      (let ((inhibit-message t))
+        (lispm-tell agent "Greet")
+        (should (lispm-test--wait (lambda () (lispm-waiting-calls agent)))))
+      (should (string-match-p " 1 other awaits you " (lispm-test--terminal-who-line)))
+      (should (string-match-p "▸ λ LispM *\n.*\n  Agents\n  Greet *!\n" (lispm-test--terminal-text)))
+      (lispm-terminal-show agent)
+      (should (string-match-p " assistant@project +awaiting approval " (lispm-test--terminal-who-line)))
+      (lispm-abort agent))))
+
+(ert-deftest lispm-test-terminal-agent-ends ()
+  "When the agent the listener talks to ends, the listener talks to LispM."
+  (lispm-test-with-terminal
+    (let ((agent (lispm-start nil project)))
+      (lispm-terminal-show agent)
+      (with-current-buffer lispm-terminal--sessions-name
+        (lispm-terminal-end (list :kind 'agent :agent agent)))
+      (should-not (memq agent (lispm-agents)))
+      (should (lispm-test--wait (lambda () (eq (lispm-terminal-agent) (lispm-system-agent)))))
+      (should (eq (window-buffer (lispm-terminal--listener-window))
+                  (lispm-agent-view (lispm-system-agent))))
+      (let ((inhibit-message t))
+        (lispm-terminal-end (list :kind 'system :agent (lispm-system-agent))))
+      (should (memq (lispm-system-agent) (lispm-agents))))))
+
+(ert-deftest lispm-test-terminal-scrolled ()
+  "On a text terminal, the listener scrolling draws the sessions again
+whole after that redisplay, which keeps the line between the panes."
+  (lispm-test-with-terminal
+    (let ((forced nil)
+          (sessions (get-buffer-window lispm-terminal--sessions-name)))
+      (cl-letf (((symbol-function 'force-window-update) (lambda (window) (push window forced))))
+        ;; What laying the terminal out scrolled is done with first.
+        (accept-process-output nil 0.05)
+        (setq forced nil)
+        (lispm-terminal--scrolled (selected-window) 1)
+        (should (lispm-test--wait (lambda () forced)))
+        (should (equal (delete-dups forced) (list sessions)))
+        ;; Not for another window.
+        (setq forced nil)
+        (lispm-terminal--scrolled sessions 1)
+        (accept-process-output nil 0.05)
+        (should-not forced)))))
+
+(ert-deftest lispm-test-terminal-skill ()
+  "Asked for the terminal, or console or TUI mode, LispM finds the skill
+terminal; its tools enter the terminal, the listener showing the agent
+asked, and leave it, the frame as it was."
+  (lispm-test-env
+    (let* ((lispm-skill-directories (list lispm-skills--builtin))
+           (lispm-system-agent-root project)
+           (lispm-terminal--frame nil) (lispm-terminal--saved nil)
+           (lispm-terminal--listener nil) (lispm-terminal--agent nil)
+           (agent (lispm-start nil project))
+           (lines (lambda (words)
+                    (mapconcat (lambda (found) (plist-get found :line))
+                               (cdr (lispm-tools--discover agent words 5)) "\n"))))
+      (unwind-protect
+          (progn
+            (dolist (words '("console mode" "tui mode" "terminal" "keyboard mode" "desktop mode"))
+              (should (string-match-p "^- skill terminal: .* Its tools: terminal_enter, terminal_leave\\."
+                                      (funcall lines words))))
+            (should (string-match-p "tools now available: terminal_enter, terminal_leave"
+                                    (car (lispm-test--call agent "skill" '((name . "terminal"))))))
+            (should (equal (lispm-test--call agent "terminal_leave" nil)
+                           '("LispM's terminal is not open: there is nothing to leave." . nil)))
+            (should (string-match-p "\\`LispM's terminal opens now"
+                                    (car (lispm-test--call agent "terminal_enter" nil))))
+            (should (lispm-test--wait #'lispm-terminal-p))
+            (should (eq (lispm-terminal-agent) agent))
+            (should (eq (window-buffer (selected-window)) (lispm-agent-view agent)))
+            (should (string-match-p "\\`LispM's terminal closes now"
+                                    (car (lispm-test--call agent "terminal_leave" nil))))
+            (should (lispm-test--wait (lambda () (not lispm-terminal-mode))))
+            (should-not (get-buffer lispm-terminal--sessions-name))
+            ;; Another program enters and leaves it its own way, and says so.
+            (let* ((asked nil)
+                   (lispm-terminal-enter-function
+                    (lambda (who) (push (cons 'enter who) asked) "In a frame of its own."))
+                   (lispm-terminal-leave-function
+                    (lambda (who) (push (cons 'leave who) asked) nil)))
+              (should (equal (car (lispm-test--call agent "terminal_enter" nil)) "In a frame of its own."))
+              (should (string-match-p "\\`LispM's terminal closes now"
+                                      (car (lispm-test--call agent "terminal_leave" nil))))
+              (should (equal asked `((leave . ,agent) (enter . ,agent))))))
+        (when lispm-terminal-mode
+          (lispm-terminal-quit))))))
+
+(ert-deftest lispm-test-terminal-closes-bar ()
+  "Asked from the LispM bar, the terminal waits for the bar to close: what
+was asked takes its place."
+  (let ((closed nil) (called nil))
+    (cl-letf (((symbol-function 'lispm-bar-open-p) (lambda () t))
+              ((symbol-function 'lispm-bar-close-then)
+               (lambda (function) (setq closed t) (funcall function))))
+      (lispm-terminal-soon (lambda () (setq called t)))
+      (should (lispm-test--wait (lambda () called)))
+      (should closed)))
+  ;; With the bar closed, what follows it happens at once.
+  (let ((lispm-bar--open nil) (called nil))
+    (lispm-bar-close-then (lambda () (setq called t)))
+    (should called)))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here
