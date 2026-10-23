@@ -122,8 +122,10 @@ handed over.  The agent first saves memory, as before any handover
 \(`lispm-compact-save-memory'), in a turn of its own; then the summary
 is written in the background while the agent is free.  Input given it
 meanwhile is taken up at once, in the session as it is, and the
-summary, out of date, is thrown away.  A session past the threshold
-when a turn starts is still handed over then.  nil compacts only then."
+summary, out of date, is thrown away; so is the handover at idle, for
+that session: it is tried once.  A session past the threshold when a
+turn starts is still handed over then, taking the summary on its way,
+if any, and not saving memory again.  nil compacts only then."
   :type '(choice (const :tag "Only when a turn starts" nil) number)
   :group 'lispm)
 
@@ -139,11 +141,11 @@ Use it for notifications, e.g. with the alert package."
 (defvar lispm--idle-handovers (make-hash-table :test #'eq :weakness 'key)
   "Agents handing their session over at idle, to the step they are at.
 That is `saving' while the agent saves memory, then, while the summary
-is written in the background, (BUFFER TICK PROCESS): the session
-buffer and its `buffer-chars-modified-tick' when the summary was asked
-for, and the request's process, if any.  A turn starting gives the
-handover up; stopping the agent too, and it is then `stopped' until
-the next turn.")
+is written in the background, (BUFFER TICK PROCESS ADOPTED): the
+session buffer and its `buffer-chars-modified-tick' when the summary
+was asked for, the request's process, if any, and non-nil once a
+handover the next turn waits for takes it.  Another turn starting,
+or the agent stopped, gives the handover up.")
 
 (defvar-local lispm-session-agent nil
   "The agent whose session this buffer holds.")
@@ -811,9 +813,10 @@ handed over to a continuation, and the turn starts there."
 The input is recorded as the turn's (see `lispm-agent-entry'), in the
 project's inbox file too, until the turn ends, and the session is
 saved: if Emacs stops in the middle of the turn, reopening the session
-takes it up (see `lispm--resume-calls').  A summary being written in
-the background is given up: the session goes on."
-  (lispm--cancel-idle-handover agent)
+takes it up (see `lispm--resume-calls').  A handover at idle under way
+is given up: the session goes on."
+  (when (and (gethash agent lispm--idle-handovers) (not (plist-get entry :idle)))
+    (lispm--give-up-idle-handover agent))
   (cl-incf (lispm-agent-turn agent))
   (setf (lispm-agent-steps agent) 0
         (lispm-agent-last-reply agent) nil
@@ -1437,8 +1440,7 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
       (setq note (concat (plist-get condition :message) "\n" note)))
     (setf (lispm-agent-compacting agent) nil)
     (when (gethash agent lispm--idle-handovers)
-      (lispm--cancel-idle-handover agent)
-      (puthash agent 'stopped lispm--idle-handovers))
+      (lispm--give-up-idle-handover agent))
     (lispm-set-state agent 'aborting)
     (dolist (p (process-list))
       (when (eq (process-get p 'lispm-agent) agent)
@@ -2601,18 +2603,24 @@ out, and the beginning of the input the first of them handled.  See
 
 (defun lispm-compact (&optional agent)
   "Hand AGENT's session over to a continuation holding a summary of it.
-Interactively, the agent of the current session."
+Interactively, the agent of the current session.  Memory saved for a
+handover since the last one is not saved again, and a summary being
+written at idle is taken (see `lispm-compact-idle')."
   (interactive)
   (let ((agent (if agent (lispm-get-agent agent) (lispm--buffer-agent))))
     (when (or (lispm-agent-busy-p agent) (lispm-agent-compacting agent))
       (user-error "%s" (lispm-tr "%s is busy" (lispm-agent-name agent))))
-    (lispm--cancel-idle-handover agent)
     (setf (lispm-agent-compacting agent) t)
-    (if lispm-compact-save-memory
-        (lispm--start-turn agent (list :event "compaction" :text lispm--save-memory-prompt
-                                       :no-compact t
-                                       :callback (lambda (_) (lispm--summarize agent))))
-      (lispm--summarize agent))))
+    (cond
+     ((lispm--adopt-idle-handover agent))
+     ((and lispm-compact-save-memory (not (lispm--memory-saved-p agent)))
+      (lispm--start-turn agent (list :event "compaction" :text lispm--save-memory-prompt
+                                     :no-compact t
+                                     :callback (lambda (_)
+                                                 (when (lispm-agent-compacting agent)
+                                                   (lispm--note-memory-saved agent))
+                                                 (lispm--summarize agent)))))
+     (t (lispm--summarize agent)))))
 
 (defun lispm--summary-request (agent)
   "The request for a summary of AGENT's session, and the turns kept after it.
@@ -2719,6 +2727,18 @@ RESUME non-nil if a turn waits for the handover in its middle."
                   :resume resume)))
 
 ;;;; Handing over at idle
+;;
+;; A handover at idle costs what one when a turn starts does: a turn
+;; saving memory, and a request carrying the whole session.  It is
+;; tried once per session: given up, as when input comes while the
+;; summary is written, it is left to the next turn's start, which then
+;; takes the memory saved, or the summary on its way, as its own.
+
+(defvar lispm--memory-saved (make-hash-table :test #'eq :weakness 'key)
+  "Agents to the session buffer they saved memory in for a handover.")
+
+(defvar lispm--idle-given-up (make-hash-table :test #'eq :weakness 'key)
+  "Agents to the session buffer whose handover at idle was given up.")
 
 (defun lispm--near-threshold-p (agent)
   "Non-nil if AGENT's session is past `lispm-compact-idle' of the threshold."
@@ -2736,21 +2756,25 @@ Text the user is writing under the last \"* User\" heading stays theirs."
        (buffer-live-p (lispm-agent-buffer agent))
        (lispm--in-session agent (lispm--input-heading-p))))
 
+(defun lispm--note-memory-saved (agent)
+  "Record that AGENT saved memory for the handover of its session."
+  (puthash agent (lispm-agent-buffer agent) lispm--memory-saved))
+
 (defun lispm--memory-saved-p (agent)
-  "Non-nil if the last turn of AGENT's session saved memory for a handover."
-  (lispm--in-session agent
-    (let* ((end (or (lispm--input-heading-p) (point-max)))
-           (last (car (last (seq-filter (lambda (section)
-                                          (and (< (plist-get section :start) end)
-                                               (memq (plist-get section :kind) '(user message event))))
-                                        (lispm-transcript-sections))))))
-      (and last (eq (plist-get last :kind) 'event)
-           (equal (plist-get last :arg) "compaction")))))
+  "Non-nil if AGENT saved memory for a handover since the last handover.
+A handover makes a new session buffer."
+  (eq (gethash agent lispm--memory-saved) (lispm-agent-buffer agent)))
+
+(defun lispm--idle-handover-p (agent)
+  "Non-nil if AGENT's session may still be handed over at idle.
+It may not once that was given up, until the session is handed over."
+  (not (eq (gethash agent lispm--idle-given-up) (lispm-agent-buffer agent))))
 
 (defun lispm--compact-when-idle (agent _reply)
   "Once AGENT's turn has ended, compact its session at idle if it is large.
 See `lispm-compact-idle'."
   (when (and (lispm--near-threshold-p agent)
+             (lispm--idle-handover-p agent)
              (not (gethash agent lispm--idle-handovers)))
     (lispm-when-idle (cons 'compact (lispm-agent-id agent)) #'lispm--compact-idle agent)))
 
@@ -2760,65 +2784,116 @@ See `lispm-compact-idle'."
   "Make room in AGENT's session, Emacs being idle, if it is still large.
 Older tool output is cleared; if that is not enough, memory is saved
 and a summary written in the background (see `lispm-compact-idle')."
-  (when (and (lispm--free-p agent) (lispm--near-threshold-p agent))
+  (when (and (lispm--free-p agent)
+             (lispm--idle-handover-p agent)
+             (lispm--near-threshold-p agent))
     (lispm--clear-results agent)
     (when (and (lispm--near-threshold-p agent) (lispm--has-history-p agent))
       (if (and lispm-compact-save-memory (not (lispm--memory-saved-p agent)))
           (progn
-            (lispm--start-turn agent (list :event "compaction" :text lispm--save-memory-prompt
-                                           :no-compact t
-                                           :callback (lambda (_)
-                                                       ;; Unless the turn was stopped.
-                                                       (when (eq (gethash agent lispm--idle-handovers)
-                                                                 'saving)
-                                                         (remhash agent lispm--idle-handovers)
-                                                         (lispm--summarize-idle agent)))))
-            (puthash agent 'saving lispm--idle-handovers))
+            (puthash agent 'saving lispm--idle-handovers)
+            (lispm--start-turn
+             agent (list :event "compaction" :text lispm--save-memory-prompt
+                         :no-compact t :idle t
+                         :callback (lambda (_)
+                                     ;; Unless the turn was stopped.
+                                     (when (eq (gethash agent lispm--idle-handovers) 'saving)
+                                       (remhash agent lispm--idle-handovers)
+                                       (lispm--note-memory-saved agent)
+                                       (if (lispm--free-p agent)
+                                           (lispm--summarize-idle agent)
+                                         ;; Input came meanwhile: it goes first.
+                                         (lispm--give-up-idle-handover agent)))))))
         (lispm--summarize-idle agent)))))
 
 (defun lispm--summarize-idle (agent)
   "Have a summary of AGENT's session written while the agent stays free.
 When it comes, the session is handed over to a continuation, unless
-it changed meanwhile or the agent is busy: then it is thrown away."
+it changed meanwhile or the agent is busy: then the handover at idle
+is given up.  A handover the next turn waits for takes it (see
+`lispm--adopt-idle-handover')."
   (when (and (lispm--free-p agent) (not (gethash agent lispm--idle-handovers)))
     (condition-case err
         (pcase-let* ((`(,request . ,kept) (lispm--summary-request agent))
                      (buffer (lispm-agent-buffer agent))
-                     (token (list buffer (buffer-chars-modified-tick buffer) nil))
+                     ;; (BUFFER TICK PROCESS ADOPTED), see `lispm--idle-handovers'.
+                     (token (list buffer (buffer-chars-modified-tick buffer) nil nil))
                      (current (lambda () (eq (gethash agent lispm--idle-handovers) token))))
           (puthash agent token lispm--idle-handovers)
-          (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent)
-                               (car request) (cdr request)
-                               :on-done
-                               (lambda (message)
-                                 (when (funcall current)
-                                   (remhash agent lispm--idle-handovers)
-                                   (let ((summary (lispm--reply-text
-                                                   (append (alist-get 'content message) nil))))
-                                     (when (and (not (string-blank-p summary))
-                                                (lispm--free-p agent)
-                                                (eq (lispm-agent-buffer agent) buffer)
-                                                (= (buffer-chars-modified-tick buffer) (nth 1 token)))
-                                       (setf (lispm-agent-compacting agent) t)
-                                       (lispm--continue agent summary nil (car kept))))))
-                               :on-error
-                               (lambda (_)
-                                 (when (funcall current)
-                                   (remhash agent lispm--idle-handovers))))))
+          (let ((proc (funcall
+                       lispm-api-function (lispm-agent-backend* agent) (car request) (cdr request)
+                       :on-done
+                       (lambda (message)
+                         (when (funcall current)
+                           (remhash agent lispm--idle-handovers)
+                           (let ((summary (lispm--reply-text (append (alist-get 'content message) nil))))
+                             (cond
+                              ((nth 3 token)
+                               (if (string-blank-p summary)
+                                   (lispm--compaction-failed agent "the summary came back empty")
+                                 (lispm--continue agent summary nil (car kept))))
+                              ((and (not (string-blank-p summary))
+                                    (lispm--free-p agent)
+                                    (eq (lispm-agent-buffer agent) buffer)
+                                    (= (buffer-chars-modified-tick buffer) (nth 1 token)))
+                               (setf (lispm-agent-compacting agent) t)
+                               (condition-case err
+                                   (lispm--continue agent summary nil (car kept))
+                                 (error
+                                  (setf (lispm-agent-compacting agent) nil)
+                                  (lispm-set-state agent 'idle)
+                                  (lispm--give-up-idle-handover agent)
+                                  (message "%s" (lispm-tr "LispM: could not compact %s: %s"
+                                                          (lispm-agent-name agent)
+                                                          (error-message-string err))))))
+                              (t (lispm--give-up-idle-handover agent))))))
+                       :on-error
+                       (lambda (err)
+                         (when (funcall current)
+                           (remhash agent lispm--idle-handovers)
+                           (if (nth 3 token)
+                               (lispm--compaction-failed
+                                agent (format "%s: %s" (plist-get err :type) (plist-get err :message)))
+                             (lispm--give-up-idle-handover agent)))))))
             (when (and (processp proc) (funcall current))
+              (process-put proc 'lispm-agent agent)
               (setf (nth 2 token) proc))))
-      (error (remhash agent lispm--idle-handovers)
+      (error (lispm--give-up-idle-handover agent)
              (message "%s" (lispm-tr "LispM: could not compact %s: %s"
                                      (lispm-agent-name agent) (error-message-string err)))))))
 
+(defun lispm--adopt-idle-handover (agent)
+  "Have the handover AGENT now waits for take the summary written at idle.
+Return non-nil if one is being written: the handover goes on when it
+comes, as one a turn waits for."
+  (when-let* ((token (gethash agent lispm--idle-handovers))
+              ((consp token)))
+    (setf (nth 3 token) t)
+    (lispm-set-state agent 'compacting "writing a summary")
+    t))
+
 (defun lispm--cancel-idle-handover (agent)
-  "Give up handing AGENT's session over at idle, and the summary being written."
+  "Stop handing AGENT's session over at idle, and the summary being written."
   (when-let* ((token (gethash agent lispm--idle-handovers)))
     (remhash agent lispm--idle-handovers)
     (when-let* ((proc (and (consp token) (nth 2 token))))
       (when (process-live-p proc)
         (process-put proc 'lispm-aborted t)
         (delete-process proc)))))
+
+(defun lispm--give-up-idle-handover (agent)
+  "Give up handing AGENT's session over at idle, until it is handed over.
+That is left to the start of a turn, past `lispm-compact-threshold'."
+  (lispm--cancel-idle-handover agent)
+  (when (buffer-live-p (lispm-agent-buffer agent))
+    (puthash agent (lispm-agent-buffer agent) lispm--idle-given-up)))
+
+(defun lispm--forget-idle-work (agent)
+  "Drop the background work waiting for AGENT, whose session ends."
+  (lispm-cancel-idle (cons 'compact (lispm-agent-id agent)))
+  (lispm--cancel-idle-handover agent))
+
+(add-hook 'lispm-session-end-functions #'lispm--forget-idle-work)
 
 ;;;; Journal: audit and rollback
 ;;

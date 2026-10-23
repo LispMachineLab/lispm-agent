@@ -73,8 +73,11 @@ it has ended and Emacs is idle (`lispm-idle-delay'): a model brings it
 back to three quarters of its budget, merging entries that say the
 same, folding old entries seldom recalled into summary entries, and
 dropping stale ones.  Each consolidation is a commit, which says what
-was merged, folded or dropped, and why: `git revert' undoes it.  A
-system prompt lists this many titles of each memory at most, those
+was merged, folded or dropped, and why: `git revert' undoes it; so
+memory is consolidated only while it is under git (`lispm-git').  A
+memory is not tried again before it says something new, nor for some
+hours after a plan that failed or freed nothing.  A system prompt
+lists this many titles at most, of all the memories it lists, those
 used most lately, and says how many more there are.  nil sets no
 limit."
   :type '(choice (const :tag "No limit" nil) integer)
@@ -407,11 +410,16 @@ The entries returned are noted as recalled."
 (defvar lispm-git--timer nil "Timer of the next commit.")
 (defvar lispm-git--process nil "The git process running, if any.")
 
+(defun lispm-git-p ()
+  "Non-nil if changes to `lispm-directory' are committed to git.
+See `lispm-git'."
+  (and lispm-git (executable-find "git") t))
+
 (defun lispm-git-commit (agent message)
   "Record a change by AGENT, described by MESSAGE, for the next commit.
 Changes made within a fraction of a second, such as several tool
 calls of one response, become one commit listing each of them."
-  (when (and lispm-git (executable-find "git"))
+  (when (lispm-git-p)
     (setq lispm-git--queue
           (append lispm-git--queue
                   (list (cons (format "%s" (if (lispm-agent-p agent) (lispm-agent-name agent) agent))
@@ -475,38 +483,42 @@ calls of one response, become one commit listing each of them."
        (lispm-memory--time (plist-get entry :updated))
        (lispm-memory--time (plist-get entry :created))))
 
-(defun lispm-memory--listing (entries)
-  "Lines listing the titles of ENTRIES, one memory's, for a system prompt.
-Past `lispm-memory-max-entries', those used least lately are not
-listed, and a line says how many there are: none is left out unseen."
+(defun lispm-memory--listing (memories)
+  "Lines listing the titles of MEMORIES, lists of entries, for a system prompt.
+Past `lispm-memory-max-entries' in all, those used least lately are
+not listed, and a line after each memory says how many of its own
+there are: none is left out unseen."
   (let* ((limit lispm-memory-max-entries)
-         (shown (if (and limit (> (length entries) limit))
-                    (let ((kept (seq-take (sort (copy-sequence entries)
-                                                (lambda (a b) (> (lispm-memory--last-used a)
-                                                                 (lispm-memory--last-used b))))
-                                          limit)))
-                      (seq-filter (lambda (e) (memq e kept)) entries))
-                  entries))
-         (hidden (- (length entries) (length shown))))
-    (concat (mapconcat (lambda (e) (concat "- " (lispm-memory--label e))) shown "\n")
-            (if (> hidden 0)
-                (format "\n- (%d more, used less lately, not listed here: `recall` finds them)"
-                        hidden)
-              ""))))
+         (all (apply #'append memories))
+         (kept (if (and limit (> (length all) limit))
+                   (seq-take (sort (copy-sequence all)
+                                   (lambda (a b) (> (lispm-memory--last-used a)
+                                                    (lispm-memory--last-used b))))
+                             limit)
+                 all)))
+    (mapconcat
+     (lambda (entries)
+       (let* ((shown (seq-filter (lambda (e) (memq e kept)) entries))
+              (hidden (- (length entries) (length shown))))
+         (concat (mapconcat (lambda (e) (concat "- " (lispm-memory--label e))) shown "\n")
+                 (cond ((zerop hidden) "")
+                       (shown (format "\n- (%d more, used less lately, not listed here: `recall` finds them)"
+                                      hidden))
+                       (t (format "- (%d, used less lately, not listed here: `recall` finds them)"
+                                  hidden))))))
+     memories "\n")))
 
 (defun lispm-memory--prompt (agent)
   "System prompt section listing AGENT's memories and its open tasks."
-  (let ((listings (delq nil (mapcar (lambda (scope)
-                                      (when-let* ((entries (lispm-memory--scope-entries agent scope)))
-                                        (lispm-memory--listing entries)))
+  (let ((memories (delq nil (mapcar (lambda (scope) (lispm-memory--scope-entries agent scope))
                                     '(project role))))
         (tasks (lispm-tasks-list agent)))
     (string-join
      (delq nil
-           (list (when listings
+           (list (when memories
                    (concat "# Your long-term memory\n"
                            "Titles of what was saved in earlier sessions; `recall` reads them.\n"
-                           (string-join listings "\n")))
+                           (lispm-memory--listing memories)))
                  (unless (equal tasks "No tasks.")
                    (concat (if (lispm-agent-system agent)
                                "# Open tasks\n"
@@ -534,12 +546,22 @@ of your plan. Reply with JSON only, in this form:
  \"drop\": [{\"id\": number, \"reason\": \"why it is stale\"}]}"
   "System prompt of the request consolidating a memory; %s is its budget.")
 
+;; A pass costs a request holding the whole memory, so it is not made
+;; again for a memory as it is: not before the memory says something
+;; new, and, after a pass that failed or freed nothing, not for
+;; `lispm-memory--retry-after' seconds.  When an entry was recalled is
+;; not something new.
+
+(defconst lispm-memory--retry-after (* 6 3600)
+  "Seconds before a memory is tried again, after a consolidation that failed.")
+
 (defvar lispm-memory--consolidating (make-hash-table :test #'equal)
   "Memory files being consolidated now.")
 
 (defvar lispm-memory--tried (make-hash-table :test #'equal)
-  "Memory files consolidation was tried on, to the hash of their text then.
-A memory is not tried again before it changes.")
+  "Memory files consolidated or tried, to (HASH . NOT-BEFORE).
+HASH is that of what the memory said then (`lispm-memory--hash'), and
+NOT-BEFORE the time before which it is not tried again.")
 
 (defun lispm-memory--text (buffer)
   "The whole text of BUFFER, without properties."
@@ -547,6 +569,11 @@ A memory is not tried again before it changes.")
     (save-restriction
       (widen)
       (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun lispm-memory--hash (text)
+  "Hash of what a memory file holding TEXT says.
+When its entries were last recalled, and how often, is left out."
+  (secure-hash 'sha1 (replace-regexp-in-string "^:RECALL\\(?:ED\\|S\\):.*\n" "" text)))
 
 (defun lispm-memory--size (text)
   "Entries and tokens of a memory file holding TEXT, as (ENTRIES . TOKENS)."
@@ -562,6 +589,33 @@ See `lispm-memory-max-entries' and `lispm-memory-max-tokens'."
     (or (and lispm-memory-max-entries (> entries lispm-memory-max-entries))
         (and lispm-memory-max-tokens (> tokens lispm-memory-max-tokens)))))
 
+(defun lispm-memory--progress-p (old new)
+  "Non-nil if a memory of size NEW is nearer its budget than one of size OLD.
+Sizes are (ENTRIES . TOKENS).  Whatever part of the budget OLD is
+past, NEW must be smaller in; within the budget, smaller in either."
+  (let ((past (delq nil (list (and lispm-memory-max-entries
+                                   (> (car old) lispm-memory-max-entries) #'car)
+                              (and lispm-memory-max-tokens
+                                   (> (cdr old) lispm-memory-max-tokens) #'cdr)))))
+    (if past
+        (seq-every-p (lambda (size) (< (funcall size new) (funcall size old))) past)
+      (or (< (car new) (car old)) (< (cdr new) (cdr old))))))
+
+(defun lispm-memory--due-p (file)
+  "Non-nil if the memory in FILE is to be consolidated now.
+That is while memory is under git (see `lispm-git-p'), if it is past
+its budget, not being consolidated, and says something new since it
+was last tried, once the time to wait after that is over."
+  (and (lispm-git-p)
+       (file-exists-p file)
+       (not (gethash file lispm-memory--consolidating))
+       (let ((text (lispm--file-text file))
+             (tried (gethash file lispm-memory--tried)))
+         (and (lispm-memory--over-budget-p text)
+              (or (null tried)
+                  (and (not (equal (car tried) (lispm-memory--hash text)))
+                       (time-less-p (cdr tried) nil)))))))
+
 (defun lispm-memory--scope-name (agent scope)
   "SCOPE of AGENT's memory, named for a commit message."
   (pcase (lispm-memory--scope agent scope)
@@ -569,16 +623,13 @@ See `lispm-memory-max-entries' and `lispm-memory-max-tokens'."
     (scope (format "%s memory" scope))))
 
 (defun lispm-memory--maintain (agent _reply)
-  "Once AGENT's turn has ended, consolidate its memories past their budget at idle."
+  "Once AGENT's turn has ended, consolidate its memories past their budget at idle.
+Only while memory is under git: a consolidation drops and rewrites
+entries, and its commit is what keeps them."
   (when (lispm-backend-name agent)
     (dolist (scope '(project role))
       (let ((file (lispm-memory-file agent scope)))
-        (when (and (file-exists-p file)
-                   (not (gethash file lispm-memory--consolidating))
-                   (let ((text (lispm--file-text file)))
-                     (and (lispm-memory--over-budget-p text)
-                          (not (equal (gethash file lispm-memory--tried)
-                                      (secure-hash 'sha1 text))))))
+        (when (lispm-memory--due-p file)
           (lispm-when-idle (cons 'consolidate file) #'lispm-memory-consolidate agent scope))))))
 
 (add-hook 'lispm-turn-end-functions #'lispm-memory--maintain)
@@ -617,46 +668,55 @@ See `lispm-memory-max-entries' and `lispm-memory-max-tokens'."
 (defun lispm-memory-consolidate (agent &optional scope)
   "Bring AGENT's memory in SCOPE back within its budget, as a model plans.
 SCOPE is as for `lispm-memory-file'.  The plan comes back later; it
-is carried out, as one commit, only if the memory did not change
-meanwhile.  See `lispm-memory-max-entries'."
+is carried out, as one commit, if the memory still says what it said
+then and the plan brings it nearer its budget.  Not while memory is
+not under git (see `lispm-git-p'), nor once AGENT has ended.  See
+`lispm-memory-max-entries'."
   (let ((file (lispm-memory-file agent scope)))
-    (when (and (file-exists-p file) (not (gethash file lispm-memory--consolidating)))
+    (when (and (memq agent (lispm-agents))
+               (lispm-git-p)
+               (file-exists-p file)
+               (not (gethash file lispm-memory--consolidating)))
       (let* ((buffer (lispm-memory--buffer agent scope))
              (text (lispm-memory--text buffer))
-             (hash (secure-hash 'sha1 text))
+             (hash (lispm-memory--hash text))
              (entries (lispm-memory--entries buffer))
-             (backend (lispm-agent-backend* agent))
-             (request (lispm-api-request
-                       backend (or lispm-memory-model (lispm-agent-model* agent)) "low"
-                       (format lispm-memory--consolidate-prompt (lispm-memory--budget)) nil
-                       `(((role . "user")
-                          (content . [((type . "text")
-                                       (text . ,(format "Today is %s. The memory, %d entries, about %d tokens:\n\n%s"
-                                                        (format-time-string "%Y-%m-%d")
-                                                        (length entries)
-                                                        (cdr (lispm-memory--size text))
-                                                        (lispm-memory--describe entries))))])))))
              (failed (lambda (reason)
                        (remhash file lispm-memory--consolidating)
+                       (puthash file (cons hash (time-add nil lispm-memory--retry-after))
+                                lispm-memory--tried)
                        (message "%s" (lispm-tr "LispM: could not consolidate %s: %s"
                                                (abbreviate-file-name file) reason)))))
-        (puthash file hash lispm-memory--tried)
+        (puthash file (cons hash 0) lispm-memory--tried)
         (puthash file t lispm-memory--consolidating)
         (condition-case err
-            (funcall lispm-api-function backend (car request) (cdr request)
-                     :on-done
-                     (lambda (message)
-                       (condition-case err
-                           (progn
-                             (lispm-memory--carry-out
-                              agent scope hash entries
-                              (lispm-memory--read-plan
-                               (lispm--reply-text (append (alist-get 'content message) nil))
-                               (length entries)))
-                             (remhash file lispm-memory--consolidating))
-                         (error (funcall failed (error-message-string err)))))
-                     :on-error
-                     (lambda (err) (funcall failed (plist-get err :message))))
+            (let* ((backend (lispm-agent-backend* agent))
+                   (request (lispm-api-request
+                             backend (or lispm-memory-model (lispm-agent-model* agent)) "low"
+                             (format lispm-memory--consolidate-prompt (lispm-memory--budget)) nil
+                             `(((role . "user")
+                                (content . [((type . "text")
+                                             (text . ,(format "Today is %s. The memory, %d entries, about %d tokens:\n\n%s"
+                                                              (format-time-string "%Y-%m-%d")
+                                                              (length entries)
+                                                              (cdr (lispm-memory--size text))
+                                                              (lispm-memory--describe entries))))]))))))
+              (when (buffer-modified-p buffer)
+                (error "Its buffer has unsaved changes"))
+              (funcall lispm-api-function backend (car request) (cdr request)
+                       :on-done
+                       (lambda (message)
+                         (condition-case err
+                             (progn
+                               (lispm-memory--carry-out
+                                agent scope hash
+                                (lispm-memory--read-plan
+                                 (lispm--reply-text (append (alist-get 'content message) nil))
+                                 (length entries)))
+                               (remhash file lispm-memory--consolidating))
+                           (error (funcall failed (error-message-string err)))))
+                       :on-error
+                       (lambda (err) (funcall failed (plist-get err :message)))))
           (error (funcall failed (error-message-string err))))))))
 
 (defun lispm-memory--read-plan (reply count)
@@ -714,53 +774,73 @@ in its MERGED property."
                                sources " | ")))
      content)))
 
-(defun lispm-memory--carry-out (agent scope hash entries plan)
+(defun lispm-memory--carry-out (agent scope hash plan)
   "Carry out the consolidation PLAN of AGENT's memory in SCOPE.
-ENTRIES are those of the memory whose text had HASH when the plan was
-made; if it changed since, that is an error, and nothing is changed.
-The entries a plan does not name stay as they are, in their place; an
-entry replacing others takes the place of the first of them.  The
-change is one commit, which names every entry merged or dropped."
+The plan was made when what the memory said had HASH (see
+`lispm-memory--hash'); if it says something else now, or its buffer
+has unsaved changes, that is an error, and nothing is changed.  So is
+a plan leaving two entries of one title, or one not bringing the
+memory nearer its budget.  The entries a plan does not name stay as
+they are, in their place; an entry replacing others takes the place
+of the first of them.  The change is one commit, which names every
+entry merged or dropped."
   (pcase-let* ((`(,replace . ,drop) plan)
                (buffer (lispm-memory--buffer agent scope nil t))
-               (entries (vconcat entries))
+               (old (lispm-memory--text buffer))
+               (entries (vconcat (lispm-memory--entries buffer)))
                (line (lambda (id) (format "\"%s\"" (plist-get (aref entries (1- id)) :title))))
-               (parts nil))
-    (unless (equal (secure-hash 'sha1 (lispm-memory--text buffer)) hash)
+               (parts nil)
+               (titles nil))
+    (unless (equal (lispm-memory--hash old) hash)
       (error "The memory changed meanwhile"))
-    (when (or replace drop)
+    (when (buffer-modified-p buffer)
+      (error "Its buffer has unsaved changes"))
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (push (buffer-substring-no-properties
+               (point-min) (if (> (length entries) 0) (plist-get (aref entries 0) :beg) (point-max)))
+              parts)
+        (cl-loop for e across entries
+                 for id from 1
+                 for group = (seq-find (lambda (g) (memq id (car g))) replace)
+                 do (cond ((assq id drop))
+                          ((and group (= id (apply #'min (car group))))
+                           (push (nth 1 group) titles)
+                           (push (pcase-let ((`(,ids ,title ,tags ,content) group))
+                                   (lispm-memory--merged
+                                    (mapcar (lambda (i) (aref entries (1- i))) (sort (copy-sequence ids) #'<))
+                                    title tags content))
+                                 parts))
+                          (group)
+                          (t (push (plist-get e :title) titles)
+                             (push (let ((text (buffer-substring-no-properties
+                                                (plist-get e :beg) (plist-get e :end))))
+                                     (if (string-suffix-p "\n" text) text (concat text "\n")))
+                                   parts))))))
+    (let ((new (apply #'concat (nreverse parts))))
+      (when-let* ((twice (seq-find (lambda (title)
+                                     (< 1 (seq-count (lambda (other) (string-equal-ignore-case other title))
+                                                     titles)))
+                                   titles)))
+        (error "The plan leaves two entries titled \"%s\"" twice))
+      (unless (lispm-memory--progress-p (lispm-memory--size old) (lispm-memory--size new))
+        (error "The plan does not bring the memory nearer its budget"))
       (with-current-buffer buffer
         (save-restriction
           (widen)
-          (push (buffer-substring-no-properties
-                 (point-min) (if (> (length entries) 0) (plist-get (aref entries 0) :beg) (point-max)))
-                parts)
-          (cl-loop for e across entries
-                   for id from 1
-                   for group = (seq-find (lambda (g) (memq id (car g))) replace)
-                   do (cond ((assq id drop))
-                            ((and group (= id (apply #'min (car group))))
-                             (push (pcase-let ((`(,ids ,title ,tags ,content) group))
-                                     (lispm-memory--merged
-                                      (mapcar (lambda (i) (aref entries (1- i))) (sort (copy-sequence ids) #'<))
-                                      title tags content))
-                                   parts))
-                            (group)
-                            (t (push (let ((text (buffer-substring-no-properties
-                                                  (plist-get e :beg) (plist-get e :end))))
-                                       (if (string-suffix-p "\n" text) text (concat text "\n")))
-                                     parts))))
-          (let ((inhibit-read-only t))
+          (let ((point (point))
+                (inhibit-read-only t))
             (erase-buffer)
-            (insert (apply #'concat (nreverse parts))))))
+            (insert new)
+            (goto-char (min point (point-max))))))
       (lispm-memory--save buffer)
-      (puthash (buffer-file-name buffer) (secure-hash 'sha1 (lispm-memory--text buffer))
-               lispm-memory--tried)
+      (puthash (buffer-file-name buffer) (cons (lispm-memory--hash new) 0) lispm-memory--tried)
       (lispm-git-commit
        agent
        (concat (format "%s: consolidate %s, %d entries to %d\n\n"
                        (lispm-agent-name agent) (lispm-memory--scope-name agent scope)
-                       (length entries) (car (lispm-memory--size (lispm-memory--text buffer))))
+                       (length entries) (car (lispm-memory--size new)))
                (mapconcat (pcase-lambda (`(,ids ,title . ,_))
                             (format "merge %s into \"%s\"" (mapconcat line ids ", ") title))
                           replace "\n")

@@ -659,12 +659,17 @@ way: `thinking', `retry' or `waiting' (for what STATUS names), or
 (defvar lispm--idle-work (make-hash-table :test #'equal)
   "Idle timers of the background work waiting to be done, by key.")
 
+(defun lispm-cancel-idle (key)
+  "Give up the background work waiting under KEY, if any."
+  (when-let* ((timer (gethash key lispm--idle-work)))
+    (cancel-timer timer)
+    (remhash key lispm--idle-work)))
+
 (defun lispm-when-idle (key function &rest args)
   "Call FUNCTION with ARGS once Emacs has been idle for `lispm-idle-delay' seconds.
 Work waiting under KEY already, such as the same work for the same
 agent, is replaced.  Errors are reported, not raised."
-  (when-let* ((timer (gethash key lispm--idle-work)))
-    (cancel-timer timer))
+  (lispm-cancel-idle key)
   (puthash key
            (run-with-idle-timer lispm-idle-delay nil
                                 (lambda ()

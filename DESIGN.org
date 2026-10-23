@@ -364,9 +364,10 @@ role's (or another role's); ~forget~ deletes. Each project, and the system, also
 user's own agenda; writing a TODO there by hand hands agents work.
 
 When a session starts, the memory titles and the open tasks are snapshotted into the system
-prompt; details are fetched on demand with ~recall~. A memory lists at most
-~lispm-memory-max-entries~ titles (default 200), those used most lately, followed by a line
-saying how many more there are: nothing is left out unseen.
+prompt; details are fetched on demand with ~recall~. The prompt lists at most
+~lispm-memory-max-entries~ titles (default 200) of the agent's own and its role's memory together,
+those used most lately, each memory followed by a line saying how many more it has: nothing is
+left out unseen.
 
 *Consolidation.* Memory that only grows would outgrow any prompt, so it compresses itself. Once a
 turn has ended, a memory past its budget, ~lispm-memory-max-entries~ entries or
@@ -379,13 +380,18 @@ exists and is named once, a drop has a reason) and carried out only if the memor
 change meanwhile; entries it does not name stay as they were. A merged entry keeps the earliest
 ~CREATED~, the latest ~RECALLED~, the sum of ~RECALLS~, and names its sources in ~MERGED~. The
 change is one commit by the agent, whose message names every entry merged or dropped and why,
-so ~git revert~ undoes it. A memory is not tried again until it changes.
+so ~git revert~ undoes it; without git (~lispm-git~ nil) memory is never consolidated. A plan
+must bring the memory nearer its budget and leave no two entries of one title. Each pass costs
+a request holding the whole memory, so a memory is not tried again before it says something new
+(when entries were recalled does not count), nor for six hours after a pass that failed or
+freed nothing.
 
 *Episodes.* Memory holds what is known; episodes, what happened. The summary of every handover
 (section 8) is kept in ~episodes/YYYY-MM-DD.org~ beside the agent's own memory. Once a week is
 over its days are rolled up, by a model at idle, into ~episodes/YYYY-Www.org~, and once a month is
 over its weeks into ~episodes/YYYY-MM.org~ (a week belongs to the month of its Thursday); the
-files rolled up are removed in the same commit. A new session of an agent of the whole system
+files rolled up are removed in the same commit, so rollups too wait for git, and a rollup
+removes nothing that changed after it was asked for. A new session of an agent of the whole system
 starts with the latest episode in its system prompt (~lispm-episodes~).
 
 The whole ~lispm-directory~ is a git repository. Memory and task changes are committed in
@@ -733,7 +739,9 @@ of its own (step 1) and the summary (step 2) is written in the background while 
 free. Input given it meanwhile starts at once in the session as it is, and the summary, out of
 date, is thrown away; so is one that comes once the session changed. Otherwise the session is
 handed over as in step 3, with no input to start. A session the user is writing in is left
-alone, and one still past the threshold when a turn starts is handed over then, as above.
+alone. Since each attempt costs a turn and a request carrying the whole session, it is made
+once per session: given up, it is left to the start of a turn past the threshold, as above,
+which then neither saves memory again nor asks for a second summary while one is on its way.
 
 ~M-x lispm-compact~ hands over on demand, like Claude Code's ~/compact~. This is the "simple
 compaction" model vendors recommend, with the latest turns kept so that the work under way
