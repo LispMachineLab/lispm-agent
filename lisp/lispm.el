@@ -103,6 +103,7 @@
 (require 'lispm-inspect)
 (require 'lispm-settings)
 (require 'lispm-chat)
+(require 'lispm-bar)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
 
@@ -161,7 +162,8 @@ you write under its last heading and send with C-c RET."
 (defun lispm--project-agent ()
   "A running agent working in the current project, the most recent first."
   (let ((root (file-name-as-directory (expand-file-name (lispm--project-root)))))
-    (seq-find (lambda (a) (equal (lispm-agent-root a) root)) (reverse (lispm-agents)))))
+    (seq-find (lambda (a) (and (equal (lispm-agent-root a) root) (not (lispm-system-agent-p a))))
+              (reverse (lispm-agents)))))
 
 ;;;###autoload
 (defun lispm (&optional role directory)

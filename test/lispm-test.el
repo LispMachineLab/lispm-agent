@@ -5643,6 +5643,27 @@ handed over once nothing more can be."
     (goto-char (point-max))
     (call-interactively (keymap-lookup lispm-chat-mode-map key))))
 
+(ert-deftest lispm-test-chat-italics ()
+  "Replies show Markdown emphasis, *TEXT* or _TEXT_, in italics, but not
+inside words, as in 2*3*4 or snake_case, nor inside code."
+  (let ((italic (lambda (text)
+                  (let ((shown (lispm-chat--inline text)))
+                    (list (substring-no-properties shown)
+                          (apply #'string (seq-filter (lambda (i) (memq 'italic (ensure-list (get-text-property i 'face shown))))
+                                                      (number-sequence 0 (1- (length shown)))))
+                          shown)))))
+    (pcase-let ((`(,text ,_ ,shown) (funcall italic "Playing *Calm* from _Quiet Rooms_.")))
+      (should (equal text "Playing Calm from Quiet Rooms."))
+      (should (memq 'italic (ensure-list (get-text-property 8 'face shown))))
+      (should (memq 'italic (ensure-list (get-text-property 18 'face shown))))
+      (should-not (get-text-property 0 'face shown)))
+    (dolist (plain '("2*3*4 is 24" "run_shell and snake_case_names" "* a list item" "code `a*b*c` stays"))
+      (pcase-let ((`(,text ,_ ,shown) (funcall italic plain)))
+        (should (equal text (string-replace "`" "" plain)))
+        (should-not (seq-some (lambda (i) (memq 'italic (ensure-list (get-text-property i 'face shown))))
+                              (number-sequence 0 (1- (length shown)))))))
+    (should (equal (car (funcall italic "**bold** and *it* and *more*")) "bold and it and more"))))
+
 (ert-deftest lispm-test-chat-items ()
   "The chat reads the conversation, and only it, out of the org document."
   (with-temp-buffer
@@ -7639,6 +7660,219 @@ of the agents drawn: so it is shown again rather than resumed twice."
           (should (equal (lispm-agents-buffer-label buffer) "Fix the build"))
           (should (eq (lispm-agents-session-buffer "0199") buffer)))
       (kill-buffer buffer))))
+
+;;;; The LispM bar
+
+(defmacro lispm-test-with-bar (&rest body)
+  "Run BODY in `lispm-test-env' with a bar of its own, drawn nowhere.
+LispM itself works in `project'; the bar finds a fake application,
+Stickies, whose opening `opened' records."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let* ((lispm-system-agent-root project)
+            (opened nil)
+            (lispm-bar-source-functions
+             (list (lambda ()
+                     (list (list :kind 'application :name "Stickies" :detail "Notes on the desktop"
+                                 :fields '((3 . "Stickies") (1.5 . "Notes on the desktop"))
+                                 :open (lambda () (push 'stickies opened)))))
+                   #'lispm-bar-skills #'lispm-bar-tools))
+            (lispm-bar-read-function #'funcall)
+            (lispm-bar-show-function #'ignore)
+            (lispm-bar-hide-function #'ignore)
+            (lispm-bar-ready-function (lambda (_agent) t))
+            (lispm-bar--open nil) (lispm-bar--asked nil) (lispm-bar--reply nil)
+            (lispm-bar--waiting nil) (lispm-bar--expanded nil) (lispm-bar--things nil)
+            (lispm-bar--text "") (lispm-bar--found nil) (lispm-bar--choice 0)
+            (lispm-bar-history nil))
+       (unwind-protect
+           (progn ,@body)
+         (when (get-buffer lispm-bar-buffer-name)
+           (kill-buffer lispm-bar-buffer-name))))))
+
+(defun lispm-test--bar-keys (keys)
+  "Open the bar and type KEYS in its field, which must close it."
+  (condition-case nil
+      (execute-kbd-macro (vconcat (kbd "M-x lispm-ai RET") (kbd keys)))
+    (quit nil)))
+
+(ert-deftest lispm-test-bar-system-agent ()
+  "LispM itself is one standing agent, of the system rather than a project."
+  (lispm-test-with-bar
+    (let ((agent (lispm-system-agent)))
+      (should (lispm-system-agent-p agent))
+      (should (eq (lispm-system-agent) agent))
+      (should (eq (lispm-agent-role agent) 'system))
+      (should (equal (lispm-agent-root agent) (file-name-as-directory project)))
+      (should (string-match-p "You are LispM itself" (lispm-system-prompt agent)))
+      ;; The project's own agents are others.
+      (let ((default-directory project))
+        (should-not (lispm--project-agent))
+        (let ((other (lispm-start)))
+          (should-not (lispm-system-agent-p other))
+          (should (eq (lispm--project-agent) other)))))))
+
+(ert-deftest lispm-test-bar-alone ()
+  "With LispM Agent alone, the bar finds LispM's own skills and tools and
+speaks of nothing else: no applications, no screen of a desktop."
+  (lispm-test-with-bar
+    (let ((lispm-bar-source-functions (list #'lispm-bar-skills #'lispm-bar-tools))
+          (lispm-bar--open t))
+      (lispm-bar--gather)
+      (should-not (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application)) lispm-bar--things))
+      (should (lispm-bar-open-p))
+      (should (string-match-p "^Find skills and tools, or ask LispM\\.$"
+                              (substring-no-properties (lispm-bar--text))))
+      (should-not (string-match-p "screen\\|desktop\\|menu bar" lispm-bar--instructions))
+      (should (eq (symbol-function 'ai) #'lispm-ai)))))
+
+(ert-deftest lispm-test-bar-finds ()
+  "The bar finds applications, skills and tools as search_tools ranks them."
+  (lispm-test-with-bar
+    (should-not (lispm-bar-find "  "))
+    (should (equal (plist-get (car (lispm-bar-find "stick")) :name) "Stickies"))
+    ;; A misspelt word finds it too, by the same scorer.
+    (should (equal (plist-get (car (lispm-bar-find "stikies")) :name) "Stickies"))
+    (let ((found (lispm-bar-find "read file" 10)))
+      (should (member "read_file" (mapcar (lambda (thing) (plist-get thing :name)) found)))
+      (should (eq (plist-get (seq-find (lambda (thing) (equal (plist-get thing :name) "read_file")) found)
+                             :kind)
+                  'tool)))
+    ;; A source that fails leaves the others to find.
+    (let ((lispm-bar-source-functions (cons (lambda () (error "Broken")) lispm-bar-source-functions))
+          (inhibit-message t))
+      (lispm-bar--gather)
+      (should (lispm-bar-find "stick")))))
+
+(ert-deftest lispm-test-bar-draws ()
+  "The bar asks LispM first, then shows what it found; opened out, under headings."
+  (lispm-test-with-bar
+    (let ((lispm-bar--open t))
+      (lispm-bar--set-text "stick")
+      (let ((text (substring-no-properties (lispm-bar--text))))
+        (should (string-match-p "\\`❯ Ask LispM “stick”" text))
+        (should (string-match-p "^  Stickies  Notes on the desktop.*Application$" text))
+        (should (string-match-p "more · C-c C-o chat · C-g close" text)))
+      (lispm-bar-next)
+      (should (eq (plist-get (lispm-bar--chosen) :kind) 'application))
+      (should (string-match-p "^❯ Stickies" (substring-no-properties (lispm-bar--text))))
+      (lispm-bar-toggle)
+      (let ((text (substring-no-properties (lispm-bar--text))))
+        (should (string-match-p "^Applications$" text))
+        (should (string-match-p "^Conversation$" text))
+        (should (string-match-p "Nothing asked yet\\." text))))))
+
+(ert-deftest lispm-test-bar-opens-applications ()
+  "Return on an application found opens it and closes the bar."
+  (lispm-test-with-bar
+    (lispm-test--bar-keys "stick C-n RET")
+    (should (equal opened '(stickies)))
+    (should-not lispm-bar--open)
+    (should-not (lispm-agent-inbox (lispm-system-agent)))))
+
+(ert-deftest lispm-test-bar-asks ()
+  "Return asks LispM what the field holds; the field stays open for the
+reply, streamed in, and a skill chosen is named in the request."
+  (lispm-test-with-bar
+    (let* ((agent (lispm-system-agent))
+           (deltas nil)
+           (lispm-response-delta-functions
+            (list (lambda (who kind text) (push (list (lispm-agent-name who) kind text) deltas)))))
+      (setq lispm-test--scripts
+            `((lispm ,(lispm-test--msg "end_turn" (lispm-test--text "Hello there.")))))
+      (lispm-test--bar-keys "hi SPC LispM RET <escape>")
+      (should (equal lispm-bar-history '("hi LispM")))
+      (should (equal (car lispm-bar--asked) "hi LispM"))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal lispm-bar--reply "Hello there."))
+      (should (equal deltas '((lispm text "streaming..."))))
+      (should (string-match-p "^\\* User\nhi LispM$" (lispm-test--transcript agent)))
+      (let ((lispm-bar--open t))
+        (should (string-match-p "λ hi LispM\n⏺ Hello there\\."
+                                (substring-no-properties (lispm-bar--text))))))))
+
+(ert-deftest lispm-test-bar-answers-inline ()
+  "A call LispM asks approval for is answered in the empty field, y or n."
+  (lispm-test-with-bar
+    (let ((agent (lispm-system-agent)))
+      (setq lispm-test--scripts
+            `((lispm ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_shell"
+                                                                   '((command . "echo hi") (why . "To greet."))))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "Said hi.")))))
+      (lispm-bar-ask "Greet")
+      (should (lispm-test--wait (lambda () (lispm-waiting-calls agent))))
+      (let ((lispm-bar--open t))
+        (should (string-match-p "▌ Bash command: echo hi\n  To greet\\.\n  Do you want to proceed\\? y yes · n no"
+                                (substring-no-properties (lispm-bar--text)))))
+      ;; Typed after other text, y is only a letter.
+      (with-temp-buffer
+        (insert "sa")
+        (let ((last-command-event ?y)) (lispm-bar-yes))
+        (should (equal (buffer-string) "say")))
+      (should (lispm-waiting-calls agent))
+      (with-temp-buffer
+        (lispm-bar-yes))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal lispm-bar--reply "Said hi."))
+      (should (string-match-p "^hi$" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-bar-approval-message ()
+  "LispM itself is answered in the bar: while it is open nothing else says
+so, while it is closed a message names the key opening it."
+  (lispm-test-with-bar
+    (let ((agent (lispm-system-agent))
+          (other (let ((default-directory project)) (lispm-start))))
+      (let ((lispm-bar--open (selected-window)))
+        (should (eq (lispm-bar--approval-message agent "run_shell") t)))
+      (should (string-match-p "\\`LispM asks to use Bash: .* to answer\\'"
+                              (lispm-bar--approval-message agent "run_shell")))
+      (should-not (lispm-bar--approval-message other "run_shell")))))
+
+(ert-deftest lispm-test-bar-without-a-model ()
+  "With no model, the bar is a launcher, and what was asked waits for one."
+  (lispm-test-with-bar
+    (let* ((agent (lispm-system-agent))
+           (setup 0)
+           (lispm-bar-ready-function (lambda (_agent) nil))
+           (lispm-bar-setup-function (lambda () (cl-incf setup))))
+      (lispm-bar-ready-p)
+      (let ((lispm-bar--open t))
+        (lispm-bar--set-text "stick")
+        ;; The best thing found is what Return opens.
+        (should (eq (plist-get (lispm-bar--chosen) :kind) 'application))
+        (should (string-match-p "^  Set up a model…  then LispM is asked “stick”"
+                                (substring-no-properties (lispm-bar--text)))))
+      ;; Words an application is found by open it.
+      (lispm-test--bar-keys "take SPC a SPC note RET")
+      (should (equal opened '(stickies)))
+      (should (= setup 0))
+      (lispm-test--bar-keys "how SPC late SPC is SPC it RET")
+      (should (= setup 1))
+      (should (equal lispm-bar--waiting '("how late is it" . "how late is it")))
+      (should-not (lispm-agent-inbox agent))
+      (setq lispm-test--scripts
+            `((lispm ,(lispm-test--msg "end_turn" (lispm-test--text "Late.")))))
+      (let ((inhibit-message t))
+        (lispm-bar-model-ready))
+      (should-not lispm-bar--waiting)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal lispm-bar--reply "Late."))
+      (should (string-match-p "^how late is it$" (lispm-test--transcript agent))))))
+
+(ert-deftest lispm-test-bar-model-ready ()
+  "LispM has a model when a backend can be named, its key variable set."
+  (lispm-test-env
+    (let ((lispm-system-agent-root project))
+      (should (lispm-bar-model-ready-p (lispm-system-agent)))
+      (let ((lispm-backend nil)
+            (process-environment (append '("OPENAI_API_KEY" "ANTHROPIC_API_KEY") process-environment)))
+        (should-not (lispm-bar-model-ready-p (lispm-system-agent))))
+      (let ((lispm-backends (cons '(test :api anthropic :url "http://fake.invalid" :key-env "LISPM_TEST_KEY")
+                                  lispm-backends))
+            (process-environment (cons "LISPM_TEST_KEY" process-environment)))
+        (should-not (lispm-bar-model-ready-p (lispm-system-agent)))
+        (setenv "LISPM_TEST_KEY" "secret")
+        (should (lispm-bar-model-ready-p (lispm-system-agent)))))))
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

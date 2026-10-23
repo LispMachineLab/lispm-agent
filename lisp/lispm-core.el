@@ -182,6 +182,12 @@ Each is called with the agent and a plist: the call's :id and :name,
 and :json, its input as received so far, the beginning of a JSON
 object.  It runs whenever more of the input arrives.")
 
+(defvar lispm-response-delta-functions nil
+  "Abnormal hook run while a response streams in.
+Each is called with the agent, the kind of what arrived (`text',
+`thinking' or `tool', the name of a tool whose call the model starts
+writing) and its text.  `lispm-live-segments' has all of it so far.")
+
 (defvar lispm-buffer-change-functions nil
   "Abnormal hook run after a tool changed a buffer's text.
 Each is called with the buffer, its old text and its new text;
