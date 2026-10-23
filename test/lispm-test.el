@@ -2497,6 +2497,108 @@ command: High lets it write only the project; Middle hides secrets."
     (lispm-test--wait (lambda () result) 30)
     result))
 
+(ert-deftest lispm-test-sandbox-extra-rules ()
+  "Rules on top of a level's add to what it lists and to what it allows,
+at every level but none, and leave the level's own lists as they were."
+  (let ((lispm-sandbox-allowed-domains '("example.com"))
+        (lispm-sandbox-secrets '("~/.ssh"))
+        (extra '(:allow-write ("/srv/data") :allowed-domains ("api.example.org")
+                 :unix-sockets ("/srv/data/run.sock") :local-binding t)))
+    (should-not (lispm-sandbox-settings 'none extra))
+    (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'middle extra))
+                                  :object-type 'alist :array-type 'list)
+      (should (equal .network.allowedDomains '("example.com" "api.example.org")))
+      (should (equal .network.allowUnixSockets '("/srv/data/run.sock")))
+      (should (eq .network.allowLocalBinding t))
+      (should (member "." .filesystem.allowWrite))
+      (should (member "/srv/data" .filesystem.allowWrite))
+      (should (equal .filesystem.denyRead '("~/.ssh"))))
+    (should (equal lispm-sandbox-allowed-domains '("example.com")))
+    (should (equal (lispm-sandbox-merge-rules '(:pty t :allow-write (".")) '(:pty nil :allow-write ("b")))
+                   '(:pty t :allow-write ("." "b"))))
+    (should-error (lispm-sandbox-settings 'low '(:allow-everything t)) :type 'lispm-sandbox-error)))
+
+(ert-deftest lispm-test-services ()
+  "A service a package defines runs in the sandbox at its own level, with
+the rules it needs on top, where and as it says; it stops when asked,
+and tells how it ended.  One given no level runs at the level set and
+takes its changes, its rules still on top.  Without srt it does not run
+at all; undefined, it stops."
+  (lispm-test-env
+    (lispm-test-with-fake-srt log
+      (let* ((lispm-services nil)
+             (lispm-service-levels nil)
+             (lispm-service--processes nil)
+             (lispm-service--ended nil)
+             (lispm-sandbox-level 'none)
+             (settings (expand-file-name "settings.json" log))
+             (before 0)
+             (changed 0)
+             (lispm-services-changed-hook (list (lambda () (setq changed (1+ changed))))))
+        (make-directory project t)
+        (lispm-define-service 'echo
+          :name "Echo" :description "Says where it runs, then waits."
+          :command (lambda () (list "sh" "-c" "echo started in $(pwd) with $LISPM_TEST_SERVICE; exec sleep 30"))
+          :directory project
+          :environment (lambda () (list "LISPM_TEST_SERVICE=its-environment"))
+          :sandbox (lambda () '(:allow-write ("/srv/echo") :local-binding t))
+          :before-start (lambda () (setq before (1+ before))))
+        (should (equal (lispm-service-name 'echo) "Echo"))
+        (should-not (lispm-service-status 'echo))
+        (should-not (lispm-service-managed-p 'echo))
+        ;; Its own level, Middle, with its rules on top.
+        (lispm-service-set-level 'echo 'middle)
+        (should (lispm-service-managed-p 'echo))
+        (should (eq (lispm-service-level 'echo) 'middle))
+        (let ((process (lispm-service-start 'echo)))
+          (should (eq (lispm-service-status 'echo) 'running))
+          (should (eq (lispm-service-start 'echo) process))
+          (should (= before 1))
+          (should (lispm-test--wait
+                   (lambda () (with-current-buffer (lispm-service-buffer-name 'echo)
+                                (string-match-p "started in .*project with its-environment"
+                                                (buffer-string))))))
+          (should (lispm-test--wait (lambda () (file-exists-p settings))))
+          (let-alist (lispm-test--json-file settings)
+            (should (member "/srv/echo" .filesystem.allowWrite))
+            (should (eq .network.allowLocalBinding t))
+            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+          (should (lispm-service-stop 'echo))
+          (should-not (process-live-p process))
+          (should (lispm-test--wait (lambda () (eq (car-safe (lispm-service-status 'echo)) 'exited)))))
+        (should-not (lispm-service-stop 'echo))
+        ;; No level of its own: it follows the level set, with its rules.
+        (lispm-service-set-level 'echo nil)
+        (should-not (lispm-service-managed-p 'echo))
+        (setq lispm-sandbox-level 'low)
+        (delete-file settings)
+        (lispm-service-start 'echo)
+        (should (lispm-test--wait (lambda () (file-exists-p settings))))
+        (setq lispm-sandbox-level 'high)
+        (cl-flet ((last-sent ()
+                    (let ((control (expand-file-name "control" log)))
+                      (when (file-exists-p control)
+                        (car (last (with-temp-buffer
+                                     (insert-file-contents control)
+                                     (split-string (buffer-string) "\n" t))))))))
+          (should (lispm-test--wait (lambda () (string-search "\"denyRead\":[\"~\"]" (or (last-sent) "")))))
+          (let-alist (json-parse-string (last-sent) :object-type 'alist :array-type 'list)
+            (should (member "/srv/echo" .filesystem.allowWrite))
+            (should (eq .network.allowLocalBinding t))))
+        (lispm-service-stop 'echo)
+        ;; Without srt, it fails rather than run outside the sandbox.
+        (let ((lispm-sandbox-srt-program (expand-file-name "no-srt" project)))
+          (should-error (lispm-service-start 'echo) :type 'lispm-sandbox-error)
+          (should-not (lispm-service-process 'echo))
+          (should (string-match-p "no-srt is not found" (cdr (lispm-service-status 'echo)))))
+        ;; Undefined, a running service stops.
+        (let ((process (lispm-service-start 'echo)))
+          (lispm-undefine-service 'echo)
+          (should-not (process-live-p process))
+          (should-not (assq 'echo lispm-services))
+          (should-error (lispm-service-start 'echo) :type 'user-error))
+        (should (> changed 4))))))
+
 (defmacro lispm-test-with-remote (&rest body)
   "Run BODY in `lispm-test-env' with `remote', `project' as a remote directory.
 It is reached through TRAMP's mock method, which Emacs's own tests of

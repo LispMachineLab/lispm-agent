@@ -86,6 +86,7 @@
 (require 'tabulated-list)
 (require 'lispm-core)
 (require 'lispm-sandbox)
+(require 'lispm-services)
 (require 'lispm-roles)
 (require 'lispm-transcript)
 (require 'lispm-api)

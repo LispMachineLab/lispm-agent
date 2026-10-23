@@ -303,6 +303,14 @@ bubblewrap on Linux), reaching the network through a proxy that checks each doma
 the new network rules at once.  The first level other than None installs srt with npm (Node.js
 22.12+).  The sandbox does not confine ~eval_elisp~, so keep ~exec~ at ~ask~ when it matters.
 
+** Services
+
+A package can offer a background program as a service (~lispm-define-service~), as
+[[https://github.com/LispMachineLab/lispm-holon][lispm-holon]] offers Holon's daemon.  It runs while Emacs runs, in the sandbox at its own
+level (~lispm-service-levels~) or else at the agents' level, with the files, sockets and domains
+it needs on top.  ~M-x lispm-service-start~, ~lispm-service-stop~ and ~lispm-service-restart~ act
+on one; a desktop's startup items can start them.
+
 * Languages
 
 The chat, its approvals and / commands, the sandbox's levels and LispM's messages speak English
