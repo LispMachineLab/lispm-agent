@@ -121,6 +121,7 @@
   ("send; on an object (a file, an agent...), act on it; on an item, show it in full" . "送信。オブジェクト（ファイル、エージェントなど）の上ではそれを操作し、項目の上ではその全体を表示")
   ("new line" . "改行")
   ("show the item at point in full; complete a / command" . "ポイント位置の項目を全体表示。/コマンドを補完")
+  ("choose in the menu of / commands, or an answer to a prompt" . "/コマンドのメニューで選ぶ。または確認への答えを選ぶ")
   ("previous and next messages sent" . "送信した前のメッセージと次のメッセージ")
   ("interrupt the agent" . "エージェントを中断")
   ("answer an approval prompt (or up, down and RET)" . "承認の確認に答える（または上下の矢印キーとRET）")

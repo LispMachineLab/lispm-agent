@@ -546,6 +546,12 @@ sessions recorded.
               revert-buffer-function #'lispm-terminal--revert
               lispm-terminal--selection (make-overlay (point-min) (point-min)))
   (overlay-put lispm-terminal--selection 'face 'lispm-terminal-selected)
+  ;; On a text terminal, a line between the sessions and the listener,
+  ;; as the chat draws its rules.  The buffer's, not the window's: set
+  ;; on a window already shown, rows Emacs did not draw again lost it.
+  (setq buffer-display-table (make-display-table))
+  (set-display-table-slot buffer-display-table 'vertical-border
+                          (make-glyph-code ?│ 'vertical-border))
   (lispm-terminal-keys-mode 1)
   (add-hook 'post-command-hook #'lispm-terminal--select-entry nil t)
   (add-hook 'window-selection-change-functions #'lispm-terminal--select-entry nil t)
@@ -669,6 +675,19 @@ REREAD non-nil, the recorded sessions read anew."
   (when lispm-session-mode
     (lispm-terminal--schedule t)))
 
+(defun lispm-terminal--scrolled (window _start)
+  "Draw the sessions again whole if WINDOW, the listener, scrolled on a
+text terminal.  Emacs then moves the screen's lines, the sessions' part
+with them, but forgets the line between the panes on them: the next
+change to the listener on such a line wrote a space over it."
+  (when (and (eq window lispm-terminal--listener)
+             (not (display-graphic-p (window-frame window))))
+    ;; After this redisplay, which moves the lines and loses the line.
+    (run-at-time 0 nil (lambda ()
+                         (when-let* ((sessions (get-buffer-window lispm-terminal--sessions-name
+                                                                  lispm-terminal--frame)))
+                           (force-window-update sessions))))))
+
 (defun lispm-terminal--tick ()
   "Draw the terminal again as a minute passed: the time, the ages."
   (lispm-terminal--schedule t))
@@ -688,6 +707,7 @@ REREAD non-nil, the recorded sessions read anew."
     (lispm-language-changed-hook . lispm-terminal--changed)
     (lispm-session-mode-hook . lispm-terminal--session-opened)
     (window-buffer-change-functions . lispm-terminal--changed)
+    (window-scroll-functions . lispm-terminal--scrolled)
     (delete-frame-functions . lispm-terminal--frame-deleted))
   "The hooks that keep the terminal up to date, and their functions.")
 
@@ -720,16 +740,11 @@ gives the frame back as it was."
        (lispm-terminal--who-buffer)
        `((side . bottom) (slot . 0) (window-height . 1) (dedicated . t)
          (window-parameters . ((no-other-window . t) ,@parameters))))
-      (when-let* ((window (display-buffer-in-side-window
-                           (lispm-terminal--sessions-buffer)
-                           `((side . left) (slot . 0) (window-width . ,lispm-terminal-sessions-width)
-                             (preserve-size . (t . nil)) (dedicated . t)
-                             (window-parameters . ,parameters))))
-                  (table (make-display-table)))
-        ;; On a text terminal, a line between the sessions and the
-        ;; listener, as the chat draws its rules.
-        (set-display-table-slot table 'vertical-border (make-glyph-code ?│ 'vertical-border))
-        (set-window-display-table window table))))
+      (display-buffer-in-side-window
+       (lispm-terminal--sessions-buffer)
+       `((side . left) (slot . 0) (window-width . ,lispm-terminal-sessions-width)
+         (preserve-size . (t . nil)) (dedicated . t)
+         (window-parameters . ,parameters)))))
   (lispm-terminal-redraw))
 
 ;;;###autoload

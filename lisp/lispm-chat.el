@@ -36,6 +36,10 @@
 ;;   ──────────────────────────────────────
 ;;     / for commands · RET send · S-RET newline
 ;;
+;; A / starts a command: while its name is written, the commands it
+;; may be show under the input instead of the hints, as Claude Code
+;; shows them; C-n and C-p choose, TAB completes, RET runs.
+;;
 ;; The chat is drawn from the org buffer, the single source of truth,
 ;; whenever the session changes, from the first item that changed; the
 ;; org buffer itself stays out of sight.  Calls awaiting approval are
@@ -161,6 +165,13 @@ it, and all the :items.")
 
 (defvar-local lispm-chat--history-index nil
   "Position in `lispm-chat--history' while browsing it, or nil.")
+
+(defcustom lispm-chat-menu-lines 10
+  "Most / commands the menu under the input shows at once."
+  :type 'natnum)
+
+(defvar-local lispm-chat--menu-choice 0
+  "Index of the command chosen in the menu of / commands.")
 
 (defvar-local lispm-chat--choice 0
   "Answer selected in the approval prompt: 0, 1 or 2.")
@@ -1074,14 +1085,16 @@ ITEMS are the session's items, where the call's preview is."
     (lispm-chat--update-footer)
     (lispm-chat--maybe-ask)))
 
-(defun lispm-chat--follow (window)
-  "Scroll WINDOW so that the input, and the hints below it, are in sight."
-  (let ((posn (posn-at-point (point-max) window)))
+(defun lispm-chat--follow (window &optional lines)
+  "Scroll WINDOW so that the input, and the LINES (3) below it, are in sight:
+the hints, or the menu of / commands."
+  (let ((posn (posn-at-point (point-max) window))
+        (lines (or lines 3)))
     (when (or (null posn)
-              (> (+ (cdr (posn-x-y posn)) (* 3 (default-line-height)))
+              (> (+ (cdr (posn-x-y posn)) (* lines (default-line-height)))
                  (window-body-height window t)))
       (with-selected-window window
-        (recenter -3)))))
+        (recenter (- lines))))))
 
 (defun lispm-chat--maybe-ask ()
   "Select the first answer of a newly shown prompt."
@@ -1208,10 +1221,72 @@ checked or not as `lispm-ground-code' now says."
   "Non-nil if point is in the text being written."
   (>= (point) lispm-chat--input-start))
 
-(defun lispm-chat--update-footer (&rest _)
-  "Draw the rule and hints below the input, and a placeholder while it is empty."
+(defvar lispm-chat-commands)
+
+(defun lispm-chat--menu ()
+  "The / commands the input may be, while it is a / and the start of a
+command's name: those whose name starts so, then those holding it
+elsewhere, as entries of `lispm-chat-commands'.  Nil otherwise, and
+then no menu shows."
+  (when (and (markerp lispm-chat--input-start) (marker-position lispm-chat--input-start))
+    (let ((input (lispm-chat--input)))
+      (when (string-match "\\`/\\([a-z]*\\)\\'" input)
+        (let* ((word (match-string 1 input))
+               (starting (seq-filter (lambda (command) (string-prefix-p word (car command)))
+                                     lispm-chat-commands)))
+          (append starting
+                  (seq-filter (lambda (command)
+                                (and (not (memq command starting)) (string-search word (car command))))
+                              lispm-chat-commands)))))))
+
+(defun lispm-chat--menu-chosen (menu)
+  "The index of the command chosen in MENU."
+  (min lispm-chat--menu-choice (1- (length menu))))
+
+(defun lispm-chat--menu-command (menu)
+  "The name of the command chosen in MENU."
+  (car (nth (lispm-chat--menu-chosen menu) menu)))
+
+(defun lispm-chat--menu-lines (menu)
+  "MENU as it shows under the input, the command chosen marked; at most
+`lispm-chat-menu-lines' of it, around the one chosen."
+  (let* ((chosen (lispm-chat--menu-chosen menu))
+         (start (max 0 (- chosen (1- lispm-chat-menu-lines))))
+         (width (+ 2 (apply #'max (mapcar (lambda (command) (string-width (car command)))
+                                          lispm-chat-commands)))))
+    (mapconcat (lambda (index)
+                 (pcase-let* ((`(,name ,_ ,doc) (nth index menu))
+                              (line (concat "/" name (make-string (- width (string-width name)) ?\s)
+                                            (lispm-tr doc))))
+                   (if (= index chosen)
+                       (propertize (concat "❯ " line) 'face 'lispm-chat-accent)
+                     (concat "  " (propertize line 'face 'lispm-chat-dim)))))
+               (number-sequence start (min (1- (length menu)) (+ start lispm-chat-menu-lines -1)))
+               "\n")))
+
+(defun lispm-chat--menu-move (n)
+  "Choose the command N lines down the menu, from the bottom to the top."
+  (let ((menu (lispm-chat--menu)))
+    (setq lispm-chat--menu-choice (mod (+ (lispm-chat--menu-chosen menu) n) (length menu)))
+    (lispm-chat--update-footer)))
+
+(defun lispm-chat--show-menu ()
+  "Scroll the menu under the input into sight, while there is one."
+  (when-let* (((lispm-chat--in-input-p))
+              (menu (lispm-chat--menu))
+              (window (get-buffer-window (current-buffer))))
+    (lispm-chat--follow window (+ 3 (min (length menu) lispm-chat-menu-lines)))))
+
+(defun lispm-chat--update-footer (&rest change)
+  "Draw the rule and hints below the input, and a placeholder while it is empty.
+While a / command's name is written, the commands it may be show in
+place of the hints.  Run on a CHANGE of the input, the first of them is
+chosen again."
+  (when change
+    (setq lispm-chat--menu-choice 0))
   (when (overlayp lispm-chat--footer)
-    (let ((footer
+    (let* ((menu (lispm-chat--menu))
+           (footer
            (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
                        (propertize (cond ((not (lispm-chat--prompting-p))
                                           (lispm-tr "Try \"explain this project\", or / for commands"))
@@ -1221,11 +1296,13 @@ checked or not as `lispm-ground-code' now says."
                                    'face 'lispm-chat-dim)
                      " ")
                    "\n" (lispm-chat--rule) "\n"
-                   (propertize (concat "  " (if (display-graphic-p)
+                   (if menu
+                       (lispm-chat--menu-lines menu)
+                     (propertize (concat "  " (if (display-graphic-p)
                                                 (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt")
                                               ;; A text terminal sends Return alike with Shift held.
                                               (lispm-tr "/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt")))
-                               'face 'lispm-chat-dim))))
+                                 'face 'lispm-chat-dim)))))
       ;; The footer is drawn at the end of the input, where point usually
       ;; is, and Emacs would draw the cursor after it, below the hints.
       ;; Put it on the footer's first character instead: the placeholder,
@@ -1237,6 +1314,7 @@ checked or not as `lispm-ground-code' now says."
 
 (defun lispm-chat-return ()
   "Send what is written, or answer the approval prompt if nothing is.
+While the menu of / commands shows, run the command chosen there.
 Outside the input, act on the object at point (see lispm-inspect.el),
 or show the item at point in full."
   (interactive)
@@ -1246,7 +1324,9 @@ or show the item at point in full."
                (t (goto-char (point-max)))))
         ((and (string-blank-p (lispm-chat--input)) (lispm-chat--prompting-p))
          (lispm-chat-choose))
-        (t (lispm-chat-send))))
+        (t (when-let* ((menu (lispm-chat--menu)))
+             (lispm-chat-set-input (concat "/" (lispm-chat--menu-command menu))))
+           (lispm-chat-send))))
 
 (defun lispm-chat-send ()
   "Send what is written to the agent, or run it as a / command."
@@ -1285,20 +1365,26 @@ or show the item at point in full."
       (lispm-chat-self-insert))))
 
 (defun lispm-chat-previous ()
-  "Select the previous answer of an approval prompt, or move up a line."
+  "Choose the command above in the menu of / commands, or select the
+previous answer of an approval prompt, or move up a line."
   (interactive)
-  (if (and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
-           (lispm-chat--prompting-p))
-      (lispm-chat-choice-previous)
-    (call-interactively #'previous-line)))
+  (cond ((and (lispm-chat--in-input-p) (lispm-chat--menu))
+         (lispm-chat--menu-move -1))
+        ((and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
+              (lispm-chat--prompting-p))
+         (lispm-chat-choice-previous))
+        (t (call-interactively #'previous-line))))
 
 (defun lispm-chat-next ()
-  "Select the next answer of an approval prompt, or move down a line."
+  "Choose the command below in the menu of / commands, or select the
+next answer of an approval prompt, or move down a line."
   (interactive)
-  (if (and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
-           (lispm-chat--prompting-p))
-      (lispm-chat-choice-next)
-    (call-interactively #'next-line)))
+  (cond ((and (lispm-chat--in-input-p) (lispm-chat--menu))
+         (lispm-chat--menu-move 1))
+        ((and (lispm-chat--in-input-p) (string-empty-p (lispm-chat--input))
+              (lispm-chat--prompting-p))
+         (lispm-chat-choice-next))
+        (t (call-interactively #'next-line))))
 
 (defun lispm-chat-history-previous ()
   "Replace what is written with the previous message sent."
@@ -1319,13 +1405,18 @@ or show the item at point in full."
     (lispm-chat-set-input "")))
 
 (defun lispm-chat-toggle ()
-  "Show the item at point in full, or briefly again; in the input, complete."
+  "Show the item at point in full, or briefly again; in the input, complete:
+while the menu of / commands shows, to the command chosen there."
   (interactive)
-  (if-let* ((key (get-text-property (point) 'lispm-chat-key)))
-      (progn (puthash key (not (gethash key lispm-chat--expanded)) lispm-chat--expanded)
-             (lispm-chat--redraw))
-    (when (lispm-chat--in-input-p)
-      (completion-at-point))))
+  (let ((menu (and (lispm-chat--in-input-p) (lispm-chat--menu)))
+        (key (get-text-property (point) 'lispm-chat-key)))
+    (cond (menu
+           (lispm-chat-set-input (concat "/" (lispm-chat--menu-command menu) " ")))
+          (key
+           (puthash key (not (gethash key lispm-chat--expanded)) lispm-chat--expanded)
+           (lispm-chat--redraw))
+          ((lispm-chat--in-input-p)
+           (completion-at-point)))))
 
 (defun lispm-chat-interrupt ()
   "Stop what the agent is doing."
@@ -1358,6 +1449,7 @@ The descriptions are English, translated where shown.")
   `(("RET" ,(lispm-tr-noop "send; on an object (a file, an agent...), act on it; on an item, show it in full"))
     ("S-RET, C-j" ,(lispm-tr-noop "new line"))
     ("TAB" ,(lispm-tr-noop "show the item at point in full; complete a / command"))
+    ("C-n, C-p" ,(lispm-tr-noop "choose in the menu of / commands, or an answer to a prompt"))
     ("M-p, M-n" ,(lispm-tr-noop "previous and next messages sent"))
     ("C-c C-c" ,(lispm-tr-noop "interrupt the agent"))
     ("1, 2, 3" ,(lispm-tr-noop "answer an approval prompt (or up, down and RET)"))
@@ -1507,6 +1599,8 @@ ARGUMENT edit edits the rules of the level Custom instead."
   "TAB" #'lispm-chat-toggle
   "<up>" #'lispm-chat-previous
   "<down>" #'lispm-chat-next
+  "<remap> <previous-line>" #'lispm-chat-previous
+  "<remap> <next-line>" #'lispm-chat-next
   "M-p" #'lispm-chat-history-previous
   "M-n" #'lispm-chat-history-next
   "C-c C-c" #'lispm-chat-interrupt
@@ -1531,6 +1625,7 @@ Write at the bottom and press RET; / starts a command (/help lists them).
   (visual-line-mode 1)
   (add-hook 'completion-at-point-functions #'lispm-chat--complete nil t)
   (add-hook 'after-change-functions #'lispm-chat--update-footer nil t)
+  (add-hook 'post-command-hook #'lispm-chat--show-menu nil t)
   (add-hook 'kill-buffer-hook #'lispm-chat--killed nil t)
   (add-hook 'window-size-change-functions #'lispm-chat--resized nil t)
   (add-hook 'display-line-numbers-mode-hook #'lispm-chat--resized nil t)

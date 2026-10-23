@@ -6736,6 +6736,47 @@ not what the reply defines itself."
         (with-current-buffer (lispm)
           (should (bound-and-true-p lispm-session-mode)))))))
 
+(ert-deftest lispm-test-chat-command-menu ()
+  "A / shows the commands under the input as their name is written, the
+first chosen; C-n and C-p choose, TAB completes, RET runs the one chosen."
+  (lispm-test-env
+    (let ((default-directory project))
+      (with-current-buffer (lispm)
+        (let ((footer (lambda () (substring-no-properties (overlay-get lispm-chat--footer 'after-string))))
+              (help nil))
+          (should-not (lispm-chat--menu))
+          (should (string-match-p "/ for commands" (funcall footer)))
+          (lispm-chat-set-input "/")
+          (should (= (length (lispm-chat--menu)) (length lispm-chat-commands)))
+          (should (string-match-p "^❯ /help +List commands and keys\n  /clear " (funcall footer)))
+          (should-not (string-match-p "/ for commands" (funcall footer)))
+          ;; At most `lispm-chat-menu-lines' show, around the one chosen.
+          (should (= (length (split-string (funcall footer) "^  ?/\\|^❯ /")) (1+ lispm-chat-menu-lines)))
+          (execute-kbd-macro (kbd "C-n C-n"))
+          (should (string-match-p "^❯ /compact " (funcall footer)))
+          (execute-kbd-macro (kbd "C-p"))
+          (should (string-match-p "^❯ /clear " (funcall footer)))
+          ;; Writing chooses the first again; names starting so come first.
+          (execute-kbd-macro (kbd "C-e c o"))
+          (should (equal (mapcar #'car (lispm-chat--menu)) '("compact" "cost")))
+          (should (string-match-p "^❯ /compact " (funcall footer)))
+          (execute-kbd-macro (kbd "<down> TAB"))
+          (should (equal (lispm-chat--input) "/cost "))
+          (should-not (lispm-chat--menu))
+          (should (string-match-p "/ for commands" (funcall footer)))
+          ;; Elsewhere in a name too; a name that matches none shows no menu.
+          (lispm-chat-set-input "/script")
+          (should (equal (mapcar #'car (lispm-chat--menu)) '("transcript")))
+          (lispm-chat-set-input "/zz")
+          (should-not (lispm-chat--menu))
+          ;; RET runs the command chosen.
+          (cl-letf (((symbol-function 'lispm-chat-help) (lambda (&rest _) (setq help t))))
+            (lispm-chat-set-input "/he")
+            (execute-kbd-macro (kbd "RET")))
+          (should help)
+          (should (equal (lispm-chat--input) ""))
+          (should (equal (car lispm-chat--history) "/help")))))))
+
 ;;;; Edits shown where they happen
 
 (defun lispm-test--apply-hunks (old new hunks)
@@ -8622,6 +8663,25 @@ elsewhere awaits an answer."
       (let ((inhibit-message t))
         (lispm-terminal-end (list :kind 'system :agent (lispm-system-agent))))
       (should (memq (lispm-system-agent) (lispm-agents))))))
+
+(ert-deftest lispm-test-terminal-scrolled ()
+  "On a text terminal, the listener scrolling draws the sessions again
+whole after that redisplay, which keeps the line between the panes."
+  (lispm-test-with-terminal
+    (let ((forced nil)
+          (sessions (get-buffer-window lispm-terminal--sessions-name)))
+      (cl-letf (((symbol-function 'force-window-update) (lambda (window) (push window forced))))
+        ;; What laying the terminal out scrolled is done with first.
+        (accept-process-output nil 0.05)
+        (setq forced nil)
+        (lispm-terminal--scrolled (selected-window) 1)
+        (should (lispm-test--wait (lambda () forced)))
+        (should (equal (delete-dups forced) (list sessions)))
+        ;; Not for another window.
+        (setq forced nil)
+        (lispm-terminal--scrolled sessions 1)
+        (accept-process-output nil 0.05)
+        (should-not forced)))))
 
 (ert-deftest lispm-test-terminal-skill ()
   "Asked for the terminal, or console or TUI mode, LispM finds the skill

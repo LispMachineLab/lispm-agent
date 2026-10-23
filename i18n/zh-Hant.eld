@@ -121,6 +121,7 @@
   ("send; on an object (a file, an agent...), act on it; on an item, show it in full" . "傳送；在物件（檔案、代理…）上則對它執行動作；在項目上則完整顯示它")
   ("new line" . "換行")
   ("show the item at point in full; complete a / command" . "完整顯示游標所在的項目；自動完成 / 指令")
+  ("choose in the menu of / commands, or an answer to a prompt" . "在 / 指令選單中選擇，或選擇對提示的回答")
   ("previous and next messages sent" . "上一則和下一則已傳送的訊息")
   ("interrupt the agent" . "中斷代理")
   ("answer an approval prompt (or up, down and RET)" . "回答核准提示（或用上、下鍵和 RET）")

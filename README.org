@@ -55,6 +55,8 @@ any other server see [[*Backends][Backends]].
 |--------------------+----------------------------------------------------------|
 | ~RET~              | send, or answer the prompt shown                         |
 | ~S-RET~, ~C-j~     | new line                                                 |
+| ~/~                | a menu of the commands under the input, as you type their name |
+| ~C-n~, ~C-p~       | choose in that menu (also the answer to an approval prompt) |
 | ~TAB~              | expand or fold the item at point; complete ~/~ commands  |
 | ~RET~ on an object | visit the file at its line, inspect the agent, describe the symbol |
 | ~M-p~, ~M-n~       | previous, next message sent                              |

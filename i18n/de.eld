@@ -121,6 +121,7 @@
   ("send; on an object (a file, an agent...), act on it; on an item, show it in full" . "senden; auf einem Objekt (einer Datei, einem Agenten ...) dieses öffnen; auf einem Eintrag ihn ganz anzeigen")
   ("new line" . "neue Zeile")
   ("show the item at point in full; complete a / command" . "Eintrag an der Cursorposition ganz anzeigen; /-Befehl vervollständigen")
+  ("choose in the menu of / commands, or an answer to a prompt" . "im Menü der /-Befehle wählen, oder eine Antwort auf eine Frage")
   ("previous and next messages sent" . "vorherige und nächste gesendete Nachricht")
   ("interrupt the agent" . "Agenten unterbrechen")
   ("answer an approval prompt (or up, down and RET)" . "Freigabefrage beantworten (oder Pfeil hoch, runter und RET)")
