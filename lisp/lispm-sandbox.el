@@ -49,7 +49,8 @@
 ;; get its network rules at once, through srt's --control-fd; their
 ;; file rules were fixed when they started, so they keep those until
 ;; they are started again.  An MCP server's :sandbox gives it a level
-;; of its own (see `lispm-mcp-servers').
+;; of its own (see `lispm-mcp-servers'), and a service its level and
+;; the rules it needs on top of the level's (see lispm-services.el).
 ;;
 ;; The first time a level other than none is used, LispM installs
 ;; version `lispm-sandbox-srt-version' of srt with npm (Node.js 22.12 or
@@ -266,6 +267,22 @@ NAME is the level's name as shown, or its symbol's, case ignored."
     :local-binding :unix-sockets :pty :apple-events)
   "The keys of a level's rules (see `lispm-sandbox-custom').")
 
+(defconst lispm-sandbox--flag-keys '(:local-binding :pty :apple-events)
+  "The keys of a level's rules that allow something or not; the others list.")
+
+(defun lispm-sandbox-merge-rules (rules extra)
+  "RULES with EXTRA's on top: what either lists, and what either allows.
+Both are plists as `lispm-sandbox-custom' describes.  RULES nil, those
+of the level none, stays nil: no rules make a sandbox of none."
+  (when rules
+    (let ((merged (copy-sequence rules)))
+      (cl-loop for (key value) on extra by #'cddr
+               do (setq merged (plist-put merged key
+                                         (if (memq key lispm-sandbox--flag-keys)
+                                             (or (plist-get merged key) value)
+                                           (append (plist-get merged key) value)))))
+      merged)))
+
 (defun lispm-sandbox-rules (&optional level)
   "The rules of LEVEL, by default `lispm-sandbox-level'; nil for `none'.
 They are a plist, as `lispm-sandbox-custom' describes; those of
@@ -294,11 +311,12 @@ They are a plist, as `lispm-sandbox-custom' describes; those of
   (when (member "*" (plist-get rules :allowed-domains))
     (lispm-sandbox--fail "srt cannot allow every domain: \"*\" may only be denied")))
 
-(defun lispm-sandbox-settings (&optional level)
-  "srt's settings for LEVEL, by default `lispm-sandbox-level'.
+(defun lispm-sandbox-settings (&optional level extra)
+  "srt's settings for LEVEL, by default `lispm-sandbox-level', with the
+rules EXTRA, a plist, on top (see `lispm-sandbox-merge-rules').
 A plist for `json-serialize', or nil for `none'.  Relative file
 names are relative to a sandboxed command's directory: its project."
-  (when-let* ((rules (lispm-sandbox-rules level)))
+  (when-let* ((rules (lispm-sandbox-merge-rules (lispm-sandbox-rules level) extra)))
     (lispm-sandbox--check rules)
     (let ((array (lambda (&rest lists) (vconcat (seq-uniq (apply #'append lists))))))
       `(:network (:allowedDomains ,(funcall array (plist-get rules :allowed-domains))
@@ -476,6 +494,7 @@ LEVEL defaults to `lispm-sandbox-level'."
   (name nil :documentation "What runs, for messages.")
   (level nil :documentation "Its own level, or nil to follow `lispm-sandbox-level'.")
   (started nil :documentation "The level it started at.")
+  (extra nil :documentation "Rules on top of its level's, see `lispm-sandbox-merge-rules'.")
   (settings nil :documentation "srt's settings it started with; nil if not confined.")
   (command nil :documentation "The program and arguments that start it.")
   (fifo nil :documentation "The named pipe of its control channel.")
@@ -503,17 +522,20 @@ LEVEL defaults to `lispm-sandbox-level'."
       (lispm-sandbox--fail (format "could not make the named pipe %s" fifo)))
     fifo))
 
-(defun lispm-sandbox-prepare (command &optional level name)
+(defun lispm-sandbox-prepare (command &optional level name extra)
   "Get COMMAND, a program and its arguments, ready to run in the sandbox.
 LEVEL is the level to run at; nil follows `lispm-sandbox-level', now
-and as it changes.  NAME says what runs, for messages.  Return a run:
-start the process with its `lispm-sandbox-run-command', then give it
-to `lispm-sandbox-attach'.  When the sandbox cannot be had, signal
+and as it changes.  NAME says what runs, for messages.  EXTRA are
+rules on top of the level's, which COMMAND needs to do its work, such
+as a service's own files and ports (see `lispm-sandbox-merge-rules');
+they hold at every level but none.  Return a run: start the process
+with its `lispm-sandbox-run-command', then give it to
+`lispm-sandbox-attach'.  When the sandbox cannot be had, signal
 `lispm-sandbox-error' rather than let COMMAND run outside it."
   (let* ((started (or level lispm-sandbox-level))
-         (settings (lispm-sandbox-settings started))
+         (settings (lispm-sandbox-settings started extra))
          (run (lispm-sandbox--make-run :name name :level level :started started
-                                       :settings settings :command command)))
+                                       :extra extra :settings settings :command command)))
     (when settings
       (when (file-remote-p default-directory)
         (lispm-sandbox--fail "it confines processes of this machine, and the directory is remote"))
@@ -588,18 +610,17 @@ nothing ran."
     (cancel-timer lispm-sandbox--change-timer)
     (setq lispm-sandbox--change-timer nil))
   (lispm-sandbox--ensure)
-  (let* ((settings (lispm-sandbox-settings))
-         (json (and settings (json-serialize settings)))
-         sent restart)
+  (let (sent restart)
     (dolist (run lispm-sandbox--runs)
       (unless (lispm-sandbox-run-level run)
-        (when (and json (lispm-sandbox--send run json))
-          (push run sent))
-        ;; File rules are fixed when a process starts, and so is
-        ;; whether it is confined at all.
-        (unless (equal (plist-get settings :filesystem)
-                       (plist-get (lispm-sandbox-run-settings run) :filesystem))
-          (push run restart))))
+        (let ((settings (lispm-sandbox-settings nil (lispm-sandbox-run-extra run))))
+          (when (and settings (lispm-sandbox--send run (json-serialize settings)))
+            (push run sent))
+          ;; File rules are fixed when a process starts, and so is
+          ;; whether it is confined at all.
+          (unless (equal (plist-get settings :filesystem)
+                         (plist-get (lispm-sandbox-run-settings run) :filesystem))
+            (push run restart)))))
     (run-hooks 'lispm-sandbox-change-hook)
     (when (or verbose sent restart)
       (message "%s"
