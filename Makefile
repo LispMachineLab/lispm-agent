@@ -4,8 +4,8 @@ ELS = $(addprefix lisp/,lispm-i18n.el lispm-local-http.el lispm-websocket.el lis
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
       lispm-core.el lispm-sandbox.el lispm-roles.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el \
-      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-ground.el lispm-inspect.el \
-      lispm-chat.el lispm.el)
+      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-ground.el lispm-inspect.el lispm-settings.el \
+      lispm-chat.el lispm-bar.el lispm.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))"
 

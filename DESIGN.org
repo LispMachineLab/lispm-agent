@@ -20,6 +20,7 @@ implementation:
 | Languages                 | words written in English, shown from a catalog per language      | [[file:lisp/lispm-i18n.el][lispm-i18n.el]]: ~lispm-tr~, [[file:i18n/][i18n/]]                    |
 | Presentations, inspector  | text is the objects it shows; one agent shown whole              | [[file:lisp/lispm-inspect.el][lispm-inspect.el]]: ~lispm-act~, ~lispm-inspect~        |
 | Grounding                 | code in replies checked against the running image                | [[file:lisp/lispm-ground.el][lispm-ground.el]]: ~lispm-ground-check~                 |
+| Settings                  | Customize's variables, read and set for a window of settings     | [[file:lisp/lispm-settings.el][lispm-settings.el]]: ~lispm-model-status~, ~lispm-settings-change-hook~ |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |

@@ -66,6 +66,8 @@ Each entry is (NAME . PLIST) with keys
                `anthropic' (Messages; requests go to URL/v1/messages)
   :url         base URL, as the respective official SDKs take it
   :model       default model for agents that do not name one
+  :models      other models it serves, offered where a model is chosen
+               (see `lispm-model-choices')
   :max-tokens  output limit, overriding `lispm-max-tokens'
   :key         nil (no key), a string, a function returning one,
                `openai' (OPENAI_API_KEY or auth-source),
@@ -191,6 +193,12 @@ what the agent was doing when Emacs last stopped can be taken up.")
 Each is called with the agent and a plist: the call's :id and :name,
 and :json, its input as received so far, the beginning of a JSON
 object.  It runs whenever more of the input arrives.")
+
+(defvar lispm-response-delta-functions nil
+  "Abnormal hook run while a response streams in.
+Each is called with the agent, the kind of what arrived (`text',
+`thinking' or `tool', the name of a tool whose call the model starts
+writing) and its text.  `lispm-live-segments' has all of it so far.")
 
 (defvar lispm-buffer-change-functions nil
   "Abnormal hook run after a tool changed a buffer's text.

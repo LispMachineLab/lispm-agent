@@ -134,6 +134,13 @@ theirs of the same name.")
                                          (error-message-string err)))))))
     (nreverse directories)))
 
+(defun lispm-skill-name (file)
+  "The name of the skill in FILE: its directory's for a SKILL.org, else
+the file's own, without its extension."
+  (if (equal (file-name-nondirectory file) "SKILL.org")
+      (file-name-nondirectory (directory-file-name (file-name-directory file)))
+    (file-name-base file)))
+
 (defun lispm-skills--read (file)
   "The skill in FILE: a plist (:name :title :description :file)."
   (with-temp-buffer
@@ -142,9 +149,7 @@ theirs of the same name.")
                       (while (re-search-forward "^#\\+\\(title\\|description\\):[ \t]*\\(.*?\\)[ \t]*$" nil t)
                         (push (cons (downcase (match-string 1)) (match-string 2)) keywords))
                       keywords))
-          (name (if (equal (file-name-nondirectory file) "SKILL.org")
-                    (file-name-nondirectory (directory-file-name (file-name-directory file)))
-                  (file-name-base file))))
+          (name (lispm-skill-name file)))
       (list :name name
             :title (or (cdr (assoc "title" keywords)) name)
             :description (or (cdr (assoc "description" keywords)) "")
@@ -325,19 +330,25 @@ does not read defines none.  Kept until the file changes."
           (string-remove-suffix "." (plist-get skill :description))
           (if tools (format " Its tools: %s." (string-join (mapcar #'car tools) ", ")) "")))
 
+(defun lispm-skills-search-fields (skill)
+  "What a search finds SKILL by, as `lispm-tools-search-score' takes it:
+its name, title and description, its headings, and its tools' names
+and descriptions."
+  (let ((index (lispm-skills--index skill)))
+    `((3 . ,(plist-get skill :name))
+      (2 . ,(plist-get skill :title))
+      (1.5 . ,(plist-get skill :description))
+      ,@(mapcar (lambda (heading) (cons 1 heading)) (plist-get index :headings))
+      ,@(mapcan (lambda (tool) (list (cons 3 (car tool)) (cons 1 (nth 2 tool))))
+                (plist-get index :tools)))))
+
 (defun lispm-skills--search (agent)
   "The skills AGENT can load, as things for search_tools to find.
 See `lispm-tool-search-functions'.  None if AGENT may not load skills."
   (when (lispm-tools-allowed-p agent "skill")
     (mapcar (lambda (skill)
-              (let* ((index (lispm-skills--index skill))
-                     (tools (plist-get index :tools)))
-                (list :fields `((3 . ,(plist-get skill :name))
-                                (2 . ,(plist-get skill :title))
-                                (1.5 . ,(plist-get skill :description))
-                                ,@(mapcar (lambda (heading) (cons 1 heading)) (plist-get index :headings))
-                                ,@(mapcan (lambda (tool) (list (cons 3 (car tool)) (cons 1 (nth 2 tool))))
-                                          tools))
+              (let ((tools (plist-get (lispm-skills--index skill) :tools)))
+                (list :fields (lispm-skills-search-fields skill)
                       :line (lispm-skills--found-line skill tools)
                       :tools (mapcar #'car tools))))
             (lispm-skills agent))))

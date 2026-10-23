@@ -73,6 +73,32 @@ any other server see [[*Backends][Backends]].
 | ~lispm-turn-diff~     | what an agent changed in its last turn                     |
 | ~lispm-revert-turn~   | undo it                                                    |
 | ~lispm-resume-agents~ | resume every agent that was at work when Emacs stopped     |
+| ~lispm-ai~, ~ai~      | the LispM bar: find what is installed, or ask LispM itself |
+| ~lispm-ai-chat~       | the conversation with LispM itself, in a chat              |
+
+* The LispM bar
+
+~M-x ai~ opens one field for the whole system.  What you type finds what is installed at once,
+ranked as ~search_tools~ ranks: skills, tools and, under LispM Desktop, applications and Control
+Panels.  ~RET~ opens the application chosen; otherwise it asks LispM itself, the system's own
+agent: one standing agent of the whole computer rather than of a project, which keeps one
+conversation going.  Its reply streams in under the field, with a line saying what it does,
+and a call it asks approval for is answered there, ~y~ or ~n~.  ~C-o~ opens the bar out to the
+conversation so far and more of what was found; ~C-c C-o~ shows the conversation in a chat;
+~C-g~ closes the bar while LispM goes on.  With no model set up, the bar still opens what it
+finds, and what was asked waits for a model (~lispm-bar-setup-function~,
+~lispm-bar-model-ready~).
+
+In plain Emacs and on a terminal the field is the minibuffer, with a window over it; LispM
+Desktop drops it from its menu bar.  Bind a key of your own:
+
+#+begin_src emacs-lisp
+(keymap-global-set "C-c SPC" #'lispm-ai)
+#+end_src
+
+Packages add what the bar finds with ~lispm-bar-source-functions~, say what a tool call does
+with ~lispm-bar-activity-functions~, and show the bar elsewhere with ~lispm-bar-read-function~,
+~lispm-bar-show-function~ and ~lispm-bar-hide-function~.
 
 * How it works
 

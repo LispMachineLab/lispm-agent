@@ -135,6 +135,13 @@ Use it for notifications, e.g. with the alert package."
   :type 'hook
   :group 'lispm)
 
+(defvar lispm-approval-message-functions nil
+  "Functions saying where the user answers a call awaiting approval.
+Each is called with the agent and the tool's name, and returns the
+message to give, t to give none, as when the call is in sight, or nil
+to leave it to the others; without one, the chat or the session is
+named.")
+
 (defvar lispm-inhibit-triggers nil
   "Non-nil while the runtime itself causes hook runs that are not events.")
 
@@ -1016,7 +1023,9 @@ what a session opened again after Emacs stopped takes up."
                                      'lispm-live (cons 'tool text))))))))
   (when (eq kind 'tool)
     (lispm-set-state agent 'requesting (format "writing a %s call" text)
-                     (cons 'writing text))))
+                     (cons 'writing text)))
+  (with-demoted-errors "LispM: %S"
+    (run-hook-with-args 'lispm-response-delta-functions agent kind text)))
 
 (defun lispm-live-region (buffer)
   "Where the response streaming into the session BUFFER is, or nil:
@@ -1712,11 +1721,16 @@ if it has one; the inbox file then no longer holds ENTRY."
         (insert (lispm-transcript-preview preview reasons))))
     (run-hook-with-args 'lispm-approval-functions agent (plist-get asked :name)
                         (plist-get asked :input))
-    (message "%s" (if (buffer-live-p (lispm-agent-view agent))
-                      (lispm-tr "λ %s wants to run %s: answer in %s" (lispm-agent-name agent)
-                                (plist-get asked :name) (buffer-name (lispm-agent-view agent)))
-                    (lispm-tr "λ %s wants to run %s: review it with C-c C-y in %s" (lispm-agent-name agent)
-                              (plist-get asked :name) (buffer-name (lispm-agent-buffer agent)))))))
+    (let ((said (run-hook-with-args-until-success 'lispm-approval-message-functions
+                                                  agent (plist-get asked :name))))
+      (unless (eq said t)
+        (message "%s" (cond (said)
+                            ((buffer-live-p (lispm-agent-view agent))
+                             (lispm-tr "λ %s wants to run %s: answer in %s" (lispm-agent-name agent)
+                                       (plist-get asked :name) (buffer-name (lispm-agent-view agent))))
+                            (t (lispm-tr "λ %s wants to run %s: review it with C-c C-y in %s"
+                                         (lispm-agent-name agent) (plist-get asked :name)
+                                         (buffer-name (lispm-agent-buffer agent))))))))))
 
 (defun lispm--todo-state-changed ()
   "Settle a call or condition whose heading the user moved to a new TODO state.
