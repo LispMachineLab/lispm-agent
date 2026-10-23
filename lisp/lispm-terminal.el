@@ -789,10 +789,12 @@ returns what to tell that agent, a string, or nil for the usual words.")
 It is called with the agent asked, and returns what to tell it, a
 string, or nil for the usual words.")
 
-(defun lispm-terminal--soon (function)
+(defun lispm-terminal-soon (function)
   "Call FUNCTION once the command or the tool call under way is over, and
 nothing is read in the minibuffer: the LispM bar, if open, is closed
-for it, as what it asked for replaces it."
+for it, as what it asked for replaces it.  The functions of
+`lispm-terminal-enter-function' and `lispm-terminal-leave-function'
+switch through it."
   (run-at-time 0 nil
                (lambda ()
                  (cond ((lispm-bar-open-p) (lispm-bar-close-then function))
@@ -807,7 +809,7 @@ for it, as what it asked for replaces it."
   "Enter LispM's terminal in the selected frame, its listener talking to
 AGENT: what terminal_enter does unless `lispm-terminal-enter-function'
 says otherwise."
-  (lispm-terminal--soon (lambda () (lispm-terminal agent)))
+  (lispm-terminal-soon (lambda () (lispm-terminal agent)))
   nil)
 
 (defun lispm-terminal-leave (_agent)
@@ -815,7 +817,7 @@ says otherwise."
 unless `lispm-terminal-leave-function' says otherwise."
   (if (not (frame-live-p lispm-terminal--frame))
       "LispM's terminal is not open: there is nothing to leave."
-    (lispm-terminal--soon #'lispm-terminal-quit)
+    (lispm-terminal-soon #'lispm-terminal-quit)
     nil))
 
 (defun lispm-terminal-tool-enter (agent)

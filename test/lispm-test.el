@@ -8674,7 +8674,7 @@ was asked takes its place."
     (cl-letf (((symbol-function 'lispm-bar-open-p) (lambda () t))
               ((symbol-function 'lispm-bar-close-then)
                (lambda (function) (setq closed t) (funcall function))))
-      (lispm-terminal--soon (lambda () (setq called t)))
+      (lispm-terminal-soon (lambda () (setq called t)))
       (should (lispm-test--wait (lambda () called)))
       (should closed)))
   ;; With the bar closed, what follows it happens at once.
