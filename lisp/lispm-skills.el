@@ -134,6 +134,13 @@ theirs of the same name.")
                                          (error-message-string err)))))))
     (nreverse directories)))
 
+(defun lispm-skill-name (file)
+  "The name of the skill in FILE: its directory's for a SKILL.org, else
+the file's own, without its extension."
+  (if (equal (file-name-nondirectory file) "SKILL.org")
+      (file-name-nondirectory (directory-file-name (file-name-directory file)))
+    (file-name-base file)))
+
 (defun lispm-skills--read (file)
   "The skill in FILE: a plist (:name :title :description :file)."
   (with-temp-buffer
@@ -142,9 +149,7 @@ theirs of the same name.")
                       (while (re-search-forward "^#\\+\\(title\\|description\\):[ \t]*\\(.*?\\)[ \t]*$" nil t)
                         (push (cons (downcase (match-string 1)) (match-string 2)) keywords))
                       keywords))
-          (name (if (equal (file-name-nondirectory file) "SKILL.org")
-                    (file-name-nondirectory (directory-file-name (file-name-directory file)))
-                  (file-name-base file))))
+          (name (lispm-skill-name file)))
       (list :name name
             :title (or (cdr (assoc "title" keywords)) name)
             :description (or (cdr (assoc "description" keywords)) "")

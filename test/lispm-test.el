@@ -6810,6 +6810,223 @@ check still asks about."
                         'auto)))
         (kill-buffer buffer)))))
 
+;;;; Settings
+
+(defmacro lispm-test--with-settings (&rest body)
+  "Run BODY in `lispm-test-env' with the settings' own variables bound, no
+key in the environment, and Customize saving nothing: `saved' lists the
+variables it was asked to save, the last first."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((lispm-model nil)
+           (lispm-effort "medium")
+           (lispm-default-policy (copy-tree lispm-default-policy))
+           (lispm-trusted-skills nil)
+           (lispm-compact-threshold 120000)
+           (lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/"))
+           (lispm-default-role 'assistant)
+           (lispm-model-choices-functions nil)
+           (lispm-backend-status-functions nil)
+           (lispm-backend-action-functions nil)
+           (lispm-settings-change-hook nil)
+           (process-environment (seq-remove (lambda (entry) (string-match-p "_API_KEY=" entry))
+                                            process-environment))
+           (saved nil))
+       (cl-letf (((symbol-function 'customize-save-variable)
+                  (lambda (variable value &rest _)
+                    (push variable saved)
+                    (customize-set-variable variable value))))
+         ,@body))))
+
+(ert-deftest lispm-test-settings-model ()
+  "The model offered and chosen: each backend's own and those it names,
+those programs add for backends there are, the one chosen; choosing one
+sets backend and model, the backend's own as nil, saved when asked."
+  (lispm-test--with-settings
+    (setf (alist-get 'test lispm-backends) '(:api anthropic :url "http://fake.invalid" :model "test-model"
+                                                  :models ("test-small" "test-model")))
+    (add-hook 'lispm-model-choices-functions
+              (lambda () '((:backend test :model "test-large" :label "Large")
+                           (:backend nowhere :model "lost"))))
+    (let ((choices (lispm-model-choices)))
+      (should (equal (seq-take choices 2) '((:backend test :model "test-model")
+                                            (:backend test :model "test-small"))))
+      (should (member '(:backend anthropic :model "claude-opus-5-5") choices))
+      (should (member '(:backend test :model "test-large" :label "Large") choices))
+      (should-not (seq-find (lambda (choice) (eq (plist-get choice :backend) 'nowhere)) choices)))
+    (lispm-set-model 'anthropic "claude-sonnet-5-5")
+    (should (eq lispm-backend 'anthropic))
+    (should (equal lispm-model "claude-sonnet-5-5"))
+    (should (equal (lispm-default-model) "claude-sonnet-5-5"))
+    ;; A model of no backend's list is offered, being chosen.
+    (should (member '(:backend anthropic :model "claude-sonnet-5-5") (lispm-model-choices)))
+    (should-not saved)
+    (lispm-set-model 'test "test-model" t)
+    (should (eq lispm-backend 'test))
+    (should-not lispm-model)
+    (should (equal saved '(lispm-model lispm-backend)))
+    (should-error (lispm-set-model 'nowhere nil) :type 'user-error)
+    (lispm-set-effort "high" t)
+    (should (equal lispm-effort "high"))
+    (should (equal (lispm-effort-name "xhigh") "Extra high"))
+    (should-error (lispm-set-effort "turbo") :type 'user-error)))
+
+(ert-deftest lispm-test-settings-model-status ()
+  "How the backend stands, told without asking anyone for a key, unless a
+program tells it; and what programs offer to do about it."
+  (lispm-test--with-settings
+    (let ((status (lispm-model-status)))
+      (should (equal (list (plist-get status :backend) (plist-get status :model) (plist-get status :effort)
+                           (plist-get status :state))
+                     '(test "test-model" "medium" ready)))
+      (should (equal (plist-get status :message) "Ready; it needs no key.")))
+    (setf (alist-get 'own lispm-backends) '(:api openai :url "https://own.example/v1" :model "m"
+                                                 :key-env "LISPM_TEST_OWN_KEY"))
+    (setq lispm-backend 'own)
+    (let ((process-environment (cons "LISPM_TEST_OWN_KEY" process-environment)))
+      (should (eq (plist-get (lispm-model-status) :state) 'no-key))
+      (should (string-search "LISPM_TEST_OWN_KEY" (plist-get (lispm-model-status) :message))))
+    (let ((process-environment (cons "LISPM_TEST_OWN_KEY=k" process-environment)))
+      (should (eq (plist-get (lispm-model-status) :state) 'ready)))
+    ;; auth-source is never asked: it may want a passphrase.
+    (cl-letf (((symbol-function 'auth-source-search) (lambda (&rest _) (error "Asked auth-source"))))
+      (setq lispm-backend 'anthropic)
+      (let ((status (lispm-model-status)))
+        (should (eq (plist-get status :state) 'unchecked))
+        (should (string-search "ANTHROPIC_API_KEY" (plist-get status :message)))
+        (should (string-search "api.anthropic.com" (plist-get status :message)))))
+    (setq lispm-backend 'nowhere)
+    (should (eq (plist-get (lispm-model-status) :state) 'unknown))
+    (setq lispm-backend nil)
+    (let ((status (lispm-model-status)))
+      (should (eq (plist-get status :state) 'none))
+      (should-not (plist-get status :model)))
+    (add-hook 'lispm-backend-status-functions
+              (lambda (name _backend) (and (null name) '(:state starting :message "Starting the gateway."))))
+    (should (equal (plist-get (lispm-model-status) :message) "Starting the gateway."))
+    (add-hook 'lispm-backend-action-functions
+              (lambda (name) (list (list (format "Set Up %s…" (or name "a Backend")) #'ignore))))
+    (should (equal (lispm-backend-actions) '(("Set Up a Backend…" ignore))))
+    ;; Another program's hook that fails breaks nothing; one telling no
+    ;; message has its state said.
+    (let ((inhibit-message t))
+      (add-hook 'lispm-backend-status-functions (lambda (&rest _) (error "Broken")) -90)
+      (add-hook 'lispm-backend-action-functions (lambda (_) (error "Broken")) -90)
+      (add-hook 'lispm-model-choices-functions (lambda () (error "Broken")))
+      (should (equal (plist-get (lispm-model-status) :message) "Starting the gateway."))
+      (should (equal (lispm-backend-actions) '(("Set Up a Backend…" ignore))))
+      (should (listp (lispm-model-choices)))
+      (add-hook 'lispm-backend-status-functions (lambda (&rest _) '(:state starting)) -95)
+      (should (equal (plist-get (lispm-model-status) :message) "starting")))))
+
+(ert-deftest lispm-test-settings-change-hook ()
+  "The change hook runs once a setting changed, once for changes made
+together, however they were made."
+  (lispm-test--with-settings
+    (let ((runs 0))
+      (add-hook 'lispm-settings-change-hook (lambda () (setq runs (1+ runs))))
+      (lispm-set-model 'anthropic "claude-sonnet-5-5")
+      (setq lispm-git t)
+      (should (lispm-test--wait (lambda () (null lispm-settings--timer)) 2))
+      (should (= runs 1))
+      (setq lispm-effort "low")
+      (should (lispm-test--wait (lambda () (null lispm-settings--timer)) 2))
+      (should (= runs 2))
+      (should-error (lispm-settings-set 'lispm-max-steps 3)))))
+
+(ert-deftest lispm-test-settings-permissions ()
+  "The default policy's action for a class changes in its place, a class
+it lacks added; a class split from another reads that one's action."
+  (lispm-test--with-settings
+    (setq lispm-default-policy '((read . auto) (exec . ask) (write . ask)))
+    (should (eq (lispm-default-permission 'shell) 'ask))
+    (should (eq (lispm-default-permission 'web) 'ask))
+    (lispm-set-default-permission 'write 'auto t)
+    (should (equal lispm-default-policy '((read . auto) (exec . ask) (write . auto))))
+    (should (equal saved '(lispm-default-policy)))
+    (lispm-set-default-permission 'shell 'deny)
+    (should (equal lispm-default-policy '((read . auto) (exec . ask) (write . auto) (shell . deny))))
+    (should (eq (lispm-default-permission 'shell) 'deny))
+    (should-error (lispm-set-default-permission 'fly 'auto) :type 'user-error)
+    (should-error (lispm-set-default-permission 'web 'sometimes) :type 'user-error)
+    (should (equal (mapcar #'car lispm-permission-classes)
+                   '(read memory comm lisp write shell exec mcp web)))
+    (should (equal (lispm-permission-action-name 'auto) "Allow"))
+    (should (equal (lispm-permission-class-description 'shell) "Run shell commands"))
+    (setq lispm-trusted-skills '(("~/p/.lispm/skills/a.org" . "h1") ("~/q/.lispm/skills/b" . "h2")))
+    (should (equal (lispm-trusted-skill-files) '("~/p/.lispm/skills/a.org" "~/q/.lispm/skills/b")))
+    ;; Even once its file is gone.
+    (lispm-untrust-skill "~/p/.lispm/skills/a.org")
+    (should (equal lispm-trusted-skills '(("~/q/.lispm/skills/b" . "h2"))))))
+
+(ert-deftest lispm-test-settings-memory ()
+  "Conversations are summed up past one of a few sizes, or the user's own;
+the memory files and task lists are listed by their titles, the one
+changed last first."
+  (lispm-test--with-settings
+    (should (eq (lispm-compact-size) 'medium))
+    (lispm-set-compact-size 'large t)
+    (should (= lispm-compact-threshold 240000))
+    (should (equal saved '(lispm-compact-threshold)))
+    (lispm-set-compact-size 'asked)
+    (should-not lispm-compact-threshold)
+    (should (eq (lispm-compact-size) 'asked))
+    (setq lispm-compact-threshold 99999)
+    (should-not (lispm-compact-size))
+    (should-error (lispm-set-compact-size 'huge) :type 'user-error)
+    (should (equal (lispm-compact-size-name 'small) "Small"))
+    (should-error (lispm-read-memory-file) :type 'user-error)
+    (let ((project (expand-file-name "projects/-x/memory.org" lispm-directory))
+          (tasks (expand-file-name "projects/-x/tasks.org" lispm-directory))
+          (role (expand-file-name "roles/assistant/memory.org" lispm-directory)))
+      (dolist (file (list project tasks role))
+        (make-directory (file-name-directory file) t))
+      (with-temp-file project (insert "#+title: Memory of ~/x\n* Fact\n"))
+      (with-temp-file tasks (insert "* TODO Untitled\n"))
+      (with-temp-file role (insert "#+title: Memory of the assistant role\n"))
+      (set-file-times project (time-subtract nil 60))
+      (set-file-times role (time-subtract nil 30))
+      (should (equal (lispm-memory-files)
+                     (list (cons "projects/-x/tasks.org" tasks)
+                           (cons "Memory of the assistant role" role)
+                           (cons "Memory of ~/x" project))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Memory of ~/x")))
+        (should (equal (lispm-read-memory-file) project))))))
+
+(ert-deftest lispm-test-settings-roles-and-skills ()
+  "The default role is one there is; directories of skills are added
+last, once, and taken out, LispM's own told from the others."
+  (lispm-test--with-settings
+    (lispm-set-default-role "assistant" t)
+    (should (eq lispm-default-role 'assistant))
+    (should-error (lispm-set-default-role 'nobody) :type 'user-error)
+    ;; LispM's own role is no default for other agents.
+    (should (lispm-get-role 'system t))
+    (should (memq 'assistant (mapcar #'lispm-role-name (lispm-default-role-choices))))
+    (should-not (memq 'system (mapcar #'lispm-role-name (lispm-default-role-choices))))
+    ;; A skill's name, from a file of its own or a directory's SKILL.org.
+    (should (equal (lispm-skill-name "~/p/.lispm/skills/a.org") "a"))
+    (should (equal (lispm-skill-name "~/q/.lispm/skills/b/SKILL.org") "b"))
+    (let ((dir (file-name-as-directory (make-temp-file "lispm-skills-" t))))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "a.org" dir) (insert "* a\n"))
+            (with-temp-file (expand-file-name ".b.org" dir) (insert "* b\n"))
+            (make-directory (expand-file-name "c" dir))
+            (with-temp-file (expand-file-name "c/SKILL.org" dir) (insert "* c\n"))
+            (make-directory (expand-file-name "d" dir))
+            (should (= (lispm-skill-directory-count dir) 2))
+            (should (= (lispm-skill-directory-count (expand-file-name "none/" dir)) 0))
+            (lispm-add-skill-directory (directory-file-name dir))
+            (should (equal (car (last lispm-skill-directories)) (abbreviate-file-name dir)))
+            (should-error (lispm-add-skill-directory dir) :type 'user-error)
+            (lispm-remove-skill-directory (directory-file-name dir) t)
+            (should (equal lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/")))
+            (should (equal saved '(lispm-skill-directories lispm-default-role))))
+        (delete-directory dir t)))
+    (should (lispm-skill-directory-builtin-p lispm-skills--builtin))
+    (should-not (lispm-skill-directory-builtin-p "~/.lispm/skills/"))))
+
 ;;;; The language LispM speaks
 
 (defun lispm-test--source-files ()

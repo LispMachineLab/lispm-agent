@@ -101,6 +101,7 @@
 (require 'lispm-develop)
 (require 'lispm-skills)
 (require 'lispm-inspect)
+(require 'lispm-settings)
 (require 'lispm-chat)
 (require 'lispm-bar)
 

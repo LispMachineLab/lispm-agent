@@ -66,6 +66,8 @@ Each entry is (NAME . PLIST) with keys
                `anthropic' (Messages; requests go to URL/v1/messages)
   :url         base URL, as the respective official SDKs take it
   :model       default model for agents that do not name one
+  :models      other models it serves, offered where a model is chosen
+               (see `lispm-model-choices')
   :max-tokens  output limit, overriding `lispm-max-tokens'
   :key         nil (no key), a string, a function returning one,
                `openai' (OPENAI_API_KEY or auth-source),
