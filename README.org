@@ -225,6 +225,13 @@ While LispM runs, they work with its agents and each other, and use what LispM's
   terminal's directory, so its calls go by that role's policy: reading runs at once, writing
   and shell commands ask you in Emacs.
 
+Agents that keep their conversations in a program of their own, as
+[[https://github.com/LispMachineLab/lispm-holon][Holon]]'s daemon and [[https://github.com/LispMachineLab/lispm-openclaw][OpenClaw]]'s Gateway, take messages through it rather than their
+terminal (~:deliver~ in ~lispm-agents-define~).  One with a shell but no MCP client calls the
+same seven tools with =bin/lispm-tool=, which finds its server by an environment variable its
+commands have.  One served no tools at all still takes messages, and its final reply to a
+request is its answer (~:answer~).
+
 They run in [[https://codeberg.org/akib/emacs-eat][Eat]]'s terminals and show with ~pop-to-buffer~.  A program drawing an interface
 around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
 ~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface

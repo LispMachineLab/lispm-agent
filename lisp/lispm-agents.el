@@ -259,12 +259,27 @@ An agent run as a CLI in a terminal has these:
                run there
   :context     function of a directory returning a server showing the
                agent Emacs's state, see `lispm-agents-context', a list
-               of servers, or nil
+               of servers, or nil; one taking a second argument gets
+               the session's id too, nil for a fresh session whose
+               agent assigns its own
   :ready       function of the agent's terminal returning non-nil when
                the agent waits for its user's next message: its session
                has begun and its latest turn has ended, so what is typed
                goes to its composer, not to a dialog.  Other agents'
-               messages wait for it; an agent without one is given none
+               messages wait for it; an agent without one is given none,
+               unless it has a :deliver
+  :deliver     function of the agent's terminal and a text giving the
+               agent the text as its user's next message through its
+               own program, rather than its composer: the program takes
+               it at once or keeps it until the agent is free.  It
+               returns non-nil if the agent took it at once.  Other
+               agents' messages then go this way, the agent free or not
+  :answer      function of the agent's terminal, a text and a function
+               of a text: it gives the agent the text as :deliver does,
+               and calls the function with the agent's final reply to
+               it once its turn ends.  For an agent served no tools of
+               LispM's (see lispm-agents-bridge.el), whose reply to a
+               request is then its answer
 
 An agent running inside Emacs has these instead:
 
@@ -819,7 +834,10 @@ same NAME is returned instead of restarted."
            ;; terminal returned as is keeps those it has.
            (servers (unless (lispm-agents-running-p (get-buffer (format "*%s*" name)))
                       (when-let* ((context (plist-get props :context)))
-                        (delq nil (ensure-list (funcall context default-directory))))))
+                        (delq nil (ensure-list
+                                   (if (memq (cdr (func-arity context)) '(0 1))
+                                       (funcall context default-directory)
+                                     (funcall context default-directory id)))))))
            (process-environment (append (seq-mapcat #'lispm-agents-context-environment servers)
                                         (lispm-agents-independent-environment process-environment)))
            (buffer (apply #'lispm-agents-terminal-make name (plist-get props :program)

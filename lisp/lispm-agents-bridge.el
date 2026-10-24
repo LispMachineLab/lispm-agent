@@ -32,7 +32,16 @@
 ;; user's next message (`lispm-agents-terminal-submit'), once it waits
 ;; for one: its agent's :ready says when (`lispm-agents-define').  Till
 ;; then messages queue, so that Return never lands in a dialog, as an
-;; approval it would answer.  An agent with no :ready takes no messages.
+;; approval it would answer.  An agent whose own program takes messages
+;; for it, as Holon's daemon does, has a :deliver instead, and is given
+;; them at once.  An agent with neither takes no messages.
+;;
+;; An agent with a shell but no MCP client, as Holon, calls the same tools
+;; with bin/lispm-tool (see lispm-agents-mcp.el).  One served no tools at
+;; all, as an OpenClaw whose Gateway runs elsewhere, has a server serving
+;; nothing (`lispm-agents-context-presence-make') and an :answer: it is
+;; still a peer, which takes messages and answers requests with its final
+;; reply.
 ;;
 ;; In LispM, a peer acts as an agent of `lispm-agents-bridge-role' in its
 ;; terminal's directory, which is none of LispM's running agents.  Its
@@ -102,10 +111,19 @@ not tell of the message yet.")
   "Return the MCP server of the agent TERMINAL, or nil."
   (seq-find #'lispm-agents-mcp-p (lispm-agents-context-servers terminal)))
 
+(defun lispm-agents-bridge--prop (terminal property)
+  "Return PROPERTY of the agent of TERMINAL, see `lispm-agents-define'."
+  (when-let* ((agent (or (buffer-local-value 'lispm-agents-buffer-agent terminal)
+                         (lispm-agents-terminal-agent terminal))))
+    (plist-get (lispm-agents-props agent) property)))
+
 (defun lispm-agents-bridge-terminals ()
-  "Return the live agent terminals LispM's tools are served to, oldest first."
+  "Return the live agent terminals that are peers, oldest first: those
+LispM's tools are served to, and those whose agent takes messages through
+its own program."
   (seq-filter (lambda (terminal)
-                (and (lispm-agents-bridge--server terminal)
+                (and (or (lispm-agents-bridge--server terminal)
+                         (lispm-agents-bridge--prop terminal :deliver))
                      (lispm-agents-terminal-live-p terminal)))
               (delete-dups (mapcar #'car lispm-agents-context--servers))))
 
@@ -146,10 +164,10 @@ agent, a role or another terminal has it already."
     "Agent"))
 
 (defun lispm-agents-bridge--takes-messages-p (terminal)
-  "Non-nil if the agent of TERMINAL can say when it is free for a message."
-  (when-let* ((agent (or (buffer-local-value 'lispm-agents-buffer-agent terminal)
-                         (lispm-agents-terminal-agent terminal))))
-    (plist-get (lispm-agents-props agent) :ready)))
+  "Non-nil if the agent of TERMINAL takes messages: its program does, or
+it can say when it is free for one."
+  (or (lispm-agents-bridge--prop terminal :deliver)
+      (lispm-agents-bridge--prop terminal :ready)))
 
 (defun lispm-agents-bridge--free-p (terminal)
   "Non-nil if the agent of TERMINAL is free for a message now.
@@ -191,16 +209,30 @@ the agent has ended, or takes no messages."
       (error "%s has ended" name))
     (unless (lispm-agents-bridge--takes-messages-p terminal)
       (error "%s takes no messages: LispM cannot tell when it waits for one" name))
-    (with-current-buffer terminal
-      (setq lispm-agents-bridge--queue (append lispm-agents-bridge--queue (list text))))
-    (lispm-agents-bridge-flush)
-    (not (memq text (buffer-local-value 'lispm-agents-bridge--queue terminal)))))
+    (if-let* ((deliver (lispm-agents-bridge--prop terminal :deliver)))
+        (funcall deliver terminal text)
+      (with-current-buffer terminal
+        (setq lispm-agents-bridge--queue (append lispm-agents-bridge--queue (list text))))
+      (lispm-agents-bridge-flush)
+      (not (memq text (buffer-local-value 'lispm-agents-bridge--queue terminal))))))
 
 (defun lispm-agents-bridge--state (terminal)
   "What the agent of TERMINAL is doing, as list_agents says it."
   (cond ((not (lispm-agents-bridge--takes-messages-p terminal)) "takes no messages")
+        ((not (lispm-agents-bridge--prop terminal :ready)) "takes messages")
         ((lispm-agents-terminal-ready-p terminal) "idle")
         (t "busy")))
+
+(defun lispm-agents-bridge--answer (terminal)
+  "Return how the agent of TERMINAL answers a request, if it is served no
+tools to reply with: a function of a text and a function of its reply."
+  (unless (lispm-agents-bridge--server terminal)
+    (when-let* ((answer (lispm-agents-bridge--prop terminal :answer)))
+      (lambda (text callback)
+        (let ((name (lispm-agents-bridge-name terminal)))
+          (unless (lispm-agents-terminal-live-p terminal)
+            (error "%s has ended" name))
+          (funcall answer terminal text callback))))))
 
 (defun lispm-agents-bridge--peer (terminal)
   "Return the agent of TERMINAL as a peer of LispM's agents."
@@ -208,7 +240,8 @@ the agent has ended, or takes no messages."
                      :kind (lispm-agents-bridge--kind terminal)
                      :root (lispm-agents-bridge--root terminal)
                      :state (lambda () (lispm-agents-bridge--state terminal))
-                     :deliver (lambda (text) (lispm-agents-bridge-deliver terminal text))))
+                     :deliver (lambda (text) (lispm-agents-bridge-deliver terminal text))
+                     :answer (lispm-agents-bridge--answer terminal)))
 
 (defun lispm-agents-bridge-peers ()
   "Return the agents of the terminals LispM's tools are served to, as peers.
