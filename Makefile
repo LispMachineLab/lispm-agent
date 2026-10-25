@@ -1,6 +1,6 @@
 EMACS ?= emacs
 # The sources, in lisp/, in the order they require each other.
-ELS = $(addprefix lisp/,lispm-i18n.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
+ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
       lispm-core.el lispm-sandbox.el lispm-services.el lispm-roles.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el \
