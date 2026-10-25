@@ -8770,6 +8770,137 @@ running, does not; nor does a session not begun."
     (should-not (funcall codex "task_complete" "task_started" "exec_approval_request"))
     (should-not (funcall codex))))
 
+(defvar lispm-test--known nil
+  "Sessions `lispm-test--lookup' finds, in the tests of turns.")
+
+(defun lispm-test--lookup (agent id)
+  "Return AGENT's session ID in `lispm-test--known', or nil.
+This is for `lispm-agents-session-lookup-functions'."
+  (seq-find (lambda (session) (and (eq (plist-get session :agent) agent)
+                                   (equal (plist-get session :id) id)))
+            lispm-test--known))
+
+(ert-deftest lispm-test-agents-known-turn ()
+  "What was read in the background, saying whether a session's latest
+turn ended, answers for it while the transcript is as it was read; once
+it changed, the agent is at work.  Nothing known, or nothing said of
+turns, leaves it to the transcript, as does a transcript other than the
+one asked about."
+  (let* ((directory (make-temp-file "lispm-test-turn" t))
+         (file (expand-file-name "p/s.jsonl" directory))
+         (lispm-test--known nil)
+         (lispm-agents-session-lookup-functions (list #'lispm-test--lookup)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (write-region "{}\n" nil file nil 'silent)
+          (let ((sessions (list (list :agent 'claude :id "s" :file file
+                                      :time (lispm-agents-file-time file) :turn-ended t)
+                                (list :agent 'claude :id "old" :file file
+                                      :time (lispm-agents-file-time file)))))
+            (setq lispm-test--known sessions)
+            (should (equal (plist-get (lispm-agents-known-session 'claude "s") :id) "s"))
+            (should-not (lispm-agents-known-session 'claude "none"))
+            (should-not (lispm-agents-known-session 'codex "s"))
+            (should (eq (lispm-agents-known-turn 'claude "s") 'ended))
+            (should (eq (lispm-agents-known-turn 'claude "s" file) 'ended))
+            (should-not (lispm-agents-known-turn 'claude "s" (expand-file-name "other.jsonl" directory)))
+            (should-not (lispm-agents-known-turn 'claude "old"))
+            (setf (plist-get (car sessions) :turn-ended) nil)
+            (should (eq (lispm-agents-known-turn 'claude "s") 'working))
+            (setf (plist-get (car sessions) :turn-ended) t)
+            (set-file-times file (time-add (current-time) 10))
+            (should (eq (lispm-agents-known-turn 'claude "s") 'working))
+            (setq lispm-test--known nil)
+            (should-not (lispm-agents-known-turn 'claude "s"))))
+      (delete-directory directory t))))
+
+(ert-deftest lispm-test-agents-ready-as-read-in-the-background ()
+  "Claude's and Codex's terminals are ready as what was read in the
+background says, their transcripts neither looked for nor read; without
+its word, they are."
+  (let* ((directory (make-temp-file "lispm-test-ready" t))
+         (lispm-agents-claude-projects-directory (expand-file-name "projects/" directory))
+         (lispm-agents-codex-sessions-directory (expand-file-name "sessions/" directory))
+         (transcript (expand-file-name "p/s.jsonl" lispm-agents-claude-projects-directory))
+         (rollout (expand-file-name "2026/10/25/rollout-1-abc.jsonl" lispm-agents-codex-sessions-directory))
+         (claude (generate-new-buffer "*claude:test*"))
+         (codex (generate-new-buffer "*codex:test*"))
+         (lispm-test--known nil)
+         (lispm-agents-session-lookup-functions (list #'lispm-test--lookup)))
+    (unwind-protect
+        (progn
+          (dolist (file (list transcript rollout))
+            (make-directory (file-name-directory file) t))
+          ;; The transcripts say Claude is at work and Codex is done.
+          (lispm-agents-append-json-line transcript '(:type "assistant" :message (:stop_reason "tool_use")))
+          (lispm-agents-append-json-line rollout '(:type "event_msg" :payload (:type "task_complete")))
+          (with-current-buffer claude (setq lispm-agents-buffer-session-id "s"))
+          (with-current-buffer codex (setq lispm-agents-buffer-session-id "abc"))
+          (setq lispm-test--known
+                (list (list :agent 'claude :id "s" :file transcript
+                            :time (lispm-agents-file-time transcript) :turn-ended t)
+                      (list :agent 'codex :id "abc" :file rollout
+                            :time (lispm-agents-file-time rollout) :turn-ended nil)))
+          (cl-letf (((symbol-function 'lispm-agents-read-json-tail)
+                     (lambda (_) (error "A transcript was read")))
+                    ((symbol-function 'file-expand-wildcards)
+                     (lambda (&rest _) (error "Claude's transcripts were looked for")))
+                    ((symbol-function 'directory-files-recursively)
+                     (lambda (&rest _) (error "Codex's rollouts were looked for"))))
+            (should (lispm-agents-claude--ready-p claude))
+            (should-not (lispm-agents-codex--ready-p codex))
+            (should (equal (buffer-local-value 'lispm-agents-codex--rollout codex) rollout)))
+          (setq lispm-test--known (mapcar (lambda (session)
+                                            (let ((copy (copy-sequence session)))
+                                              (cl-remf copy :turn-ended)
+                                              copy))
+                                          lispm-test--known))
+          (should-not (lispm-agents-claude--ready-p claude))
+          (should (lispm-agents-codex--ready-p codex)))
+      (kill-buffer claude)
+      (kill-buffer codex)
+      (delete-directory directory t))))
+
+(ert-deftest lispm-test-agents-claims-take-recent-sessions ()
+  "A terminal learning its session takes the sessions read a while ago,
+and looks again once a reader has newer ones, before ten seconds are up;
+the picker's list wants them as they are now."
+  (let* ((launched (float-time))
+         (buffer (generate-new-buffer "*codex:project*"))
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (asked nil)
+         (recorded (lambda (agent sessions &optional recent)
+                     (push (list agent recent) asked)
+                     (unless recent (funcall sessions))))
+         (lispm-agents-read-sessions-function recorded)
+         (lispm-agents-sessions-arrived-hook nil))
+    (add-hook 'lispm-agents-sessions-arrived-hook #'lispm-agents--claim-again)
+    (unwind-protect
+        (lispm-test--with-agents
+            `((codex :name "Codex" :program "emacs"
+                     :sessions ,(lambda ()
+                                  (list (list :agent 'codex :id "0199" :cwd "/tmp/project/"
+                                              :title "Fix the build" :time 2.0
+                                              :started (+ launched 1))))))
+          (with-current-buffer buffer
+            (setq default-directory "/tmp/project/"
+                  lispm-agents-buffer-agent 'codex
+                  lispm-agents-buffer-launched launched))
+          (should-not (lispm-agents-terminal-session-id buffer))
+          (should (equal asked '((codex t))))
+          (should-not (lispm-agents-terminal-session-id buffer))
+          (should (= (length asked) 1))
+          (lispm-agents-sessions-arrived)
+          (setq lispm-agents-read-sessions-function #'lispm-agents-read-sessions)
+          (should (equal (lispm-agents-terminal-session-id buffer) "0199"))
+          (setq lispm-agents-read-sessions-function recorded
+                asked nil)
+          (lispm-agents-sessions-list)
+          (should (equal asked '((codex nil)))))
+      (kill-buffer buffer))))
+
 (ert-deftest lispm-test-peers-named-and-listed ()
   "The editor's agents with a server are peers, named after their agent, a
 number added to a name taken; each sees who is here, itself marked, as
@@ -8858,6 +8989,22 @@ that cannot tell when it waits takes none."
                              (car (lispm-test--peer-call codex "ask_agent" '((agent . "mute") (request . "?"))))))
       (should-not lispm-collab--requests)
       (should-not (lispm-test--given mute)))))
+
+(ert-deftest lispm-test-peers-look-again-when-sessions-arrive ()
+  "Messages waiting for an agent are looked at again as soon as a session
+reader has newer sessions, which may tell that it is free."
+  (lispm-test-with-peers
+    (let ((boss (lispm-defagent boss :root project))
+          (codex (lispm-test--peer 'codex project))
+          (lispm-agents-bridge-poll-interval 3600))
+      (push codex lispm-test--busy)
+      (lispm-test--call boss "send_message" '((to . "codex") (text . "One.")))
+      (should lispm-agents-bridge--timer)
+      (setq lispm-test--busy nil)
+      (lispm-test--wait (lambda () nil) 0.05)
+      (should-not (lispm-test--given codex))
+      (lispm-agents-sessions-arrived)
+      (should (string-prefix-p "[Message from boss]\nOne." (car (lispm-test--sent codex 1)))))))
 
 (ert-deftest lispm-test-peers-ask ()
   "Agents of every kind ask each other: a LispM agent's call waits for an

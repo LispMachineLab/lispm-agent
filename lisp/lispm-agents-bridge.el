@@ -200,6 +200,14 @@ Look again later while messages wait."
       (setq lispm-agents-bridge--timer
             (run-at-time lispm-agents-bridge-poll-interval nil #'lispm-agents-bridge-flush)))))
 
+(defun lispm-agents-bridge--sessions-arrived ()
+  "Look at once whether agents with messages waiting are free: a session
+reader has read the transcripts anew, which may say so.
+This is on `lispm-agents-sessions-arrived-hook'."
+  (when lispm-agents-bridge--timer
+    (cancel-timer lispm-agents-bridge--timer)
+    (setq lispm-agents-bridge--timer (run-at-time 0 nil #'lispm-agents-bridge-flush))))
+
 (defun lispm-agents-bridge-deliver (terminal text)
   "Put TEXT to the agent of TERMINAL as its user's next message, once it is
 free for it.  Return non-nil if it was given TEXT at once.  An error if
@@ -554,6 +562,7 @@ wait for the user's approval in Emacs."
 
 (add-hook 'lispm-peer-functions #'lispm-agents-bridge-peers)
 (add-hook 'lispm-agents-context-release-functions #'lispm-agents-bridge--ended)
+(add-hook 'lispm-agents-sessions-arrived-hook #'lispm-agents-bridge--sessions-arrived)
 
 (provide 'lispm-agents-bridge)
 ;;; lispm-agents-bridge.el ends here

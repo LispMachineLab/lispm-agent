@@ -161,10 +161,15 @@ Claude Code places worktrees under REPO/.claude/worktrees/NAME."
 
 (defun lispm-agents-claude--transcript (terminal)
   "Return the transcript of the session the Claude TERMINAL runs, or nil.
-Claude writes it once the session's first message is sent."
+Claude writes it once the session's first message is sent.  It is where
+what was read in the background has it, see `lispm-agents-known-session',
+else looked for in every project."
   (when-let* ((id (buffer-local-value 'lispm-agents-buffer-session-id terminal)))
-    (car (file-expand-wildcards
-          (expand-file-name (format "*/%s.jsonl" id) lispm-agents-claude-projects-directory)))))
+    (or (when-let* ((file (plist-get (lispm-agents-known-session 'claude id) :file))
+                    ((file-exists-p file)))
+          file)
+        (car (file-expand-wildcards
+              (expand-file-name (format "*/%s.jsonl" id) lispm-agents-claude-projects-directory))))))
 
 (defun lispm-agents-claude-turn-ended-p (objects)
   "Return non-nil if OBJECTS, the last records of a Claude transcript, end a
@@ -184,9 +189,15 @@ turn: their last message is Claude's answer, or its user's interruption."
                      (mapcar (lambda (block) (plist-get block :text)) content))))))))
 
 (defun lispm-agents-claude--ready-p (terminal)
-  "Return non-nil when the Claude of TERMINAL waits for its user's next message."
-  (when-let* ((file (lispm-agents-claude--transcript terminal)))
-    (lispm-agents-claude-turn-ended-p (lispm-agents-read-json-tail file))))
+  "Return non-nil when the Claude of TERMINAL waits for its user's next message.
+What was read in the background may know, see `lispm-agents-known-turn';
+else its transcript's end is read."
+  (when-let* ((id (buffer-local-value 'lispm-agents-buffer-session-id terminal)))
+    (pcase (lispm-agents-known-turn 'claude id)
+      ('ended t)
+      ('working nil)
+      (_ (when-let* ((file (lispm-agents-claude--transcript terminal)))
+           (lispm-agents-claude-turn-ended-p (lispm-agents-read-json-tail file)))))))
 
 ;;;; LispM's tools, over MCP
 
