@@ -85,14 +85,16 @@ is made and their arguments checked.  Tools from elsewhere, such as
 MCP servers, have an INPUT-SCHEMA instead (a JSON schema as an alist,
 or a function returning one) and a FUNCTION taking the whole input.
 A DEFERRED tool is not offered to an agent until search_tools has
-found it for that agent.  CHANGES, for a tool that changes a buffer,
-tells what a call would make of it; TARGETS, for a tool whose
-arguments do not name the files it writes, tells which (see
-`lispm-deftool').  Calls of an ALWAYS-ASK tool await the user's approval
-whatever the policy says.  FILE is the file a tool defined with
-`lispm-deftool' was loaded from, if any."
+found it for that agent.  PREVIEW, or DIFF, tells what a call would
+do; CHANGES, for a tool that changes a buffer, what a call would make
+of it; TARGETS, for a tool whose arguments do not name the files it
+writes, which (see `lispm-deftool').  Calls of an ALWAYS-ASK tool
+await the user's approval whatever the policy says.  FILE is the file
+a tool defined with `lispm-deftool' was loaded from, if any."
   name description params input-schema permission function async preview deferred
-  changes targets always-ask file)
+  changes targets always-ask file
+  ;; Last: packages compiled before it read the others where they were.
+  diff)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -121,7 +123,12 @@ BODY may start with keyword options:
                      the result (and non-nil as second argument on
                      failure); its own value is ignored
   :preview FUNCTION  called with the same arguments; returns a string
-                     (usually a diff) shown while the call awaits approval
+                     shown while the call awaits approval
+  :diff FUNCTION     instead of :preview, for a call that changes a file
+                     or buffer: called with the same arguments, returns
+                     (OLD NEW LABEL), the text there now and the text
+                     the call would leave, whose diff, LABEL naming the
+                     file, is the preview; it is made in the background
   :changes FUNCTION  for a tool that changes a buffer: called with the
                      same arguments, returns (BUFFER . TEXT), the buffer
                      the call would change and the text it would leave
@@ -143,13 +150,14 @@ BODY may start with keyword options:
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview changes targets deferred always-ask
+  (let ((permission 'read) async preview diff changes targets deferred always-ask
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
         (:permission (setq permission (pop body)))
         (:async (setq async (pop body)))
         (:preview (setq preview (pop body)))
+        (:diff (setq diff (pop body)))
         (:changes (setq changes (pop body)))
         (:targets (setq targets (pop body)))
         (:deferred (setq deferred (pop body)))
@@ -162,6 +170,7 @@ is printed.  Signal an error to report a failure to the model."
        :permission ',permission
        :async ,async
        :preview ,preview
+       :diff ,diff
        :changes ,changes
        :targets ,targets
        :deferred ,deferred
@@ -383,12 +392,30 @@ runs."
     (when result
       (apply #'lispm-tools--deliver done agent tool result))))
 
-(defun lispm-tool-preview-text (tool input)
-  "What calling TOOL with INPUT would do, as a string, or nil."
-  (when-let* ((preview (lispm-tool-preview tool)))
+(defun lispm-tool-preview-text (tool input &optional callback)
+  "What calling TOOL with INPUT would do, as a string, or nil.
+With CALLBACK, return nil, and call CALLBACK with that instead: at
+once, unless it is the diff of a tool that has one (see `lispm-deftool'),
+which a program makes in the background; then later.  Without CALLBACK,
+Emacs waits for that program."
+  (let ((diff (lispm-tool-diff tool))
+        (preview (lispm-tool-preview tool))
+        (later nil)
+        text)
     (condition-case err
-        (apply preview (lispm-tools--arguments tool input))
-      (error (format "(no preview: %s)" (error-message-string err))))))
+        (cond (diff
+               (pcase-let ((`(,old ,new ,label) (apply diff (lispm-tools--arguments tool input))))
+                 (if (not callback)
+                     (setq text (lispm--diff old new label))
+                   (lispm--diff old new label
+                                (lambda (made &optional why)
+                                  (funcall callback (or made (format "(no preview: %s)" why)))))
+                   (setq later t))))
+              (preview (setq text (apply preview (lispm-tools--arguments tool input)))))
+      (error (setq text (format "(no preview: %s)" (error-message-string err)))))
+    (cond (later nil)
+          (callback (ignore (funcall callback text)))
+          (t text))))
 
 (defun lispm-tool-would-change (tool input)
   "What calling TOOL with INPUT would change: (BUFFER . TEXT), or nil.
@@ -1665,13 +1692,13 @@ error then."
                   (not (buffer-local-value 'buffer-read-only buffer)))))
           (t (error "Cannot write %s: it is not writable" label)))))
 
-(defun lispm-tools--edit-preview (path old-text new-text &optional replace-all)
-  "Diff that edit_file would produce in the file at PATH.
+(defun lispm-tools--edit-diff (path old-text new-text &optional replace-all)
+  "The file at PATH as it is and as edit_file would leave it, and its label.
 OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
   (let* ((file (lispm-tools--file path))
          (old (lispm--file-text file)))
-    (lispm--diff old (car (lispm-tools--replace old old-text new-text replace-all))
-                 (lispm-tools--label file))))
+    (list old (car (lispm-tools--replace old old-text new-text replace-all))
+          (lispm-tools--label file))))
 
 (lispm-deftool edit_file
     ((path string "File to edit, absolute or relative to your root.")
@@ -1682,7 +1709,7 @@ OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
 as one undoable step and is then saved.  old_text must match the
 current contents exactly, so read the file first."
   :permission write
-  :preview #'lispm-tools--edit-preview
+  :diff #'lispm-tools--edit-diff
   :changes (lambda (path old-text new-text &optional replace-all)
              (let ((file (lispm-tools--file path)))
                ;; No buffer is visited to show a file that cannot be written.
@@ -1728,9 +1755,9 @@ writable.  A missing directory that can be made is no error."
   "Create a file, or replace a file's entire contents.  Prefer edit_file
 for changes to existing files."
   :permission write
-  :preview (lambda (path content)
-             (let ((file (lispm-tools--file path)))
-               (lispm--diff (lispm--file-text file) content (lispm-tools--label file))))
+  :diff (lambda (path content)
+          (let ((file (lispm-tools--file path)))
+            (list (lispm--file-text file) content (lispm-tools--label file))))
   :changes (lambda (path content)
              (let ((file (lispm-tools--file path)))
                ;; No buffer is visited to show a file that cannot be written.
@@ -1758,10 +1785,9 @@ for changes to existing files."
   "Replace text in an Emacs buffer that is not a file, such as *scratch*.
 For files use edit_file."
   :permission write
-  :preview (lambda (buffer old-text new-text &optional replace-all)
-             (let ((old (lispm-tools--buffer-file-text (lispm-tools--buffer buffer))))
-               (lispm--diff old (car (lispm-tools--replace old old-text new-text replace-all))
-                            buffer)))
+  :diff (lambda (buffer old-text new-text &optional replace-all)
+          (let ((old (lispm-tools--buffer-file-text (lispm-tools--buffer buffer))))
+            (list old (car (lispm-tools--replace old old-text new-text replace-all)) buffer)))
   :changes (lambda (buffer old-text new-text &optional replace-all)
              (let ((b (lispm-tools--buffer buffer)))
                (when-let* ((file (buffer-file-name b)))

@@ -151,6 +151,15 @@ BODY can use `project', a scratch directory for agents to work in."
   (with-current-buffer (lispm-agent-buffer agent)
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun lispm-test--previewed (agent &optional previews)
+  "A predicate: AGENT awaits approval, its session showing PREVIEWS previews.
+PREVIEWS is 1 by default.  A diff is previewed once the program making
+it has run, a little after the call awaits approval."
+  (lambda ()
+    (and (eq (lispm-agent-state agent) 'waiting)
+         (>= (lispm-test--count "^\\*\\*\\* Preview$" (lispm-test--transcript agent))
+             (or previews 1)))))
+
 ;;;; Transcript
 
 ;;;; Programs run in the background
@@ -199,6 +208,36 @@ So may diff be, which reads no input."
     (should (lispm-test--wait (lambda () heard)))
     (accept-process-output nil 0.1)
     (should (equal heard '((3 "done" ""))))))
+
+(ert-deftest lispm-test-diff-in-the-background ()
+  "Given a callback, `lispm--diff' runs diff in the background, through `lispm-exec'.
+The diff is the one made while Emacs waits; it comes later, never
+before the call returns, also when nothing changed.  A diff that could
+not be made says why.  No file is left behind."
+  (let* ((temporary-file-directory (file-name-as-directory (make-temp-file "lispm-test-diff-" t)))
+         (heard nil)
+         (hear (lambda (&rest got) (setq heard got))))
+    (unwind-protect
+        (progn
+          (should-not (lispm--diff "a\nb\n" "a\nλ\n" "f.txt" hear))
+          (should-not heard)
+          (should (lispm-test--wait (lambda () heard)))
+          (should (equal heard (list (lispm--diff "a\nb\n" "a\nλ\n" "f.txt"))))
+          (should (string-match-p "\\`--- a/f\\.txt\n\\+\\+\\+ b/f\\.txt\n@@ .* @@\n a\n-b\n\\+λ\n\\'" (car heard)))
+          (should-not (directory-files temporary-file-directory nil "lispm-"))
+          (setq heard nil)
+          (should-not (lispm--diff "same" "same" "f.txt" hear))
+          (should-not heard)
+          (should (lispm-test--wait (lambda () heard)))
+          (should (equal heard '("(no changes)")))
+          (setq heard nil)
+          (let ((lispm-exec-function (lambda (_program _args callback &rest _)
+                                       (run-at-time 0 nil callback "diff did not run" "" ""))))
+            (lispm--diff "a" "b" "f.txt" hear)
+            (should (lispm-test--wait (lambda () heard)))
+            (should (equal heard '(nil "diff did not run"))))
+          (should-not (directory-files temporary-file-directory nil "lispm-")))
+      (delete-directory temporary-file-directory t))))
 
 (ert-deftest lispm-test-exec-goes-through-its-function ()
   (let* ((ran nil)
@@ -695,12 +734,21 @@ BODY can use `port' and `log', the file the server records requests in."
       (with-current-buffer (find-file-noselect file)
         (let ((last-command nil)) (undo))
         (should (equal (buffer-string) "one\ntwo\nthree\nfour\n")))
-      ;; Previews are diffs; nothing changes yet.
-      (should (string-match-p "^-three\n\\+3"
-                              (let ((lispm-current-agent agent))
-                                (lispm-tool-preview-text (lispm-get-tool "edit_file")
-                                                         '((path . "a.txt") (old_text . "three")
-                                                           (new_text . "3"))))))
+      ;; Previews are diffs; nothing changes yet.  Given a callback, the
+      ;; diff is made in the background, the same; a call that makes no
+      ;; diff says why at once.
+      (let ((lispm-current-agent agent)
+            (tool (lispm-get-tool "edit_file"))
+            (edit '((path . "a.txt") (old_text . "three") (new_text . "3")))
+            heard)
+        (should (string-match-p "^-three\n\\+3" (lispm-tool-preview-text tool edit)))
+        (should-not (lispm-tool-preview-text tool edit (lambda (preview) (push preview heard))))
+        (should-not heard)
+        (should (lispm-test--wait (lambda () heard)))
+        (should (equal heard (list (lispm-tool-preview-text tool edit))))
+        (lispm-tool-preview-text tool '((path . "a.txt") (old_text . "zzz") (new_text . "y"))
+                                 (lambda (preview) (push preview heard)))
+        (should (equal (car heard) "(no preview: old_text was not found; read the file again, it may have changed)")))
       (should (string-match-p "=> 3" (car (lispm-test--call agent "eval_elisp" '((code . "(+ 1 2)"))))))
       (should (string-match-p "Function car"
                               (car (lispm-test--call agent "describe_symbol" '((name . "car"))))))
@@ -1254,7 +1302,7 @@ The tools are deferred: the model finds them with search_tools first."
                                                                        (funcall redefine "lispm-test-dev-ext")))
                         ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
         (lispm-test--chat-type chat "Make it two")
-        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+        (should (lispm-test--wait (lispm-test--previewed agent)))
         (let ((requests (reverse lispm-test--requests)))
           (should-not (member "edit_definition" (funcall names (nth 0 requests))))
           (should (string-match-p "^- lisp: edit, evaluate and test Emacs Lisp definitions"
@@ -1730,7 +1778,7 @@ changes; the trust is saved with Customize."
             (progn
               ;; Once: the code runs, the user having seen it.
               (lispm-tell agent "load")
-              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (should (lispm-test--wait (lispm-test--previewed agent)))
               (should (equal (lispm-test--asked agent) "trust_skill"))
               (let ((transcript (lispm-test--transcript agent)))
                 (should (string-match-p "^\\*\\*\\* Asks: trust_skill  local$" transcript))
@@ -1843,7 +1891,7 @@ longer.  Code changed while the user is asked is not evaluated."
         (unwind-protect
             (progn
               (lispm-test--chat-type chat "load it")
-              (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+              (should (lispm-test--wait (lispm-test--previewed agent)))
               (let ((text (lispm-test--chat-text chat)))
                 (should (string-match-p "│ Run the code of the project's skill local" text))
                 (should (string-match-p "│   \\+(defun lispm-test-local-helper () 1)" text))
@@ -1885,7 +1933,7 @@ the agent's at once, deferred; a resumed session loads it again."
           (let ((file (expand-file-name "shout.org" user-skills)))
             (lispm-tell agent "Keep the shout tool")
             ;; Asked, whatever the policy says, with the file it would be.
-            (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+            (should (lispm-test--wait (lispm-test--previewed agent)))
             (should-not (file-exists-p file))
             (should (string-match-p "^\\*\\*\\* Preview\n#\\+begin_src diff\n\\(?:.*\n\\)*\\+#\\+description: Shout things\\. Loudly\\.$"
                                     (lispm-test--transcript agent)))
@@ -3251,7 +3299,7 @@ are not saved: saving it would ask."
                                                      (old_text . "world") (new_text . "lisp"))))
                ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
       (lispm-tell agent "Greet lisp" :callback (lambda (r) (setq reply r)))
-      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (lispm-test--wait (lispm-test--previewed agent)))
       (should (equal (lispm-test--file project "a.txt") "hello world\n"))
       (with-current-buffer (lispm-agent-buffer agent)
         (goto-char (point-min))
@@ -3304,7 +3352,7 @@ text go back to the model byte for byte."
                                                      (old_text . "world") (new_text . "lisp"))))
                ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
       (lispm-tell agent "Greet lisp")
-      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (lispm-test--wait (lispm-test--previewed agent)))
       (let ((before (lispm-test--transcript agent)))
         (with-current-buffer (lispm-agent-buffer agent)
           (goto-char (point-min))
@@ -3321,6 +3369,54 @@ text go back to the model byte for byte."
                              (lispm-test--tool "t1" "edit_file"
                                                '((why . "w") (path . "a.txt")
                                                  (old_text . "world") (new_text . "lisp")))))))))
+
+(ert-deftest lispm-test-approval-awaits-its-diff ()
+  "A call previewed as a diff is announced once a program has made the diff.
+Emacs does not wait for diff meanwhile, and the call awaits approval
+all the same; a diff that comes once its call was decided announces
+nothing."
+  (lispm-test-env
+    (with-temp-file (expand-file-name "a.txt" project) (insert "hello world\n"))
+    (let* ((held nil)
+           (made 0)
+           (announced nil)
+           (lispm-exec-function (lambda (program &rest rest)
+                                  (if (equal program "diff")
+                                      (push (cons program rest) held)
+                                    (apply #'lispm-exec-locally program rest))))
+           (lispm-approval-functions (list (lambda (_agent name _input) (push name announced))))
+           (agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "edit_file"
+                                                   '((why . "w") (path . "a.txt")
+                                                     (old_text . "world") (new_text . "lisp")))
+                                 (lispm-test--tool "t2" "write_file"
+                                                   '((why . "w") (path . "b.txt") (content . "b\n"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Greet lisp")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (equal (lispm-waiting-calls agent) '("t1" "t2")))
+      (should (= (length held) 2))
+      (should-not announced)
+      (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
+      ;; t2 is denied before its diff is made.
+      (lispm-resolve agent "t2" 'deny)
+      (pcase-dolist (`(,program ,args ,callback . ,keys) (reverse held))
+        (apply #'lispm-exec-locally program args
+               (lambda (&rest how) (apply callback how) (cl-incf made))
+               keys))
+      (should (lispm-test--wait (lambda () (= made 2))))
+      (should (equal announced '("edit_file")))
+      (let ((transcript (lispm-test--transcript agent)))
+        (should (= (lispm-test--count "^\\*\\*\\* Preview$" transcript) 1))
+        (should (string-match-p "^\\*\\* WAITING edit_file  a\\.txt\n\\(?:.*\n\\)*?\\*\\*\\* Preview\n#\\+begin_src diff\n\\(?:.*\n\\)*?-hello world\n\\+hello lisp\n"
+                                transcript)))
+      (lispm-resolve agent "t1" 'approve)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+      (should-not (file-exists-p (expand-file-name "b.txt" project))))))
 
 (defun lispm-test--input-heading-p (agent)
   "Whether AGENT's session ends with an empty input heading."
@@ -6491,7 +6587,7 @@ kind; a call being written also says so as the agent's activity."
             (should-not (eq (aref footer 0) ?\n))))
         (lispm-chat-set-input ""))
       (lispm-test--chat-type chat "Greet lisp")
-      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (lispm-test--wait (lispm-test--previewed agent)))
       (let ((text (lispm-test--chat-text chat)))
         (should (string-match-p "^λ >> Greet lisp$" text))
         (should (string-match-p "^⏺ Reading\\.$" text))
@@ -7290,7 +7386,7 @@ it made before keeping the results they had."
             `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_lisp" `((code . ,code))))
                       ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
       (lispm-tell agent "Greet lisp")
-      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (lispm-test--wait (lispm-test--previewed agent)))
       (should (equal (lispm-agent-status agent) "1 call awaits approval"))
       (should (equal (plist-get (lispm-asked (gethash "t1" (lispm-agent-pending agent))) :input)
                      '((path . "a.txt") (old_text . "world") (new_text . "lisp"))))
@@ -7474,7 +7570,7 @@ check still asks about."
                                  (lispm-test--tool "t3" "write_file"
                                                    '((why . "w") (path . "asked.txt") (content . "a\n")))))))
       (lispm-test--chat-type chat "go")
-      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--previewed agent 2))
                                                 (= (length (lispm-waiting-calls agent)) 2)))))
       (let ((transcript (lispm-test--transcript agent)))
         (should (string-match-p "^\\*\\* DENIED write_file  denied\\.txt\n\\(?:.*\n\\)*?Denied: Not that file\\.$"
@@ -7514,7 +7610,7 @@ check still asks about."
                                                           '((code . "(write_file :path \"asked.txt\" :content \"a\")"))))
                       ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
       (lispm-tell agent "write")
-      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (should (lispm-test--wait (lispm-test--previewed agent)))
       (should (equal (plist-get (lispm-asked (gethash "t1" (lispm-agent-pending agent))) :reasons)
                      '("That file is watched.")))
       (should (string-match-p "^\\*\\*\\* Asks: write_file  asked\\.txt\n\\(?:.*\n\\)*\\*\\*\\* Preview\n- That file is watched\\.$"

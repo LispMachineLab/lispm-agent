@@ -271,16 +271,17 @@ is in it, and what type of definition it replaced."
     (list (concat (substring old 0 (1- beg)) new (substring old (1- end)))
           beg (+ beg (length new)) type)))
 
-(defun lispm-develop--edit-preview (name new-text &optional kind path)
-  "Diff that edit_definition would make: of NAME's definition, to NEW-TEXT.
-KIND and PATH are edit_definition's arguments."
+(defun lispm-develop--edit-diff (name new-text &optional kind path)
+  "NAME's file as it is and as edit_definition would leave it, and its label.
+The definition is replaced with NEW-TEXT; KIND and PATH are
+edit_definition's arguments."
   (pcase-let* ((`(,symbol ,file ,types) (lispm-develop--definition name kind path))
                (old (lispm--file-text file)))
     (with-temp-buffer
       (insert old)
       (pcase-let ((`(,text ,_beg ,_end ,type) (lispm-develop--edit symbol types file new-text)))
         (lispm-develop--new-form new-text symbol type)
-        (lispm--diff old text (lispm-tools--label file))))))
+        (list old text (lispm-tools--label file))))))
 
 (lispm-deftool edit_definition
     ((name string "Name of the function, macro, variable or face to redefine.")
@@ -299,7 +300,7 @@ eval_definition; then run the tests with ert_run."
   :deferred t
   :targets (lambda (name _new-text &optional kind path)
              (list (nth 1 (lispm-develop--definition name kind path))))
-  :preview #'lispm-develop--edit-preview
+  :diff #'lispm-develop--edit-diff
   :changes (lambda (name new-text &optional kind path)
              (pcase-let ((`(,symbol ,file ,types) (lispm-develop--definition name kind path)))
                ;; No buffer is visited to show a file that cannot be written.
