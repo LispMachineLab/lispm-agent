@@ -183,6 +183,23 @@ BODY can use `project', a scratch directory for agents to work in."
     (should (lispm-test--wait (lambda () heard)))
     (should (equal '("sh ended by signal 15" "" "") heard))))
 
+(ert-deftest lispm-test-exec-program-gone-before-its-input-ends ()
+  "A program gone before it is sent the end of its input calls back once, later.
+So may diff be, which reads no input."
+  (let ((heard nil)
+        (send-eof (symbol-function 'process-send-eof)))
+    (cl-letf (((symbol-function 'process-send-eof)
+               (lambda (&optional process)
+                 ;; Gone first: waiting so takes in no event.
+                 (let ((deadline (+ (float-time) 5)))
+                   (while (and (process-live-p process) (< (float-time) deadline))))
+                 (funcall send-eof process))))
+      (lispm-exec "sh" '("-c" "printf done; exit 3") (lambda (&rest got) (push got heard))))
+    (should-not heard)
+    (should (lispm-test--wait (lambda () heard)))
+    (accept-process-output nil 0.1)
+    (should (equal heard '((3 "done" ""))))))
+
 (ert-deftest lispm-test-exec-goes-through-its-function ()
   (let* ((ran nil)
          (lispm-exec-function (lambda (&rest arguments) (push arguments ran))))
