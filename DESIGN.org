@@ -221,7 +221,7 @@ its own, so made-up names stay unknown to the image. What is found is data, ~(un
      (replace-all boolean "Replace every occurrence." :optional t))
   "Replace text in a file..."
   :permission write                          ; permission class
-  :preview #'lispm-tools--edit-preview       ; diff shown before approval
+  :diff #'lispm-tools--edit-diff             ; text before and after, diffed for approval
   ...)
 #+end_src
 
@@ -495,7 +495,10 @@ that mounts the user's home directory reaches their Emacs configuration, and wit
 Such a root has the in-memory journal only (section 12).
 
 *Approval is an org TODO state.* A call that needs approval is recorded as
-~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. To decide:
+~** WAITING edit_file ...~, with a diff preview and the ~why~ below it. The tool's ~:diff~
+gives the text before and after; ~diff~ runs in the background (~lispm-exec~), and the call
+is announced, its preview written, ~lispm-approval-functions~ run and the message saying
+where to answer given, once the diff is made, if the call still awaits approval. To decide:
 
 - in the chat, a box shows the command or diff and the ~why~ and asks as Claude Code does:
   ~1~ yes, ~2~ yes and don't ask again for this tool (for an ~exec~ call, or a shell command

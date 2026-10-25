@@ -481,12 +481,13 @@ HASH nil withdraws the trust.  The change is saved with Customize."
            (seq-remove (lambda (entry) (lispm-skills--same-file-p (car entry) file))
                        lispm-trusted-skills))))
 
-(defun lispm-skills--trust-preview (input)
+(defun lispm-skills--trust-diff (input)
   "The code of the skill INPUT names, which the user is asked to let run.
-As a diff that adds it all, as a new file's would."
+As nothing, the code, and the skill's label: its diff adds it all, as a
+new file's would."
   (let ((file (expand-file-name (alist-get 'file input))))
-    (lispm--diff "" (string-join (lispm-skills--blocks (lispm-skills--file-text file)) "\n")
-                 (lispm-tools--label file))))
+    (list "" (string-join (lispm-skills--blocks (lispm-skills--file-text file)) "\n")
+          (lispm-tools--label file))))
 
 (defconst lispm-skills--trust-tool
   (lispm-tool--create
@@ -497,7 +498,7 @@ As a diff that adds it all, as a new file's would."
                                (hash (type . "string"))
                                (files (type . "array") (items (type . "string")))))
    :permission 'exec
-   :preview #'lispm-skills--trust-preview)
+   :diff #'lispm-skills--trust-diff)
   "What loading a project's skill asks the user: to evaluate its code.
 No agent calls it: the skill tool asks for it (see `lispm-call-ask'),
 and the transcript records it so, with its input: the skill's name,
@@ -700,13 +701,13 @@ CODE and TITLE may be nil.  See write_skill."
                         (org-escape-code-in-string (string-trim code)) "\n#+end_src\n")
               ""))))
 
-(defun lispm-skills--write-preview (name description instructions &optional code title)
-  "The skill file write_skill would write, as a diff against the file there now.
+(defun lispm-skills--write-diff (name description instructions &optional code title)
+  "The skill file there now, the one write_skill would write, and its label.
 NAME, DESCRIPTION, INSTRUCTIONS, CODE and TITLE are its arguments."
   (let ((file (lispm-skills--target name lispm-current-agent)))
-    (lispm--diff (lispm--file-text file)
-                 (lispm-skills--compose name description instructions code title)
-                 (lispm-tools--label file))))
+    (list (lispm--file-text file)
+          (lispm-skills--compose name description instructions code title)
+          (lispm-tools--label file))))
 
 (lispm-deftool write_skill
     ((name string "The skill's name: lowercase letters, digits, - and _, such as \"org-tables\".")
@@ -726,7 +727,7 @@ with eval_elisp first."
   :permission exec
   :deferred t
   :always-ask t
-  :preview #'lispm-skills--write-preview
+  :diff #'lispm-skills--write-diff
   (let* ((agent lispm-current-agent)
          (file (lispm-skills--target name agent))
          (text (lispm-skills--compose name description instructions code title))

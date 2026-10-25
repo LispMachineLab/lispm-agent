@@ -1706,15 +1706,29 @@ if it has one; the inbox file then no longer holds ENTRY."
   (lispm-inbox-save agent))
 
 (defun lispm--ask-approval (agent id)
-  "Show AGENT's call ID for approval: a preview, why it asks, a notification."
+  "Show AGENT's call ID for approval: a preview, why it asks, a notification.
+They are shown once the preview is made: for a diff, by a program Emacs
+does not wait for (see `lispm-tool-preview-text'), if the call still
+awaits the same approval by then."
   (let* ((call (gethash id (lispm-agent-pending agent)))
          (asked (lispm-asked call))
-         (reasons (plist-get asked :reasons))
-         (preview (and (plist-get asked :tool)
-                       (let ((lispm-current-agent agent)
-                             (default-directory (lispm-agent-root agent)))
-                         (lispm-tool-preview-text (plist-get asked :tool)
-                                                  (plist-get asked :input))))))
+         (asking (plist-get call :asking))
+         (announce (lambda (preview)
+                     (when (and (eq (gethash id (lispm-agent-pending agent)) call)
+                                (eq (plist-get call :status) 'ask)
+                                (eq (plist-get call :asking) asking))
+                       (lispm--announce-approval agent call asked preview)))))
+    (if (plist-get asked :tool)
+        (let ((lispm-current-agent agent)
+              (default-directory (lispm-agent-root agent)))
+          (lispm-tool-preview-text (plist-get asked :tool) (plist-get asked :input) announce))
+      (funcall announce nil))))
+
+(defun lispm--announce-approval (agent call asked preview)
+  "Show AGENT's CALL, awaiting approval of ASKED (see `lispm-asked'), with PREVIEW.
+PREVIEW, a string or nil, and why it asks go in the transcript; then
+`lispm-approval-functions' run, and a message says where to answer."
+  (let ((reasons (plist-get asked :reasons)))
     (when (and (or preview reasons) (plist-get call :marker))
       (lispm--in-session agent
         (goto-char (lispm-transcript-subtree-end (plist-get call :marker) 2))

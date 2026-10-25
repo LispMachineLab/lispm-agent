@@ -40,6 +40,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'lispm-i18n)
+(require 'lispm-exec)
 
 (defgroup lispm nil
   "An Emacs-native agent runtime."
@@ -794,25 +795,42 @@ repository, as that author, not to the one in `default-directory'."
                  entry))
               process-environment))
 
-(defun lispm--diff (old new label)
-  "Unified diff from string OLD to string NEW, with file LABEL."
+(defun lispm--diff (old new label &optional callback)
+  "Unified diff from string OLD to string NEW, with file LABEL.
+With CALLBACK, return nil, and call CALLBACK with the diff instead,
+once `diff' has run in the background (see `lispm-exec'), or with nil
+and a sentence saying why it did not: later, never before this returns."
   (if (equal old new)
-      "(no changes)"
-    (let ((a (make-temp-file "lispm-a"))
-          (b (make-temp-file "lispm-b"))
-          (coding-system-for-write 'utf-8)
-          (coding-system-for-read 'utf-8))
+      (if callback (ignore (run-at-time 0 nil callback "(no changes)")) "(no changes)")
+    (let* ((a (make-temp-file "lispm-a"))
+           (b (make-temp-file "lispm-b"))
+           (args (list "-u" "--label" (concat "a/" label) "--label" (concat "b/" label) a b))
+           ;; The files are named in full: a directory that is remote,
+           ;; or gone, would only keep diff from running.
+           (default-directory temporary-file-directory)
+           (later nil))
       (unwind-protect
-          (progn
+          (let ((coding-system-for-write 'utf-8))
             (write-region old nil a nil 'silent)
             (write-region new nil b nil 'silent)
-            (with-temp-buffer
-              (call-process "diff" nil t nil "-u"
-                            "--label" (concat "a/" label)
-                            "--label" (concat "b/" label) a b)
-              (buffer-string)))
-        (delete-file a)
-        (delete-file b)))))
+            (if (not callback)
+                (with-temp-buffer
+                  (let ((coding-system-for-read 'utf-8))
+                    (apply #'call-process "diff" nil t nil args))
+                  (buffer-string))
+              (lispm-exec "diff" args
+                          (lambda (exit output errors)
+                            (delete-file a)
+                            (delete-file b)
+                            ;; 1 when the files differ, 0 when they do not.
+                            (if (memq exit '(0 1))
+                                (funcall callback output)
+                              (funcall callback nil (if (stringp exit) exit (string-trim errors))))))
+              (setq later t)
+              nil))
+        (unless later
+          (delete-file a)
+          (delete-file b))))))
 
 (provide 'lispm-core)
 ;;; lispm-core.el ends here

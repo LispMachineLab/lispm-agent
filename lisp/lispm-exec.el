@@ -74,7 +74,7 @@ when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
                                                         :noquery t :coding 'utf-8 :sentinel #'ignore))
                 :sentinel
                 (lambda (process _event)
-                  (unless (process-live-p process)
+                  (when (and (not (process-live-p process)) (buffer-live-p output))
                     ;; What it said last, read before its pipe goes.
                     (while (accept-process-output stderr 0 nil t))
                     (delete-process stderr)
@@ -86,9 +86,13 @@ when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
                       (kill-buffer output)
                       (kill-buffer errors)
                       (lispm-exec--call callback exit printed said)))))))
-          (when input
-            (process-send-string process input))
-          (process-send-eof process))
+          ;; A program may be gone before it is sent its input, or the
+          ;; end of it, as one reading none, as diff, may be: its
+          ;; sentinel then says how it went, later.
+          (ignore-errors
+            (when input
+              (process-send-string process input))
+            (process-send-eof process)))
       (error (when (process-live-p stderr) (delete-process stderr))
              (kill-buffer output)
              (kill-buffer errors)
