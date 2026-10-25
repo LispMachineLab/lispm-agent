@@ -572,13 +572,33 @@ Codex writes forked threads to separate files that share the session id."
           (puthash key session latest))))
     (hash-table-values latest)))
 
-(defun lispm-agents--agent-sessions (props &optional reader)
-  "Return the sessions of the agent of PROPS, as its :sessions reads them,
-or as READER, its session reader, has them; READER may say `pending'
-instead, which is returned as it is.  An agent whose sessions cannot be
-read lists none, and says so."
+(defvar lispm-agents-read-sessions-function #'lispm-agents-read-sessions
+  "Function reading an agent's sessions as they are now.
+`lispm-agents-sessions-list', which lists every session, as for the
+session picker or for a terminal to learn its session from, calls it
+with the agent, its :sessions, see `lispm-agents-define', and RECENT,
+and it returns what that returns.  RECENT non-nil says that sessions
+read a while ago will do, or none yet: who asks asks again once a
+session reader has newer ones, see `lispm-agents-sessions-arrived'.
+A host that reads the sessions in the background may wrap this with
+`add-function' and answer with what it read when that is new enough,
+calling the function it wraps otherwise.")
+
+(defun lispm-agents-read-sessions (_agent sessions &optional _recent)
+  "Return what SESSIONS, the :sessions of an agent, returns."
+  (funcall sessions))
+
+(defun lispm-agents--agent-sessions (agent props &optional reader recent)
+  "Return the sessions of AGENT, whose properties are PROPS, as its
+:sessions reads them through `lispm-agents-read-sessions-function',
+RECENT passed on, or as READER, its session reader, has them; READER
+may say `pending' instead, which is returned as it is.  An agent whose
+sessions cannot be read lists none, and says so."
   (condition-case err
-      (let ((sessions (funcall (or reader (plist-get props :sessions)))))
+      (let ((sessions (if reader
+                          (funcall reader)
+                        (funcall lispm-agents-read-sessions-function
+                                 agent (plist-get props :sessions) recent))))
         (if (and reader (eq sessions 'pending))
             'pending
           (delq nil (copy-sequence sessions))))
@@ -591,15 +611,18 @@ read lists none, and says so."
   (sort (lispm-agents--newest-per-id sessions)
         (lambda (a b) (> (plist-get a :time) (plist-get b :time)))))
 
-(defun lispm-agents-sessions-list ()
+(defun lispm-agents-sessions-list (&optional recent)
   "Return every recorded session of the agents that can run here, newest
 first, see `lispm-agents-available'.  An agent whose sessions cannot
 be read lists none, and says so.  Each agent's :sessions reads them as
-they are now; session readers are never asked, so the list is complete,
-see `lispm-agents-sessions-snapshot'.  The terminals running sessions
-learn theirs from them, see `lispm-agents-refresh-buffer-titles'."
+they are now, through `lispm-agents-read-sessions-function'; session
+readers are never asked, so the list is complete, see
+`lispm-agents-sessions-snapshot'.  RECENT non-nil takes sessions read a
+while ago, or none yet, as that function says.  The terminals running
+sessions learn theirs from them, see `lispm-agents-refresh-buffer-titles'."
   (let ((sessions (lispm-agents--sort-sessions
-                   (mapcan (pcase-lambda (`(,_ . ,props)) (lispm-agents--agent-sessions props))
+                   (mapcan (pcase-lambda (`(,agent . ,props))
+                             (lispm-agents--agent-sessions agent props nil recent))
                            (lispm-agents-available)))))
     (lispm-agents-refresh-buffer-titles sessions)
     sessions))
@@ -667,6 +690,40 @@ sessions with its :sessions again, once Emacs is idle."
                       lispm-agents--session-readers))
     (lispm-agents-sessions-arrived)))
 
+(defvar lispm-agents-session-lookup-functions nil
+  "Functions looking a session up in what was read in the background.
+Each is called with an agent and the id of one of its sessions, and
+returns the session as the agent's :sessions lists it, see
+`lispm-agents-define', or nil when it does not know it, which may be too
+new for it; the first to know it answers.  None reads a transcript or
+waits.  The session may add :turn-ended: non-nil when its latest turn
+had ended, nil when it had not, as its transcript was at its :time, see
+`lispm-agents-known-turn'.  The session must not be modified.")
+
+(defun lispm-agents-known-session (agent id)
+  "Return the session ID of AGENT as what was read in the background has
+it, see `lispm-agents-session-lookup-functions', or nil."
+  (run-hook-with-args-until-success 'lispm-agents-session-lookup-functions agent id))
+
+(defun lispm-agents-known-turn (agent id &optional file)
+  "Return how the latest turn of AGENT's session ID stands, as what was
+read in the background knows, see `lispm-agents-known-session': `ended'
+when it had ended, `working' when it had not, or when the session's
+transcript changed since, as it does while the agent works; nil when
+that does not say.  FILE, when given, is the transcript the caller would
+read, which the session's must be."
+  (when-let* ((session (lispm-agents-known-session agent id))
+              ((plist-member session :turn-ended))
+              (transcript (plist-get session :file))
+              (time (plist-get session :time))
+              ((numberp time))
+              ((or (null file) (equal (expand-file-name file) (expand-file-name transcript))))
+              (attributes (file-attributes transcript)))
+    (if (and (= time (float-time (file-attribute-modification-time attributes)))
+             (plist-get session :turn-ended))
+        'ended
+      'working)))
+
 (defun lispm-agents-sessions-snapshot ()
   "Return the sessions as they are known now, (SESSIONS . PENDING).
 SESSIONS are as `lispm-agents-sessions-list' returns them, but an
@@ -679,7 +736,7 @@ draws this."
     (cons (lispm-agents--sort-sessions
            (mapcan (pcase-lambda (`(,agent . ,props))
                      (let ((sessions (lispm-agents--agent-sessions
-                                      props (alist-get agent lispm-agents--session-readers))))
+                                      agent props (alist-get agent lispm-agents--session-readers))))
                        (if (eq sessions 'pending)
                            (progn (push agent pending) nil)
                          sessions)))
@@ -914,14 +971,27 @@ directory take the sessions in the order they began."
 (defun lispm-agents-terminal-session-id (terminal)
   "Return the id of the session the agent TERMINAL runs, or nil if unknown.
 A terminal started fresh for an agent that assigns its own ids learns it
-once the agent recorded the session, from a list of the sessions, see
-`lispm-agents-claim-sessions'; one is made at most every ten seconds."
+once the agent recorded the session, from a list of the sessions read a
+while ago, see `lispm-agents-claim-sessions'; one is made at most every
+ten seconds, or once a session reader has newer sessions."
   (with-current-buffer terminal
     (unless (or lispm-agents-buffer-session-id
                 (and lispm-agents--claimed-at (< (- (float-time) lispm-agents--claimed-at) 10)))
       (setq lispm-agents--claimed-at (float-time))
-      (lispm-agents-sessions-list))
+      (lispm-agents-sessions-list t))
     lispm-agents-buffer-session-id))
+
+(defun lispm-agents--claim-again ()
+  "Let the terminals not knowing their session look at once when next
+asked, see `lispm-agents-terminal-session-id': a session reader has
+newer sessions.  This is on `lispm-agents-sessions-arrived-hook'."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-local-value 'lispm-agents--claimed-at buffer)
+               (not (buffer-local-value 'lispm-agents-buffer-session-id buffer)))
+      (with-current-buffer buffer
+        (setq lispm-agents--claimed-at nil)))))
+
+(add-hook 'lispm-agents-sessions-arrived-hook #'lispm-agents--claim-again)
 
 (defun lispm-agents-refresh-buffer-titles (sessions)
   "Update the titles of running agent terminals from SESSIONS.

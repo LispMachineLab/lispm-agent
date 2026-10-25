@@ -174,19 +174,30 @@ the main checkout, so NAME is matched against known projects."
   "The rollout of the session this Codex terminal runs, once found.")
 (put 'lispm-agents-codex--rollout 'permanent-local t)
 
+(defun lispm-agents-codex--known-rollout (id)
+  "Return the rollout of Codex session ID where what was read in the
+background has it, see `lispm-agents-known-session', or nil."
+  (when-let* ((file (plist-get (lispm-agents-known-session 'codex id) :file))
+              ((string-suffix-p (concat id ".jsonl") file))
+              ((file-exists-p file)))
+    file))
+
 (defun lispm-agents-codex--terminal-rollout (terminal)
   "Return the rollout of the session the Codex TERMINAL runs, or nil.
 Codex writes it once the session's first message is sent, which tells
-the terminal which it is, see `lispm-agents-terminal-session-id'."
+the terminal which it is, see `lispm-agents-terminal-session-id'.  It is
+where what was read in the background has it, else the newest of the
+session's."
   (with-current-buffer terminal
     (when-let* ((id (lispm-agents-terminal-session-id terminal)))
       (unless (and lispm-agents-codex--rollout
                    (string-suffix-p (concat id ".jsonl") lispm-agents-codex--rollout)
                    (file-exists-p lispm-agents-codex--rollout))
         (setq lispm-agents-codex--rollout
-              (car (sort (seq-filter (lambda (file) (string-suffix-p (concat id ".jsonl") file))
-                                     (lispm-agents-codex--files))
-                         (lambda (a b) (> (lispm-agents-file-time a) (lispm-agents-file-time b)))))))
+              (or (lispm-agents-codex--known-rollout id)
+                  (car (sort (seq-filter (lambda (file) (string-suffix-p (concat id ".jsonl") file))
+                                         (lispm-agents-codex--files))
+                             (lambda (a b) (> (lispm-agents-file-time a) (lispm-agents-file-time b))))))))
       lispm-agents-codex--rollout)))
 
 (defun lispm-agents-codex-turn-ended-p (objects)
@@ -202,9 +213,15 @@ the last turn they tell of was completed or aborted."
             '("task_complete" "turn_complete" "turn_aborted"))))
 
 (defun lispm-agents-codex--ready-p (terminal)
-  "Return non-nil when the Codex of TERMINAL waits for its user's next message."
+  "Return non-nil when the Codex of TERMINAL waits for its user's next message.
+What was read in the background may know, see `lispm-agents-known-turn';
+else its rollout's end is read."
   (when-let* ((file (lispm-agents-codex--terminal-rollout terminal)))
-    (lispm-agents-codex-turn-ended-p (lispm-agents-read-json-tail file))))
+    (pcase (lispm-agents-known-turn
+            'codex (buffer-local-value 'lispm-agents-buffer-session-id terminal) file)
+      ('ended t)
+      ('working nil)
+      (_ (lispm-agents-codex-turn-ended-p (lispm-agents-read-json-tail file))))))
 
 ;;;; Emacs's state, over MCP
 
