@@ -24,6 +24,7 @@ implementation:
 | Settings                  | Customize's variables, read and set for a window of settings     | [[file:lisp/lispm-settings.el][lispm-settings.el]]: ~lispm-model-status~, ~lispm-settings-change-hook~ |
 | Tool calls                | Elisp functions (~lispm-deftool~) on buffers, files, processes   | [[file:lisp/lispm-tools.el][lispm-tools.el]]                                          |
 | Execution loop            | the event loop: curl subprocesses and callbacks, never blocking  | [[file:lisp/lispm-runtime.el][lispm-runtime.el]]: ~lispm--request~ → ~lispm--dispatch~  |
+| Background programs       | callbacks once a program exits; a kernel beside Emacs may run it | [[file:lisp/lispm-exec.el][lispm-exec.el]]: ~lispm-exec~, ~lispm-exec-function~         |
 | Permissions, approval     | a tool call is an org heading: WAITING → APPROVED or DENIED      | ~lispm--todo-state-changed~, ~lispm-review~              |
 | Errors, recovery          | a turn stopped early waits at a condition heading for a restart  | ~lispm-signal~, ~lispm-restart~, ~lispm-condition-handlers~ |
 | Long-term memory, tasks   | org files (memory.org, tasks.org), consolidated past a budget    | [[file:lisp/lispm-memory.el][lispm-memory.el]]: ~lispm-memory-consolidate~ |

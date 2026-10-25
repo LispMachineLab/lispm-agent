@@ -45,6 +45,7 @@
 ;;; Code:
 
 (require 'lispm-core)
+(require 'lispm-exec)
 
 (defcustom lispm-journal-git t
   "Whether to take snapshots of a project's git work tree at every turn.
@@ -95,6 +96,14 @@ one by one through TRAMP.  Such a root has the in-memory journal only."
     (with-temp-buffer
       (when (zerop (apply #'call-process "git" nil '(t nil) nil args))
         (buffer-string)))))
+
+(defun lispm-journal--git-later (dir top args callback)
+  "Run git with ARGS on the journal DIR, work tree TOP, in the background;
+then call CALLBACK with its output, or nil when it failed."
+  (let ((process-environment (lispm-journal--environment dir top))
+        (default-directory top))
+    (lispm-exec "git" args (lambda (exit output _errors)
+                             (funcall callback (and (eql exit 0) output))))))
 
 (defconst lispm-journal--script
   "set -e
@@ -277,22 +286,24 @@ must see the files as that turn left them."
 A turn that changed nothing leaves no snapshot."
   (when-let* ((snapshot (lispm-journal--current agent))
               (before (plist-get snapshot :before)))
-    (let ((same (string-trim (or (lispm-journal--git (plist-get snapshot :dir) (plist-get snapshot :top)
-                                                     "rev-parse" (concat before "^{tree}"))
-                                 ""))))
+    (let ((message (format "%s turn %d" (lispm-agent-name agent) (lispm-agent-turn agent))))
       (lispm-journal--take
        agent snapshot
        (lambda ()
-         (lispm-journal--snapshot
-          (plist-get snapshot :top) (plist-get snapshot :dir)
-          :index (lispm-journal--index (plist-get snapshot :dir) agent)
-          :ref (plist-get snapshot :ref)
-          :message (format "%s turn %d" (lispm-agent-name agent) (lispm-agent-turn agent))
-          :author (symbol-name (lispm-agent-name agent))
-          :parent before :same same
-          :callback (lambda (_tree commit)
-                      (plist-put snapshot :after commit)
-                      (lispm-journal--taken snapshot))))))))
+         ;; The tree the turn began with, read without waiting for git.
+         (lispm-journal--git-later
+          (plist-get snapshot :dir) (plist-get snapshot :top) (list "rev-parse" (concat before "^{tree}"))
+          (lambda (same)
+            (lispm-journal--snapshot
+             (plist-get snapshot :top) (plist-get snapshot :dir)
+             :index (lispm-journal--index (plist-get snapshot :dir) agent)
+             :ref (plist-get snapshot :ref)
+             :message message
+             :author (symbol-name (lispm-agent-name agent))
+             :parent before :same (string-trim (or same ""))
+             :callback (lambda (_tree commit)
+                         (plist-put snapshot :after commit)
+                         (lispm-journal--taken snapshot))))))))))
 
 (defun lispm-journal--records (dir session)
   "The turns of SESSION the journal DIR holds, newest first, as plists.

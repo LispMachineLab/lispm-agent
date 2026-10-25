@@ -153,6 +153,42 @@ BODY can use `project', a scratch directory for agents to work in."
 
 ;;;; Transcript
 
+;;;; Programs run in the background
+
+(ert-deftest lispm-test-exec-runs-programs-in-the-background ()
+  (let* ((directory (make-temp-file "lispm-test-exec-" t))
+         (default-directory (file-name-as-directory directory))
+         (process-environment (cons "LISPM_EXEC_TEST=λ" process-environment))
+         (heard nil))
+    (unwind-protect
+        (progn
+          (lispm-exec "sh" '("-c" "printf '%s|%s|' \"$(pwd -P)\" \"$LISPM_EXEC_TEST\"; printf oops >&2; cat; exit 3")
+                      (lambda (&rest got) (setq heard got))
+                      :input "in \u4e2d")
+          ;; Never before it returns.
+          (should-not heard)
+          (should (lispm-test--wait (lambda () heard)))
+          (should (equal (list 3 (format "%s|λ|in \u4e2d" (file-truename directory)) "oops") heard)))
+      (delete-directory directory t))))
+
+(ert-deftest lispm-test-exec-says-what-did-not-run ()
+  (let ((heard nil))
+    (lispm-exec "lispm-no-such-program" nil (lambda (&rest got) (setq heard got)))
+    (should-not heard)
+    (should (lispm-test--wait (lambda () heard)))
+    (should (stringp (car heard)))
+    (should (equal '("" "") (cdr heard))))
+  (let ((heard nil))
+    (lispm-exec "sh" '("-c" "kill -TERM $$") (lambda (&rest got) (setq heard got)))
+    (should (lispm-test--wait (lambda () heard)))
+    (should (equal '("sh ended by signal 15" "" "") heard))))
+
+(ert-deftest lispm-test-exec-goes-through-its-function ()
+  (let* ((ran nil)
+         (lispm-exec-function (lambda (&rest arguments) (push arguments ran))))
+    (lispm-exec "git" '("status") #'ignore :input "x")
+    (should (equal (list (list "git" '("status") #'ignore :input "x")) ran))))
+
 (ert-deftest lispm-test-transcript-roundtrip ()
   "Model output survives rendering and parsing byte for byte."
   (let* ((tricky "* not a heading\n,* comma\n#+begin_src x\n#+end_src\nλ→∀\n\n")
