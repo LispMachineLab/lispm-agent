@@ -152,6 +152,13 @@
   "Hash table from the items last drawn to their text, so unchanged items
 are not drawn again.")
 
+(defvar-local lispm-chat--streamed nil
+  "What of a reply streaming in is drawn already, as (TEXT SHOWN LINES CODE):
+TEXT its complete lines, SHOWN them as `lispm-chat--markdown' shows them
+with nothing presented, LINES non-nil when SHOWN holds a line, CODE
+non-nil when a code block is open after TEXT.  Each redraw draws only
+the lines that came after.")
+
 (defvar-local lispm-chat--parsed nil
   "The items last read from the session, as a plist: :buffer and its :tick,
 where the response streaming in started, :live, the :stable items before
@@ -230,7 +237,7 @@ it, and all the :items.")
   "Items of the response streaming into the session BUFFER."
   (mapcar (lambda (segment)
             (pcase (plist-get segment :kind)
-              ('text (list :kind 'text :text (plist-get segment :text)))
+              ('text (list :kind 'text :text (plist-get segment :text) :live t))
               ('thinking (list :kind 'thought :key "thought@live" :text (plist-get segment :text) :live t))
               ('tool (list :kind 'tool :name (plist-get segment :name) :state "WRITING"))))
           (lispm-live-segments buffer)))
@@ -360,11 +367,12 @@ Lines that wrap are indented by PREFIX too."
   "TEXT with the objects it names presented, to act on with RET or a click."
   (lispm-present-text text (lispm-chat--root)))
 
-(defun lispm-chat--inline (line &optional defined)
+(defun lispm-chat--inline (line &optional defined plain)
   "LINE of a reply with its Markdown headings, bold, italics and code shown
 as faces.  Code naming a symbol or a file is presented as the object,
 and code naming what this Emacs lacks is marked; DEFINED are the names
-the reply defines."
+the reply defines.  PLAIN presents no code, for a reply still streaming
+in: it is presented once it is complete."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
                 line)))
@@ -377,7 +385,9 @@ the reply defines."
       ;; The match data say what of the match to replace: presenting
       ;; the code must leave them as they are.
       (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
-                    (save-match-data (lispm-present-code code (lispm-chat--root) defined))))
+                    (if plain
+                        code
+                      (save-match-data (lispm-present-code code (lispm-chat--root) defined)))))
       line t t))))
 
 (defun lispm-chat--italics (line)
@@ -401,16 +411,58 @@ the code's `lispm-chat-code' property marks."
           (setq start end))))
     (apply #'concat (nreverse (cons (substring line start) parts)))))
 
-(defun lispm-chat--markdown (text)
+(defun lispm-chat--fence-p (line)
+  "Return non-nil when LINE of a reply opens or closes a code block."
+  (string-match-p "\\`[ \t]*```" line))
+
+(defun lispm-chat--markdown-line (line in-code &optional defined plain)
+  "LINE of a reply, no fence, as `lispm-chat--markdown' shows it: as code
+when IN-CODE, else see `lispm-chat--inline' for DEFINED and PLAIN."
+  (if in-code
+      (propertize (concat "  " line) 'face 'lispm-chat-code)
+    (lispm-chat--inline line defined plain)))
+
+(defun lispm-chat--markdown (text &optional plain)
   "TEXT of a reply, its Markdown shown as faces.
-Code blocks lose their fences and keep their lines as they are."
-  (let ((defined (lispm-ground-definitions text))
+Code blocks lose their fences and keep their lines as they are.  PLAIN
+presents no code, see `lispm-chat--inline'."
+  (let ((defined (and (not plain) (lispm-ground-definitions text)))
         in-code out)
     (dolist (line (split-string text "\n"))
-      (cond ((string-match-p "\\`[ \t]*```" line) (setq in-code (not in-code)))
-            (in-code (push (propertize (concat "  " line) 'face 'lispm-chat-code) out))
-            (t (push (lispm-chat--inline line defined) out))))
+      (if (lispm-chat--fence-p line)
+          (setq in-code (not in-code))
+        (push (lispm-chat--markdown-line line in-code defined plain) out)))
     (string-join (nreverse out) "\n")))
+
+(defun lispm-chat--streaming-markdown (text)
+  "TEXT of a reply streaming in, as `lispm-chat--markdown' shows it with
+nothing presented.  Its complete lines are kept as drawn, in
+`lispm-chat--streamed', so each step draws only those that came since:
+drawn whole, a long reply took longer at every step."
+  (pcase-let* ((`(,source ,shown ,lines ,code)
+                (if (and lispm-chat--streamed (string-prefix-p (car lispm-chat--streamed) text))
+                    lispm-chat--streamed
+                  (list "" "" nil nil)))
+               (from (length source))
+               (end (let ((at from) (newline (string-search "\n" text from)))
+                      (while newline
+                        (setq at (1+ newline) newline (string-search "\n" text at)))
+                      at)))
+    (when (> end from)
+      (let (new)
+        (dolist (line (split-string (substring text from (1- end)) "\n"))
+          (if (lispm-chat--fence-p line)
+              (setq code (not code))
+            (push (lispm-chat--markdown-line line code nil t) new)))
+        (when new
+          (setq shown (string-join (if lines (cons shown (nreverse new)) (nreverse new)) "\n")
+                lines t)))
+      (setq source (substring text 0 end)))
+    (setq lispm-chat--streamed (list source shown lines code))
+    (let ((last (substring text end)))
+      (cond ((lispm-chat--fence-p last) shown)
+            (lines (concat shown "\n" (lispm-chat--markdown-line last code nil t)))
+            (t (lispm-chat--markdown-line last code nil t))))))
 
 (defconst lispm-chat--tools
   `(("read_file" :shown ,(lispm-tr-noop "Read" "tool") :result read)
@@ -688,9 +740,13 @@ it names one."
            (lispm-present-in shown at (+ at (length from)) (list 'agent from))))
        (concat "\n" (lispm-chat--present shown) "\n")))
     ('text
-     (concat "\n" (lispm-chat--indent (lispm-chat--present (lispm-chat--markdown (plist-get item :text)))
-                                      "  " "⏺ ")
-             "\n"))
+     (let ((text (plist-get item :text)))
+       (concat "\n" (lispm-chat--indent (if (plist-get item :live)
+                                            ;; Presented and checked once complete.
+                                            (lispm-chat--streaming-markdown text)
+                                          (lispm-chat--present (lispm-chat--markdown text)))
+                                        "  " "⏺ ")
+               "\n")))
     ('thought
      (let ((text (plist-get item :text)))
        (concat "\n"
@@ -1193,7 +1249,8 @@ checked or not as `lispm-ground-code' now says."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
-        (setq lispm-chat--parsed nil)
+        (setq lispm-chat--parsed nil
+              lispm-chat--streamed nil)
         (clrhash lispm-chat--rendered)
         (lispm-chat--redraw)))))
 
