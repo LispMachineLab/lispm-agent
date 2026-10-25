@@ -229,7 +229,7 @@ With a prefix argument, choose its ROLE as well."
      (list (read-directory-name (lispm-tr "New session in: ")
                                 (if agent (lispm-agent-root agent) default-directory)
                                 nil t)
-           (and current-prefix-arg (lispm--read-role (lispm-tr "Role"))))))
+           (and current-prefix-arg (lispm-read-role (lispm-tr "Role"))))))
   (lispm-terminal-show (lispm-start role (lispm--project-root directory))))
 
 (defun lispm-terminal--session-ended (agent)
