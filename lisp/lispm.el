@@ -147,13 +147,15 @@ you write under its last heading and send with C-c RET."
 
 (defvar lispm--last-role nil "Name of the role last chosen.")
 
-(defun lispm--read-role (prompt)
+(defun lispm-read-role (prompt)
   "Read a role name with PROMPT; return the symbol."
   (let* ((names (mapcar (lambda (r) (symbol-name (lispm-role-name r))) (lispm-roles)))
          (default (if (member lispm--last-role names) lispm--last-role
                     (symbol-name lispm-default-role))))
     (setq lispm--last-role (completing-read (format-prompt prompt default) names nil t nil nil default))
     (intern lispm--last-role)))
+
+(define-obsolete-function-alias 'lispm--read-role #'lispm-read-role "0.8.0")
 
 (defun lispm--read-agent (prompt)
   "Read the name of a running agent with PROMPT; return the agent."
@@ -176,7 +178,7 @@ you write under its last heading and send with C-c RET."
   "Start a new agent in the current project, as starting Claude Code there would.
 The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
-  (interactive (list (and current-prefix-arg (lispm--read-role (lispm-tr "Role")))))
+  (interactive (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))))
   (lispm-show (lispm-start role directory)))
 
 ;;;###autoload
