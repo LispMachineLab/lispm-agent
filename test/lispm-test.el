@@ -6300,6 +6300,33 @@ inside words, as in 2*3*4 or snake_case, nor inside code."
                               (number-sequence 0 (1- (length shown)))))))
     (should (equal (car (funcall italic "**bold** and *it* and *more*")) "bold and it and more"))))
 
+(ert-deftest lispm-test-chat-streaming-markdown ()
+  "A reply streaming in is drawn from its complete lines, kept as drawn,
+and its last line, as `lispm-chat--markdown' draws it whole with nothing
+presented: at every step, inside code blocks and after them, and from
+the start again for another reply."
+  (with-temp-buffer
+    (let ((text "# Plan\nRun `ls` and **then** *this*.\n```sh\nmake test\n\n```\nDone, see `README.md`.\n\nNext"))
+      (dotimes (k (1+ (length text)))
+        (let ((part (substring text 0 k)))
+          (should (equal-including-properties (lispm-chat--streaming-markdown part)
+                                              (lispm-chat--markdown part t)))))
+      (should (equal (car lispm-chat--streamed) (string-remove-suffix "Next" text)))
+      (should (equal-including-properties (lispm-chat--streaming-markdown "Other\n*reply*")
+                                          (lispm-chat--markdown "Other\n*reply*" t))))))
+
+(ert-deftest lispm-test-chat-live-reply-presented-once ()
+  "A reply streaming in presents nothing it names: that is looked up once,
+when it is complete."
+  (let ((presented 0))
+    (cl-letf (((symbol-function 'lispm-present-code) (lambda (code &rest _) (cl-incf presented) code))
+              ((symbol-function 'lispm-present-text) (lambda (text &rest _) (cl-incf presented) text)))
+      (with-temp-buffer
+        (should (string-search "ls" (lispm-chat--item (list :kind 'text :text "Run `ls` now" :live t))))
+        (should (= presented 0))
+        (lispm-chat--item (list :kind 'text :text "Run `ls` now"))
+        (should (= presented 2))))))
+
 (ert-deftest lispm-test-chat-items ()
   "The chat reads the conversation, and only it, out of the org document."
   (with-temp-buffer
