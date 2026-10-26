@@ -6034,9 +6034,18 @@ handed over once nothing more can be."
             (should (equal (lispm-form-value 'name) "Rex"))
             (lispm-test--form-press 'barks)
             (should (eq (lispm-form-value 'barks) t))
-            (cl-letf (((symbol-function 'widget-choose) (lambda (&rest _) '(big))))
-              (lispm-test--form-press 'size))
+            ;; Whatever shows the form shows a pop-up menu's choices.
+            (let* ((asked nil)
+                   (lispm-form-choose-function
+                    (lambda (label choices value _event) (setq asked (list label choices value)) '(big))))
+              (lispm-test--form-press 'size)
+              (should (equal asked '("Size" ((small . "Small") (big . "Big")) nil))))
             (should (eq (lispm-form-value 'size) 'big))
+            (should (string-match-p "Big ▾" (buffer-string)))
+            ;; Drawn again, as when the look changes, it keeps its values.
+            (lispm-form-redraw)
+            (should (= drawn 5))
+            (should (equal (lispm-form-value 'name) "Rex"))
             (should (string-match-p "Big ▾" (buffer-string)))
             ;; A value its check refuses is refused.
             (lispm-test--form-type 'age "two")

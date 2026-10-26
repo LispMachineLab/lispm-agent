@@ -144,9 +144,10 @@ whether it is required, how it is checked, and when it is shown, as a function o
 ~lispm-form~ draws it with Emacs's widgets (wid-edit.el), which edit, move from field to field
 and press buttons as Customize does, in a graphical frame or a text terminal alike; it is drawn
 again when a choice shows or hides fields, keeping what was typed. A form knows nothing of
-where it is shown: whatever shows it dresses it, as a desktop does in its look, through two
-points of contact, ~lispm-form-glyph-function~, the pictures of its buttons, check boxes, radio
-buttons and pop-up menus, and ~lispm-form-drawn-hook~. Being data, a form is one an agent could
+where it is shown: whatever shows it dresses it, as a desktop does in its look, through three
+points of contact: ~lispm-form-glyph-function~, the pictures of its buttons, check boxes, radio
+buttons and pop-up menus; ~lispm-form-choose-function~, which shows a pop-up menu's choices; and
+~lispm-form-drawn-hook~, run whenever it is drawn, as ~lispm-form-redraw~ draws it again. Being data, a form is one an agent could
 fill in as well as a person.
 
 *An app is a character too*, of a kind: its soul is its skill (section 11), whose code its

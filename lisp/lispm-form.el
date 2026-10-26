@@ -60,7 +60,9 @@
 ;; A form knows nothing of where it is shown.  Whatever shows it may
 ;; dress it, as a desktop does in its look: `lispm-form-glyph-function'
 ;; gives the pictures of its buttons, check boxes, radio buttons and
-;; pop-up menus, and `lispm-form-drawn-hook' runs once it is drawn.
+;; pop-up menus, `lispm-form-choose-function' shows a pop-up menu's
+;; choices, and `lispm-form-drawn-hook' runs once it is drawn, as
+;; `lispm-form-redraw' draws it again, when the look changes, say.
 ;; Without them, it is drawn as text, which a text terminal shows too.
 
 ;;; Code:
@@ -79,6 +81,13 @@ It is called with KIND, STATE and LABEL:
        presses, LABEL its label;
   KIND `popup', a pop-up menu, STATE nil, LABEL what it shows.
 It returns an image, or nil for the control drawn as text.")
+
+(defvar lispm-form-choose-function #'lispm-form-choose
+  "Function showing the choices of a pop-up menu of a form; it returns one.
+It is called with the field's LABEL, its CHOICES, a list of (VALUE .
+TEXT), the VALUE chosen now, and the EVENT that pressed the menu, if
+any, with point on the menu.  It returns (VALUE), the choice made, or
+nil when none was.")
 
 (defvar lispm-form-drawn-hook nil
   "Normal hook run in a form's buffer each time it is drawn.")
@@ -332,12 +341,9 @@ Where pictures cannot be shown, the control is drawn as text anyway."
                              :tag (concat shown " ▾")
                              :tag-glyph (lispm-form--glyph 'popup nil shown)
                              :notify (lambda (_widget &optional _child event)
-                                       (when-let* ((choice (widget-choose
-                                                            (or label lispm-form--title)
-                                                            (mapcar (lambda (choice)
-                                                                      (cons (cdr choice) (list (car choice))))
-                                                                    choices)
-                                                            event)))
+                                       (when-let* ((choice (funcall lispm-form-choose-function
+                                                                    (or label lispm-form--title)
+                                                                    choices value event)))
                                          (lispm-form--set key (car choice) t)))))
          (insert "\n")))
       ('picture
@@ -359,6 +365,19 @@ Where pictures cannot be shown, the control is drawn as text anyway."
       (_ (error "No type of field %S" type)))
     (when-let* ((help (plist-get props :help)))
       (insert (propertize (concat "  " help) 'face 'shadow) "\n"))))
+
+(defun lispm-form-choose (label choices _value event)
+  "Show CHOICES, a list of (VALUE . TEXT), as LABEL's; return (VALUE) chosen.
+A menu for EVENT, if it is the mouse's, else Emacs's own way for the
+keyboard (see `widget-choose')."
+  (widget-choose label
+                 (mapcar (lambda (choice) (cons (cdr choice) (list (car choice)))) choices)
+                 event))
+
+(defun lispm-form-redraw ()
+  "Draw the form in this buffer again, as it is, point staying where it was."
+  (when (derived-mode-p 'lispm-form-mode)
+    (lispm-form--draw)))
 
 (defun lispm-form--read-picture (old)
   "Read the file of a picture, starting from OLD's directory."
