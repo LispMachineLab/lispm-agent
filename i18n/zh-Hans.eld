@@ -49,6 +49,7 @@
   (("tool" . "Ask") . "询问")
   (("tool" . "Message") . "消息")
   (("tool" . "Agents") . "智能体")
+  (("tool" . "Start") . "启动")
   (("tool" . "Skill") . "技能")
   (("tool" . "Test") . "测试")
   (("tool" . "Definitions") . "定义")

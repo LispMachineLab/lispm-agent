@@ -49,6 +49,7 @@
   (("tool" . "Ask") . "依頼")
   (("tool" . "Message") . "メッセージ")
   (("tool" . "Agents") . "エージェント")
+  (("tool" . "Start") . "起動")
   (("tool" . "Skill") . "スキル")
   (("tool" . "Test") . "テスト")
   (("tool" . "Definitions") . "定義")

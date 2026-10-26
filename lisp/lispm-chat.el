@@ -514,6 +514,7 @@ drawn whole, a long reply took longer at every step."
     ("task_list" :shown ,(lispm-tr-noop "Tasks" "tool"))
     ("ask_agent" :shown ,(lispm-tr-noop "Ask" "tool")) ("send_message" :shown ,(lispm-tr-noop "Message" "tool"))
     ("list_agents" :shown ,(lispm-tr-noop "Agents" "tool"))
+    ("start_agent" :shown ,(lispm-tr-noop "Start" "tool"))
     ("search_tools" :shown "ToolSearch") ("skill" :shown ,(lispm-tr-noop "Skill" "tool"))
     ("apropos" :shown "Apropos") ("read_info" :shown "Info")
     ("web_search" :shown "WebSearch") ("web_fetch" :shown "WebFetch")

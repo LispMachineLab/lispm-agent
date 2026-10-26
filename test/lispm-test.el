@@ -1785,7 +1785,7 @@ a role is kept to; one without the skill tool is shown no skills."
                       "remember" "recall" "task_add" "task_update" "task_list" "ask_agent"
                       "send_message" "return_value" "run_lisp" "search_tools" "skill"))
         (should (member name names)))
-      (dolist (name '("write_skill" "read_info" "inspect_agent" "forget" "list_agents"))
+      (dolist (name '("write_skill" "read_info" "inspect_agent" "forget" "list_agents" "start_agent"))
         (should-not (member name names))
         (should (lispm-tool-deferred (lispm-get-tool name)))))))
 
@@ -5025,6 +5025,94 @@ Its policy is the stricter of its role's and its caller's."
                                        lispm-test--requests))
              (results (alist-get 'content (aref (alist-get 'messages helper-request) 2))))
         (should (string-match-p "Denied by policy" (alist-get 'content (aref results 0))))))))
+
+(ert-deftest lispm-test-start-agent ()
+  "start_agent starts agents that work on their own, bounded by their caller.
+The caller waits for none of them, and they stay once they have replied."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes." :policy '((write . auto)))
+    (lispm-defrole writer "Writes docs." :policy '((write . auto)))
+    (let ((boss (lispm-defagent boss :root project :policy '((write . ask)))))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t0" "search_tools" '((query . "select:start_agent"))))
+                    ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "start_agent"
+                                                        '((role . "reviewer") (request . "Review the parser.")))
+                                      (lispm-test--tool "t2" "start_agent"
+                                                        '((role . "writer") (request . "Document the parser."))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Started both.")))
+              (reviewer@project hang)
+              (writer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Documented.")))))
+      (lispm-tell boss "get the parser reviewed and documented")
+      ;; The caller's turn ends while the reviewer still works.
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (lispm-get-agent "writer@project" t)
+                                                (funcall (lispm-test--idle-p (lispm-get-agent "writer@project")))))))
+      (let ((reviewer (lispm-get-agent "reviewer@project"))
+            (writer (lispm-get-agent "writer@project"))
+            (results (let ((messages (alist-get 'messages
+                                                (seq-find (lambda (body) (eq (lispm-test--agent-name body) 'boss))
+                                                          lispm-test--requests))))
+                       (alist-get 'content (aref messages (1- (length messages)))))))
+        (should (eq (lispm-agent-state reviewer) 'requesting))
+        (should (string-match-p "\\`Started reviewer@project (reviewer, in "
+                                (alist-get 'content (aref results 0))))
+        (should (string-match-p "\\`Started writer@project (writer, in "
+                                (alist-get 'content (aref results 1))))
+        ;; Each got its request from the caller, and its caller's ceiling.
+        (dolist (agent (list reviewer writer))
+          (should (file-equal-p (lispm-agent-root agent) project))
+          (should (string-match-p "Message from boss" (lispm-test--transcript agent)))
+          (should (string-match-p "^#\\+lispm_ceiling: .*(write \\. ask)" (lispm-test--transcript agent)))
+          (should (eq (lispm-policy-action agent 'write) 'ask)))
+        ;; The writer, which replied, stays.
+        (accept-process-output nil 0.1)
+        (should (memq writer (lispm-agents)))
+        (should (buffer-live-p (lispm-agent-buffer writer)))))))
+
+(ert-deftest lispm-test-start-agent-elsewhere ()
+  "An agent started outside its caller's project waits for the user's approval.
+It may do there what its caller may do in its own, so the call asks
+whatever the policy says, even once the tool is allowed for good."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes.")
+    (let* ((other (file-name-as-directory (expand-file-name "../other" project)))
+           (boss (lispm-defagent boss :root project :policy '((comm . auto))))
+           (tool (lispm-get-tool "start_agent")))
+      (make-directory other t)
+      (make-directory (expand-file-name "sub" project) t)
+      (should (eq (lispm-tool-action boss tool '((role . "reviewer") (request . "r"))) 'auto))
+      (should (eq (lispm-tool-action boss tool '((role . "reviewer") (request . "r") (project . "sub"))) 'auto))
+      (push "start_agent" (lispm-agent-allowed boss))
+      (pcase-let ((`(,action ,reason) (lispm-tool-decision boss tool `((role . "reviewer") (request . "r")
+                                                                        (project . ,other)))))
+        (should (eq action 'ask))
+        (should (string-match-p "outside the project of boss" reason)))
+      ;; Neither a directory that is none nor a role that is none starts anything.
+      (should (string-match-p "No directory" (car (lispm-test--call boss "start_agent"
+                                                                     '((role . "reviewer") (request . "r")
+                                                                       (project . "nowhere"))))))
+      (should (string-match-p "No role named" (car (lispm-test--call boss "start_agent"
+                                                                      '((role . "nobody") (request . "r"))))))
+      (should (equal (lispm-agents) (list boss)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t0" "search_tools" '((query . "select:start_agent"))))
+                    ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "start_agent"
+                                                        `((role . "reviewer") (request . "Review it.")
+                                                          (project . ,other))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Started.")))
+              (reviewer@other ,(lispm-test--msg "end_turn" (lispm-test--text "Reviewed.")))))
+      (lispm-tell boss "get the other project reviewed")
+      (should (lispm-test--wait (lambda () (equal (lispm-test--asked boss) "start_agent"))))
+      (should (equal (lispm-agents) (list boss)))
+      (lispm-approve-for boss)
+      (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                (lispm-get-agent "reviewer@other" t)
+                                                (funcall (lispm-test--idle-p (lispm-get-agent "reviewer@other")))))))
+      (should (file-equal-p (lispm-agent-root (lispm-get-agent "reviewer@other")) other)))))
 
 ;;;; Role files
 
