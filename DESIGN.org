@@ -16,6 +16,7 @@ implementation:
 |---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
 | Character                 | someone: a soul, a memory and a past; a standing agent per place | [[file:lisp/lispm-characters.el][lispm-characters.el]]: ~lispm-character-agent~        |
+| Forms                     | fields written as data, drawn with Emacs's widgets               | [[file:lisp/lispm-form.el][lispm-form.el]]: ~lispm-form~                           |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
 | Terminal                  | a frame of sessions, a listener and a who line, keys only        | [[file:lisp/lispm-terminal.el][lispm-terminal.el]]: ~lispm-terminal~                   |
@@ -132,10 +133,22 @@ that drives an agent drives it, sessions, tools, policy, handovers; what it adds
 
 A character is its directory, ~characters/<name>/~ in ~lispm-directory~: ~character.org~, written as
 a role file is (keywords, then the soul), its picture, ~self.org~, ~memory.org~, ~episodes/~, and
-the ~tasks.org~ of its own conversation. ~lispm-save-character~ makes or changes one, as an app's
-form does; ~lispm-new-character~ makes one in Emacs, its file to fill in, read again when saved;
-~lispm-character-change-functions~ tells a desktop when to show an app of it, which the agent
-knows nothing of.
+the ~tasks.org~ of its own conversation. ~lispm-character-form~ makes or changes one, the form
+~lispm-new-character~ and ~lispm-edit-character~ show; ~lispm-save-character~ does it from Lisp,
+and its file, edited by hand, is read again when saved. ~lispm-character-change-functions~ tells a
+desktop when to show an app of it, which the agent knows nothing of.
+
+*Forms* ([[file:lisp/lispm-form.el][lispm-form.el]]). A form is data: a title and fields, each a key and a plist
+saying its type (~text~, ~text-area~, ~picture~, ~choice~, ~radio~, ~check~, ~heading~), its label,
+whether it is required, how it is checked, and when it is shown, as a function of the values.
+~lispm-form~ draws it with Emacs's widgets (wid-edit.el), which edit, move from field to field
+and press buttons as Customize does, in a graphical frame or a text terminal alike; it is drawn
+again when a choice shows or hides fields, keeping what was typed. A form knows nothing of
+where it is shown: whatever shows it dresses it, as a desktop does in its look, through three
+points of contact: ~lispm-form-glyph-function~, the pictures of its buttons, check boxes, radio
+buttons and pop-up menus; ~lispm-form-choose-function~, which shows a pop-up menu's choices; and
+~lispm-form-drawn-hook~, run whenever it is drawn, as ~lispm-form-redraw~ draws it again. Being data, a form is one an agent could
+fill in as well as a person.
 
 *An app is a character too*, of a kind: its soul is its skill (section 11), whose code its
 conversations evaluate from the start, so its tools are theirs; its picture is its icon; it
