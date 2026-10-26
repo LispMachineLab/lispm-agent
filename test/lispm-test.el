@@ -9688,6 +9688,8 @@ Return (STATUS . OUTPUT)."
       (process-send-string process input))
     (process-send-eof process)
     (lispm-test--wait (lambda () (not (process-live-p process))) 20)
+    ;; Output may still wait in the pipe once the process has exited.
+    (while (accept-process-output process 0.05))
     (prog1 (cons (process-exit-status process)
                  (decode-coding-string (with-current-buffer output (buffer-string)) 'utf-8))
       (kill-buffer output))))
