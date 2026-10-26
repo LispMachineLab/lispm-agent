@@ -6015,6 +6015,10 @@ handed over once nothing more can be."
             (should (member '(radio on nil) glyphs))
             (should (member '(button default "Adopt") glyphs))
             (should (member '(popup nil "Choose…") glyphs))
+            ;; Each control says what it is, to be drawn otherwise, as focused.
+            (should (equal (delq nil (mapcar (lambda (widget) (widget-get widget :lispm-form-control))
+                                             (lispm-test--form-buttons)))
+                           '(radio radio (popup nil "Choose…") (button nil "Cancel") (button default "Adopt"))))
             (should (= drawn 1))
             ;; It starts in its first field.
             (should (eq (lispm-form--key-at (point)) 'name))

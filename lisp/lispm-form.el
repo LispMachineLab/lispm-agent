@@ -63,7 +63,11 @@
 ;; pop-up menus, `lispm-form-choose-function' shows a pop-up menu's
 ;; choices, and `lispm-form-drawn-hook' runs once it is drawn, as
 ;; `lispm-form-redraw' draws it again, when the look changes, say.
-;; Without them, it is drawn as text, which a text terminal shows too.
+;; Each control's widget says what it is, as the glyph function was
+;; asked, in its :lispm-form-control: `check' or `radio' (its state is
+;; its value), or (KIND STATE LABEL) for a button or a pop-up menu, so
+;; that it can be drawn otherwise, as focused.  Without them, a form is
+;; drawn as text, which a text terminal shows too.
 
 ;;; Code:
 
@@ -215,7 +219,7 @@ Where pictures cannot be shown, the control is drawn as text anyway."
   (widget-create 'push-button
                  :tag label
                  :tag-glyph (lispm-form--glyph 'button (and default 'default) label)
-                 :lispm-form-default default
+                 :lispm-form-control (list 'button (and default 'default) label)
                  :notify (lambda (&rest _) (funcall action))))
 
 (defun lispm-form--key-at (position)
@@ -315,6 +319,7 @@ Where pictures cannot be shown, the control is drawn as text anyway."
                            :on "[X]" :off "[ ]"
                            :on-glyph (lispm-form--glyph 'check 'on)
                            :off-glyph (lispm-form--glyph 'check 'off)
+                           :lispm-form-control 'check
                            :value value
                            :notify (lambda (widget &rest _)
                                      (lispm-form--set key (widget-value widget) t))))
@@ -328,6 +333,7 @@ Where pictures cannot be shown, the control is drawn as text anyway."
                              :on "(*)" :off "( )"
                              :on-glyph (lispm-form--glyph 'radio 'on)
                              :off-glyph (lispm-form--glyph 'radio 'off)
+                             :lispm-form-control 'radio
                              :value (equal value choice)
                              :action (lambda (&rest _) (lispm-form--set key choice t))))
          (insert " " text "   "))
@@ -340,6 +346,7 @@ Where pictures cannot be shown, the control is drawn as text anyway."
           key (widget-create 'push-button
                              :tag (concat shown " ▾")
                              :tag-glyph (lispm-form--glyph 'popup nil shown)
+                             :lispm-form-control (list 'popup nil shown)
                              :notify (lambda (_widget &optional _child event)
                                        (when-let* ((choice (funcall lispm-form-choose-function
                                                                     (or label lispm-form--title)
