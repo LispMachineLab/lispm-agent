@@ -495,7 +495,8 @@ policy of the agent acting in LispM decides."
      "List the agents working in this Emacs: LispM's own agents (role, project, state), \
 the agents of other programs, such as you, and the roles LispM starts helpers from.")
     ("send_message" lispm-agents-bridge--tool-send-message
-     ((to . ((type . "string") (description . "Name of the receiving agent, as list_agents gives it.")))
+     ((to . ((type . "string") (description . "Name of the receiving agent or LispM character, as \
+list_agents gives it.")))
       (text . ((type . "string")
                (description . "The message, self-contained: they cannot see your conversation. \
 Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))))
@@ -504,7 +505,8 @@ Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))))
 as they are free.  Use ask_agent when you need an answer.")
     ("ask_agent" lispm-agents-bridge--tool-ask-agent
      ((agent . ((type . "string")
-                (description . "A running agent, or a role to start a helper from: list_agents shows them.")))
+                (description . "A running agent, a LispM character (by its name, as Ada), or a role to \
+start a helper from: list_agents shows them.")))
       (request . ((type . "string")
                   (description . "What you need, self-contained: they cannot see your conversation. \
 Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))))
@@ -552,8 +554,16 @@ ask_agent reach them, and what they send comes to you as your user's message: [M
 NAME]; [Request ID from NAME], which you answer with reply; [Reply from NAME to request ID]. \
 search_tools finds LispM's skills, the manuals of the parts and apps of this system, and its \
 tools: load a skill with skill, call a tool with call_tool. A call that changes things may \
-wait for the user's approval in Emacs."
-            (lispm-agents-bridge-name terminal))))
+wait for the user's approval in Emacs. LispM's characters are someone, not tools: when your \
+user writes @Name for one of them, as \"tell @Ada\" or \"have @Ada look at this\", pass it \
+on with send_message or ask_agent to Name, and it takes it up in a conversation of its own in \
+your directory.%s"
+            (lispm-agents-bridge-name terminal)
+            (if-let* ((characters (seq-remove #'lispm-character-skill (lispm-characters))))
+                (concat " The characters now: "
+                        (mapconcat #'lispm-character-title* characters ", ")
+                        "; apps are characters too, which list_agents names.")
+              ""))))
 
 (setq lispm-agents-mcp-extra-tools
       (append (seq-remove (lambda (tool) (assoc (car tool) lispm-agents-bridge-tools))

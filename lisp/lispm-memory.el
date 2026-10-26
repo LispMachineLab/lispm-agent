@@ -31,6 +31,15 @@
 ;; prompt, works in no project: its own memory is the system's,
 ;; system/memory.org, in place of a project's.
 ;;
+;; A character has a memory of its own besides, which goes with it to
+;; every place it has a conversation in:
+;;
+;;   characters/<name>/memory.org   what it learned that is its own, as
+;;                                  what it knows of the people it works
+;;                                  with, wherever it learned it.
+;;
+;; Its own conversation, in no project, has that memory for its own.
+;;
 ;; One heading per fact, with tags and CREATED/UPDATED properties, and
 ;; RECALLED/RECALLS: when `recall' last returned it, and how often.  A
 ;; memory past its budget (`lispm-memory-max-entries',
@@ -97,25 +106,40 @@ A small, cheap model does; nil is the agent's own model."
   :group 'lispm)
 
 (defun lispm-memory-home (agent)
-  "The scope of AGENT's own memory: `system' or `project'.
+  "The scope of AGENT's own memory: `system', `self' or `project'.
 An agent of the whole system (see `lispm-make-agent') works in no
-project; its memory is the system's."
-  (if (lispm-agent-system agent) 'system 'project))
+project; its memory is the system's.  Nor does a character's own
+conversation (see `lispm-character-home-p'), whose memory is the
+character's."
+  (cond ((lispm-agent-system agent) 'system)
+        ((lispm-character-home-p agent) 'self)
+        (t 'project)))
 
 (defun lispm-memory--scope (agent scope)
-  "SCOPE as AGENT has it: nil and `project' stand for its own memory."
-  (if (memq scope '(nil project)) (lispm-memory-home agent) scope))
+  "SCOPE as AGENT has it: nil and `project' stand for its own memory.
+An error for `self' if AGENT is no character's."
+  (cond ((memq scope '(nil project)) (lispm-memory-home agent))
+        ((and (eq scope 'self) (not (lispm-agent-character agent)))
+         (error "You are no character, with a memory of your own: use project or role"))
+        (t scope)))
+
+(defun lispm-memory--scopes (agent)
+  "The scopes of the memory AGENT reads, its own first: a list."
+  (delete-dups (mapcar (lambda (scope) (lispm-memory--scope agent scope))
+                       (if (lispm-agent-character agent) '(self project role) '(project role)))))
 
 (defun lispm-memory-file (agent &optional scope role)
   "File of AGENT's memory in SCOPE.
 SCOPE `project' (the default) is AGENT's own: its project's, shared by
 the agents of the project, or, for an agent of the whole system, the
 system's, as SCOPE `system' is; `role' is shared by the agents of its
-role, or of ROLE, across projects."
+role, or of ROLE, across projects; `self' is its character's, in all
+of the character's conversations."
   (expand-file-name "memory.org"
                     (pcase (lispm-memory--scope agent scope)
                       ('role (lispm-role-directory (or role (lispm-agent-role agent))))
                       ('system (lispm-system-directory))
+                      ('self (lispm-character-directory (lispm-agent-character agent)))
                       (_ (lispm-project-directory (lispm-agent-root agent))))))
 
 (defun lispm-tasks-file (agent)
@@ -146,13 +170,18 @@ TO-CHANGE is as for `lispm-memory--visit'."
                          ('role (format "#+title: Memory of the %s role\n"
                                         (or role (lispm-agent-role agent))))
                          ('system "#+title: Memory of the system\n")
+                         ('self (format "#+title: Memory of %s\n"
+                                        (if-let* ((character (lispm-agent-character* agent)))
+                                            (lispm-character-title* character)
+                                          (lispm-agent-character agent))))
                          (_ (format "#+title: Memory of %s\n"
                                     (abbreviate-file-name (lispm-agent-root agent)))))
                        to-change))
 
 (defun lispm-memory--scope-entries (agent scope &optional role)
   "Entries of AGENT's memory in SCOPE (or ROLE's), without creating its file.
-Each has its :scope (`project', `role' or `system') and its :file too."
+Each has its :scope (`project', `role', `system' or `self') and its
+:file too."
   (let ((file (lispm-memory-file agent scope role))
         (scope (lispm-memory--scope agent scope)))
     (and (file-exists-p file)
@@ -266,12 +295,16 @@ stays on record."
     (format "%s %s memory \"%s\"." (if existing "Updated" "Saved") scope title)))
 
 (defun lispm-memory--label (entry)
-  "Title of a memory ENTRY, with its tags and, for role memory, its scope."
+  "Title of a memory ENTRY, with its tags and, for role memory and a
+character's own, its scope."
   (concat (plist-get entry :title)
           (if (plist-get entry :tags)
               (format " [%s]" (string-join (plist-get entry :tags) ", "))
             "")
-          (if (eq (plist-get entry :scope) 'role) " (role memory)" "")))
+          (pcase (plist-get entry :scope)
+            ('role " (role memory)")
+            ('self " (your own)")
+            (_ ""))))
 
 (defun lispm-memory--format (entry)
   "ENTRY of a memory file as text for the model."
@@ -300,11 +333,14 @@ memory file whose buffer has changes of the user's is left as it is."
 
 (defun lispm-memory-recall (agent query &optional role)
   "Entries of AGENT's memory matching every word of QUERY.
-AGENT's own memory comes first, then that of its role, or of ROLE.
-The entries returned are noted as recalled."
-  (let* ((entries (append (lispm-memory--scope-entries agent 'project)
-                          (lispm-memory--scope-entries
-                           agent 'role (and role (lispm-role-name (lispm-get-role role))))))
+AGENT's own memory comes first, then that of its role, or of ROLE.  A
+character's own memory comes before all.  The entries returned are
+noted as recalled."
+  (let* ((entries (mapcan (lambda (scope)
+                            (lispm-memory--scope-entries
+                             agent scope
+                             (and role (eq scope 'role) (lispm-role-name (lispm-get-role role)))))
+                          (lispm-memory--scopes agent)))
          (words (split-string (downcase query) "[ \t\n,]+" t))
          (titles (lambda (es) (mapconcat (lambda (e) (concat "- " (lispm-memory--label e))) es "\n")))
          (hits (seq-filter
@@ -322,10 +358,11 @@ The entries returned are noted as recalled."
                (mapconcat #'lispm-memory--format shown "\n\n"))))))
 
 (defun lispm-memory-forget (agent title)
-  "Delete the entry TITLE from AGENT's own memory, or else its role memory."
+  "Delete the entry TITLE from AGENT's own memory, or else its role memory.
+A character's own memory comes first."
   (let* ((entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
-                          (append (lispm-memory--scope-entries agent 'project)
-                                  (lispm-memory--scope-entries agent 'role))))
+                          (mapcan (lambda (scope) (lispm-memory--scope-entries agent scope))
+                                  (lispm-memory--scopes agent))))
          (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope) nil t))))
     (unless entry (error "No memory titled \"%s\"" title))
     (with-current-buffer buffer
@@ -511,7 +548,7 @@ there are: none is left out unseen."
 (defun lispm-memory--prompt (agent)
   "System prompt section listing AGENT's memories and its open tasks."
   (let ((memories (delq nil (mapcar (lambda (scope) (lispm-memory--scope-entries agent scope))
-                                    '(project role))))
+                                    (lispm-memory--scopes agent))))
         (tasks (lispm-tasks-list agent)))
     (string-join
      (delq nil
@@ -627,7 +664,7 @@ was last tried, once the time to wait after that is over."
 Only while memory is under git: a consolidation drops and rewrites
 entries, and its commit is what keeps them."
   (when (lispm-backend-name agent)
-    (dolist (scope '(project role))
+    (dolist (scope (lispm-memory--scopes agent))
       (let ((file (lispm-memory-file agent scope)))
         (when (lispm-memory--due-p file)
           (lispm-when-idle (cons 'consolidate file) #'lispm-memory-consolidate agent scope))))))
@@ -856,8 +893,8 @@ entry merged or dropped."
      (content string "The fact, preference or lesson, self-contained.")
      (tags array "Optional tags, e.g. [\"build\", \"preference\"]."
            :optional t :items ((type . "string")))
-     (scope string "project (default): about where you work, shared with every agent working there: this project, or, for an agent of the whole system, the system. role: true everywhere, e.g. the user's general preferences; shared with agents of your role in all projects."
-            :optional t :enum ("project" "role")))
+     (scope string "project (default): about where you work, shared with every agent working there: this project, or, for an agent of the whole system, the system. role: true everywhere, e.g. the user's general preferences; shared with agents of your role in all projects. self, for a character only: your own, in every conversation you have, e.g. what you know of the people you work with."
+            :optional t :enum ("project" "role" "self")))
   "Save something to long-term memory, org files that persist across
 sessions (versioned in git).  Use it for durable knowledge: project
 conventions, the user's preferences, lessons learned.  Saving under an
@@ -865,12 +902,13 @@ existing title replaces that entry.  Do not store transient state of
 the current task."
   :permission memory
   (lispm-memory-remember lispm-current-agent title content (append tags nil)
-                         (if (equal scope "role") 'role 'project)))
+                         (pcase scope ("role" 'role) ("self" 'self) (_ 'project))))
 
 (lispm-deftool recall
     ((query string "Words to look for; entries containing all of them are returned. An empty string lists all titles.")
      (role string "Also read the role memory of another role instead of yours." :optional t))
-  "Search long-term memory: this project's (or the system's), then your role's."
+  "Search long-term memory: this project's (or the system's), then your role's.
+A character's own memory is searched first."
   :permission memory
   (lispm-memory-recall lispm-current-agent query role))
 

@@ -45,6 +45,12 @@
 ;;                 do in its own, it is started only once the user
 ;;                 approved it.
 ;;
+;; A character is reached by its name too, as @Ada: the request goes to
+;; its conversation in the caller's project, which is started there if
+;; it has none, and goes on from then on (see `lispm-character-agent').
+;; An app that is a character has one conversation, its own, wherever
+;; it is asked from.
+;;
 ;; inspect_agent (lispm-inspect.el) shows another agent in depth.
 ;; Places and buffers pass between agents as org links,
 ;; [[file:PATH::LINE]] and [[buffer:NAME]], which tools resolve (see
@@ -177,10 +183,27 @@ An error if no request ID awaits PEER's reply."
   "The name of SENDER, an agent or the name of a peer, as a string."
   (if (lispm-agent-p sender) (symbol-name (lispm-agent-name sender)) sender))
 
+(defun lispm-collab--place (sender)
+  "Where SENDER, an agent or a peer's name, works, for a character it asks:
+its project's root, or nil for none, as for an agent of the whole system."
+  (cond ((lispm-agent-p sender) (unless (lispm-agent-system sender) (lispm-agent-root sender)))
+        ((lispm-get-peer sender) (lispm-peer-root (lispm-get-peer sender)))))
+
+(defun lispm-collab--character-agent (name sender)
+  "The conversation of the character NAME designates where SENDER works; or nil.
+SENDER is an agent or a peer's name.  NAME is a character's name, or
+the name it goes by, with or without @ (see `lispm-get-character').
+An app's is its own, wherever SENDER works."
+  (when-let* ((character (and (or (stringp name) (and name (symbolp name)))
+                              (lispm-get-character (format "%s" name) t))))
+    (lispm-character-agent character (unless (lispm-character-skill character)
+                                       (lispm-collab--place sender)))))
+
 (defun lispm-collab-send (from to text)
   "Send TEXT from FROM, an agent or a peer's name, to the agent or peer TO.
-Return what the sender is told."
-  (let ((agent (lispm-get-agent to t))
+TO may be a character, by its name: its conversation where FROM works
+gets TEXT.  Return what the sender is told."
+  (let ((agent (or (lispm-collab--character-agent to from) (lispm-get-agent to t)))
         (name (lispm-collab--name from)))
     (cond
      ((or (eq agent from) (equal (format "%s" to) name)) (error "That is you"))
@@ -237,12 +260,18 @@ as a message: [Reply from X to request ID]."
                                (if (lispm-agent-status a) (concat ", " (lispm-agent-status a)) "")))
                      (lispm-agents) "\n")
           (or (lispm-collab--peer-lines (and (stringp self) self)) "")
+          (if-let* ((characters (lispm-collab--characters self t)))
+              (concat "\nCharacters, reached by name, as @Ada, in a conversation of their own where you work:\n"
+                      characters)
+            "")
           "\nRoles:\n" (lispm-collab--roles)))
 
 (defun lispm-collab--target (name &optional caller)
   "The agent NAME designates, which must not be CALLER (default: the acting agent).
-NAME is as for `lispm-get-agent'."
-  (let ((agent (or (lispm-get-agent name t)
+NAME is as for `lispm-get-agent', or names a character, whose
+conversation where CALLER works it then designates."
+  (let ((agent (or (lispm-collab--character-agent name (or caller lispm-current-agent))
+                   (lispm-get-agent name t)
                    (error "No agent or role named %s; list_agents, which search_tools finds, shows them" name))))
     (when (eq agent (or caller lispm-current-agent))
       (error "That is you"))
@@ -269,7 +298,8 @@ reply as `lispm-collab--replied' words it, makes the delegation outlive
 Emacs: should Emacs stop before the reply, it still settles the call.
 Return the agent asked."
   (let* ((role (cond ((lispm-role-p agent) agent)
-                     ((and (stringp agent) (not (lispm-get-agent agent t)))
+                     ((and (stringp agent) (not (lispm-get-agent agent t))
+                           (not (lispm-get-character agent t)))
                       (lispm-get-role agent t))))
          (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
          (target (or helper (lispm-collab--target agent caller))))
@@ -408,6 +438,28 @@ Then it stays, to answer them, as an agent of its own."
                     (lispm-agent-inbox helper))
     (lispm-retire helper)))
 
+(defun lispm-collab--characters (&optional self apps)
+  "Lines naming the characters, but that of SELF, an agent; or nil.
+Apps among them only with APPS non-nil, marked as such; else a line
+says how many there are."
+  (let* ((characters (seq-remove (lambda (character)
+                                   (and (lispm-agent-p self)
+                                        (eq (lispm-character-name character)
+                                            (lispm-agent-character self))))
+                                 (lispm-characters)))
+         (left-out (if apps 0 (seq-count #'lispm-character-skill characters))))
+    (when characters
+      (string-join
+       (append
+        (mapcar (lambda (character)
+                  (format "- %s%s: %s" (lispm-character-title* character)
+                          (if (lispm-character-skill character) " (app)" "")
+                          (or (lispm-character-description character) "(no description)")))
+                (if apps characters (seq-remove #'lispm-character-skill characters)))
+        (unless (zerop left-out)
+          (list (format "- and %d apps, which list_agents names" left-out))))
+       "\n"))))
+
 (defun lispm-collab--roles ()
   "Description of the roles helpers can be started from."
   (mapconcat (lambda (role)
@@ -433,6 +485,20 @@ Then it stays, to answer them, as an agent of its own."
                         "\n")
               "")
             "Roles:\n" (lispm-collab--roles)
+            (if-let* ((characters (lispm-collab--characters agent)))
+                (concat "\nCharacters, who are someone, not a role: reach one by its name, as @Ada,"
+                        " with ask_agent or send_message, and it takes the request up in a"
+                        " conversation of its own in your project, which goes on. When the user"
+                        " addresses one with @, pass the request on to it rather than doing it yourself."
+                        (if (seq-some #'lispm-character-skill (lispm-characters))
+                            (concat " Apps are characters too, of two faces: their skill and its tools,"
+                                    " which you use yourself when you know what to do (search_tools"
+                                    " finds them), and themselves, whom you ask when a request needs"
+                                    " their judgment, what they remember of the user, or many steps"
+                                    " of their own.")
+                          "")
+                        "\n" characters)
+              "")
             "\nName places as [[file:PATH::LINE]] and buffers as [[buffer:NAME]]:"
             " the tools of whoever reads them take these as files and buffers.")))
 
@@ -447,7 +513,7 @@ helpers can be started from."
   (lispm-collab-agents-text lispm-current-agent))
 
 (lispm-deftool send_message
-    ((to string "Name of the receiving agent.")
+    ((to string "Name of the receiving agent, or of a character.")
      (text string "The message, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Send a message to another agent without waiting for an answer.  It
 reaches them as a new turn as soon as they are free.  Use ask_agent
@@ -456,7 +522,7 @@ when you need the answer to continue."
   (lispm-collab-send lispm-current-agent to text))
 
 (lispm-deftool ask_agent
-    ((agent string "A running agent, or a role to start a helper from (list_agents, which search_tools finds, shows them).")
+    ((agent string "A running agent, a character (by its name, as Ada), or a role to start a helper from (list_agents, which search_tools finds, shows them).")
      (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Delegate a request and wait for the final reply, which becomes the
 result of this call.  Ask a running agent better placed for it, or
@@ -466,7 +532,8 @@ as a list of places, ask for it: they can return a value with their
 reply (return_value), which follows it as JSON."
   :permission comm
   :async t
-  (if-let* ((peer (and (not (lispm-get-agent agent t)) (lispm-get-peer agent))))
+  (if-let* ((peer (and (not (lispm-get-agent agent t)) (not (lispm-get-character agent t))
+                       (lispm-get-peer agent))))
       (lispm-ask-peer peer request (symbol-name (lispm-agent-name lispm-current-agent))
                       (lambda (reply &optional ended)
                         (funcall done (if ended reply (format "%s replied:\n%s" agent reply))

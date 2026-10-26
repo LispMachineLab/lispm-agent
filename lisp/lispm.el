@@ -103,6 +103,7 @@
 (require 'lispm-mcp)
 (require 'lispm-title)
 (require 'lispm-episodes)
+(require 'lispm-characters)
 (require 'lispm-emacs)
 (require 'lispm-develop)
 (require 'lispm-skills)
@@ -120,6 +121,9 @@
 
 ;; And those of the user's role files.
 (lispm-load-roles)
+
+;; The characters there are.
+(lispm-load-characters)
 
 ;;;; Starting, resuming and switching
 
@@ -180,6 +184,14 @@ The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
   (interactive (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))))
   (lispm-show (lispm-start role directory)))
+
+;;;###autoload
+(defun lispm-character (character &optional here)
+  "Talk to CHARACTER, in its own conversation, which goes on.
+With a prefix argument, HERE: in its conversation in the current
+project.  See lispm-characters.el."
+  (interactive (list (lispm-read-character (lispm-tr "Talk to: ")) current-prefix-arg))
+  (lispm-show (lispm-character-agent character (and here (lispm--project-root)))))
 
 ;;;###autoload
 (defun lispm-resume (session)

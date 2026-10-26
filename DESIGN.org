@@ -15,6 +15,7 @@ implementation:
 | Harness capability        | Emacs abstraction                                                | Implementation                                          |
 |---------------------------+------------------------------------------------------------------+---------------------------------------------------------|
 | Agent, role               | an agent is one session of a role in a project, a Lisp object    | [[file:lisp/lispm-core.el][lispm-core.el]]: ~lispm-defrole~, ~lispm-start~                 |
+| Character                 | someone: a soul, a memory and a past; a standing agent per place | [[file:lisp/lispm-characters.el][lispm-characters.el]]: ~lispm-character-agent~        |
 | Context, workspace        | an org buffer (the session file), re-parsed on every request     | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-transcript-parse~         |
 | Interface                 | a chat laid out like Claude Code's, drawn from that org buffer   | [[file:lisp/lispm-chat.el][lispm-chat.el]]: ~lispm-chat~                           |
 | Terminal                  | a frame of sessions, a listener and a who line, keys only        | [[file:lisp/lispm-terminal.el][lispm-terminal.el]]: ~lispm-terminal~                   |
@@ -102,6 +103,51 @@ on: its agents use the user's. The files are read when LispM loads (~lispm-load-
 one, its live agents keeping what they copied. Roles defined in Lisp are neither replaced by a
 file nor deleted, and a role read from a file and defined again in Lisp is a Lisp role from then
 on (~lispm-role-file~).
+
+*Characters* ([[file:lisp/lispm-characters.el][lispm-characters.el]]). An agent is one conversation: when it ends, nobody is
+left. A *character* is someone: a name, a soul in the user's words, a picture, and a memory and
+a past of its own, which last. A process is one run of a program; a character is rather the
+user of a Lisp Machine, who has several activities going at once and is the same in all of
+them. It has a conversation going on in each place it is: its own, in no project, which an app of
+it shows, and one in each project it is asked into. Each is a standing agent of the character's
+role (~lispm-character-agent~): ~ada~ at home, ~ada@lispm~ in a project, its session marked
+~#+lispm_character: ada~, so that it resumes as the character's, whatever it was called. All
+that drives an agent drives it, sessions, tools, policy, handovers; what it adds is identity:
+
+- *Who it is.* Its system prompt begins with its name and its soul, not ~ROLE@PROJECT~: it is told
+  it is one person in many conversations, and where this one is.
+- *Its own memory*, ~characters/<name>/memory.org~ (~remember~ with scope ~self~), goes with it to
+  every place; a project's memory stays the project's, a role's the role's.
+- *Its own past.* Its episodes are kept in its directory, of all its conversations: the
+  summaries of its handovers, and a line for each turn of each conversation, its diary, rolled up
+  by week and month. A new conversation starts with the latest of them, and with where else it
+  has one going: what it did elsewhere, it knows.
+- *It grows.* The soul is the user's and stays so; ~revise_self~, a tool only characters have (a
+  tool's ~:for~), writes ~self.org~, what it came to know of itself, which its conversations start
+  with too. Each revision is a commit, and it tells the user.
+- *Its own model.* ~#+backend~ names one of ~lispm-backends~, or ~#+endpoint~ is an endpoint of its
+  own, as an entry of ~lispm-backends~ is, by the name ~@ada~ (~lispm-backend~); without them, it
+  thinks with the user's. Its file is under git, so it holds no key: an endpoint says where its
+  key is, with ~:key-env~ or ~:key auth-source~.
+
+A character is its directory, ~characters/<name>/~ in ~lispm-directory~: ~character.org~, written as
+a role file is (keywords, then the soul), its picture, ~self.org~, ~memory.org~, ~episodes/~, and
+the ~tasks.org~ of its own conversation. ~lispm-save-character~ makes or changes one, as an app's
+form does; ~lispm-new-character~ makes one in Emacs, its file to fill in, read again when saved;
+~lispm-character-change-functions~ tells a desktop when to show an app of it, which the agent
+knows nothing of.
+
+*An app is a character too*, of a kind: its soul is its skill (section 11), whose code its
+conversations evaluate from the start, so its tools are theirs; its picture is its icon; it
+thinks with a model the user chose, or LispM's. The program bringing it makes it one each time
+it loads (~lispm-define-app-character~); what the user chose for it goes into a character file of
+its name without a ~#+title~, which comes first and makes no character while the app is gone. An
+app has one conversation, its own, wherever it is asked from. Others meet it in two ways, as an
+object and as a subject: with its skill and its tools, which they use themselves when they know
+what to do, at the cost of one request; or asking it, which costs a conversation of its own but
+brings its judgment, what it remembers of the user, and keeps many steps out of the asker's
+context. The second is always built on the first, and the user's =@Name= always asks for it.
+Apps are named apart from other characters in system prompts, so that they do not crowd them.
 
 * 2. Context: the buffer is the context
 
@@ -366,6 +412,10 @@ files under ~lispm-directory~:
 An agent of the whole system (~lispm-defagent~ with ~:system t~), such as the agent of a
 system-wide prompt, works in no project: its own memory, tasks and episodes are the system's,
 ~system/memory.org~ and so on, in place of a project's. Agents of projects do not see them.
+
+A character (section 1) has a third: ~characters/<name>/memory.org~, its own, which it reads first
+in every conversation it has (~remember~ with ~scope: "self"~); its own conversation, in no
+project, has it in place of a project's, as a system agent has the system's.
 
 One heading per fact, with tags and ~CREATED~/~UPDATED~ properties, and ~RECALLED~/~RECALLS~: when
 ~recall~ last returned it, and how often. ~recall~ searches the agent's own memory, then the
@@ -724,6 +774,10 @@ Concurrency:
   interrupted and, unattended, gone on with), and the reply, when it comes, settles the call. A
   helper's ceiling is recorded in its session (~#+lispm_ceiling:~), so a helper's session opened
   again, by a restart or by hand, may still do no more than its caller.
+- *Characters are reached by name* (section 1), as =@Ada=: ~ask_agent~ and ~send_message~ go to its
+  conversation in the asker's project, started there if it has none, and the editor's agents do
+  the same, told so by their server; an app's is its own. Every system prompt names the
+  characters and says that the user's =@Name= is to be passed on, and the chat completes =@names=.
 
 * 8. Handing over: long conversations
 

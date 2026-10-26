@@ -240,14 +240,29 @@ needs nothing more."
                     sections))))))
     (and sections (string-join (nreverse sections) "\n\n"))))
 
+(defun lispm--identity-prompt (agent)
+  "The opening of AGENT's system prompt: who it is."
+  (if-let* ((character (lispm-agent-character* agent)))
+      (concat
+       (format "You are \"%s\": not a session but someone, who lives inside a running GNU Emacs %s session, working alongside its human user. You share one programmable environment with them: files, buffers, processes and Emacs itself. You have conversations in many places, one going on in each, and you are the same %s in all of them, with one memory and one past. %s"
+               (lispm-character-title* character) emacs-version (lispm-character-title* character)
+               (if (lispm-character-home-p agent)
+                   "This conversation is your own, in no project: people come to you here."
+                 (format "This conversation is in the project at %s, where your work is: %s is your name here."
+                         (abbreviate-file-name (lispm-agent-root agent)) (lispm-agent-name agent))))
+       (when-let* ((soul (lispm-character-soul character))
+                   ((not (string-blank-p soul))))
+         (concat "\n\n# Who you are\n" (string-trim soul))))
+    (format "You are \"%s\", an AI agent (role: %s) living inside a running GNU Emacs %s session, working alongside its human user. You share one programmable environment with them: files, buffers, processes and Emacs itself."
+            (lispm-agent-name agent) (lispm-agent-role agent) emacs-version)))
+
 (defun lispm-system-prompt (agent)
   "System prompt of a new session of AGENT."
   (string-join
    (seq-remove
     (lambda (s) (or (null s) (string-blank-p s)))
     (append
-     (list (format "You are \"%s\", an AI agent (role: %s) living inside a running GNU Emacs %s session, working alongside its human user. You share one programmable environment with them: files, buffers, processes and Emacs itself."
-                   (lispm-agent-name agent) (lispm-agent-role agent) emacs-version)
+     (list (lispm--identity-prompt agent)
            (lispm-agent-instructions agent)
            (lispm--environment-prompt agent)
            (lispm--project-instructions agent))
@@ -284,9 +299,21 @@ the session's agent is started again from its role."
       (cond
        ((and id (seq-find (lambda (a) (equal (lispm-agent-id a) id)) (lispm-agents))))
        ((and standing (lispm-agent-standing standing)
+             (not (lispm-agent-character standing))
              (not (buffer-live-p (lispm-agent-buffer standing))))
         (when id (setf (lispm-agent-id standing) id))
         standing)
+       ;; A character's conversation goes on in the agent it has there.
+       ((when-let* ((character (lispm-get-character (or (cdr (assoc "character" keywords)) "") t))
+                    (root (cdr (assoc "root" keywords)))
+                    (agent (lispm-character-agent character root)))
+          (if (buffer-live-p (lispm-agent-buffer agent))
+              ;; An earlier conversation of it there, while it has another open.
+              (lispm-make-agent (lispm-agent-role agent) root
+                                :name (lispm--free-name name) :id id
+                                :character (lispm-character-name character))
+            (when id (setf (lispm-agent-id agent) id))
+            agent)))
        ((lispm-get-role (intern (or (cdr (assoc "role" keywords)) "")) t)
         (let ((agent (lispm-make-agent (intern (cdr (assoc "role" keywords)))
                                        (or (cdr (assoc "root" keywords)) default-directory)
@@ -477,6 +504,8 @@ the continuation keeps the title the conversation is listed under."
                 ("root" . ,(abbreviate-file-name (lispm-agent-root agent)))
                 ,@(and previous `(("previous" . ,(format "[[file:%s]]" previous))))
                 ,@(and (lispm-agent-system agent) '(("system" . "t")))
+                ,@(when-let* ((character (lispm-agent-character agent)))
+                    `(("character" . ,character)))
                 ,@(when-let* ((ceiling (lispm-agent-ceiling agent)))
                     `(("ceiling" . ,(let ((print-length nil) (print-level nil))
                                       (prin1-to-string ceiling)))))
@@ -512,11 +541,21 @@ Emacs's lock files (.#NAME) and other dot files are left out."
               (file-expand-wildcards (expand-file-name pattern lispm-directory))))
 
 (defun lispm--latest-session-file (agent)
-  "The newest file of the sessions standing AGENT had in its project."
-  (let ((name (symbol-name (lispm-agent-name agent))))
+  "The newest file of the sessions standing AGENT had in its project.
+A character's are those of its conversation in AGENT's root, whatever
+the agent was called then."
+  (let ((name (symbol-name (lispm-agent-name agent)))
+        (character (lispm-agent-character agent))
+        (root (lispm-agent-root agent)))
     (car (sort (seq-filter
                 (lambda (file)
-                  (equal (cdr (assoc "agent" (lispm--file-keywords file))) name))
+                  (let ((keywords (lispm--file-keywords file)))
+                    (if character
+                        (and (equal (cdr (assoc "character" keywords)) (symbol-name character))
+                             (equal (file-name-as-directory
+                                     (expand-file-name (or (cdr (assoc "root" keywords)) "~")))
+                                    root))
+                      (equal (cdr (assoc "agent" keywords)) name))))
                 (lispm--session-files-in
                  (expand-file-name "*.org" (lispm--sessions-directory (lispm-agent-root agent)))))
                (lambda (a b) (time-less-p (file-attribute-modification-time (file-attributes b))
@@ -656,6 +695,7 @@ Descriptions are remembered until FILE changes."
                  (when (and title (assoc "id" keywords))
                    (list :id (cdr (assoc "id" keywords))
                          :agent (cdr (assoc "agent" keywords))
+                         :character (cdr (assoc "character" keywords))
                          :role (cdr (assoc "role" keywords))
                          :root (expand-file-name (or (cdr (assoc "root" keywords)) "~"))
                          :title title
@@ -666,7 +706,8 @@ Descriptions are remembered until FILE changes."
 
 (defun lispm-sessions ()
   "Every recorded session with some input, newest first.
-Each is a plist (:id :agent :role :root :title :time :file); a session
+Each is a plist (:id :agent :character :role :root :title :time :file),
+:character nil but in a character's; a session
 continued in several files is listed once, by its newest file."
   (let ((latest (make-hash-table :test #'equal)))
     (dolist (file (lispm--session-files-in "projects/*/sessions/*.org"))
@@ -2254,7 +2295,7 @@ If the restart needs a value, ask the user for it."
 (defun lispm-use-model (agent backend model)
   "Have AGENT use BACKEND (a key of `lispm-backends', nil for the default)
 and MODEL (nil for the backend's), for the rest of its session."
-  (when (and backend (not (assq backend lispm-backends)))
+  (when (and backend (not (lispm-backend backend)))
     (user-error "%s" (lispm-tr "Unknown backend %s (see `lispm-backends')" backend)))
   (setf (lispm-agent-backend agent) backend
         (lispm-agent-model agent) model))
@@ -2269,7 +2310,7 @@ The condition's heading records it, so it outlives a restart of Emacs."
       (when (re-search-backward "^:RESTART: use-model\n:VALUE: \\(.*\\)$" nil t)
         (when-let* ((value (ignore-errors (car (read-from-string (match-string 1)))))
                     ((consp value))
-                    ((or (null (car value)) (assq (car value) lispm-backends))))
+                    ((or (null (car value)) (lispm-backend (car value)))))
           (setf (lispm-agent-backend agent) (car value)
                 (lispm-agent-model agent) (cdr value)))))))
 
@@ -2440,13 +2481,17 @@ that asked for the handover starts the next one."
 (defun lispm--read-model (agent)
   "Ask for a backend and a model for AGENT; return (BACKEND . MODEL)."
   (let* ((current (lispm-backend-name agent))
+         (own (when-let* ((character (lispm-agent-character* agent)))
+                (lispm-character-backend-name character)))
          (name (completing-read (format-prompt (lispm-tr "Backend") current)
-                                (mapcar (lambda (b) (symbol-name (car b))) lispm-backends)
+                                (delete-dups
+                                 (append (and own (lispm-backend own) (list (symbol-name own)))
+                                         (mapcar (lambda (b) (symbol-name (car b))) lispm-backends)))
                                 nil t nil nil (and current (symbol-name current))))
          (backend (if (string-empty-p name)
                       (user-error "%s" (lispm-tr "No backend chosen"))
                     (intern name)))
-         (default (plist-get (alist-get backend lispm-backends) :model))
+         (default (plist-get (lispm-backend backend) :model))
          (model (read-string (format-prompt (lispm-tr "Model") default) nil nil default)))
     (cons backend (and model (not (string-empty-p model)) model))))
 

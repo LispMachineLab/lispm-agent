@@ -37,6 +37,10 @@
 ;;
 ;; A new session of an agent of the whole system starts knowing what
 ;; happened lately: its system prompt carries the latest episode.
+;;
+;; A character's episodes are its own, wherever they happened: they are
+;; kept in its directory, for all its conversations (lispm-characters.el
+;; adds a line to them after each of its turns, its diary).
 
 ;;; Code:
 
@@ -68,8 +72,11 @@ open; names, paths, values. Leave out what was transient. Reply with the summary
   "Episode directories a rollup failed in, to the time to try again after.")
 
 (defun lispm-episodes-directory (agent)
-  "Directory of AGENT's episodes: those of its project, or of the system."
-  (expand-file-name "episodes/" (lispm-home-directory agent)))
+  "Directory of AGENT's episodes: those of its project, or of the system.
+A character's conversations, wherever they are, have the character's."
+  (expand-file-name "episodes/" (if (lispm-agent-character agent)
+                                    (lispm-character-directory (lispm-agent-character agent))
+                                  (lispm-home-directory agent))))
 
 ;;;; Periods
 
@@ -135,29 +142,34 @@ over, `week' or `month', and the files to roll up into it."
     (delay-mode-hooks (org-mode))
     (lispm-memory--entries (current-buffer))))
 
+(defun lispm-episodes-add (agent text file &optional what)
+  "Add TEXT to the episodes of the day, as what AGENT's session in FILE did.
+WHAT names it in the commit message: \"episode\" by default."
+  (let* ((dir (lispm-episodes-directory agent))
+         (day (progn (make-directory dir t)
+                     (expand-file-name (format-time-string "%Y-%m-%d.org") dir)))
+         (buffer (lispm-memory--visit day (format-time-string "#+title: Episodes of %Y-%m-%d\n") t)))
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert (lispm-memory--entry-text
+                   (format "%s %s" (format-time-string "%H:%M") (lispm-agent-name agent)) nil
+                   `(("AGENT" . ,(format "%s" (lispm-agent-name agent)))
+                     ("SESSION" . ,(and file (format "[[file:%s]]" (abbreviate-file-name file))))
+                     ("CREATED" . ,(lispm-memory--stamp)))
+                   text)))))
+    (lispm-memory--save buffer)
+    (lispm-git-commit agent (format "%s: %s of %s" (lispm-agent-name agent) (or what "episode")
+                                    (file-name-base day)))))
+
 (defun lispm-episodes-record (agent summary file)
   "Keep SUMMARY, the one AGENT's session in FILE was handed over with.
 It joins the episodes of the day."
   (when lispm-episodes
-    (let* ((dir (lispm-episodes-directory agent))
-           (day (progn (make-directory dir t)
-                       (expand-file-name (format-time-string "%Y-%m-%d.org") dir)))
-           (buffer (lispm-memory--visit day (format-time-string "#+title: Episodes of %Y-%m-%d\n") t)))
-      (with-current-buffer buffer
-        (save-excursion
-          (save-restriction
-            (widen)
-            (goto-char (point-max))
-            (unless (bolp) (insert "\n"))
-            (insert (lispm-memory--entry-text
-                     (format "%s %s" (format-time-string "%H:%M") (lispm-agent-name agent)) nil
-                     `(("AGENT" . ,(format "%s" (lispm-agent-name agent)))
-                       ("SESSION" . ,(and file (format "[[file:%s]]" (abbreviate-file-name file))))
-                       ("CREATED" . ,(lispm-memory--stamp)))
-                     summary)))))
-      (lispm-memory--save buffer)
-      (lispm-git-commit agent (format "%s: episode of %s" (lispm-agent-name agent)
-                                      (file-name-base day))))))
+    (lispm-episodes-add agent summary file)))
 
 (add-hook 'lispm-handover-functions #'lispm-episodes-record)
 

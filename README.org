@@ -143,7 +143,8 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
   awaits approval there, removed lines struck out (~lispm-show-edits~).
 - *Roles, agents, sessions.*  A role is instructions, tools, policy and model: ~lispm-defrole~,
   or an org file in =~/.lispm/roles/=.  An agent is one session of a role in one project, named
-  ~ROLE@PROJECT~.  A project's =AGENTS.md= and =CLAUDE.md= join the system prompt.
+  ~ROLE@PROJECT~.  A character is someone, with a conversation in each place (see [[*Characters][Characters]]).
+  A project's =AGENTS.md= and =CLAUDE.md= join the system prompt.
 - *Memory under git.*  ~lispm-directory~ (=~/.emacs.d/lispm/=) is a git repository of sessions,
   each project's =memory.org= and =tasks.org=, each role's memory, and the system's, for an
   agent in no project (~:system t~).  A conversation that grows too long is handed over to a new
@@ -195,6 +196,45 @@ it starts a subagent that may do no more than its caller.  ~start_agent~ starts 
 its own instead, in the caller's project or another, and stays once it has replied; outside the
 caller's project, only once you approve.  The ~worktree~ skill gives each helper a git worktree
 of its own.
+
+* Characters
+
+An agent is one conversation; a character is someone.  It has a name, a soul and a picture, a
+memory and a past of its own, and a conversation going on in each place it is: its own, and one
+in each project it is asked into.  It is the same in all of them.
+
+#+begin_src emacs-lisp
+(lispm-create-character "Ada"
+  :description "Reviews changes with care, and says so plainly."
+  :soul "Plain-spoken.  Likes small diffs; distrusts clever code."
+  :avatar "~/Pictures/ada.png"
+  :role 'reviewer                                            ; its tools and policy
+  :endpoint '(:api openai :url "http://127.0.0.1:11434/v1")  ; a model endpoint of its own
+  :model "qwen3")
+#+end_src
+
+~M-x lispm-new-character~ does the same in Emacs: it makes the character's file,
+=characters/ada/character.org= in ~lispm-directory~, for you to say who it is, and saving the
+file makes it so.  ~M-x lispm-character~ talks to one (~C-u~: in the current project).
+
+- *Reached by name, from anywhere.*  ~ask_agent~ and ~send_message~ take a character's name, as
+  =@Ada=: the request goes to its conversation in the asker's project, started there if need be.
+  Claude Code and Codex do the same when you write "tell @Ada" or "have @Ada look at this".  The
+  chat completes =@names= with ~TAB~.
+- *Its own memory and past.*  ~remember~ with scope ~self~ keeps what is its own, in every place.
+  Each turn of each of its conversations is a line in its diary, rolled up by week and month, and
+  its conversations start with the latest, and with where else it has one going.
+- *It grows.*  The soul is yours; with ~revise_self~ it writes what it came to know of itself,
+  each revision a commit it tells you about.
+- *Its own model.*  ~:backend~ names one of ~lispm-backends~ and ~:endpoint~ is one of its own;
+  without them, it uses yours.  No key goes into its file, which git records: ~:key-env~ or
+  ~:key auth-source~ say where it is.
+- *Apps are characters too.*  ~lispm-define-app-character~ makes an app one: its skill is its
+  soul and its tools are its own; its icon is its picture.  Agents use an app themselves, with its
+  skill and tools, when they know what to do, and ask it when a request needs its judgment or what
+  it remembers, and whenever you write =@Name=.
+
+~lispm-character-change-functions~ tells a desktop when to show or remove a character's app.
 
 * Claude Code, Codex and other agents
 
