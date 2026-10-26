@@ -74,6 +74,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'image)
 (require 'wid-edit)
 (require 'lispm-i18n)
 
@@ -386,14 +387,19 @@ keyboard (see `widget-choose')."
   (when (derived-mode-p 'lispm-form-mode)
     (lispm-form--draw)))
 
+(defun lispm-form--picture-p (file)
+  "Non-nil if FILE is a picture: one Emacs shows, or named as pictures are.
+An Emacs without a display shows none, but keeps them all the same."
+  (or (image-supported-file-p file)
+      (member (downcase (or (file-name-extension file) "")) '("png" "jpg" "jpeg" "gif" "svg" "webp"))))
+
 (defun lispm-form--read-picture (old)
   "Read the file of a picture, starting from OLD's directory."
   (let ((file (read-file-name (lispm-tr "Picture: ")
                               (and old (file-name-directory old)) nil t nil
                               (lambda (file)
-                                (or (file-directory-p file)
-                                    (image-supported-file-p file))))))
-    (unless (and (file-regular-p file) (image-supported-file-p file))
+                                (or (file-directory-p file) (lispm-form--picture-p file))))))
+    (unless (and (file-regular-p file) (lispm-form--picture-p file))
       (user-error "%s" (lispm-tr "Not a picture: %s" (abbreviate-file-name file))))
     (expand-file-name file)))
 
