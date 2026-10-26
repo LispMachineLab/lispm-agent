@@ -791,18 +791,57 @@ Results in responses that are not sent (tagged :ignore:) are left out."
                             results))))))))
         (nreverse results)))))
 
+(defvar-local lispm-transcript--folded nil
+  "What `lispm-transcript-parse' read of the sections before the last one,
+kept for the next parse while nothing before them changed: (END KINDS
+SYSTEM MESSAGES PENDING CONDITION), END where the last section began,
+KINDS the `lispm-transcript-kinds' they were read with, and the rest as
+the parse gathers them, MESSAGES newest first.  Nothing in them is
+changed in place: they are shared with what the parse returned.")
+
+(defvar-local lispm-transcript--changed nil
+  "The first position changed since `lispm-transcript-parse' last read the
+buffer, or nil.")
+
+(defun lispm-transcript--note-change (beg _end _length)
+  "Note that the buffer changed from BEG on.
+This is on `after-change-functions' of a buffer parsed once."
+  (when (or (null lispm-transcript--changed) (< beg lispm-transcript--changed))
+    (setq lispm-transcript--changed beg)))
+
 (defun lispm-transcript-parse ()
   "Parse the current session buffer.
 Return a plist: :system (the system prompt), :messages (Messages API
 messages, oldest first), :pending (ids of tool calls without a result
 yet), :pending-calls (those calls, as `lispm-transcript--parse-assistant'
 describes them), :condition (the condition awaiting a restart, if any,
-as `lispm-transcript--condition' describes it) and :last-role."
+as `lispm-transcript--condition' describes it) and :last-role.
+Only the last section grows as a turn goes on, so what was read of the
+sections before it is kept, see `lispm-transcript--folded', and read
+again only once something there changed: a request of a long session
+read it all at every step."
   (save-excursion
     (save-restriction
       (widen)
-      (let (system messages pending condition)
-        (dolist (section (lispm-transcript-sections))
+      (unless (memq #'lispm-transcript--note-change after-change-functions)
+        (add-hook 'after-change-functions #'lispm-transcript--note-change nil t)
+        (setq lispm-transcript--folded nil))
+      (pcase-let* ((folded lispm-transcript--folded)
+                   (`(,from ,_ ,system ,messages ,pending ,condition)
+                    (if (and folded
+                             (eq (nth 1 folded) lispm-transcript-kinds)
+                             (or (null lispm-transcript--changed)
+                                 (> lispm-transcript--changed (car folded))))
+                        folded
+                      (list (point-min) nil nil nil nil nil)))
+                   (sections (lispm-transcript-sections from))
+                   (last (car (last sections))))
+        (setq lispm-transcript--changed nil)
+        (dolist (section sections)
+          (when (eq section last)
+            (setq lispm-transcript--folded
+                  (list (plist-get section :start) lispm-transcript-kinds
+                        system messages pending condition)))
           (let ((role (and (not (plist-get section :ignore))
                            (lispm-transcript--role (cons (plist-get section :kind)
                                                          (plist-get section :arg))))))
@@ -826,11 +865,11 @@ as `lispm-transcript--condition' describes it) and :last-role."
                    (push `((role . "user") (content . ,(vconcat results))) messages))
                  (setq pending (append pending calls)))))))
         (setq messages (lispm-transcript--load-images
-                        (lispm-transcript--normalize (nreverse messages))))
+                        (lispm-transcript--normalize (reverse messages))))
         (list :system system
               :messages messages
               :pending (mapcar (lambda (call) (plist-get call :id)) pending)
-              :pending-calls pending
+              :pending-calls (copy-sequence pending)
               :condition condition
               :last-role (alist-get 'role (car (last messages))))))))
 
