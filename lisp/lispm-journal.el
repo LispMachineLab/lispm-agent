@@ -109,7 +109,8 @@ then call CALLBACK with its output, or nil when it failed."
   "set -e
 git add -u >/dev/null 2>&1 || true
 if [ -n \"$LISPM_FILES\" ]; then
-  git add -f -A --pathspec-from-file=- --pathspec-file-nul >/dev/null
+  xargs -0 sh -c 'exec find \"$@\" -prune -type f -size -\"$LISPM_LIMIT\"c -print0 2>/dev/null' sh |
+    git add -f -A --pathspec-from-file=- --pathspec-file-nul >/dev/null
 fi
 tree=$(git write-tree)
 if [ -n \"$LISPM_SAME\" ] && [ \"$tree\" = \"$LISPM_SAME\" ]; then
@@ -126,7 +127,9 @@ git for-each-ref --sort=-refname --format='%(refname)' \"$LISPM_REFS\" |
 git gc --auto --quiet >/dev/null 2>&1 || true
 echo \"$tree $commit\""
   "Shell script taking a snapshot of a work tree in a journal repository.
-The files to add come on its standard input; the environment says the
+The files to add come on its standard input, each after ./; those that
+are no regular files or not smaller than LISPM_LIMIT bytes are left out,
+find telling them apart, off Emacs's thread.  The environment says the
 rest (see `lispm-journal--snapshot').  It prints the snapshot's tree
 and commit, or only the tree when that is LISPM_SAME, the tree a turn
 began with: a turn that changed nothing leaves no ref.")
@@ -156,12 +159,10 @@ error in a process sentinel, which ends a batch Emacs."
            (let ((ok (and (zerop (process-exit-status process)) (file-directory-p top)))
                  (buffer (process-buffer process)))
              (when ok
-               (setq files (seq-filter
-                            (lambda (file)
-                              (let ((attributes (file-attributes (expand-file-name file top))))
-                                (and attributes (not (file-attribute-type attributes))
-                                     (<= (file-attribute-size attributes) lispm-journal-max-file-size))))
-                            (split-string (with-current-buffer buffer (buffer-string)) "\0" t))))
+               ;; Which are regular files small enough, the script asks
+               ;; find: looking at each here took this sentinel 0.1 s in a
+               ;; project of 5,000 files, twice a turn.
+               (setq files (split-string (with-current-buffer buffer (buffer-string)) "\0" t)))
              (kill-buffer buffer)
              ;; A snapshot that fails, its project gone say, is no journal
              ;; entry: never an error in a sentinel.
@@ -178,6 +179,7 @@ INDEX, REF, MESSAGE, AUTHOR, PARENT, SAME and CALLBACK are as for
   (let* ((process-environment
           (append (list (concat "GIT_INDEX_FILE=" index)
                         (concat "LISPM_FILES=" (if files "1" ""))
+                        (concat "LISPM_LIMIT=" (number-to-string (1+ lispm-journal-max-file-size)))
                         (concat "LISPM_SAME=" (or same ""))
                         (concat "LISPM_REF=" ref)
                         (concat "LISPM_REFS=" (file-name-directory ref))
@@ -201,7 +203,9 @@ INDEX, REF, MESSAGE, AUTHOR, PARENT, SAME and CALLBACK are as for
                                     (split-string (with-current-buffer buffer (buffer-string))))))
                    (kill-buffer buffer)
                    (funcall callback (car words) (cadr words)))))))))
-    (process-send-string process (mapconcat (lambda (file) (concat file "\0")) files ""))
+    ;; After ./, no name is taken for an option of find or a magic
+    ;; pathspec of git.
+    (process-send-string process (mapconcat (lambda (file) (concat "./" file "\0")) files ""))
     (process-send-eof process)
     process))
 

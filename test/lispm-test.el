@@ -312,6 +312,69 @@ not be made says why.  No file is left behind."
       (should (equal (alist-get 'is_error (aref (alist-get 'content (nth 2 (plist-get parsed :messages))) 0))
                      t)))))
 
+(ert-deftest lispm-test-transcript-parse-again ()
+  "Parsing a session again reads only its last section anew while nothing
+before it changed, and gives what a whole parse gives at every step: as
+sections are added, as the last one grows, as an earlier one changes, at
+the edge of what was kept, and as the last one goes."
+  (with-temp-buffer
+    (insert (lispm-transcript-header "t" '(("agent" . "t")))
+            (lispm-transcript-section "System" "be brief")
+            (lispm-transcript-section "User" "hello"))
+    (org-mode)
+    (cl-flet ((add-round (i)
+                (goto-char (point-max))
+                (insert "* Assistant\n")
+                (pcase-dolist (`(,id . ,marker)
+                               (lispm-transcript-insert-blocks
+                                (list (lispm-test--text (format "Step %d" i))
+                                      (lispm-test--tool (format "toolu_%d" i) "read_file" '((path . "a.txt"))))
+                                (lambda (_) "DONE")))
+                  (goto-char (lispm-transcript-subtree-end marker 2))
+                  (insert (lispm-transcript-result (format "output %d\n" i) nil))))
+              (check ()
+                ;; What was kept, then the same read whole.
+                (let ((again (lispm-transcript-parse))
+                      (whole (let ((lispm-transcript--folded nil)) (lispm-transcript-parse))))
+                  (should (equal again whole))
+                  again)))
+      (check)
+      (dotimes (i 3)
+        (add-round i)
+        (check))
+      ;; Kept: everything before the last section.
+      (should (= (car lispm-transcript--folded)
+                 (save-excursion (goto-char (point-max)) (re-search-backward "^\\* ") (point))))
+      (goto-char (point-max))
+      (insert "* User\nmore\n")
+      (check)
+      ;; The last section grows.
+      (goto-char (point-max))
+      (insert "and more\n")
+      (let ((content (alist-get 'content (car (last (plist-get (check) :messages))))))
+        (should (equal (alist-get 'text (aref content (1- (length content)))) "more\nand more")))
+      ;; An earlier section changes: the system prompt, then a result.
+      (goto-char (point-min))
+      (re-search-forward "be brief")
+      (insert " and kind")
+      (should (equal (plist-get (check) :system) "be brief and kind"))
+      (goto-char (point-min))
+      (re-search-forward "output 1")
+      (insert "!")
+      (check)
+      ;; Text inserted where the last section begins belongs to the one
+      ;; before, here the user's.
+      (goto-char (point-max))
+      (insert "* User\nlast\n")
+      (check)
+      (goto-char (car lispm-transcript--folded))
+      (insert "said at the edge\n")
+      (should (string-search "said at the edge"
+                             (format "%S" (plist-get (check) :messages))))
+      ;; The last section goes.
+      (delete-region (car lispm-transcript--folded) (point-max))
+      (check))))
+
 (ert-deftest lispm-test-transcript-sections ()
   "Other code reads a session through its sections: each of a kind its
 title names, the user's inputs as requests carry them, and an assistant
@@ -3903,6 +3966,29 @@ batch Emacs, as on CI when a test's directory went first."
       (delete-directory top t)
       (should (lispm-test--wait (lambda () (not (eq result 'pending)))))
       (should (equal result '(nil nil))))))
+
+(ert-deftest lispm-test-journal-snapshot-files ()
+  "A snapshot holds the project's regular files up to the size limit,
+whatever their names, and leaves out larger ones and symbolic links."
+  (lispm-test-env
+    (lispm-test--git-repo project)
+    (dolist (file '("small.txt" "-dash.txt" ":colon.txt" "sp ace.txt" "dir/inner.txt"))
+      (lispm-test--write (expand-file-name file project) "small\n"))
+    (lispm-test--write (expand-file-name "big.bin" project) (make-string 64 ?x))
+    (make-symbolic-link "small.txt" (expand-file-name "link" project))
+    (let* ((lispm-journal-max-file-size 32)
+           (dir (lispm-journal--directory project))
+           (result 'pending))
+      (lispm-journal--snapshot project dir :index (expand-file-name "index-test" dir)
+                               :ref "refs/turns/test/1" :message "m" :author "test"
+                               :callback (lambda (tree commit) (setq result (list tree commit))))
+      (should (lispm-test--wait (lambda () (not (eq result 'pending)))))
+      (should (car result))
+      (should (equal (sort (split-string (lispm-journal--git dir project "ls-tree" "-r" "--name-only"
+                                                             (car result))
+                                         "\n" t)
+                           #'string<)
+                     '("-dash.txt" ":colon.txt" "README" "dir/inner.txt" "small.txt" "sp ace.txt"))))))
 
 ;;;; Conditions and restarts
 
