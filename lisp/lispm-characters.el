@@ -421,7 +421,8 @@ See lispm-characters.el for what the file holds."
 (defun lispm-delete-character (character)
   "Delete CHARACTER, with its memory and its past: its directory.
 Its conversations end; their sessions stay.  The directory goes to
-the trash, if the system has one, and its commits stay in git.
+the trash while `delete-by-moving-to-trash' is on, and its commits stay
+in git.
 Interactively, you are asked first."
   (interactive (list (lispm-read-character (lispm-tr "Delete the character: "))))
   (let* ((character (lispm-get-character character))
@@ -441,8 +442,8 @@ Interactively, you are asked first."
         (with-current-buffer buffer (set-buffer-modified-p nil))
         (kill-buffer buffer)))
     (when (file-directory-p directory)
-      (let ((delete-by-moving-to-trash t))
-        (delete-directory directory t t)))
+      ;; To the trash as `delete-by-moving-to-trash' says.
+      (delete-directory directory t t))
     ;; An app stays one, as its program defines it.
     (lispm-characters--define name)
     (lispm-git-commit "lispm" (format "delete the character %s" name))
