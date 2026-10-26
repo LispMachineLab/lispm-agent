@@ -84,8 +84,9 @@
 ;; remembers of the user, or many steps of its own, and whenever the
 ;; user writes @Name.
 ;;
-;; `lispm-save-character' makes or changes one, as an app's form does;
-;; `lispm-new-character' makes one in Emacs, its file to fill in;
+;; `lispm-character-form' is the form making or changing one, which
+;; `lispm-new-character' and `lispm-edit-character' show, and so may an
+;; app; `lispm-save-character' does it from Lisp, and
 ;; `lispm-delete-character' deletes one.  A character file saved by hand
 ;; is read again at once.  `lispm-character-change-functions' tells
 ;; who wants to know, as a desktop showing an app for each character.
@@ -103,6 +104,7 @@
 (require 'lispm-runtime)
 (require 'lispm-episodes)
 (require 'lispm-skills)
+(require 'lispm-form)
 
 (defcustom lispm-character-diary-entries 12
   "How many lines of its diary a character's conversation starts with.
@@ -400,19 +402,126 @@ is one of its name already."
       (user-error "%s" (lispm-tr "There is no character yet; make one with M-x lispm-new-character")))
     (lispm-get-character (completing-read prompt titles nil t))))
 
+;;;; The form
+
+(defun lispm-characters--role-choices ()
+  "The roles a character may work with, for its form."
+  (cons (cons nil (lispm-tr "Default (%s)" lispm-default-role))
+        (mapcar (lambda (role) (cons (lispm-role-name role) (symbol-name (lispm-role-name role))))
+                (lispm-roles))))
+
+(defun lispm-characters--backend-choices ()
+  "The backends a character may think with, for its form."
+  (mapcar (lambda (entry) (cons (car entry) (symbol-name (car entry)))) lispm-backends))
+
+(defun lispm-characters--effort-choices ()
+  "The effort levels a character may think at, for its form."
+  (cons (cons nil (lispm-tr "Default (%s)" lispm-effort))
+        (mapcar (lambda (effort) (cons effort effort)) '("low" "medium" "high" "xhigh" "max"))))
+
+(defun lispm-characters--thinking (kind)
+  "A :when of the form: non-nil while the character thinks with KIND."
+  (lambda (values) (eq (alist-get 'thinks values) kind)))
+
+(defun lispm-characters--form-values (character)
+  "The values of the form of CHARACTER, nil for a new one: an alist."
+  (let ((endpoint (and character (lispm-character-endpoint character))))
+    `((title . ,(and character (lispm-character-title* character)))
+      (description . ,(and character (lispm-character-description character)))
+      (avatar . ,(and character (lispm-character-avatar character)))
+      (soul . ,(and character (lispm-character-soul character)))
+      (role . ,(and character (lispm-character-role character)))
+      (thinks . ,(cond (endpoint 'endpoint)
+                       ((and character (lispm-character-backend character)) 'backend)
+                       (t 'lispm)))
+      (backend . ,(and character (lispm-character-backend character)))
+      (api . ,(or (plist-get endpoint :api) 'openai))
+      (url . ,(plist-get endpoint :url))
+      (key-env . ,(plist-get endpoint :key-env))
+      (auth-source . ,(eq (plist-get endpoint :key) 'auth-source))
+      (model . ,(and character (lispm-character-model character)))
+      (effort . ,(and character (lispm-character-effort character))))))
+
+(defun lispm-characters--form-props (values)
+  "What the values of a character's form, an alist, make it: a plist.
+Those of who it is only if the form has them; an app's has not."
+  (let* ((get (lambda (key) (alist-get key values)))
+         (thinks (funcall get 'thinks)))
+    (append
+     (when (assq 'title values)
+       (list :title (funcall get 'title) :description (funcall get 'description)
+             :avatar (funcall get 'avatar) :soul (funcall get 'soul) :role (funcall get 'role)))
+     (list :backend (and (eq thinks 'backend) (funcall get 'backend))
+           :endpoint (and (eq thinks 'endpoint)
+                          `(:api ,(funcall get 'api) :url ,(funcall get 'url)
+                            ,@(when-let* ((variable (funcall get 'key-env))) (list :key-env variable))
+                            ,@(when (funcall get 'auth-source) (list :key 'auth-source))))
+           :model (funcall get 'model)
+           :effort (funcall get 'effort)))))
+
+(defun lispm-character-form (&optional character)
+  "The form making a character, or changing CHARACTER; return its buffer.
+That of an app chooses its model alone: who it is, its skill says.
+Submitted, the character is made or changed (`lispm-save-character')."
+  (let* ((character (and character (lispm-get-character character)))
+         (app (and character (lispm-character-skill character))))
+    (lispm-form
+     (if character (lispm-character-title* character) (lispm-tr "New Character"))
+     (append
+      (unless app
+        `((title :type text :label ,(lispm-tr "Name") :required t)
+          (description :type text :label ,(lispm-tr "Description") :width 60
+                       :help ,(lispm-tr "One line: what other agents are told of it."))
+          (avatar :type picture :label ,(lispm-tr "Picture"))
+          (soul :type text-area :label ,(lispm-tr "Soul") :lines 8
+                :help ,(lispm-tr "Who it is: its nature, its voice, what it cares about."))
+          (role :type choice :label ,(lispm-tr "Role") :choices lispm-characters--role-choices
+                :help ,(lispm-tr "What it works with: instructions, tools, permissions."))))
+      `((thinks :type radio :label ,(lispm-tr "Model")
+                :choices ((lispm . ,(lispm-tr "LispM's"))
+                          (backend . ,(lispm-tr "A backend"))
+                          (endpoint . ,(lispm-tr "An endpoint of its own"))))
+        (backend :type choice :label ,(lispm-tr "Backend") :required t
+                 :choices lispm-characters--backend-choices
+                 :when ,(lispm-characters--thinking 'backend))
+        (api :type radio :label ,(lispm-tr "API")
+             :choices ((openai . "OpenAI") (anthropic . "Anthropic"))
+             :when ,(lispm-characters--thinking 'endpoint))
+        (url :type text :label ,(lispm-tr "URL") :required t :width 60
+             :when ,(lispm-characters--thinking 'endpoint))
+        (key-env :type text :label ,(lispm-tr "Key")
+                 :help ,(lispm-tr "The environment variable holding its key, if it needs one: \
+never the key itself, which git would record.")
+                 :when ,(lispm-characters--thinking 'endpoint))
+        (auth-source :type check :text ,(lispm-tr "Look its key up in auth-source")
+                     :when ,(lispm-characters--thinking 'endpoint))
+        (model :type text :label ,(lispm-tr "Model name")
+               :help ,(lispm-tr "Empty: the backend's own."))
+        (effort :type choice :label ,(lispm-tr "Effort") :choices lispm-characters--effort-choices)))
+     :values (lispm-characters--form-values character)
+     :submit (if character (lispm-tr "Save") (lispm-tr "Create"))
+     :on-submit (lambda (values)
+                  (let ((props (lispm-characters--form-props values)))
+                    (if character
+                        (apply #'lispm-save-character (lispm-character-name character) props)
+                      (apply #'lispm-create-character (plist-get props :title)
+                             (cl-loop for (key value) on props by #'cddr
+                                      unless (eq key :title) append (list key value)))))))))
+
 ;;;###autoload
-(defun lispm-new-character (title)
-  "Make a character called TITLE, and visit its file to say who it is.
-Its soul is the text after the keywords; saving the file makes it so.
-See lispm-characters.el for what the file holds."
-  (interactive (list (read-string (lispm-tr "Name of the new character: "))))
-  (let ((character (lispm-create-character title)))
-    (find-file (lispm-character-file character))
-    (goto-char (point-max))
-    character))
+(defun lispm-new-character ()
+  "Make a character, in its form."
+  (interactive)
+  (pop-to-buffer (lispm-character-form)))
 
 ;;;###autoload
 (defun lispm-edit-character (character)
+  "Change CHARACTER, in its form."
+  (interactive (list (lispm-read-character (lispm-tr "Change the character: "))))
+  (pop-to-buffer (lispm-character-form character)))
+
+;;;###autoload
+(defun lispm-visit-character-file (character)
   "Visit the file of CHARACTER, to change who it is; saving it makes it so."
   (interactive (list (lispm-read-character (lispm-tr "Change the character: "))))
   (find-file (lispm-characters--file (lispm-character-name (lispm-get-character character)))))

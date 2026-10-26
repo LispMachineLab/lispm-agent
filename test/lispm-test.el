@@ -5952,6 +5952,150 @@ handed over once nothing more can be."
       (with-current-buffer (lispm-character "Ada" t)
         (should (eq (lispm-agent-name lispm-chat-agent) 'ada@project))))))
 
+(defun lispm-test--form-field (key)
+  "Move to the start of the field KEY of the form in this buffer."
+  (let ((widget (alist-get key lispm-form--widgets)))
+    (goto-char (or (widget-field-start widget) (widget-get widget :from)))))
+
+(defun lispm-test--form-type (key text)
+  "Type TEXT into the field KEY of the form in this buffer."
+  (lispm-test--form-field key)
+  (insert text))
+
+(defun lispm-test--form-press (key &optional nth)
+  "Press the NTH (default first) widget of the field KEY, as Return would."
+  (let ((widgets (seq-filter (lambda (widget) (eq (widget-get widget :lispm-form-key) key))
+                             (lispm-test--form-buttons))))
+    (widget-apply-action (nth (or nth 0) widgets))))
+
+(defun lispm-test--form-buttons ()
+  "The buttons of the form in this buffer, in order."
+  (let (buttons)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when-let* ((widget (widget-at (point))))
+          (unless (memq widget buttons) (push widget buttons)))
+        (forward-char 1)))
+    (nreverse buttons)))
+
+(ert-deftest lispm-test-form ()
+  "A form written as data is drawn, filled in, checked and submitted."
+  (let* ((submitted nil)
+         (glyphs nil)
+         (drawn 0)
+         (lispm-form-glyph-function (lambda (kind state label) (push (list kind state label) glyphs) nil))
+         (lispm-form-drawn-hook (list (lambda () (cl-incf drawn))))
+         (buffer (lispm-form
+                  "Pet"
+                  `((name :type text :label "Name" :required t)
+                    (notes :type text-area :label "Notes" :lines 3 :help "Anything.")
+                    (kind :type radio :label "Kind" :choices ((cat . "Cat") (dog . "Dog")) :value cat)
+                    (barks :type check :text "Barks"
+                           :when ,(lambda (values) (eq (alist-get 'kind values) 'dog)))
+                    (size :type choice :label "Size" :choices ((small . "Small") (big . "Big")))
+                    (age :type text :label "Age"
+                         :validate ,(lambda (value) (and value (not (string-match-p "\\`[0-9]+\\'" value))
+                                                         "a number"))))
+                  :submit "Adopt"
+                  :on-submit (lambda (values) (setq submitted values)))))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (should (eq major-mode 'lispm-form-mode))
+            (let ((text (buffer-string)))
+              (should (string-prefix-p "Pet\n" text))
+              (should (string-match-p "^Name \\*$" text))
+              (should (string-match-p "^  Anything\\.$" text))
+              (should (string-match-p "(\\*) Cat   ( ) Dog" text))
+              (should (string-match-p "Choose… ▾" text))
+              (should (string-match-p "\\[Cancel\\] \\[Adopt\\]" text))
+              (should-not (string-match-p "Barks" text)))
+            ;; Those who dress it are asked for pictures, and told when it is drawn.
+            (should (member '(radio on nil) glyphs))
+            (should (member '(button default "Adopt") glyphs))
+            (should (member '(popup nil "Choose…") glyphs))
+            (should (= drawn 1))
+            ;; It starts in its first field.
+            (should (eq (lispm-form--key-at (point)) 'name))
+            ;; A required field left empty is refused, and point goes there.
+            (lispm-test--form-field 'notes)
+            (should-error (lispm-form-submit) :type 'user-error)
+            (should (eq (lispm-form--key-at (point)) 'name))
+            (lispm-test--form-type 'name "Rex")
+            (lispm-test--form-type 'notes "Good boy.\nVery good.")
+            (should (equal (lispm-form-value 'name) "Rex"))
+            (should (equal (lispm-form-value 'notes) "Good boy.\nVery good."))
+            ;; Choosing shows the fields that depend on it, keeping what was typed.
+            (lispm-test--form-press 'kind 1)
+            (should (eq (lispm-form-value 'kind) 'dog))
+            (should (string-match-p "( ) Cat   (\\*) Dog" (buffer-string)))
+            (should (string-match-p "\\[ \\] Barks" (buffer-string)))
+            (should (equal (lispm-form-value 'name) "Rex"))
+            (lispm-test--form-press 'barks)
+            (should (eq (lispm-form-value 'barks) t))
+            (cl-letf (((symbol-function 'widget-choose) (lambda (&rest _) '(big))))
+              (lispm-test--form-press 'size))
+            (should (eq (lispm-form-value 'size) 'big))
+            (should (string-match-p "Big ▾" (buffer-string)))
+            ;; A value its check refuses is refused.
+            (lispm-test--form-type 'age "two")
+            (should (equal (cadr (should-error (lispm-form-submit) :type 'user-error)) "Age: a number"))
+            (lispm-test--form-field 'age)
+            (delete-region (point) (+ (point) 3))
+            (insert "2")
+            (lispm-form-submit))
+          (should (equal submitted '((name . "Rex") (notes . "Good boy.\nVery good.") (kind . dog)
+                                     (barks . t) (size . big) (age . "2"))))
+          (should-not (buffer-live-p buffer)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest lispm-test-character-form ()
+  "A character is made and changed in its form; an app's chooses its model alone."
+  (lispm-test-env
+    (let* ((picture (lispm-test--png (expand-file-name "ada.png" project)))
+           (buffer (lispm-character-form)))
+      (with-current-buffer buffer
+        (lispm-test--form-type 'title "Ada")
+        (lispm-test--form-type 'description "Reviews changes.")
+        (lispm-test--form-type 'soul "Plain-spoken.")
+        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) picture)))
+          (lispm-test--form-press 'avatar))
+        (should (equal (lispm-form-value 'avatar) picture))
+        ;; An endpoint of its own asks for its address.
+        (lispm-test--form-press 'thinks 2)
+        (should-error (lispm-form-submit) :type 'user-error)
+        (lispm-test--form-type 'url "http://127.0.0.1:11434/v1")
+        (lispm-test--form-type 'key-env "LOCAL_KEY")
+        (lispm-test--form-type 'model "qwen3")
+        (lispm-form-submit))
+      (let ((ada (lispm-get-character "ada")))
+        (should (equal (lispm-character-soul ada) "Plain-spoken."))
+        (should (equal (lispm-character-endpoint ada)
+                       '(:api openai :url "http://127.0.0.1:11434/v1" :key-env "LOCAL_KEY")))
+        (should (equal (lispm-character-model ada) "qwen3"))
+        (should (lispm-character-avatar ada))
+        ;; Changed in its form, back to LispM's model.
+        (with-current-buffer (lispm-character-form ada)
+          (should (equal (lispm-form-value 'url) "http://127.0.0.1:11434/v1"))
+          (lispm-test--form-press 'thinks 0)
+          (should-not (assq 'url (lispm-form-values)))
+          (lispm-form-submit))
+        (should-not (lispm-character-endpoint ada))
+        (should (equal (lispm-character-soul ada) "Plain-spoken."))
+        (should (equal (lispm-character-model ada) "qwen3")))
+      ;; An app's form has its model alone.
+      (let ((lispm-characters--apps nil))
+        (lispm-define-app-character 'notes :title "Notes" :skill "notes")
+        (with-current-buffer (lispm-character-form "Notes")
+          (should-not (alist-get 'title lispm-form--widgets))
+          (lispm-test--form-type 'model "small-model")
+          (lispm-form-submit))
+        (should (equal (lispm-character-model (lispm-get-character "notes")) "small-model"))
+        (should (equal (lispm--file-text (expand-file-name "characters/notes/character.org"
+                                                           lispm-directory))
+                       "#+model: small-model\n"))))))
+
 (ert-deftest lispm-test-character-names ()
   (should (eq (lispm-character-name-for "Ada Lovelace") 'ada-lovelace))
   (should (eq (lispm-character-name-for "  R2-D2! ") 'r2-d2))

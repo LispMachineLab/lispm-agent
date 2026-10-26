@@ -213,9 +213,11 @@ in each project it is asked into.  It is the same in all of them.
   :model "qwen3")
 #+end_src
 
-~M-x lispm-new-character~ does the same in Emacs: it makes the character's file,
-=characters/ada/character.org= in ~lispm-directory~, for you to say who it is, and saving the
-file makes it so.  ~M-x lispm-character~ talks to one (~C-u~: in the current project).
+~M-x lispm-new-character~ does the same in a form: name, picture, soul, role and model, which
+~M-x lispm-edit-character~ shows again to change it.  A character is its file,
+=characters/ada/character.org= in ~lispm-directory~, which you may edit too
+(~M-x lispm-visit-character-file~).  ~M-x lispm-character~ talks to one (~C-u~: in the current
+project).
 
 - *Reached by name, from anywhere.*  ~ask_agent~ and ~send_message~ take a character's name, as
   =@Ada=: the request goes to its conversation in the asker's project, started there if need be.
