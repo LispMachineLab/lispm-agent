@@ -265,7 +265,7 @@ its own, so made-up names stay unknown to the image. What is found is data, ~(un
   ~edit_buffer~ (write); ~run_shell~ (shell); ~eval_elisp~ (exec); ~run_lisp~ (lisp); the
   memory, task and collaboration tools described below. Deferred, as seldom needed:
   ~read_info~ (read), ~write_skill~ (exec), ~forget~ (memory), ~list_agents~ ~inspect_agent~
-  (comm); and for Lisp in the image (below): ~xref_definitions~ ~xref_references~
+  ~start_agent~ (comm); and for Lisp in the image (below): ~xref_definitions~ ~xref_references~
   ~flymake_diagnostics~ (read); ~edit_definition~ (write); ~eval_definition~ ~ert_run~ (exec).
 - *Emacs is the operating system*, so LispM does not wrap its functions in tools one by one:
   ~eval_elisp~ reaches anything in Emacs (magit, org, LSP, windows, the network, ...), and
@@ -671,7 +671,8 @@ Agents do not only answer when asked. Any Emacs hook or timer can wake one up:
 * 7. Multi-agent collaboration
 
 Agents share one Emacs: the same buffers, the same files, the same event loop. Collaboration
-needs only three tools, and two more to see each other and to answer with data:
+needs only three tools, and three more to see each other, to answer with data and to start
+agents that work on their own:
 
 - ~list_agents~: who is running, in which project, doing what, and which roles exist
   (~inspect_agent~ shows one in depth); both are deferred, since the system prompt already
@@ -685,6 +686,12 @@ needs only three tools, and two more to see each other and to answer with data:
   whose session stays on record. *A helper may do no more than its caller*: for each permission
   class its policy is the stricter of its role's and its caller's (its ~ceiling~), so a reviewer
   that may not write cannot get writes done by starting a coder.
+- ~start_agent~: an agent of a role, started in the caller's project or another, that *works on
+  its own*: nobody waits for its reply, and it stays once it has replied, for the user and the
+  other agents to talk to. It gets its caller's ceiling as a helper does. Started outside the
+  caller's project, it could do there what the caller may do in its own, where the caller's
+  writes always ask; so that call asks too, whatever the policy says (a function of
+  ~lispm-tool-action-functions~). Deferred, as seldom needed.
 
 What passes between agents need not be only text. A reply can carry a *value*: the agent asked
 returns one with ~return_value~ (any JSON: a list of places, an org subtree as text), the turn's

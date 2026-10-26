@@ -49,6 +49,7 @@
   (("tool" . "Ask") . "詢問")
   (("tool" . "Message") . "傳訊")
   (("tool" . "Agents") . "代理")
+  (("tool" . "Start") . "啟動")
   (("tool" . "Skill") . "技能")
   (("tool" . "Test") . "測試")
   (("tool" . "Definitions") . "定義")

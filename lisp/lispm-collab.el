@@ -20,7 +20,7 @@
 ;;; Commentary:
 
 ;; Several agents share one Emacs: the same buffers, files and event
-;; loop.  They coordinate through three tools:
+;; loop.  They coordinate through four tools:
 ;;
 ;;   list_agents   who else is here, what they are doing, and which
 ;;                 roles helpers can be started from;
@@ -35,7 +35,15 @@
 ;;                 once it has replied: a subagent.  A helper may do no
 ;;                 more than its caller: for each permission class it
 ;;                 gets the stricter of its role's and its caller's
-;;                 policy.
+;;                 policy;
+;;   start_agent   an agent of a role, started in the caller's project
+;;                 or another, that works on its own: nobody waits for
+;;                 its reply, and it stays once it has replied, for the
+;;                 user and the other agents to talk to.  It is bounded
+;;                 by its caller as a helper is; started outside the
+;;                 caller's project, where it may do what the caller may
+;;                 do in its own, it is started only once the user
+;;                 approved it.
 ;;
 ;; inspect_agent (lispm-inspect.el) shows another agent in depth.
 ;; Places and buffers pass between agents as org links,
@@ -299,6 +307,45 @@ A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
     (lispm--in-session caller
       (lispm-transcript-set-property marker "ASKED" (lispm-agent-id target)))))
 
+;;;; Agents working on their own
+
+(defun lispm-collab-root (caller directory)
+  "Root of the project around DIRECTORY, which is relative to CALLER's root.
+Nil if DIRECTORY is not a directory."
+  (let ((directory (file-name-as-directory (expand-file-name directory (lispm-agent-root caller)))))
+    (and (file-directory-p directory) (lispm--project-root directory))))
+
+(defun lispm-collab-start (caller role request &optional root)
+  "Start an agent of ROLE in ROOT for CALLER, hand it REQUEST, and return it.
+ROLE is a role or its name; ROOT defaults to CALLER's root.  Unlike a
+helper (see `lispm-delegate'), the agent works on its own: nobody waits
+for its reply, and it stays once it has replied, until the user ends
+it.  Like a helper, it may do no more than CALLER, an agent: for each
+permission class it gets the stricter of its role's and CALLER's
+policy, for the rest of its life."
+  (let ((agent (lispm-start (or (lispm-get-role role t)
+                                (error "No role named %s; list_agents, which search_tools finds, shows the roles"
+                                       role))
+                            (or root (lispm-agent-root caller)))))
+    (lispm-set-ceiling agent (lispm-policy caller))
+    (lispm-tell agent request :from (lispm-agent-name caller))
+    agent))
+
+(defun lispm-collab--start-elsewhere (agent tool input)
+  "Make AGENT's call of TOOL on INPUT ask if it starts an agent elsewhere.
+That is outside AGENT's project, where the agent started may do what
+AGENT may do in its own, as AGENT's writes there, which always ask
+\(see `lispm-tool-action'), could not."
+  (when-let* (((equal (lispm-tool-name tool) "start_agent"))
+              (project (and (listp input) (alist-get 'project input)))
+              ((stringp project))
+              (root (lispm-collab-root agent project))
+              ((not (file-in-directory-p root (lispm-agent-root agent)))))
+    (cons 'ask (format "It starts an agent in %s, outside the project of %s, that may do there what %s may do in its own."
+                       (abbreviate-file-name root) (lispm-agent-name agent) (lispm-agent-name agent)))))
+
+(add-hook 'lispm-tool-action-functions #'lispm-collab--start-elsewhere)
+
 ;;;; Delegations across restarts of Emacs
 
 (defun lispm-collab--deliver (caller-id call agent reply)
@@ -373,7 +420,8 @@ Then it stays, to answer them, as an agent of its own."
   (let ((others (remq agent (lispm-agents))))
     (concat "# Other agents\n"
             "ask_agent delegates to a running agent, or to a helper it starts from a"
-            " role; send_message notifies a running agent.\n"
+            " role; send_message notifies a running agent; start_agent, which"
+            " search_tools finds, starts an agent of a role that works on its own and stays.\n"
             (if others
                 (concat "Running:\n"
                         (mapconcat (lambda (a)
@@ -429,6 +477,29 @@ reply (return_value), which follows it as JSON."
                     ;; A call the model made, not one a Lisp program does.
                     :call lispm-current-call))
   nil)
+
+(lispm-deftool start_agent
+    ((role string "The role to start the agent from (list_agents, which search_tools finds, shows the roles).")
+     (request string "Its first task, self-contained: it cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]].")
+     (project string "Directory of the project it works in, yours or another; default: yours." :optional t))
+  "Start an agent of a role that works on its own, in your project or
+another, and hand it a first request.  Nobody waits for its reply, and
+it stays once it has replied, for the user and the other agents to
+talk to: for work that goes on apart from yours.  If you need to hear
+back, ask it in the request to send_message you; to wait for its reply
+instead, use ask_agent.  The result names the agent, which
+send_message, ask_agent and inspect_agent then reach.  It may do no
+more than you."
+  :permission comm
+  :deferred t
+  (let ((agent (lispm-collab-start
+                lispm-current-agent role request
+                (and project
+                     (or (lispm-collab-root lispm-current-agent project)
+                         (error "No directory %s" project))))))
+    (format "Started %s (%s, in %s).  It works on its own and stays once it has replied: send_message and ask_agent reach it."
+            (lispm-agent-name agent) (lispm-agent-role agent)
+            (abbreviate-file-name (lispm-agent-root agent)))))
 
 (lispm-register-tool
  (lispm-tool--create

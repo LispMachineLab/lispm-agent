@@ -191,8 +191,10 @@ and timers can wake them:
 #+end_src
 
 Agents work together with ~send_message~ and ~ask_agent~, which delegates and waits; given a role,
-it starts a subagent that may do no more than its caller.  The ~worktree~ skill gives each helper
-a git worktree of its own.
+it starts a subagent that may do no more than its caller.  ~start_agent~ starts one that works on
+its own instead, in the caller's project or another, and stays once it has replied; outside the
+caller's project, only once you approve.  The ~worktree~ skill gives each helper a git worktree
+of its own.
 
 * Claude Code, Codex and other agents
 

@@ -49,6 +49,7 @@
   (("tool" . "Ask") . "Fragen")
   (("tool" . "Message") . "Nachricht")
   (("tool" . "Agents") . "Agenten")
+  (("tool" . "Start") . "Starten")
   (("tool" . "Skill") . "Skill")
   (("tool" . "Test") . "Test")
   (("tool" . "Definitions") . "Definitionen")
