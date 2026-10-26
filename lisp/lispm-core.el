@@ -216,6 +216,12 @@ Each is called with the buffer, its old text and its new text;
 ;; declared with `lispm-defagent' are standing: they keep one
 ;; conversation going across Emacs sessions, and hooks and timers wake
 ;; them up.
+;;
+;; A character is someone, not a kind: a name, a soul, a memory and a
+;; past of its own, which last.  It has conversations in many places,
+;; one going on in each, and is the same in all of them: each is a
+;; standing agent of its role, the character's agent at that place
+;; (`lispm-character-agent'), whose identity is the character's.
 
 (defcustom lispm-default-role 'assistant
   "Role of agents started without choosing one."
@@ -232,6 +238,31 @@ Each is called with the buffer, its old text and its new text;
 (defvar lispm--role-files nil
   "Alist of (NAME . FILE): the roles read from role files (lispm-roles.el).
 A role defined again in Lisp is no longer one of them.")
+
+(cl-defstruct (lispm-character (:constructor lispm-character--create)
+                               (:copier nil))
+  "Someone: an identity that lasts, with a conversation in each place it is.
+Its conversations are agents (see `lispm-character-agent'); its
+memory, its past and what it learned of itself are in its directory
+\(see `lispm-character-directory')."
+  name                       ; symbol naming its directory and its agents, as `ada'
+  title                      ; the name it goes by, as "Ada"
+  description                ; one line: what other agents are told of it
+  soul                       ; who it is: nature, voice, values; the user's words
+  avatar                     ; its picture, a file, or nil
+  role                       ; role whose instructions, tools and policy it works with
+  backend                    ; a backend of `lispm-backends' it uses, or nil
+  endpoint                   ; a model endpoint of its own, as an entry of `lispm-backends'
+  model effort
+  skill                      ; for an app: the name of its skill, which is what it is for
+  file)                      ; the file it was read from, if any
+
+(defvar lispm--characters nil
+  "Alist of (NAME . CHARACTER) in definition order.")
+
+(defvar lispm-character-change-functions nil
+  "Abnormal hook run when a character is defined, changed or removed.
+Each is called with the character's name and `defined' or `removed'.")
 
 (cl-defstruct (lispm-agent (:constructor lispm-agent--create)
                            (:copier nil))
@@ -277,7 +308,8 @@ A role defined again in Lisp is no longer one of them.")
   triggers                   ; hook and timer subscriptions
   (usage (list 0 0 0))       ; input, output, cache-read tokens
   ;; Last, so that code compiled against fewer slots still reads the others.
-  system)                    ; non-nil for an agent of the whole system, in no project
+  system                     ; non-nil for an agent of the whole system, in no project
+  character)                 ; name of the character whose conversation it is, if any
 
 (defvar lispm--agents nil
   "Alist of (NAME . AGENT) of the live agents, oldest first.")
@@ -310,7 +342,9 @@ Signal an error if there is none, unless NOERROR."
         (t (user-error "%s" (lispm-tr "No agent named %s" agent)))))
 
 (defun lispm--apply-role (agent role)
-  "Give AGENT the capabilities of ROLE."
+  "Give AGENT the capabilities of ROLE, and those of its character, if any.
+What a character says of itself, its description and its model,
+overrides what its role says."
   (setf (lispm-agent-role agent) (lispm-role-name role)
         (lispm-agent-description agent) (lispm-role-description role)
         (lispm-agent-instructions agent) (lispm-role-instructions role)
@@ -319,6 +353,15 @@ Signal an error if there is none, unless NOERROR."
         (lispm-agent-backend agent) (lispm-role-backend role)
         (lispm-agent-model agent) (lispm-role-model role)
         (lispm-agent-effort agent) (lispm-role-effort role))
+  (when-let* ((character (lispm-agent-character* agent)))
+    (setf (lispm-agent-description agent) (or (lispm-character-description character)
+                                              (lispm-agent-description agent))
+          (lispm-agent-backend agent) (or (lispm-character-backend-name character)
+                                          (lispm-agent-backend agent))
+          (lispm-agent-model agent) (or (lispm-character-model character)
+                                        (lispm-agent-model agent))
+          (lispm-agent-effort agent) (or (lispm-character-effort character)
+                                         (lispm-agent-effort agent))))
   agent)
 
 (defun lispm-register-role (name &rest props)
@@ -398,13 +441,15 @@ PROPS are as for `lispm-register-role'.
       (setq name (format "%s<%d>" base (cl-incf n))))
     (intern name)))
 
-(cl-defun lispm-make-agent (role root &key name id standing system)
+(cl-defun lispm-make-agent (role root &key name id standing system character)
   "Make a live agent of ROLE working in ROOT, and return it.
 NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id.
 STANDING non-nil makes it a standing agent, as `lispm-defagent' does.
 SYSTEM non-nil makes it an agent of the whole system, as the agent of
 a system-wide prompt is: it works in no project, and its memory, tasks
-and episodes are the system's (see `lispm-system-directory')."
+and episodes are the system's (see `lispm-system-directory').
+CHARACTER, the name of a character, makes it that character's
+conversation (see `lispm-character-agent')."
   (let* ((role (lispm-get-role role))
          (agent (lispm-agent--create
                  :name (or name (lispm--free-name
@@ -413,7 +458,8 @@ and episodes are the system's (see `lispm-system-directory')."
                  :id (or id (lispm--new-id))
                  :root (file-name-as-directory (expand-file-name root))
                  :standing standing
-                 :system system)))
+                 :system system
+                 :character character)))
     (lispm--apply-role agent role)
     (setq lispm--agents (append lispm--agents
                                 (list (cons (lispm-agent-name agent) agent))))
@@ -460,6 +506,135 @@ PROPS are as for `lispm-register-agent'.
     (setq props (cons :description props)))
   `(lispm-register-agent ',name ,@props))
 
+;;;; Characters
+
+(defcustom lispm-character-home "~/"
+  "Directory a character's own conversation works in.
+That is the conversation it has of its own, not in a project: the
+one an app of its shows, say.  Its memory and its tasks there are its
+own (see `lispm-home-directory')."
+  :type 'directory)
+
+(defun lispm-characters ()
+  "Return the characters."
+  (mapcar #'cdr lispm--characters))
+
+(defun lispm-get-character (character &optional noerror)
+  "Return the character CHARACTER designates, or nil.
+CHARACTER is a character, a name (a symbol), or a string: its name or
+the name it goes by, in any case, with or without a leading @, as
+@Ada.  Signal an error if there is none, unless NOERROR."
+  (cond ((lispm-character-p character) character)
+        ((and (symbolp character) (alist-get character lispm--characters)))
+        ((and (stringp character)
+              (let ((name (string-remove-prefix "@" (string-trim character))))
+                (seq-find (lambda (c)
+                            (or (string-equal-ignore-case name (symbol-name (lispm-character-name c)))
+                                (and (lispm-character-title c)
+                                     (string-equal-ignore-case name (lispm-character-title c)))))
+                          (lispm-characters)))))
+        (noerror nil)
+        (t (user-error "%s" (lispm-tr "No character named %s" character)))))
+
+(defun lispm-agent-character* (agent)
+  "The character whose conversation AGENT is, or nil."
+  (when-let* ((name (lispm-agent-character agent)))
+    (lispm-get-character name t)))
+
+(defun lispm-character-title* (character)
+  "The name CHARACTER goes by."
+  (or (lispm-character-title character) (symbol-name (lispm-character-name character))))
+
+(defun lispm-character-backend-name (character)
+  "Name of the backend CHARACTER's conversations use, or nil for the default.
+A character with an endpoint of its own uses it, by the name @NAME."
+  (cond ((lispm-character-endpoint character)
+         (intern (format "@%s" (lispm-character-name character))))
+        ((lispm-character-backend character))))
+
+(defun lispm-character-directory (character)
+  "Directory of what CHARACTER is: its file, memory, past; created on demand.
+CHARACTER is a character or a name."
+  (let ((dir (expand-file-name (format "characters/%s/"
+                                       (if (lispm-character-p character)
+                                           (lispm-character-name character)
+                                         character))
+                               lispm-directory)))
+    (make-directory dir t)
+    dir))
+
+(defun lispm-register-character (name &rest props)
+  "Define or redefine the character NAME from PROPS, and return it.
+PROPS are :title, :description, :soul, :avatar, :role (the name of a
+role, nil for `lispm-default-role'), :backend, :endpoint, :model,
+:effort, :skill and :file (see `lispm-character').  Its live
+conversations take on the new definition at once."
+  (let ((character (or (alist-get name lispm--characters)
+                       (let ((new (lispm-character--create :name name)))
+                         (setq lispm--characters (append lispm--characters (list (cons name new))))
+                         new))))
+    (setf (lispm-character-title character) (plist-get props :title)
+          (lispm-character-description character) (plist-get props :description)
+          (lispm-character-soul character) (plist-get props :soul)
+          (lispm-character-avatar character) (plist-get props :avatar)
+          (lispm-character-role character) (plist-get props :role)
+          (lispm-character-backend character) (plist-get props :backend)
+          (lispm-character-endpoint character) (plist-get props :endpoint)
+          (lispm-character-model character) (plist-get props :model)
+          (lispm-character-effort character) (plist-get props :effort)
+          (lispm-character-skill character) (plist-get props :skill)
+          (lispm-character-file character) (plist-get props :file))
+    (dolist (agent (lispm-agents))
+      (when (eq (lispm-agent-character agent) name)
+        (lispm--apply-role agent (lispm-get-role (lispm-agent-role agent)))))
+    (run-hook-with-args 'lispm-character-change-functions name 'defined)
+    character))
+
+(defun lispm-unregister-character (name)
+  "Remove the character NAME, a symbol or a string; return it, or nil.
+Its live conversations go on with what they had from it."
+  (let* ((name (if (stringp name) (intern name) name))
+         (character (alist-get name lispm--characters)))
+    (when character
+      (setq lispm--characters (seq-remove (lambda (entry) (eq (car entry) name)) lispm--characters))
+      (run-hook-with-args 'lispm-character-change-functions name 'removed))
+    character))
+
+(defun lispm--character-root-p (root)
+  "Non-nil if ROOT is `lispm-character-home', where characters are at home."
+  (equal (file-name-as-directory (expand-file-name root))
+         (file-name-as-directory (expand-file-name lispm-character-home))))
+
+(defun lispm-character-home-p (agent)
+  "Non-nil if AGENT is a character's own conversation, in no project."
+  (and (lispm-agent-character agent) (lispm--character-root-p (lispm-agent-root agent))))
+
+(defun lispm-character-agent (character &optional root)
+  "CHARACTER's conversation in ROOT: a standing agent, declared if need be.
+ROOT nil, or `lispm-character-home', is its own conversation, named as
+the character is; elsewhere it is NAME@PROJECT.  It works with the
+character's role, or `lispm-default-role', and resumes the
+conversation it had there, if any."
+  (let* ((character (lispm-get-character character))
+         (name (lispm-character-name character))
+         (root (file-name-as-directory (expand-file-name (or root lispm-character-home)))))
+    (or (seq-find (lambda (agent)
+                    (and (eq (lispm-agent-character agent) name)
+                         (lispm-agent-standing agent)
+                         (equal (lispm-agent-root agent) root)))
+                  (lispm-agents))
+        (let ((agent (lispm-make-agent
+                      (or (lispm-get-role (lispm-character-role character) t) lispm-default-role)
+                      root
+                      :name (lispm--free-name
+                             (if (lispm--character-root-p root)
+                                 (symbol-name name)
+                               (format "%s@%s" name (lispm--project-name root))))
+                      :standing t
+                      :character name)))
+          (run-hook-with-args 'lispm-agent-declared-functions agent)
+          agent))))
+
 (defun lispm--key-variable (backend)
   "The environment variable that holds BACKEND's API key, or nil."
   (or (plist-get backend :key-env)
@@ -476,6 +651,16 @@ See `lispm-backend'."
                          (not (string-empty-p value))))
                      lispm-backends))))
 
+(defun lispm-backend (name)
+  "Plist of the backend NAME, or nil if there is none.
+An entry of `lispm-backends', or a character's own endpoint, named
+@NAME after it (see `lispm-character-backend-name')."
+  (or (alist-get name lispm-backends)
+      (when-let* ((string (and name (symbolp name) (symbol-name name)))
+                  ((string-prefix-p "@" string))
+                  (character (alist-get (intern (substring string 1)) lispm--characters)))
+        (lispm-character-endpoint character))))
+
 (defun lispm-agent-backend* (agent)
   "Plist of the backend AGENT uses."
   (let ((name (lispm-backend-name agent)))
@@ -483,7 +668,7 @@ See `lispm-backend'."
            (user-error "No model backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY, \
 or set `lispm-backend' to an entry of `lispm-backends', where a server \
 of your own can be added"))
-          ((alist-get name lispm-backends))
+          ((lispm-backend name))
           (t (user-error "Unknown backend %s (see `lispm-backends')" name)))))
 
 (defun lispm-agent-model* (agent)
@@ -569,10 +754,12 @@ which work in no project."
 
 (defun lispm-home-directory (agent)
   "Directory of AGENT's own memory, tasks and episodes.
-The system's for an agent of the whole system, else its project's."
-  (if (lispm-agent-system agent)
-      (lispm-system-directory)
-    (lispm-project-directory (lispm-agent-root agent))))
+The system's for an agent of the whole system, the character's for a
+character's own conversation (see `lispm-character-home-p'), else its
+project's."
+  (cond ((lispm-agent-system agent) (lispm-system-directory))
+        ((lispm-character-home-p agent) (lispm-character-directory (lispm-agent-character agent)))
+        (t (lispm-project-directory (lispm-agent-root agent)))))
 
 (defconst lispm--policy-actions '(deny ask auto)
   "Policy actions, from the strictest to the most permissive.")

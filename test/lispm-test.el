@@ -100,6 +100,8 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm--agents nil)
           (lispm--roles (copy-sequence lispm--roles))
           (lispm--role-files (copy-sequence lispm--role-files))
+          (lispm--characters nil)
+          (lispm-character-home (expand-file-name "character-home/" tmp))
           (lispm-api-function #'lispm-test--fake-api)
           (lispm-test--scripts nil)
           (lispm-test--requests nil)
@@ -5862,6 +5864,297 @@ handed over once nothing more can be."
         (should (cdr result))
         (should (string-match-p "deadlock" (car result))))
       (should (cdr (lispm-test--call boss "send_message" '((to . "boss") (text . "hi"))))))))
+
+;;;; Characters
+
+(defun lispm-test--png (file)
+  "Write a one-pixel PNG to FILE; return FILE."
+  (let ((coding-system-for-write 'binary))
+    (with-temp-file file
+      (set-buffer-multibyte nil)
+      (insert (base64-decode-string
+               "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))))
+  file)
+
+(ert-deftest lispm-test-character-file ()
+  (lispm-test-env
+    (let* ((changes nil)
+           (lispm-character-change-functions
+            (list (lambda (name change) (push (cons name change) changes))))
+           (picture (lispm-test--png (expand-file-name "ada.png" project)))
+           (ada (lispm-create-character
+                 "Ada" :description "Reviews changes with care." :soul "Plain-spoken.\nLikes small diffs."
+                 :avatar picture :role 'assistant
+                 :endpoint '(:api openai :url "http://127.0.0.1:11434/v1" :key-env "LOCAL_KEY")
+                 :model "qwen3"))
+           (file (expand-file-name "characters/ada/character.org" lispm-directory)))
+      (should (eq (lispm-get-character "@ada") ada))
+      (should (eq (lispm-get-character "ADA") ada))
+      (should (equal changes '((ada . defined))))
+      (should (file-exists-p file))
+      (should (equal (lispm-character-file ada) file))
+      ;; The picture is copied in, named after what it holds.
+      (should (string-match-p "/characters/ada/avatar-[[:xdigit:]]\\{8\\}\\.png\\'" (lispm-character-avatar ada)))
+      (should (file-exists-p (lispm-character-avatar ada)))
+      ;; What the file says is what was saved.
+      (let ((read (lispm-characters--read file)))
+        (should (equal (plist-get read :title) "Ada"))
+        (should (equal (plist-get read :soul) "Plain-spoken.\nLikes small diffs."))
+        (should (equal (plist-get read :endpoint)
+                       '(:api openai :url "http://127.0.0.1:11434/v1" :key-env "LOCAL_KEY")))
+        (should (eq (plist-get read :role) 'assistant)))
+      ;; Changing one thing keeps the others.
+      (lispm-save-character 'ada :model "qwen3.5")
+      (should (equal (lispm-character-model ada) "qwen3.5"))
+      (should (equal (lispm-character-soul ada) "Plain-spoken.\nLikes small diffs."))
+      (should (lispm-character-avatar ada))
+      ;; Made again by name, it is refused; so is a role's name.
+      (should-error (lispm-create-character "Ada") :type 'user-error)
+      (should-error (lispm-create-character "Assistant") :type 'user-error)
+      ;; A key never goes into the file.
+      (should-error (lispm-create-character "Bob" :endpoint '(:api openai :url "http://x" :key "sk-1"))
+                    :type 'user-error)
+      (should-not (lispm-get-character "bob" t))
+      (should-not (file-exists-p (expand-file-name "characters/bob/character.org" lispm-directory)))
+      ;; Saved by hand, the file is read again.
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-max))
+        (insert "Fond of λ.\n")
+        (save-buffer))
+      (should (string-match-p "Fond of λ" (lispm-character-soul ada)))
+      ;; Loaded again, characters whose files are gone are removed.
+      (let ((lispm--characters nil))
+        (should (equal (lispm-load-characters) '(ada)))
+        (should (lispm-get-character "Ada" t)))
+      (setq changes nil)
+      (lispm-delete-character ada)
+      (should-not (lispm-get-character "ada" t))
+      (should-not (file-exists-p (expand-file-name "characters/ada/" lispm-directory)))
+      (should (equal changes '((ada . removed)))))))
+
+(ert-deftest lispm-test-character-chat ()
+  "M-x lispm-character talks to a character; the chat completes @names."
+  (lispm-test-env
+    (lispm-create-character "Ada")
+    (let ((default-directory project))
+      (with-current-buffer (lispm-character "Ada")
+        (should (eq major-mode 'lispm-chat-mode))
+        (should (eq lispm-chat-agent (lispm-character-agent "Ada")))
+        (lispm-chat-set-input "tell @A")
+        (goto-char (point-max))
+        (pcase-let ((`(,beg ,end ,table . ,_) (lispm-chat--complete)))
+          (should (equal (buffer-substring-no-properties beg end) "A"))
+          (should (equal (all-completions "A" table) '("Ada"))))
+        (lispm-chat-set-input "/cl")
+        (goto-char (point-max))
+        (should (member "clear" (nth 2 (lispm-chat--complete))))))
+    (let ((default-directory project))
+      (with-current-buffer (lispm-character "Ada" t)
+        (should (eq (lispm-agent-name lispm-chat-agent) 'ada@project))))))
+
+(ert-deftest lispm-test-character-names ()
+  (should (eq (lispm-character-name-for "Ada Lovelace") 'ada-lovelace))
+  (should (eq (lispm-character-name-for "  R2-D2! ") 'r2-d2))
+  (should (eq (lispm-character-name-for "λx") (intern "λx")))
+  (should-not (lispm-character-name-for "!!!")))
+
+(ert-deftest lispm-test-character-conversations ()
+  (lispm-test-env
+    (lispm-create-character "Ada" :description "Reviews changes." :soul "Plain-spoken."
+                            :endpoint '(:api anthropic :url "http://ada.invalid") :model "ada-model")
+    (let* ((home (lispm-character-agent "Ada"))
+           (here (lispm-character-agent "Ada" project)))
+      ;; One conversation in each place, which goes on.
+      (should (eq (lispm-agent-name home) 'ada))
+      (should (eq (lispm-agent-name here) 'ada@project))
+      (should (eq (lispm-character-agent "ada" project) here))
+      (should (eq (lispm-character-agent "ada" lispm-character-home) home))
+      (should (lispm-agent-standing here))
+      (should (lispm-character-home-p home))
+      (should-not (lispm-character-home-p here))
+      (should (equal (lispm-agent-description here) "Reviews changes."))
+      ;; It thinks with its own endpoint and model.
+      (should (eq (lispm-backend-name here) '@ada))
+      (should (equal (plist-get (lispm-agent-backend* here) :url) "http://ada.invalid"))
+      (should (equal (lispm-agent-model* here) "ada-model"))
+      ;; Its home is its own; a project's memory and tasks stay the project's.
+      (should (equal (lispm-home-directory home) (lispm-character-directory 'ada)))
+      (should (equal (lispm-home-directory here) (lispm-project-directory project)))
+      ;; It knows who it is, and where it is.
+      (let ((prompt (lispm-system-prompt here)))
+        (should (string-prefix-p "You are \"Ada\": not a session but someone" prompt))
+        (should (string-match-p "# Who you are\nPlain-spoken." prompt))
+        (should (string-match-p "in the project at " prompt))
+        (should (string-match-p "# Your other conversations\n- ada, in " prompt))
+        (should (string-match-p "# Yourself, as you came to know it" prompt)))
+      (should (string-match-p "This conversation is your own" (lispm-system-prompt home)))
+      ;; Its session says whose it is, and is taken up again as its.
+      (lispm-session-buffer here)
+      (let ((file (buffer-file-name (lispm-agent-buffer here)))
+            (id (lispm-agent-id here)))
+        (should (string-match-p "^#\\+lispm_character: ada$" (lispm-test--transcript here)))
+        (kill-buffer (lispm-agent-buffer here))
+        (setq lispm--agents nil)
+        (let ((again (lispm-resume-file file)))
+          (should (eq (lispm-agent-character again) 'ada))
+          (should (lispm-agent-standing again))
+          (should (equal (lispm-agent-id again) id))
+          (should (eq (lispm-character-agent "Ada" project) again)))
+        ;; A declared conversation there resumes it too.
+        (kill-buffer (lispm-agent-buffer (lispm-character-agent "Ada" project)))
+        (setq lispm--agents nil)
+        (let ((again (lispm-character-agent "Ada" project)))
+          (lispm-session-buffer again)
+          (should (equal (lispm-agent-id again) id)))))))
+
+(ert-deftest lispm-test-character-memory ()
+  (lispm-test-env
+    (lispm-create-character "Ada")
+    (let ((here (lispm-character-agent "Ada" project))
+          (home (lispm-character-agent "Ada"))
+          (other (lispm-start nil project)))
+      (should (string-match-p "Saved self memory"
+                              (car (lispm-test--call here "remember"
+                                                     '((title . "The user likes λ")
+                                                       (content . "Prefers small diffs.")
+                                                       (scope . "self"))))))
+      (should (file-exists-p (expand-file-name "characters/ada/memory.org" lispm-directory)))
+      ;; Its own memory goes with it; the project's stays the project's.
+      (lispm-test--call here "remember" '((title . "Build") (content . "make test")))
+      (should (string-match-p "Prefers small diffs" (car (lispm-test--call home "recall" '((query . "λ"))))))
+      (should (string-match-p "Nothing matches" (car (lispm-test--call home "recall" '((query . "make"))))))
+      (should (string-match-p "make test" (car (lispm-test--call other "recall" '((query . "build"))))))
+      (should (string-match-p "Nothing matches" (car (lispm-test--call other "recall" '((query . "λ"))))))
+      (should (string-match-p "The user likes λ (your own)" (lispm-system-prompt here)))
+      ;; Others have no memory of their own.
+      (should (cdr (lispm-test--call other "remember" '((title . "x") (content . "y") (scope . "self"))))))))
+
+(ert-deftest lispm-test-character-revises-itself ()
+  (lispm-test-env
+    (lispm-create-character "Ada" :soul "Plain-spoken.")
+    (let ((here (lispm-character-agent "Ada" project))
+          (other (lispm-start nil project)))
+      ;; Only a character has the tool.
+      (should (lispm-tools-allowed-p here "revise_self"))
+      (should-not (lispm-tools-allowed-p other "revise_self"))
+      (should (string-match-p "Revised"
+                              (car (lispm-test--call here "revise_self"
+                                                     '((text . "I check the tests first.")
+                                                       (why . "I keep doing it."))))))
+      (should (equal (lispm-character-self "ada") "I check the tests first."))
+      (lispm-test--call here "revise_self" '((text . "I check the tests last.") (why . "Changed.")))
+      (should (equal (lispm-character-self "ada") "I check the tests last."))
+      (should (string-match-p "came to know it\nI check the tests last\\."
+                              (lispm-system-prompt (lispm-character-agent "Ada"))))
+      ;; Its soul stays the user's.
+      (should (equal (lispm-character-soul (lispm-get-character "ada")) "Plain-spoken.")))))
+
+(ert-deftest lispm-test-character-reached-by-name ()
+  (lispm-test-env
+    (lispm-create-character "Ada" :description "Reviews changes.")
+    (let ((boss (lispm-defagent boss "Delegates." :root project)))
+      (setq lispm-test--scripts
+            `((boss ,(lispm-test--msg "tool_use"
+                                      (lispm-test--tool "t1" "ask_agent"
+                                                        '((agent . "@Ada") (request . "Look at a.el"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Ada says it is fine.")))
+              (Ada ,(lispm-test--msg "end_turn" (lispm-test--text "It is fine.")))))
+      ;; Its colleagues are told who it is and how to reach it.
+      (let ((prompt (lispm-system-prompt boss)))
+        (should (string-match-p "Characters, who are someone" prompt))
+        (should (string-match-p "^- Ada: Reviews changes\\.$" prompt)))
+      (should (string-match-p "Characters, reached by name"
+                              (car (lispm-test--call boss "list_agents" nil))))
+      (lispm-tell boss "ask Ada")
+      (let ((ada nil))
+        (should (lispm-test--wait (lambda ()
+                                    (setq ada (lispm-get-agent 'ada@project t))
+                                    (and ada (funcall (lispm-test--idle-p boss))
+                                         (funcall (lispm-test--idle-p ada))
+                                         (= (length lispm-test--requests) 3)))))
+        ;; It took the request up in the asker's project, in a conversation of its own.
+        (should (equal (lispm-agent-root ada) (file-name-as-directory project)))
+        (should (eq (lispm-agent-character ada) 'ada))
+        (should (string-match-p "\\* Message from boss\nLook at a\\.el" (lispm-test--transcript ada)))
+        (let ((messages (alist-get 'messages (car lispm-test--requests))))
+          (should (equal (alist-get 'content (aref (alist-get 'content (aref messages 2)) 0))
+                         "ada@project replied:\nIt is fine.")))
+        ;; Its diary has the turn, which its conversations elsewhere start with.
+        (let ((days (directory-files (expand-file-name "characters/ada/episodes/" lispm-directory)
+                                     nil "\\.org\\'")))
+          (should (= (length days) 1)))
+        (let ((prompt (lispm-system-prompt (lispm-character-agent "Ada"))))
+          (should (string-match-p "# Your latest days" prompt))
+          (should (string-match-p "boss asked: Look at a\\.el" prompt))
+          (should (string-match-p "You replied: It is fine\\." prompt)))
+        ;; send_message reaches the same conversation.
+        (should (string-match-p "Delivered to Ada"
+                                (car (lispm-test--call boss "send_message" '((to . "Ada") (text . "Thanks."))))))
+        (should (lispm-test--wait (lambda () (string-match-p "Thanks\\." (lispm-test--transcript ada)))))
+        ;; It does not ask itself.
+        (should (cdr (lispm-test--call ada "send_message" '((to . "Ada") (text . "hi")))))))))
+
+(ert-deftest lispm-test-character-apps ()
+  "An app is a character whose soul is its skill, reached in its own conversation."
+  (lispm-test-env
+    (let* ((skills (expand-file-name "app-skills/" project))
+           (lispm-skill-directories (list skills))
+           (lispm-characters--apps nil)
+           (boss (lispm-defagent boss "Delegates." :root project)))
+      (lispm-test--write (expand-file-name "notes.org" skills)
+                         (concat "#+title: Notes\n#+description: Keep notes.\n\n"
+                                 "Keep each note short.\n\n#+begin_src emacs-lisp :lispm load\n"
+                                 "(lispm-deftool note_add ((text string \"The note.\")) \"Add a note.\"\n"
+                                 "  (format \"Noted: %s\" text))\n#+end_src\n"))
+      (unwind-protect
+          (let* ((notes (lispm-define-app-character 'notes :title "Notes" :skill "notes"
+                                                    :description "Keeps notes."))
+                 (agent (lispm-character-agent notes)))
+            (should (lispm-character-app-p "Notes"))
+            ;; Its skill is its soul, and its tools are its own from the start.
+            (should (member "note_add" (lispm-agent-loaded-tools agent)))
+            (should (member "note_add" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
+            (let ((prompt (lispm-system-prompt agent)))
+              (should (string-match-p "# What you are for\nYou are the app Notes" prompt))
+              (should (string-match-p "Keep each note short\\." prompt)))
+            ;; Asked from a project, it answers in its own conversation.
+            (setq lispm-test--scripts
+                  `((boss ,(lispm-test--msg "tool_use"
+                                            (lispm-test--tool "t1" "ask_agent"
+                                                              '((agent . "@Notes") (request . "Note λ"))))
+                          ,(lispm-test--msg "end_turn" (lispm-test--text "Noted.")))
+                    (Notes ,(lispm-test--msg "end_turn" (lispm-test--text "Kept.")))))
+            ;; Others are told of apps apart, and of their two faces.
+            (let ((prompt (lispm-system-prompt boss)))
+              (should (string-match-p "Apps are characters too, of two faces" prompt))
+              (should (string-match-p "^- and 1 apps, which list_agents names$" prompt)))
+            (should (string-match-p "^- Notes (app): Keeps notes\\.$"
+                                    (car (lispm-test--call boss "list_agents" nil))))
+            (lispm-tell boss "note it")
+            (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
+                                                      (funcall (lispm-test--idle-p agent))
+                                                      (= (length lispm-test--requests) 3)))))
+            (should (string-match-p "\\* Message from boss\nNote λ" (lispm-test--transcript agent)))
+            (should-not (lispm-get-agent 'notes@project t))
+            ;; What the user chooses for it goes into its file, and comes first.
+            (lispm-save-character 'notes :model "small-model")
+            (let ((file (expand-file-name "characters/notes/character.org" lispm-directory)))
+              (should (equal (lispm--file-text file) "#+model: small-model\n")))
+            (should (equal (lispm-character-model notes) "small-model"))
+            (should (equal (lispm-character-title notes) "Notes"))
+            (should (equal (lispm-character-skill notes) "notes"))
+            (should (equal (lispm-agent-model* agent) "small-model"))
+            ;; Loaded again, the file alone makes no character until the app is back.
+            (let ((lispm--characters nil)
+                  (lispm-characters--apps nil))
+              (should-not (lispm-load-characters))
+              (should-not (lispm-get-character "notes" t))
+              (lispm-define-app-character 'notes :title "Notes" :skill "notes")
+              (should (equal (lispm-character-model (lispm-get-character "notes")) "small-model")))
+            ;; Uninstalled, it is a character no more.
+            (lispm-remove-app-character 'notes)
+            (should-not (lispm-get-character "notes" t)))
+        (remhash "note_add" lispm-tools--registry)))))
 
 (ert-deftest lispm-test-ask-agents-in-parallel ()
   "An agent that asks several at once waits on each until it replies."

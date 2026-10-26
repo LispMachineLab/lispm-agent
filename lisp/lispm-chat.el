@@ -1636,14 +1636,21 @@ ARGUMENT edit edits the rules of the level Custom instead."
   (lispm-retire agent))
 
 (defun lispm-chat--complete ()
-  "Complete the / command being written."
-  (when (and (lispm-chat--in-input-p)
-             (save-excursion
-               (goto-char lispm-chat--input-start)
-               (looking-at "/[a-z]*\\'")))
-    (list (1+ lispm-chat--input-start) (point-max)
-          (mapcar #'car lispm-chat-commands)
-          :exclusive 'no)))
+  "Complete the / command being written, or the @name of a character."
+  (when (lispm-chat--in-input-p)
+    (let ((name (save-excursion
+                  (skip-chars-backward "[:alnum:]_-" lispm-chat--input-start)
+                  (and (eq (char-before) ?@) (point)))))
+      (cond
+       ((save-excursion
+          (goto-char lispm-chat--input-start)
+          (looking-at "/[a-z]*\\'"))
+        (list (1+ lispm-chat--input-start) (point-max)
+              (mapcar #'car lispm-chat-commands)
+              :exclusive 'no))
+       ((and name (lispm-characters))
+        (list name (point) (mapcar #'lispm-character-title* (lispm-characters))
+              :exclusive 'no))))))
 
 ;;;; The mode
 

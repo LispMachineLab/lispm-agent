@@ -90,11 +90,12 @@ do; CHANGES, for a tool that changes a buffer, what a call would make
 of it; TARGETS, for a tool whose arguments do not name the files it
 writes, which (see `lispm-deftool').  Calls of an ALWAYS-ASK tool
 await the user's approval whatever the policy says.  FILE is the file
-a tool defined with `lispm-deftool' was loaded from, if any."
+a tool defined with `lispm-deftool' was loaded from, if any.  A tool
+with FOR, a function of an agent, is only that of agents it holds for."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff)
+  diff for)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -146,11 +147,14 @@ BODY may start with keyword options:
                      the policy says (one that denies the class still
                      denies it): for calls whose effects outlast the
                      session, such as saving code later sessions run
+  :for FUNCTION      called with an agent: the tool is that agent's
+                     only if it returns non-nil, as a character's own
+                     tools are only characters'
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview diff changes targets deferred always-ask
+  (let ((permission 'read) async preview diff changes targets deferred always-ask for
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -161,7 +165,8 @@ is printed.  Signal an error to report a failure to the model."
         (:changes (setq changes (pop body)))
         (:targets (setq targets (pop body)))
         (:deferred (setq deferred (pop body)))
-        (:always-ask (setq always-ask (pop body)))))
+        (:always-ask (setq always-ask (pop body)))
+        (:for (setq for (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -175,6 +180,7 @@ is printed.  Signal an error to report a failure to the model."
        :targets ,targets
        :deferred ,deferred
        :always-ask ,always-ask
+       :for ,for
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
@@ -221,17 +227,21 @@ is printed.  Signal an error to report a failure to the model."
   "Non-nil if AGENT's role gives it the tool NAME, offered or deferred.
 In a role's list of tools, a name ending with * stands for every
 tool whose name starts with the rest, such as mcp__peekaboo__*.  A
-role giving the skill tool gives search_tools too, which finds skills."
-  (let ((spec (lispm-agent-tools agent)))
-    (or (eq spec t)
-        (and (listp spec)
-             (let ((patterns (mapcar (lambda (x) (format "%s" x)) spec)))
-               (or (seq-some (lambda (pattern)
-                               (if (string-suffix-p "*" pattern)
-                                   (string-prefix-p (substring pattern 0 -1) name)
-                                 (equal pattern name)))
-                             patterns)
-                   (and (equal name "search_tools") (member "skill" patterns))))))))
+role giving the skill tool gives search_tools too, which finds skills.
+A tool for some agents only (its :for) is never another's."
+  (let ((spec (lispm-agent-tools agent))
+        (for (when-let* ((tool (gethash name lispm-tools--registry)))
+               (lispm-tool-for tool))))
+    (and (or (null for) (funcall for agent))
+         (or (eq spec t)
+             (and (listp spec)
+                  (let ((patterns (mapcar (lambda (x) (format "%s" x)) spec)))
+                    (or (seq-some (lambda (pattern)
+                                    (if (string-suffix-p "*" pattern)
+                                        (string-prefix-p (substring pattern 0 -1) name)
+                                      (equal pattern name)))
+                                  patterns)
+                        (and (equal name "search_tools") (member "skill" patterns)))))))))
 
 (defun lispm-agent-tools* (agent)
   "Tools AGENT may call, sorted by name (a stable request prefix).
