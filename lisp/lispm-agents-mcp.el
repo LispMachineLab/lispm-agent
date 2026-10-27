@@ -70,7 +70,7 @@ to bind with `lispm-agents-context-bind'.  MAKE is the constructor
 of a type including `lispm-agents-mcp', taking :token and
 :directory; NAME names the server's process."
   (let ((server (funcall make
-                         :token (car (process-lines "uuidgen"))
+                         :token (lispm-agents-uuid)
                          :directory (file-name-as-directory (expand-file-name directory)))))
     (setf (lispm-agents-mcp-server server)
           (lispm-local-http-serve

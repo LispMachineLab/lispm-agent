@@ -71,7 +71,7 @@ while it is connected; DIFFS maps a diff's tab name to its buffer."
   "Serve the IDE protocol to a Claude terminal running in DIRECTORY.
 Return the server, to bind with `lispm-agents-context-bind'."
   (let ((session (lispm-agents-ide--make
-                  :token (car (process-lines "uuidgen"))
+                  :token (lispm-agents-uuid)
                   :directory (file-name-as-directory (expand-file-name directory)))))
     (setf (lispm-agents-ide-server session)
           (lispm-websocket-serve

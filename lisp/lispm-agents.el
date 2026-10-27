@@ -852,14 +852,6 @@ The session of an agent running inside Emacs runs while its buffer lives."
 Tab labels show it instead of the terminal's machine-oriented buffer name.")
 (put 'lispm-agents-buffer-title 'permanent-local t)
 
-(defun lispm-agents-uuid ()
-  "Return a random version 4 UUID string."
-  (let ((bytes (mapcar (lambda (_) (random 256)) (number-sequence 1 16))))
-    (setf (nth 6 bytes) (logior #x40 (logand (nth 6 bytes) #x0f))
-          (nth 8 bytes) (logior #x80 (logand (nth 8 bytes) #x3f)))
-    (apply #'format "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
-           bytes)))
-
 (defconst lispm-agents-session-marker-regexp
   (concat "\\`\\(CLAUDECODE\\|CLAUDE_PID\\|CLAUDE_EFFORT"
           "\\|CLAUDE_CODE_[A-Z0-9_]*\\|CLAUDE_AGENT_SDK_[A-Z0-9_]*"
