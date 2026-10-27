@@ -9908,6 +9908,22 @@ reply to a request answers it, and its end settles what it was asked."
         (should-not lispm-collab--requests)
         (should (equal (mapcar #'lispm-peer-name (lispm-peers)) '("codex")))))))
 
+(ert-deftest lispm-test-agents-uuid ()
+  "An agent's server makes its token with no program, as uuidgen, which a
+system may lack: a version 4 UUID, a new one each time."
+  (let ((exec-path nil)
+        (pattern "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-4[0-9a-f]\\{3\\}-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}\\'")
+        (tokens nil))
+    (dotimes (_ 8)
+      (push (lispm-agents-uuid) tokens))
+    (dolist (token tokens)
+      (should (string-match-p pattern token)))
+    (should (= (length (delete-dups tokens)) 8))
+    ;; Without the system's random bytes, Emacs's.
+    (cl-letf (((symbol-function 'insert-file-contents-literally)
+               (lambda (&rest _) (signal 'file-missing '("Opening input file" "/dev/urandom")))))
+      (should (string-match-p pattern (lispm-agents-uuid))))))
+
 (ert-deftest lispm-test-agents-context-session-id ()
   "An agent's :context taking a second argument gets the session's id."
   (let* ((seen nil)
