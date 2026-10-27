@@ -6165,11 +6165,12 @@ title goes where the window shows it instead."
             (let ((field (alist-get 'name lispm-form--widgets)))
               (should (equal (get-text-property (1- (widget-field-end field)) 'display)
                              `(space :align-to (,(plist-get geometry :right)))))
-              (should (equal (get-text-property (widget-field-text-end field) 'display) ""))
+              (should (eq (get-text-property (widget-field-text-end field) 'invisible) t))
               (lispm-test--form-type 'name "Rex")
               (should (equal (get-text-property (1- (widget-field-end field)) 'display)
                              `(space :align-to (,(plist-get geometry :right)))))
               (should-not (get-text-property (- (widget-field-text-end field) 1) 'display))
+              (should-not (get-text-property (- (widget-field-text-end field) 1) 'invisible))
               (should (equal (lispm-form-value 'name) "Rex")))
             ;; A text area: its later lines lined up, a side at each line's end.
             (let* ((area (alist-get 'notes lispm-form--widgets))
@@ -6191,6 +6192,32 @@ title goes where the window shows it instead."
             (lispm-form-redraw)
             (should-not (string-match-p "^ Pet\n" (buffer-string)))
             (should-not (string-match-p "TAB goes" (buffer-string)))))
+      (kill-buffer buffer))))
+
+;; Keys go through the command loop, which moves point after each
+;; command out of what is displayed otherwise, as a field's padding.
+(ert-deftest lispm-test-form-typing ()
+  "What is typed into a form, key by key, goes where point is: a text
+field keeps what is typed together, its blanks too, and point does not
+wander into its padding; a text area takes its lines."
+  (let ((buffer (lispm-form "Pet" '((name :type text :label "Name")
+                                    (motto :type text :label "Motto")
+                                    (notes :type text-area :label "Notes" :lines 2)))))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (execute-kbd-macro (kbd "R e x TAB G o o d SPC d o g C-f C-f ! TAB"))
+          (execute-kbd-macro (kbd "S i t s . RET S t a y s ."))
+          (should (equal (lispm-form-value 'name) "Rex"))
+          (should (equal (lispm-form-value 'motto) "Good dog!"))
+          (should (equal (lispm-form-value 'notes) "Sits.\nStays."))
+          ;; Typed into a text area, its text takes no face of its frame.
+          (let ((area (widget-get (alist-get 'notes lispm-form--widgets) :field-overlay)))
+            (should-not (text-property-not-all (overlay-start area) (overlay-end area) 'face nil)))
+          ;; What is shown of a field ends where its text does.
+          (let ((field (alist-get 'motto lispm-form--widgets)))
+            (should (eq (get-text-property (widget-field-text-end field) 'invisible) t))
+            (should-not (get-text-property (1- (widget-field-text-end field)) 'invisible))))
       (kill-buffer buffer))))
 
 (ert-deftest lispm-test-character-form ()

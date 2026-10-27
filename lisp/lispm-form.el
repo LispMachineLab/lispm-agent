@@ -195,7 +195,11 @@ TAB and S-TAB go from field to field, \\[lispm-form-submit] submits it,
 
 \\{lispm-form-mode-map}"
   (setq-local truncate-lines nil)
-  (setq-local word-wrap t))
+  (setq-local word-wrap t)
+  ;; A new line of a text area starts where its panel does, not indented
+  ;; under the label beside its first.
+  (electric-indent-local-mode -1)
+  (add-hook 'post-command-hook #'lispm-form--keep-point nil t))
 
 ;;;; Making a form
 
@@ -313,9 +317,11 @@ KEY may be a number of pixels instead.  FACE, if non-nil, is the space's."
   (and lispm-form-group-function (apply lispm-form-group-function part args)))
 
 (defun lispm-form--edge (&optional thin)
-  "A side of a text area's frame, one pixel wide; THIN for a thin line."
+  "A side of a text area's frame, one pixel wide; THIN for a thin line.
+What is typed after it, into the area, takes none of its face."
   (propertize " " 'display '(space :width (1)) 'face (if thin '(lispm-form-area-edge (:height 10))
-                                                       'lispm-form-area-edge)))
+                                                       'lispm-form-area-edge)
+              'rear-nonsticky t))
 
 (defun lispm-form--sides (group &optional thin)
   "The sides of GROUP's box for a line, (LEFT . RIGHT): strings; THIN for a
@@ -618,10 +624,13 @@ the form's fields, each text area a panel as wide."
   "Make the text field WIDGET as wide as the form's fields, whatever its text.
 Its padding, the blanks Emacs's widgets end a field of a fixed size
 with, is drawn as one blank reaching to the right edge, the rest of it
-shown as nothing, so that the field is one run of its face, framed once."
+hidden, so that the field is one run of its face, framed once."
   (let* ((start (widget-field-start widget))
          (end (widget-field-end widget))
          (text-end (widget-field-text-end widget))
+         ;; Blanks just typed are shown, though they end the text, until
+         ;; point leaves them: they are as Emacs's widgets pad a field.
+         (shown (if (and text-end end (< text-end (point) end)) (point) text-end))
          (right (if-let* ((width (widget-get widget :lispm-form-width)))
                     (+ (plist-get lispm-form--geometry :control)
                        (* width (plist-get lispm-form--geometry :em)))
@@ -629,12 +638,27 @@ shown as nothing, so that the field is one run of its face, framed once."
     (when (and start end text-end)
       (with-silent-modifications
         (remove-list-of-text-properties start end '(display invisible))
-        (when (< text-end end)
+        (when (< shown end)
           ;; The last blank reaches the edge, the others before it are
-          ;; shown as nothing: the frame closes only where the field's
-          ;; face ends right after what is shown.
-          (put-text-property text-end (1- end) 'display "")
+          ;; hidden: the frame closes only where the field's face ends
+          ;; right after what is shown.  Invisible, not displayed as "":
+          ;; after each command Emacs takes point out of text displayed
+          ;; as nothing, even from its start, to the field's end, and
+          ;; what is typed next goes there, after the blanks.
+          (put-text-property shown (1- end) 'invisible t)
           (put-text-property (1- end) end 'display `(space :align-to (,right))))))))
+
+(defun lispm-form--keep-point ()
+  "Keep point out of the hidden padding of the text field it is in: at the
+end of what the field shows, where a dialog's field keeps it.  Run after
+each command in a form's buffer."
+  (when-let* ((field (widget-field-at (point)))
+              ((eq (widget-type field) 'editable-field))
+              (start (widget-field-start field))
+              (end (widget-field-end field))
+              (hidden (text-property-any start end 'invisible t))
+              ((< hidden (point))))
+    (goto-char hidden)))
 
 (defun lispm-form--shape-area (widget)
   "Make the text area WIDGET a panel as wide as the form's fields, framed:
@@ -676,8 +700,10 @@ right edge."
             ;; Over the newline: the panel runs on to the right edge before
             ;; it, and the newline itself is not the panel's.
             (let ((pad (make-overlay (1- (point)) (point))))
+              ;; The cursor at the end of a line stays by its text, not
+              ;; after the panel's edge.
               (overlay-put pad 'before-string
-                           (concat (lispm-form--at :right nil 'lispm-form-area)
+                           (concat (propertize (lispm-form--at :right nil 'lispm-form-area) 'cursor t)
                                    (lispm-form--edge)
                                    (or (cdr sides) "")))
               (overlay-put pad 'face 'default)
