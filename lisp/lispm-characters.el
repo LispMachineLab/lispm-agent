@@ -469,15 +469,18 @@ Submitted, the character is made or changed (`lispm-save-character')."
      (if character (lispm-character-title* character) (lispm-tr "New Character"))
      (append
       (unless app
-        `((title :type text :label ,(lispm-tr "Name") :required t)
-          (description :type text :label ,(lispm-tr "Description") :width 60
-                       :help ,(lispm-tr "One line: what other agents are told of it."))
+        `((who :type heading :label ,(lispm-tr "Character"))
+          (title :type text :label ,(lispm-tr "Name") :required t)
+          (description :type text :label ,(lispm-tr "Description")
+                       :help ,(lispm-tr "What other agents are told of it."))
           (avatar :type picture :label ,(lispm-tr "Picture"))
-          (soul :type text-area :label ,(lispm-tr "Soul") :lines 8
-                :help ,(lispm-tr "Who it is: its nature, its voice, what it cares about."))
-          (role :type choice :label ,(lispm-tr "Role") :choices lispm-characters--role-choices
-                :help ,(lispm-tr "What it works with: instructions, tools, permissions."))))
-      `((thinks :type radio :label ,(lispm-tr "Model")
+          (soul :type text-area :label ,(lispm-tr "Soul") :lines 7
+                :help ,(lispm-tr "Its nature, its voice, what it cares about."))))
+      `((thinking :type heading :label ,(lispm-tr "How it thinks"))
+        ,@(unless app
+            `((role :type choice :label ,(lispm-tr "Role") :choices lispm-characters--role-choices
+                    :help ,(lispm-tr "Its instructions, tools and permissions."))))
+        (thinks :type radio :label ,(lispm-tr "Model")
                 :choices ((lispm . ,(lispm-tr "LispM's"))
                           (backend . ,(lispm-tr "A backend"))
                           (endpoint . ,(lispm-tr "An endpoint of its own"))))
@@ -487,11 +490,10 @@ Submitted, the character is made or changed (`lispm-save-character')."
         (api :type radio :label ,(lispm-tr "API")
              :choices ((openai . "OpenAI") (anthropic . "Anthropic"))
              :when ,(lispm-characters--thinking 'endpoint))
-        (url :type text :label ,(lispm-tr "URL") :required t :width 60
+        (url :type text :label ,(lispm-tr "URL") :required t
              :when ,(lispm-characters--thinking 'endpoint))
         (key-env :type text :label ,(lispm-tr "Key")
-                 :help ,(lispm-tr "The environment variable holding its key, if it needs one: \
-never the key itself, which git would record.")
+                 :help ,(lispm-tr "The variable holding its key: never the key itself.")
                  :when ,(lispm-characters--thinking 'endpoint))
         (auth-source :type check :text ,(lispm-tr "Look its key up in auth-source")
                      :when ,(lispm-characters--thinking 'endpoint))
@@ -678,6 +680,55 @@ that should last, and tell the user what you changed."
             "\nrevise_self keeps what you come to know of yourself, for all your conversations;"
             " remember with scope self keeps what you learn that is yours, as what you know of"
             " the people you work with.")))
+
+(defun lispm-character-conversations (character)
+  "CHARACTER's conversations, one in each place it has one, the live first.
+Each is a plist: :agent, its name; :root; :home, non-nil for the
+character's own; :live, the agent, while it is; :state and :status, its
+state and what it does, while it is; :title, what it was last about, and
+:time, when, as float seconds, once recorded."
+  (let* ((name (lispm-character-name (lispm-get-character character)))
+         ;; Those declared only, never opened, have no conversation yet.
+         (live (seq-filter (lambda (agent) (and (eq (lispm-agent-character agent) name)
+                                                (buffer-live-p (lispm-agent-buffer agent))))
+                           (lispm-agents)))
+         (recorded (seq-filter (lambda (session)
+                                 (equal (plist-get session :character) (symbol-name name)))
+                               (lispm-sessions)))
+         (roots (delete-dups
+                 (append (mapcar #'lispm-agent-root live)
+                         (mapcar (lambda (session) (file-name-as-directory (plist-get session :root)))
+                                 recorded)))))
+    (mapcar (lambda (root)
+              (let ((agent (seq-find (lambda (agent) (equal (lispm-agent-root agent) root)) live))
+                    (session (seq-find (lambda (session)
+                                         (equal (file-name-as-directory (plist-get session :root)) root))
+                                       recorded)))
+                (list :agent (if agent (lispm-agent-name agent) (intern (plist-get session :agent)))
+                      :root root
+                      :home (lispm--character-root-p root)
+                      :live agent
+                      :state (and agent (lispm-agent-state agent))
+                      :status (and agent (lispm-agent-status agent))
+                      :title (plist-get session :title)
+                      :time (plist-get session :time))))
+            roots)))
+
+(defun lispm-character-days (character &optional count)
+  "The latest COUNT lines of CHARACTER's diary, the latest first.
+COUNT is `lispm-character-diary-entries' by default.  Each is a plist:
+:day, as 2026-10-27; :title, the time and the conversation, as \"14:02
+ada@lispm\"; :text, what happened."
+  (let* ((directory (expand-file-name "episodes/" (lispm-character-directory
+                                                   (lispm-character-name (lispm-get-character character)))))
+         (days (and (file-directory-p directory)
+                    (directory-files directory t "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org\\'"))))
+    (seq-take (cl-loop for file in (reverse days)
+                       append (cl-loop for entry in (reverse (lispm-episodes--entries file))
+                                       collect (list :day (file-name-base file)
+                                                     :title (plist-get entry :title)
+                                                     :text (plist-get entry :body))))
+              (or count lispm-character-diary-entries))))
 
 (defun lispm-characters--places (agent)
   "System prompt section of a character's conversation: where else it has one."

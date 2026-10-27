@@ -143,12 +143,26 @@ saying its type (~text~, ~text-area~, ~picture~, ~choice~, ~radio~, ~check~, ~he
 whether it is required, how it is checked, and when it is shown, as a function of the values.
 ~lispm-form~ draws it with Emacs's widgets (wid-edit.el), which edit, move from field to field
 and press buttons as Customize does, in a graphical frame or a text terminal alike; it is drawn
-again when a choice shows or hides fields, keeping what was typed. A form knows nothing of
-where it is shown: whatever shows it dresses it, as a desktop does in its look, through three
-points of contact: ~lispm-form-glyph-function~, the pictures of its buttons, check boxes, radio
-buttons and pop-up menus; ~lispm-form-choose-function~, which shows a pop-up menu's choices; and
-~lispm-form-drawn-hook~, run whenever it is drawn, as ~lispm-form-redraw~ draws it again. Being data, a form is one an agent could
-fill in as well as a person.
+again when a choice shows or hides fields, keeping what was typed. It is laid out as a dialog:
+the labels flush right in a column, each control beside its label and its help under it, the
+fields one width (~lispm-form-width~), a text area a framed panel as wide, the fields after a
+heading in a group box, the buttons at the bottom right. Positions are pixels measured in the
+buffer's own faces, remapped or not, so a field is as wide in a proportional face as in Emacs's
+own: a text field's padding is drawn as one blank reaching the fields' right edge.
+
+A form knows nothing of where it is shown: whatever shows it dresses it, as a desktop does in its
+look. ~lispm-form-glyph-function~ gives the pictures of its buttons, check boxes, radio buttons,
+pop-up menus and pictures; ~lispm-form-group-function~ the edges of its group boxes;
+~lispm-form-choose-function~ shows a pop-up menu's choices. Its faces may be remapped, before it is
+drawn (~lispm-form-mode-hook~), so that it is measured in them, and ~lispm-form-show-header~ set to
+nil where its window is titled with it. ~lispm-form-drawn-hook~ runs whenever it is drawn, as
+~lispm-form-redraw~ draws it again. Being data, a form is one an agent could fill in as well as a
+person.
+
+*A character's chat says who it is*: its picture, its name, what it is told to be, where the
+conversation is and what it thinks with, in place of LispM's welcome; its replies start with its
+picture. ~lispm-character-conversations~ and ~lispm-character-days~ tell where a character has
+conversations and what it did lately, for whatever shows it.
 
 *An app is a character too*, of a kind: its soul is its skill (section 11), whose code its
 conversations evaluate from the start, so its tools are theirs; its picture is its icon; it
