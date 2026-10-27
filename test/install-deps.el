@@ -7,9 +7,10 @@
 
 ;; `make deps' runs this: the packages lispm.el requires (its
 ;; Package-Requires header) are installed from GNU ELPA and MELPA into
-;; .deps/, which the other targets use; LispM Kit, which no archive
-;; holds, is the checkout LISPM_KIT puts on the load path.  As a
-;; package, LispM gets them the usual way, from package.el.
+;; .deps/, which the other targets use; LispM Kit and LispM UI, which
+;; no archive holds, are the checkouts LISPM_KIT and LISPM_UI put on the
+;; load path.  As a package, LispM gets them the usual way, from
+;; package.el.
 
 ;;; Code:
 
@@ -22,8 +23,9 @@
 (let ((missing (seq-remove (lambda (dep)
                              (or (eq (car dep) 'emacs)
                                  (package-installed-p (car dep) (cadr dep))
-                                 ;; LispM's own, as lispm-kit, are in no
-                                 ;; archive: a checkout on the load path.
+                                 ;; LispM's own, as lispm-kit and
+                                 ;; lispm-ui, are in no archive: a
+                                 ;; checkout on the load path.
                                  (locate-library (symbol-name (car dep)))))
                            (package-desc-reqs
                             (with-temp-buffer

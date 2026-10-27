@@ -104,7 +104,7 @@
 (require 'lispm-runtime)
 (require 'lispm-episodes)
 (require 'lispm-skills)
-(require 'lispm-form)
+(require 'lispm-ui-form)
 
 (defcustom lispm-character-diary-entries 12
   "How many lines of its diary a character's conversation starts with.
@@ -465,7 +465,7 @@ That of an app chooses its model alone: who it is, its skill says.
 Submitted, the character is made or changed (`lispm-save-character')."
   (let* ((character (and character (lispm-get-character character)))
          (app (and character (lispm-character-skill character))))
-    (lispm-form
+    (lispm-ui-form
      (if character (lispm-character-title* character) (lispm-tr "New Character"))
      (append
       (unless app

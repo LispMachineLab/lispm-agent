@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
 ;; Version: 0.10.1
-;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0"))
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.1.0"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -111,8 +111,13 @@
 (require 'lispm-settings)
 (require 'lispm-chat)
 (require 'lispm-bar)
+(require 'lispm-ui)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
+
+;; LispM UI, which draws LispM's forms, speaks the language LispM does.
+(add-hook 'lispm-ui-language-functions #'lispm-current-language)
+(add-hook 'lispm-language-changed-hook #'lispm-ui-language-changed)
 
 ;;;; Roles
 
