@@ -88,6 +88,9 @@
 (require 'wid-edit)
 (require 'lispm-i18n)
 
+;; Only in an Emacs that draws images.
+(declare-function image-size "image.c" (spec &optional pixels frame))
+
 (defvar lispm-form-glyph-function nil
   "Function giving the picture of a control of a form, or nil for text.
 It is called with KIND, STATE and LABEL:
