@@ -75,7 +75,8 @@
 ;; gives the pictures of its buttons, check boxes, radio buttons,
 ;; pop-up menus and pictures, `lispm-form-group-function' the edges of
 ;; its group boxes, `lispm-form-choose-function' shows a pop-up menu's
-;; choices, its faces may be remapped (`lispm-form-mode-hook' runs before
+;; choices, `lispm-form-choose-file-function' the files to choose a
+;; picture from, its faces may be remapped (`lispm-form-mode-hook' runs before
 ;; it is drawn) and `lispm-form-show-header' set to nil where its window
 ;; is titled with it, and `lispm-form-drawn-hook' runs once it is drawn,
 ;; as `lispm-form-redraw' draws it again, when the look changes, say.
@@ -127,6 +128,14 @@ It is called with the field's LABEL, its CHOICES, a list of (VALUE .
 TEXT), the VALUE chosen now, and the EVENT that pressed the menu, if
 any, with point on the menu.  It returns (VALUE), the choice made, or
 nil when none was.")
+
+(defvar lispm-form-choose-file-function nil
+  "Function showing files to choose one of for a form's field, or nil.
+It is called with the field's TYPE, `picture', its LABEL, the FILE
+chosen now, or nil, and PREDICATE, a function of a file's name saying
+whether it may be chosen, as whether it is a picture.  It returns the
+file chosen, or nil when none was.  Without one, the file is read in
+the minibuffer.")
 
 (defvar lispm-form-drawn-hook nil
   "Normal hook run in a form's buffer each time it is drawn.")
@@ -582,7 +591,8 @@ Where pictures cannot be shown, the control is drawn as text anyway."
                 (lispm-form--remember
                  key (lispm-form--button (lispm-tr "Choose…")
                                          (lambda ()
-                                           (lispm-form--set key (lispm-form--read-picture value) t))))
+                                           (when-let* ((file (lispm-form--read-picture value label)))
+                                             (lispm-form--set key file t)))))
                 (when value
                   (insert " ")
                   (lispm-form--button (lispm-tr "Remove") (lambda () (lispm-form--set key nil t)))))))
@@ -730,12 +740,16 @@ An Emacs without a display shows none, but keeps them all the same."
   (or (image-supported-file-p file)
       (member (downcase (or (file-name-extension file) "")) '("png" "jpg" "jpeg" "gif" "svg" "webp"))))
 
-(defun lispm-form--read-picture (old)
-  "Read the file of a picture, starting from OLD's directory."
-  (let ((file (read-file-name (lispm-tr "Picture: ")
-                              (and old (file-name-directory old)) nil t nil
-                              (lambda (file)
-                                (or (file-directory-p file) (lispm-form--picture-p file))))))
+(defun lispm-form--read-picture (old &optional label)
+  "Choose the file of a picture for the field LABEL, from OLD's directory:
+among the files `lispm-form-choose-file-function' shows, or in the
+minibuffer.  Return it, or nil when none was chosen."
+  (when-let* ((file (if lispm-form-choose-file-function
+                        (funcall lispm-form-choose-file-function 'picture label old #'lispm-form--picture-p)
+                      (read-file-name (lispm-tr "Picture: ")
+                                      (and old (file-name-directory old)) nil t nil
+                                      (lambda (file)
+                                        (or (file-directory-p file) (lispm-form--picture-p file)))))))
     (unless (and (file-regular-p file) (lispm-form--picture-p file))
       (user-error "%s" (lispm-tr "Not a picture: %s" (abbreviate-file-name file))))
     (expand-file-name file)))
