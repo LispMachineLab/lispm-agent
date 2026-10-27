@@ -41,14 +41,20 @@
 ;;   choice     one of :choices, a pop-up menu
 ;;   radio      one of :choices, a radio button each
 ;;   check      on or off, a check box
+;;   buttons    no value: a row of push buttons, :buttons a list of
+;;              (LABEL . FUNCTION), each FUNCTION called with no
+;;              argument in the form's buffer when its button is pressed
 ;;   heading    no value: a heading that starts a group of fields
 ;;
-;; and take :label, :help (a line under the field), :value (its value
-;; at first), :required (empty is refused), :validate (a function of
-;; the value returning nil, or what is wrong), :when (a function of
-;; the values: the field is shown only while it returns non-nil) and
-;; :width (of a text field, in columns).  :choices is a list of
-;; (VALUE . LABEL), or a function returning one.
+;; and take :label, :help (a line under the field, or a function of the
+;; values returning one or nil, asked each time the form is drawn),
+;; :value (its value at first), :required (empty is refused), :validate
+;; (a function of the value returning nil, or what is wrong), :when (a
+;; function of the values: the field is shown only while it returns
+;; non-nil) and :width (of a text field, in columns).  :choices is a
+;; list of (VALUE . LABEL), or a function returning one.  A form whose
+;; help says how something outside it stands, as whether a server
+;; answers, is drawn again with `lispm-form-redraw' when that changes.
 ;;
 ;; `lispm-form' draws it in a buffer of its own with Emacs's widgets
 ;; (wid-edit.el), and returns the buffer: TAB and S-TAB go from field to
@@ -90,6 +96,10 @@
 
 ;; Only in an Emacs that draws images.
 (declare-function image-size "image.c" (spec &optional pixels frame))
+
+(defconst lispm-form-types '(text text-area picture choice radio check buttons heading)
+  "The types a form's fields may be, see `lispm-form'.
+A program written for a later LispM may ask whether one it uses is here.")
 
 (defvar lispm-form-glyph-function nil
   "Function giving the picture of a control of a form, or nil for text.
@@ -245,7 +255,7 @@ trimmed, nil when empty.  ON-CANCEL is called when it is cancelled."
   (mapcar (lambda (field) (cons (car field) (lispm-form-value (car field))))
           (seq-filter (lambda (field)
                         (and (lispm-form--shown-p field)
-                             (not (eq (plist-get (cdr field) :type) 'heading))))
+                             (not (memq (plist-get (cdr field) :type) '(heading buttons)))))
                       lispm-form--fields)))
 
 (defun lispm-form--set (key value &optional redraw)
@@ -570,8 +580,19 @@ Where pictures cannot be shown, the control is drawn as text anyway."
                 (when value
                   (insert " ")
                   (lispm-form--button (lispm-tr "Remove") (lambda () (lispm-form--set key nil t)))))))
+        ('buttons
+         (row (lambda ()
+                (label)
+                (insert (lispm-form--at :control))
+                (let ((first t))
+                  (pcase-dolist (`(,text . ,action) (plist-get props :buttons))
+                    (unless first
+                      (insert (propertize " " 'display `(space :width (,(plist-get lispm-form--geometry :em))))))
+                    (setq first nil)
+                    (lispm-form--remember key (lispm-form--button text action)))))))
         (_ (error "No type of field %S" type)))
-      (when-let* ((help (plist-get props :help)))
+      (when-let* ((help (let ((help (plist-get props :help)))
+                          (if (functionp help) (funcall help (lispm-form--all-values)) help))))
         (row (lambda ()
                (insert (lispm-form--at :control)
                        (propertize help 'face 'lispm-form-help
