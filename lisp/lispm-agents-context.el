@@ -85,6 +85,22 @@ its terminal, it has the terminal's end noticed all the same, see
   "Stop nothing: the server holds nothing."
   nil)
 
+(defun lispm-agents-uuid ()
+  "Return a random version 4 UUID string.
+Its bytes are the system's, from /dev/urandom, as a server's token is a
+secret; `random''s where there is none."
+  (let ((bytes (or (ignore-errors
+                     (with-temp-buffer
+                       (set-buffer-multibyte nil)
+                       ;; A device takes no start, only an end.
+                       (insert-file-contents-literally "/dev/urandom" nil nil 16)
+                       (and (= (buffer-size) 16) (string-to-list (buffer-string)))))
+                   (mapcar (lambda (_) (random 256)) (number-sequence 1 16)))))
+    (setf (nth 6 bytes) (logior #x40 (logand (nth 6 bytes) #x0f))
+          (nth 8 bytes) (logior #x80 (logand (nth 8 bytes) #x3f)))
+    (apply #'format "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
+           bytes)))
+
 (defvar lispm-agents-context--servers nil
   "Live servers, as (TERMINAL . SERVER), a terminal's first bound first.")
 
