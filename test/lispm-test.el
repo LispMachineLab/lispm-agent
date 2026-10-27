@@ -6205,6 +6205,17 @@ title goes where the window shows it instead."
         (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) picture)))
           (lispm-test--form-press 'avatar))
         (should (equal (lispm-form-value 'avatar) picture))
+        ;; Whatever shows the form may show the files to choose from.
+        (let* ((asked nil)
+               (lispm-form-choose-file-function
+                (lambda (type label file predicate)
+                  (push (list type label file (and (funcall predicate picture) t) (funcall predicate "notes.txt"))
+                        asked)
+                  nil)))
+          (lispm-test--form-press 'avatar)
+          (should (equal asked `((picture ,(lispm-tr "Picture") ,picture t nil))))
+          ;; None chosen, the picture stays.
+          (should (equal (lispm-form-value 'avatar) picture)))
         ;; An endpoint of its own asks for its address.
         (lispm-test--form-press 'thinks 2)
         (should-error (lispm-form-submit) :type 'user-error)
