@@ -622,11 +622,20 @@ right edge."
   (let ((overlay (widget-get widget :field-overlay))
         (group (widget-get widget :lispm-form-group)))
     (mapc #'delete-overlay (widget-get widget :lispm-form-pads))
+    (when-let* ((tail (widget-get widget :lispm-form-tail)))
+      (delete-overlay tail))
     (when (overlayp overlay)
       (let* ((sides (lispm-form--sides group))
              (start (overlay-start overlay))
-             ;; Its last newline ends it, in an overlay of its own.
-             (last (widget-get widget :field-end-overlay))
+             ;; Its last newline ends it, in an overlay of its own; an
+             ;; Emacs before 31 leaves that newline after the field, in
+             ;; none, and the panel gives it one.
+             (last (or (widget-get widget :field-end-overlay)
+                       (when (eq (char-after (overlay-end overlay)) ?\n)
+                         (let ((tail (make-overlay (overlay-end overlay)
+                                                   (1+ (overlay-end overlay)))))
+                           (widget-put widget :lispm-form-tail tail)
+                           tail))))
              (end (max (overlay-end overlay) (if (overlayp last) (or (overlay-end last) 0) 0)))
              pads)
         (dolist (overlay (list overlay last))

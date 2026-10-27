@@ -6138,6 +6138,12 @@ title goes where the window shows it instead."
               (should (= (length pads) 2))
               (should (string-match-p "|\\'" (overlay-get (car pads) 'before-string)))
               (should (string-prefix-p " |" (overlay-get (widget-get area :field-overlay) 'line-prefix)))
+              ;; Each of its lines starts at its side, the last one too.
+              (save-excursion
+                (goto-char (overlay-start (widget-get area :field-overlay)))
+                (dotimes (_ 2)
+                  (should (get-char-property (point) 'line-prefix))
+                  (forward-line 1)))
               ;; Typed in, it is shaped again.
               (lispm-test--form-type 'notes "a\nb")
               (should (= (length (widget-get area :lispm-form-pads)) 3)))
