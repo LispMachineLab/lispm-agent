@@ -5952,6 +5952,28 @@ handed over once nothing more can be."
       (with-current-buffer (lispm-character "Ada" t)
         (should (eq (lispm-agent-name lispm-chat-agent) 'ada@project))))))
 
+(ert-deftest lispm-test-character-chat-says-who ()
+  "A character's chat opens with who it is and where the conversation is,
+not with LispM's welcome; its replies are marked as its."
+  (lispm-test-env
+    (lispm-create-character "Ada" :description "Reviews changes with care.")
+    (setq lispm-test--scripts `((Ada ,(lispm-test--msg "end_turn" (lispm-test--text "Hello.")))))
+    (let* ((home (lispm-character-agent "Ada"))
+           (here (lispm-character-agent "Ada" project))
+           (text (lambda (agent)
+                   (let ((chat (lispm-chat agent)))
+                     (lispm-chat-redraw chat)
+                     (with-current-buffer chat (buffer-substring-no-properties (point-min) (point-max)))))))
+      (let ((shown (funcall text home)))
+        (should (string-prefix-p "Ada\nReviews changes with care.\nAt home · " shown))
+        (should-not (string-match-p "Welcome to" shown)))
+      (should (string-match-p (concat "^In " (regexp-quote (abbreviate-file-name (file-name-as-directory project))))
+                              (funcall text here)))
+      (lispm-tell home "Hi")
+      (should (lispm-test--wait (lispm-test--idle-p home)))
+      ;; Where no picture is shown, a reply is marked as any agent's.
+      (should (string-match-p "^⏺ Hello\\.$" (funcall text home))))))
+
 (defun lispm-test--form-field (key)
   "Move to the start of the field KEY of the form in this buffer."
   (let ((widget (alist-get key lispm-form--widgets)))
@@ -6004,10 +6026,10 @@ handed over once nothing more can be."
           (with-current-buffer buffer
             (should (eq major-mode 'lispm-form-mode))
             (let ((text (buffer-string)))
-              (should (string-prefix-p "Pet\n" text))
-              (should (string-match-p "^Name \\*$" text))
-              (should (string-match-p "^  Anything\\.$" text))
-              (should (string-match-p "(\\*) Cat   ( ) Dog" text))
+              (should (string-prefix-p " Pet\n" text))
+              (should (string-match-p "^ Name: " text))
+              (should (string-match-p "^ Anything\\.$" text))
+              (should (string-match-p "^ Kind: (\\*) Cat\n ( ) Dog$" text))
               (should (string-match-p "Choose… ▾" text))
               (should (string-match-p "\\[Cancel\\] \\[Adopt\\]" text))
               (should-not (string-match-p "Barks" text)))
@@ -6033,7 +6055,7 @@ handed over once nothing more can be."
             ;; Choosing shows the fields that depend on it, keeping what was typed.
             (lispm-test--form-press 'kind 1)
             (should (eq (lispm-form-value 'kind) 'dog))
-            (should (string-match-p "( ) Cat   (\\*) Dog" (buffer-string)))
+            (should (string-match-p "( ) Cat\n (\\*) Dog" (buffer-string)))
             (should (string-match-p "\\[ \\] Barks" (buffer-string)))
             (should (equal (lispm-form-value 'name) "Rex"))
             (lispm-test--form-press 'barks)
@@ -6062,6 +6084,69 @@ handed over once nothing more can be."
                                      (barks . t) (size . big) (age . "2"))))
           (should-not (buffer-live-p buffer)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest lispm-test-form-layout ()
+  "A form is laid out as a dialog: its labels end in one column, its
+controls start in the next, its fields reach one right edge; a heading's
+fields are framed in a group box whose edges whatever shows the form
+gives, a text area is a panel with a side on each of its lines, and the
+title goes where the window shows it instead."
+  (let* ((parts nil)
+         (lispm-form-group-function
+          (lambda (part &rest args)
+            (push (cons part args) parts)
+            (pcase part ('top (format "[%s]" (cadr args))) ('bottom "[end]") ('side "|"))))
+         (buffer (with-temp-buffer
+                   (lispm-form "Pet" '((who :type heading :label "Pet")
+                                       (name :type text :label "Name")
+                                       (notes :type text-area :label "Notes" :lines 2)
+                                       (kind :type choice :label "Kind" :choices ((cat . "Cat"))))))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (let ((geometry lispm-form--geometry)
+                (text (buffer-substring-no-properties (point-min) (point-max))))
+            (should (< (plist-get geometry :left) (plist-get geometry :label)
+                       (plist-get geometry :control) (plist-get geometry :right)
+                       (plist-get geometry :outer)))
+            (should (= (plist-get geometry :right)
+                       (+ (plist-get geometry :control) (* lispm-form-width (plist-get geometry :em)))))
+            ;; The group box, its sides on the rows of its fields.
+            (should (string-match-p "^ \\[Pet\\]$" text))
+            (should (string-match-p "^ | Name:  .*|$" text))
+            (should (string-match-p "^ \\[end\\]$" text))
+            (should (assq 'top parts))
+            ;; Each label ends where the column does, as its space says.
+            (goto-char (point-min))
+            (search-forward "Name:")
+            (let ((space (get-text-property (- (point) 6) 'display)))
+              (should (equal (car space) 'space))
+              (should (= (+ (car (plist-get (cdr space) :align-to)) (lispm-form--measure (lispm-form--label-text "Name")))
+                         (plist-get geometry :label))))
+            ;; A text field reaches the right edge, its padding one blank.
+            (let ((field (alist-get 'name lispm-form--widgets)))
+              (should (equal (get-text-property (1- (widget-field-end field)) 'display)
+                             `(space :align-to (,(plist-get geometry :right)))))
+              (should (equal (get-text-property (widget-field-text-end field) 'display) ""))
+              (lispm-test--form-type 'name "Rex")
+              (should (equal (get-text-property (1- (widget-field-end field)) 'display)
+                             `(space :align-to (,(plist-get geometry :right)))))
+              (should-not (get-text-property (- (widget-field-text-end field) 1) 'display))
+              (should (equal (lispm-form-value 'name) "Rex")))
+            ;; A text area: its later lines lined up, a side at each line's end.
+            (let* ((area (alist-get 'notes lispm-form--widgets))
+                   (pads (widget-get area :lispm-form-pads)))
+              (should (= (length pads) 2))
+              (should (string-match-p "|\\'" (overlay-get (car pads) 'before-string)))
+              (should (string-prefix-p " |" (overlay-get (widget-get area :field-overlay) 'line-prefix)))
+              ;; Typed in, it is shaped again.
+              (lispm-test--form-type 'notes "a\nb")
+              (should (= (length (widget-get area :lispm-form-pads)) 3)))
+            ;; Shown where its window is titled with it, it shows no title.
+            (setq lispm-form-show-header nil)
+            (lispm-form-redraw)
+            (should-not (string-match-p "^ Pet\n" (buffer-string)))
+            (should-not (string-match-p "TAB goes" (buffer-string)))))
+      (kill-buffer buffer))))
 
 (ert-deftest lispm-test-character-form ()
   "A character is made and changed in its form; an app's chooses its model alone."
@@ -6244,6 +6329,15 @@ handed over once nothing more can be."
           (should (string-match-p "# Your latest days" prompt))
           (should (string-match-p "boss asked: Look at a\\.el" prompt))
           (should (string-match-p "You replied: It is fine\\." prompt)))
+        ;; Its conversations and its days are there to show.
+        (let ((conversations (lispm-character-conversations "Ada")))
+          (should (equal (mapcar (lambda (c) (plist-get c :agent)) conversations) '(ada@project)))
+          (should (eq (plist-get (car conversations) :live) ada))
+          (should-not (plist-get (car conversations) :home)))
+        (let ((days (lispm-character-days "Ada")))
+          (should (= (length days) 1))
+          (should (string-match-p "boss asked: Look at a\\.el" (plist-get (car days) :text)))
+          (should (string-match-p " ada@project\\'" (plist-get (car days) :title))))
         ;; send_message reaches the same conversation.
         (should (string-match-p "Delivered to Ada"
                                 (car (lispm-test--call boss "send_message" '((to . "Ada") (text . "Thanks."))))))

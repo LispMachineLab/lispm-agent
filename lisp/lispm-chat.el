@@ -746,7 +746,10 @@ it names one."
                                             ;; Presented and checked once complete.
                                             (lispm-chat--streaming-markdown text)
                                           (lispm-chat--present (lispm-chat--markdown text)))
-                                        "  " "⏺ ")
+                                        "  " (concat (if lispm-chat-agent
+                                                         (lispm-chat--mark lispm-chat-agent)
+                                                       "⏺")
+                                                     " "))
                "\n")))
     ('thought
      (let ((text (plist-get item :text)))
@@ -827,8 +830,59 @@ Lines that are nil are left out."
                        (delq nil (copy-sequence lines)) "\n")
             "\n" (funcall bar "╰" "╯") "\n")))
 
+(defface lispm-chat-name '((t :inherit bold :height 1.3))
+  "Face of the name of a character, atop its conversation."
+  :group 'lispm-chat)
+
+(defun lispm-chat--picture (agent height)
+  "AGENT's character's picture, HEIGHT pixels tall, as a string showing it; or nil.
+Nil too where pictures are not shown."
+  (when-let* ((character (lispm-agent-character* agent))
+              (file (lispm-character-avatar character))
+              ((display-images-p))
+              ((file-readable-p file))
+              (image (create-image file nil nil :height height :ascent 'center)))
+    (propertize " " 'display image)))
+
+(defun lispm-chat--mark (agent)
+  "What a reply of AGENT's starts with: its character's picture, or ⏺."
+  (or (lispm-chat--picture agent (default-line-height)) "⏺"))
+
+(defun lispm-chat--character-header (agent character)
+  "The top of the chat of AGENT, a conversation of CHARACTER: who it is."
+  (let* ((size (* 3 (default-line-height)))
+         (picture (lispm-chat--picture agent size))
+         (indent (if picture
+                     (propertize " " 'display `(space :align-to (,(+ size (default-font-width)))))
+                   ""))
+         (dim (lambda (text) (concat indent (propertize text 'face 'lispm-chat-dim) "\n"))))
+    (concat (or picture "") (if picture " " "")
+            (propertize (lispm-character-title* character) 'face 'lispm-chat-name) "\n"
+            (if-let* ((description (lispm-character-description character)))
+                (concat indent description "\n")
+              "")
+            (funcall dim (concat (if (lispm-character-home-p agent)
+                                     (lispm-tr "At home")
+                                   (lispm-tr "In %s" (abbreviate-file-name (lispm-agent-root agent))))
+                                 " · "
+                                 (if (lispm-backend-name agent)
+                                     (lispm-tr "model: %s via %s · role: %s"
+                                               (or (lispm-agent-model* agent) "?")
+                                               (lispm-backend-name agent)
+                                               (lispm-agent-role agent))
+                                   (lispm-tr "no model backend (see `lispm-backend') · role: %s"
+                                             (lispm-agent-role agent)))))
+            (funcall dim (lispm-tr "/help for help, /model to switch models")))))
+
 (defun lispm-chat--header (agent)
-  "The welcome box at the top of AGENT's chat."
+  "The welcome box at the top of AGENT's chat.
+A character's says who it is instead."
+  (if-let* ((character (lispm-agent-character* agent)))
+      (lispm-chat--character-header agent character)
+    (lispm-chat--header-box agent)))
+
+(defun lispm-chat--header-box (agent)
+  "The welcome box at the top of the chat of AGENT, no character's."
   (lispm-chat--box
    (list (concat (propertize "✻ " 'face 'lispm-chat-accent)
                  (lispm-tr "Welcome to %s!" (propertize "LispM" 'face 'bold)) "  "
