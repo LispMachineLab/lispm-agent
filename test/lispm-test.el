@@ -6085,6 +6085,45 @@ not with LispM's welcome; its replies are marked as its."
           (should-not (buffer-live-p buffer)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest lispm-test-form-buttons ()
+  "A row of push buttons does what each says, in the form's buffer, and a
+help that is a function says how things stand each time the form is drawn."
+  (let* ((pressed nil)
+         (stands "Not asked")
+         (glyphs nil)
+         (submitted nil)
+         (lispm-form-glyph-function (lambda (kind state label) (push (list kind state label) glyphs) nil))
+         (buffer (lispm-form
+                  "Server"
+                  `((address :type text :label "Address" :value "http://a:1"
+                             :help ,(lambda (values) (format "%s: %s" (alist-get 'address values) stands)))
+                    (actions :type buttons
+                             :buttons (("Test" . ,(lambda () (push (cons 'test (lispm-form-value 'address)) pressed)))
+                                       ("Open" . ,(lambda () (push 'open pressed))))))
+                  :on-submit (lambda (values) (setq submitted values)))))
+    (unwind-protect
+        (progn
+          (should (memq 'buttons lispm-form-types))
+          (with-current-buffer buffer
+            (let ((text (buffer-string)))
+              (should (string-match-p "\\[Test\\] \\[Open\\]" text))
+              (should (string-match-p "http://a:1: Not asked" text)))
+            (should (member '(button nil "Test") glyphs))
+            (should (member '(button nil "Open") glyphs))
+            ;; Each button is the field's, as the keyboard and a focus ring find it.
+            (lispm-test--form-press 'actions 0)
+            (lispm-test--form-press 'actions 1)
+            (should (equal pressed '(open (test . "http://a:1"))))
+            ;; Drawn again, its help says how things stand now.
+            (setq stands "Answers")
+            (lispm-form-redraw)
+            (should (string-match-p "http://a:1: Answers" (buffer-string)))
+            (should-not (string-match-p "Not asked" (buffer-string)))
+            (lispm-form-submit))
+          ;; Buttons have no value of their own.
+          (should (equal submitted '((address . "http://a:1")))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (ert-deftest lispm-test-form-layout ()
   "A form is laid out as a dialog: its labels end in one column, its
 controls start in the next, its fields reach one right edge; a heading's
