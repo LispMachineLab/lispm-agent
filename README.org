@@ -178,13 +178,16 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
 |------------------------------+---------+-------------------------------------------|
 | ~read~ ~memory~ ~comm~ ~lisp~ | auto    | reading, memory and tasks, other agents, ~run_lisp~ |
 | ~write~                      | ask     | changing files and buffers (always asks outside the root) |
-| ~shell~                      | ask     | ~run_shell~                               |
+| ~shell~                      | ask     | ~run_shell~ (a command that only reads, such as ~ls~ or ~git status~, is ~read~) |
 | ~exec~                       | ask     | ~eval_elisp~, ~write_skill~                |
 | ~web~ ~mcp~                  | ask     | ~web_search~, ~web_fetch~, MCP tools      |
 
-~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  Other
-packages can hold calls back through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the
-strictest answer wins), as [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
+~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  A shell
+command made only of programs that read (~lispm-shell-read-only-programs~: ~ls~, ~grep~, ~git log~,
+~gh pr view~ and the like, piped or chained, writing nowhere but =/dev/null=) is decided as
+reading is; one the shell would expand or run anything through asks.  Other packages can hold
+calls back through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest answer
+wins), as [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
 
 * Standing agents
 

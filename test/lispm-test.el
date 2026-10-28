@@ -2322,9 +2322,10 @@ before the split do."
       (should (eq (lispm-tool-permission elisp) 'exec))
       ;; Its calls say why, as those of exec do.
       (should (assq 'why (alist-get 'properties (alist-get 'input_schema (lispm-tool-schema shell)))))
-      ;; Both ask by default.
+      ;; Both ask by default, but for a command that only reads.
       (let ((agent (lispm-make-agent 'assistant project)))
-        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "make"))) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'auto))
         (should (eq (alist-get 'shell (lispm-policy agent)) 'ask)))
       ;; A policy naming exec alone governs shell commands too ...
       (should (eq (funcall action '((exec . auto)) 'shell) 'auto))
@@ -2371,6 +2372,50 @@ Emacs wherever the root is, is allowed call by call."
         (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
         (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
                        '("eval_elisp" (code . "1"))))))))
+
+(ert-deftest lispm-test-shell-reads-unasked ()
+  "A shell command that only reads is decided as reading is: unasked by
+default, where a command that may write asks.  Any doubt asks."
+  (lispm-test-env
+    (let ((agent (lispm-make-agent 'assistant project))
+          (shell (lispm-get-tool "run_shell")))
+      (dolist (command '("ls -la" "git status" "git log --oneline -5" "git -C .. diff HEAD~1 -- lisp/"
+                         "git branch --merged main" "git tag -l 'v*'" "git config user.name"
+                         "git stash list" "git worktree list" "echo hi | wc -l" "ls && git status"
+                         "head -20 f\ntail -5 f" "ls 2>/dev/null" "ls 2>&1" "wc -l < file"
+                         "grep \">\" f" "grep -r \"a|b\" ." "echo '$(x)'" "echo ${HOME}" "ls *.{el,org}"
+                         "find . -name x" "fd pattern" "gh pr view 1" "gh api repos/o/r" "env"))
+        (should (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'read))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'auto)))
+      (dolist (command '("make" "rm -rf x" "git push" "git commit -m x" "git branch -d x" "git branch foo"
+                         "git tag v1" "git config user.name x" "git stash pop" "git worktree add x"
+                         "git remote add x y" "git -c core.pager=x log" "ls; rm x" "ls &" "ls > out"
+                         "ls >> out" "cat `x`" "ls $(x)" "echo \"$(x)\"" "cat <(ls)" "(ls)" "{ ls; }"
+                         "FOO=1 ls" "/bin/ls" "ls # comment" "ls \"unterminated" "" "   "
+                         "find . -delete" "find . -exec rm {} \;" "fd -x rm" "env rm x" "xargs rm"
+                         "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "gh pr merge 1" "gh pr view 1 --web"
+                         "gh api -X POST repos/o/r" "gh api repos/o/r -f a=b"))
+        (should-not (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'shell))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'ask)))
+      ;; A call without a command is in the tool's class.
+      (should (eq (lispm-tool-call-permission shell nil) 'shell))
+      (should (eq (lispm-tool-action agent shell nil) 'ask))
+      ;; The user's own readers read too; a program given by its path never.
+      (let ((lispm-shell-read-only-programs '(("brew" . t))))
+        (should (eq (lispm-tool-action agent shell '((command . "brew list"))) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "/opt/homebrew/bin/brew list"))) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask)))
+      ;; An agent that may not read may not run a reading command either.
+      (setf (lispm-agent-policy agent) '((read . deny) (shell . auto)))
+      (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'deny))
+      (should (eq (lispm-tool-action agent shell '((command . "make"))) 'auto))
+      ;; Approving a reading command for good, where reading asks, allows
+      ;; that exact command, as any command on this machine.
+      (setf (lispm-agent-policy agent) '((read . ask)))
+      (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask))
+      (should (equal (lispm-tools-allowance shell '((command . "ls")) agent) '("run_shell" (command . "ls")))))))
 
 ;;;; The sandbox
 
@@ -7498,19 +7543,19 @@ not what the reply defines itself."
       (setq lispm-test--scripts
             `((tester
                ,(lispm-test--msg "tool_use"
-                                 (lispm-test--tool "t1" "run_shell" '((why . "w") (command . "echo one"))))
+                                 (lispm-test--tool "t1" "run_shell" '((why . "w") (command . "touch one && echo one"))))
                ,(lispm-test--msg "tool_use"
                                  (lispm-test--tool "t2" "write_file"
                                                    '((why . "w") (path . "b.txt") (content . "b\n"))))
                ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
       (lispm-test--chat-type chat "go")
       (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
-      (should (string-match-p "│ Bash command +│\n│ +│\n│   echo one" (lispm-test--chat-text chat)))
+      (should (string-match-p "│ Bash command +│\n│ +│\n│   touch one && echo one" (lispm-test--chat-text chat)))
       (should (string-match-p "2\\. Yes, and don't ask again for this exact command"
                               (lispm-test--chat-text chat)))
       (lispm-test--chat-key chat "2")
       ;; This command, not every command.
-      (should (equal (lispm-agent-allowed agent) '(("run_shell" (command . "echo one")))))
+      (should (equal (lispm-agent-allowed agent) '(("run_shell" (command . "touch one && echo one")))))
       (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
                                                 (equal (car (lispm-waiting-calls agent)) "t2")))))
       (should (string-match-p "Do you want to write b\\.txt\\?" (lispm-test--chat-text chat)))
@@ -7519,7 +7564,8 @@ not what the reply defines itself."
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should-not (file-exists-p (expand-file-name "b.txt" project)))
       (let ((text (lispm-test--chat-text chat)))
-        (should (string-match-p "⏺ Bash(echo one)\n  ⎿  one" text))
+        (should (string-match-p "⏺ Bash(touch one && echo one)\n  ⎿  one" text))
+        (should (file-exists-p (expand-file-name "one" project)))
         (should (string-match-p "⏺ Write(b\\.txt)\n  ⎿  The user denied this call\\. Their reason: use the scratch buffer"
                                 text)))
       ;; A standing agent outlives its chat.
@@ -8145,7 +8191,7 @@ error, or an answer that is not one, asks."
       (should (equal (lispm-tools-denial agent write '("Not that file.")) "Denied: Not that file."))
       ;; What LispM's rules deny is denied without asking anyone.
       (setq consulted 0)
-      (should (equal (lispm-tool-decision agent (lispm-get-tool "run_shell") '((command . "ls")))
+      (should (equal (lispm-tool-decision agent (lispm-get-tool "run_shell") '((command . "make")))
                      '(deny)))
       (should (= consulted 0))
       (should (equal (lispm-tools-denial agent (lispm-get-tool "run_shell") nil)
@@ -10187,12 +10233,12 @@ reply, streamed in, and a skill chosen is named in the request."
     (let ((agent (lispm-system-agent)))
       (setq lispm-test--scripts
             `((lispm ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_shell"
-                                                                   '((command . "echo hi") (why . "To greet."))))
+                                                                   '((command . "touch hi && echo hi") (why . "To greet."))))
                      ,(lispm-test--msg "end_turn" (lispm-test--text "Said hi.")))))
       (lispm-bar-ask "Greet")
       (should (lispm-test--wait (lambda () (lispm-waiting-calls agent))))
       (let ((lispm-bar--open t))
-        (should (string-match-p "▌ Bash command: echo hi\n  To greet\\.\n  Do you want to proceed\\? y yes · n no"
+        (should (string-match-p "▌ Bash command: touch hi && echo hi\n  To greet\\.\n  Do you want to proceed\\? y yes · n no"
                                 (substring-no-properties (lispm-bar--text)))))
       ;; Typed after other text, y is only a letter.
       (with-temp-buffer
@@ -10393,7 +10439,7 @@ elsewhere awaits an answer."
       (setq lispm-test--scripts
             `((,(lispm-agent-name agent)
                ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "run_shell"
-                                                              '((command . "echo hi") (why . "To greet."))))
+                                                              '((command . "touch hi && echo hi") (why . "To greet."))))
                ,(lispm-test--msg "end_turn" (lispm-test--text "Said hi.")))))
       (let ((inhibit-message t))
         (lispm-tell agent "Greet")

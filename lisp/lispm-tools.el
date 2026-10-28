@@ -91,11 +91,14 @@ of it; TARGETS, for a tool whose arguments do not name the files it
 writes, which (see `lispm-deftool').  Calls of an ALWAYS-ASK tool
 await the user's approval whatever the policy says.  FILE is the file
 a tool defined with `lispm-deftool' was loaded from, if any.  A tool
-with FOR, a function of an agent, is only that of agents it holds for."
+with FOR, a function of an agent, is only that of agents it holds for.
+CLASS, a function of a call's arguments, says which class the call
+belongs to when it does less than the tool can (see
+`lispm-tool-call-permission')."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff for)
+  diff for class)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -150,11 +153,18 @@ BODY may start with keyword options:
   :for FUNCTION      called with an agent: the tool is that agent's
                      only if it returns non-nil, as a character's own
                      tools are only characters'
+  :class FUNCTION    called with the same arguments before the call is
+                     decided: returns the permission class of this call
+                     when it does less than the tool can, as a shell
+                     command that only reads does, or nil for the tool's
+                     own; it changes nothing (see
+                     `lispm-tool-call-permission')
 
 Otherwise BODY's value is the result: a string, or any object, which
-is printed.  Signal an error to report a failure to the model."
+is printed; or a `lispm-tool-result', text with image or video files
+the model sees too.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview diff changes targets deferred always-ask for
+  (let ((permission 'read) async preview diff changes targets deferred always-ask for class
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -166,7 +176,8 @@ is printed.  Signal an error to report a failure to the model."
         (:targets (setq targets (pop body)))
         (:deferred (setq deferred (pop body)))
         (:always-ask (setq always-ask (pop body)))
-        (:for (setq for (pop body)))))
+        (:for (setq for (pop body)))
+        (:class (setq class (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -181,6 +192,7 @@ is printed.  Signal an error to report a failure to the model."
        :deferred ,deferred
        :always-ask ,always-ask
        :for ,for
+       :class ,class
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
@@ -975,7 +987,9 @@ denied it."
 
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
-Calls the user allowed for this Emacs session run at once (see
+The policy decides by the class of the call, the tool's unless the
+call does less (see `lispm-tool-call-permission').  Calls the user
+allowed for this Emacs session run at once (see
 `lispm-tools-allowance').  Writes outside the agent's root always ask,
 whatever the policy says: to files named by a `path' argument, visited
 by a buffer a `buffer' argument names, or that the tool's targets
@@ -986,10 +1000,23 @@ function cannot tell does.  So do the calls of a tool that always asks
 `lispm-tool-decision' for why."
   (car (lispm-tool-decision agent tool input)))
 
+(defun lispm-tool-call-permission (tool input)
+  "The class of TOOL's call on INPUT: the tool's, unless the call does less.
+A tool with a class function (`:class' in `lispm-deftool') has it say
+which class the call belongs to, as run_shell says `read' of a command
+that only reads (see `lispm-shell-read-only-p'); the policy then
+decides the call as it decides that class.  A function that answers
+nil, or fails, leaves the call in the tool's class."
+  (or (when-let* ((class (lispm-tool-class tool)))
+        (condition-case nil
+            (apply class (lispm-tools--arguments tool input))
+          (error nil)))
+      (lispm-tool-permission tool)))
+
 (defun lispm-tools--action (agent tool input)
   "What LispM's own rules decide of AGENT's call of TOOL on INPUT.
 See `lispm-tool-action'."
-  (let ((action (lispm-policy-action agent (lispm-tool-permission tool))))
+  (let ((action (lispm-policy-action agent (lispm-tool-call-permission tool input))))
     (cond ((lispm-tools--allowed-p agent tool input) 'auto)
           ((and (eq action 'auto) (lispm-tool-always-ask tool)) 'ask)
           ((and (eq action 'auto)
@@ -1811,6 +1838,291 @@ For files use edit_file."
     (lispm-tools--set-text b (car edit))
     (format "Replaced %d occurrence%s in %s." (cdr edit) (if (= (cdr edit) 1) "" "s") buffer)))
 
+;;;; Shell commands that only read
+
+(defcustom lispm-shell-read-only-programs
+  '(("ls" . t) ("dir" . t) ("tree" . t) ("pwd" . t) ("file" . t) ("stat" . t)
+    ("du" . t) ("df" . t) ("cat" . t) ("head" . t) ("tail" . t) ("wc" . t)
+    ("grep" . t) ("egrep" . t) ("fgrep" . t) ("rg" . t) ("ag" . t)
+    ("find" . lispm-shell--find-reads-p) ("fd" . lispm-shell--fd-reads-p)
+    ("echo" . t) ("printf" . t) ("true" . t) ("false" . t) ("test" . t) ("[" . t)
+    ("which" . t) ("whereis" . t) ("whatis" . t) ("type" . t) ("man" . t)
+    ("basename" . t) ("dirname" . t) ("realpath" . t) ("readlink" . t)
+    ("sort" . t) ("uniq" . t) ("cut" . t) ("tr" . t) ("diff" . t) ("cmp" . t) ("comm" . t)
+    ("column" . t) ("fold" . t) ("nl" . t) ("paste" . t) ("rev" . t) ("seq" . t) ("expr" . t)
+    ("jq" . t) ("xxd" . t) ("od" . t) ("hexdump" . t) ("strings" . t) ("nm" . t)
+    ("md5" . t) ("md5sum" . t) ("shasum" . t) ("sha1sum" . t) ("sha256sum" . t) ("cksum" . t)
+    ("date" . t) ("cal" . t) ("uname" . t) ("hostname" . t) ("whoami" . t) ("id" . t)
+    ("uptime" . t) ("printenv" . t) ("locale" . t) ("ps" . t) ("pgrep" . t) ("lsof" . t)
+    ("sw_vers" . t) ("arch" . t) ("nproc" . t)
+    ("env" . lispm-shell--env-reads-p)
+    ("git" . lispm-shell--git-reads-p)
+    ("gh" . lispm-shell--gh-reads-p))
+  "Programs whose commands only read, each with when: (PROGRAM . WHEN).
+WHEN is t when every call of PROGRAM only reads, or a function of the
+call's arguments, a list of strings, that returns non-nil when that
+call does: `find' reads unless it is told to delete or run something.
+A command made only of such calls, such as `git status', is of class
+`read' (see `lispm-shell-read-only-p'): it runs as reading does,
+unasked under the default policy, where other commands ask.  Programs
+that run what they are given, such as sh, xargs, env with a command or
+sudo, must not be here, nor any that writes: a reader of files that
+can also write them, such as sed with -i, needs a function.  A program
+is named without a directory: a command naming one by its path asks."
+  :type '(alist :key-type (string :tag "Program")
+                :value-type (choice (const :tag "Always" t) (function :tag "When")))
+  :group 'lispm)
+
+(defun lispm-shell--words (command)
+  "COMMAND's simple commands, each a list of words, or `unsure'.
+Words are split as the shell splits them, quotes and backslashes
+undone, at spaces, newlines, |, ||, && and ;.  Anything that would
+have the shell do more than run programs on words is `unsure': a
+redirection other than to /dev/null, from a file or of one descriptor
+to another; a command or process substitution, backquotes included; a
+subshell, group or function; a job put in the background; a here
+document; an environment assignment before a program; a comment.  So
+is an empty command."
+  (let ((length (length command))
+        (i 0)
+        commands words word (in-word nil) quote)
+    (cl-labels ((char () (and (< i length) (aref command i)))
+                (end-word () (when in-word (push (apply #'string (nreverse word)) words))
+                           (setq word nil in-word nil))
+                (end-command () (end-word)
+                             (when words (push (nreverse words) commands))
+                             (setq words nil))
+                (add (c) (push c word) (setq in-word t))
+                (unsure () (throw 'unsure 'unsure))
+                (redirection ()
+                  ;; At a <, > or &>, any descriptor before it dropped.
+                  (let ((start i))
+                    (while (memq (char) '(?< ?> ?&)) (cl-incf i))
+                    (let ((op (substring command start i)))
+                      (while (memq (char) '(?\s ?\t)) (cl-incf i))
+                      (let ((target-start i))
+                        (while (and (char) (not (memq (char) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
+                          (cl-incf i))
+                        (let ((target (substring command target-start i)))
+                          (pcase op
+                            ((or ">" ">>" "&>")
+                             (unless (equal target "/dev/null") (unsure)))
+                            (">&" (unless (string-match-p "\\`[0-9]+\\'" target) (unsure)))
+                            ("<" (when (or (string-empty-p target) (string-prefix-p "(" target))
+                                   (unsure)))
+                            (_ (unsure)))))))))
+      (catch 'unsure
+        (while (< i length)
+          (let ((c (aref command i)))
+            (cond
+             ((eq quote ?')
+              (if (eq c ?') (setq quote nil) (add c))
+              (cl-incf i))
+             ((eq quote ?\")
+              (cond ((eq c ?\") (setq quote nil) (cl-incf i))
+                    ((eq c ?\\)
+                     (cl-incf i)
+                     (when (char) (add (char)) (cl-incf i)))
+                    ((eq c ?`) (unsure))
+                    ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
+                     (unsure))
+                    (t (add c) (cl-incf i))))
+             ((memq c '(?' ?\"))
+              (setq quote c in-word t)
+              (cl-incf i))
+             ((eq c ?\\)
+              (cl-incf i)
+              (when (char) (add (char)) (cl-incf i)))
+             ((memq c '(?\s ?\t))
+              (end-word)
+              (cl-incf i))
+             ((memq c '(?\n ?\;))
+              (end-command)
+              (cl-incf i))
+             ((eq c ?|)
+              (end-command)
+              (cl-incf i)
+              (when (eq (char) ?|) (cl-incf i)))
+             ((eq c ?&)
+              (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?&)
+                  (progn (end-command) (cl-incf i 2))
+                (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?>)
+                    (progn (end-word) (redirection))
+                  (unsure))))
+             ((memq c '(?< ?>))
+              ;; 2>&1: the digits so far are the descriptor, not a word.
+              (if (and in-word word (seq-every-p (lambda (d) (<= ?0 d ?9)) word))
+                  (setq word nil in-word nil)
+                (end-word))
+              (redirection))
+             ((memq c '(?` ?\( ?\)))
+              (unsure))
+             ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
+              (unsure))
+             ((and (eq c ?#) (not in-word))
+              (unsure))
+             ((and (memq c '(?{ ?})) (not in-word)
+                   (let ((next (and (< (1+ i) length) (aref command (1+ i)))))
+                     (or (null next) (memq next '(?\s ?\t ?\n ?\;)))))
+              (unsure))
+             (t (add c) (cl-incf i)))))
+        (end-command)
+        (when quote (unsure))
+        (let ((commands (nreverse commands)))
+          (unless commands (unsure))
+          (dolist (words commands)
+            (when (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" (car words))
+              (unsure)))
+          commands)))))
+
+(defun lispm-shell-read-only-p (command)
+  "Non-nil if the shell COMMAND only reads, as far as can be told.
+It does when it runs only programs of `lispm-shell-read-only-programs',
+each as that says it only reads, joined by pipes, && || or ;, writing
+nowhere but /dev/null, with nothing the shell would run or expand into
+a command (see `lispm-shell--words').  Any doubt answers nil: a command
+this cannot read is one that may write."
+  (when (stringp command)
+    (let ((commands (lispm-shell--words command)))
+      (and (listp commands)
+           (seq-every-p
+            (pcase-lambda (`(,program . ,args))
+              (and (not (string-search "/" program))
+                   (let ((when (alist-get program lispm-shell-read-only-programs nil nil #'equal)))
+                     (cond ((eq when t) t)
+                           ((functionp when)
+                            (condition-case nil (and (funcall when args) t) (error nil)))))))
+            commands)))))
+
+(defun lispm-shell--none-of (args options)
+  "Non-nil if none of ARGS is one of OPTIONS, or starts with one taking a value."
+  (not (seq-some (lambda (arg)
+                   (seq-some (lambda (option)
+                               (or (equal arg option)
+                                   (and (string-prefix-p "--" option)
+                                        (string-prefix-p (concat option "=") arg))))
+                             options))
+                 args)))
+
+(defun lispm-shell--find-reads-p (args)
+  "Non-nil if find with ARGS only reads: it neither deletes nor runs nor writes."
+  (lispm-shell--none-of args '("-delete" "-exec" "-execdir" "-ok" "-okdir"
+                               "-fprint" "-fprint0" "-fprintf" "-fls")))
+
+(defun lispm-shell--fd-reads-p (args)
+  "Non-nil if fd with ARGS only reads: it runs nothing it finds."
+  (lispm-shell--none-of args '("-x" "--exec" "-X" "--exec-batch" "-l" "--list-details")))
+
+(defun lispm-shell--env-reads-p (args)
+  "Non-nil if env with ARGS only prints the environment: it runs nothing."
+  (seq-every-p (lambda (arg) (member arg '("-0" "--null"))) args))
+
+(defun lispm-shell--positionals (args consuming)
+  "The ARGS that are not options; CONSUMING are options that take the next ARG."
+  (let (positionals)
+    (while args
+      (let ((arg (pop args)))
+        (cond ((member arg consuming) (pop args))
+              ((equal arg "--") (setq positionals (append (reverse args) positionals) args nil))
+              ((string-prefix-p "-" arg))
+              (t (push arg positionals)))))
+    (nreverse positionals)))
+
+(defconst lispm-shell--git-readers
+  '("status" "log" "diff" "show" "blame" "annotate" "grep" "ls-files" "ls-tree" "ls-remote"
+    "cat-file" "rev-parse" "rev-list" "describe" "shortlog" "merge-base" "name-rev"
+    "count-objects" "check-ignore" "check-attr" "diff-tree" "diff-index" "diff-files"
+    "for-each-ref" "show-ref" "show-branch" "var" "version" "whatchanged" "cherry"
+    "range-diff" "help" "verify-commit" "verify-tag" "status")
+  "Git subcommands that only read, whatever their arguments.")
+
+(defun lispm-shell--git-reads-p (args)
+  "Non-nil if git with ARGS only reads.
+Of its options before the subcommand, -C, -P, --no-pager, --no-optional-locks,
+--git-dir= and --work-tree= are read with; any other, -c among them, which
+can have a subcommand run a program, is not.  Subcommands of
+`lispm-shell--git-readers' read; branch, tag, remote, config, stash,
+reflog, worktree, submodule and notes read while their arguments only ask."
+  (let (subcommand)
+    (while (and args (not subcommand))
+      (let ((arg (pop args)))
+        (cond ((equal arg "-C") (pop args))
+              ((member arg '("-P" "--no-pager" "--no-optional-locks" "--help" "--version")))
+              ((or (string-prefix-p "--git-dir=" arg) (string-prefix-p "--work-tree=" arg)))
+              ((string-prefix-p "-" arg) (setq args nil subcommand 'unsure))
+              (t (setq subcommand arg)))))
+    (pcase subcommand
+      ('nil t)
+      ('unsure nil)
+      ((pred (lambda (s) (member s lispm-shell--git-readers))) t)
+      ("branch"
+       (and (lispm-shell--none-of args '("-d" "-D" "-m" "-M" "-c" "-C" "-u" "-f" "--delete" "--move"
+                                         "--copy" "--force" "--set-upstream-to" "--unset-upstream"
+                                         "--edit-description" "--track" "--no-track"))
+            (or (member "-l" args) (member "--list" args)
+                (null (lispm-shell--positionals
+                       args '("--contains" "--no-contains" "--merged" "--no-merged" "--points-at"
+                              "--sort" "--format" "--color" "--abbrev"))))))
+      ("tag"
+       (and (lispm-shell--none-of args '("-d" "-D" "-f" "-a" "-s" "-u" "-m" "-F" "-e" "--delete"
+                                         "--force" "--annotate" "--sign" "--local-user"
+                                         "--message" "--file" "--edit"))
+            (or (member "-l" args) (member "--list" args)
+                (null (lispm-shell--positionals
+                       args '("--contains" "--no-contains" "--merged" "--no-merged" "--points-at"
+                              "--sort" "--format" "--color"))))))
+      ("remote" (member (car (lispm-shell--positionals args nil)) '(nil "show" "get-url")))
+      ("config"
+       (and (lispm-shell--none-of args '("--unset" "--unset-all" "--add" "--replace-all" "-e" "--edit"
+                                         "--rename-section" "--remove-section"))
+            (let ((positionals (lispm-shell--positionals args '("-f" "--file" "--blob" "-t" "--type"
+                                                                 "--default"))))
+              (if (seq-some (lambda (arg) (member arg '("--get" "--get-all" "--get-regexp"
+                                                        "--get-urlmatch" "-l" "--list"
+                                                        "--get-color" "--get-colorbool")))
+                            args)
+                  (<= (length positionals) 2)
+                (<= (length positionals) 1)))))
+      ("stash" (member (car (lispm-shell--positionals args nil)) '("list" "show")))
+      ("reflog" (member (car (lispm-shell--positionals args nil)) '(nil "show")))
+      ("worktree" (equal (car (lispm-shell--positionals args nil)) "list"))
+      ("submodule" (member (car (lispm-shell--positionals args nil)) '("status" "summary")))
+      ("notes" (member (car (lispm-shell--positionals args nil)) '("show" "list")))
+      (_ nil))))
+
+(defconst lispm-shell--gh-readers
+  '(("pr" "view" "list" "checks" "diff" "status")
+    ("issue" "view" "list" "status")
+    ("run" "list" "view")
+    ("repo" "view")
+    ("release" "list" "view")
+    ("auth" "status")
+    ("label" "list")
+    ("workflow" "list" "view")
+    ("gist" "list" "view")
+    ("search")
+    ("status")
+    ("api"))
+  "GitHub CLI commands that only read: (COMMAND . SUBCOMMANDS), every
+subcommand of a COMMAND with none.")
+
+(defun lispm-shell--gh-reads-p (args)
+  "Non-nil if gh with ARGS only reads: a command of `lispm-shell--gh-readers',
+not opening the browser (-w, --web), and api only with GET or HEAD and
+nothing to send."
+  (let ((positionals (lispm-shell--positionals args '("-R" "--repo"))))
+    (and (lispm-shell--none-of args '("-w" "--web"))
+         (when-let* ((readers (assoc (car positionals) lispm-shell--gh-readers)))
+           (and (or (null (cdr readers)) (member (cadr positionals) (cdr readers)))
+                (or (not (equal (car positionals) "api"))
+                    (and (lispm-shell--none-of args '("-f" "-F" "--field" "--raw-field" "--input"))
+                         (let ((method (or (cadr (member "-X" args)) (cadr (member "--method" args))
+                                           (seq-some (lambda (arg)
+                                                       (and (string-prefix-p "--method=" arg)
+                                                            (substring arg 9)))
+                                                     args))))
+                           (member method '(nil "GET" "HEAD"))))))))))
+
 ;;;; Built-in tools: execution
 
 (lispm-deftool run_shell
@@ -1822,6 +2134,9 @@ remote, the command runs on its machine.  The user may have the
 command run in a sandbox: its result then says what the sandbox
 allows."
   :permission shell
+  ;; A command that only reads is decided as reading is.
+  :class (lambda (command &optional _timeout)
+           (and (lispm-shell-read-only-p command) 'read))
   :async t
   ;; Setting up must not be cut short by C-g: a process left without
   ;; its timer and its agent could be neither timed out nor aborted.
