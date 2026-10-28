@@ -117,10 +117,20 @@ Genera's did."
     (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-get-agent agent) id))
     (_ (user-error "%s" (lispm-tr "Nothing to act on here")))))
 
+(defvar lispm-act-functions nil
+  "Functions acting on what is at point where no object is presented.
+Each is called with no argument and returns non-nil if it acted; RET in
+the inspector and the chat tries them in turn.  lispm-hyperbole.el adds
+Hyperbole's implicit buttons, once Hyperbole is loaded.")
+
 (defun lispm-act-at-point ()
-  "Act on the object presented at point."
+  "Act on the object presented at point.
+Where none is, act as one of `lispm-act-functions' does."
   (interactive)
-  (lispm-act (or (lispm-object-at) (user-error "%s" (lispm-tr "Nothing to act on here")))))
+  (if-let* ((object (lispm-object-at)))
+      (lispm-act object)
+    (or (run-hook-with-args-until-success 'lispm-act-functions)
+        (user-error "%s" (lispm-tr "Nothing to act on here")))))
 
 (defun lispm-act-at-mouse (event)
   "Act on the object presented where EVENT, a click, happened."
@@ -550,4 +560,8 @@ its policy and ceiling, and the files its turns changed."
                         lispm-current-agent)))
 
 (provide 'lispm-inspect)
+
+;; Hyperbole's Action Key on these objects, and its implicit buttons in
+;; LispM's text, once Hyperbole is loaded.  LispM does not need it.
+(with-eval-after-load 'hyperbole (require 'lispm-hyperbole))
 ;;; lispm-inspect.el ends here

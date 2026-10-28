@@ -7,7 +7,7 @@ ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-we
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
       lispm-core.el lispm-sandbox.el lispm-services.el lispm-roles.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el \
-      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-form.el lispm-characters.el lispm-agents-bridge.el lispm-ground.el lispm-inspect.el lispm-settings.el \
+      lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-form.el lispm-characters.el lispm-agents-bridge.el lispm-ground.el lispm-inspect.el lispm-hyperbole.el lispm-settings.el \
       lispm-chat.el lispm-bar.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))" \
@@ -28,8 +28,12 @@ compile: deps
 	$(EMACS) -Q --batch $(DEPS) -L lisp --eval "(setq byte-compile-error-on-warn t)" \
 	  -f batch-byte-compile $(ELS)
 
+# Hyperbole's tests run in an Emacs of their own: loading Hyperbole
+# changes syntax tables, keys and Org for the whole Emacs.
 test: deps
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-test.el -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
+	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'
 
 # The messages each catalog of i18n/ lacks, and those it holds that the code
 # no longer gives; the tests fail on either.
