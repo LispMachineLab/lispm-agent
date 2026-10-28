@@ -1471,11 +1471,14 @@ whose directory name is that name, when there is one."
 A project is the root from `lispm-agents--resolve-roots', so worktrees
 and subdirectories join their repository and chat locations share one `chats'
 group.  Return a list of plists
-  (:key KEY :dir DIR :chats CHATS :running BUFFERS :sessions SESSIONS :time T)
+  (:key KEY :dir DIR :chats CHATS :running BUFFERS :waiting WAITING
+   :sessions SESSIONS :time T)
 where KEY folds case (macOS paths are case-insensitive), DIR is the root for
-display, and T is the latest activity.  Projects with running terminals come
-first, then by latest activity, and the chats group last.  SESSIONS are
-newest first and keep that order inside each group."
+display, WAITING non-nil when one of BUFFERS waits for the user, see
+`lispm-agents-buffer-waiting-p', and T is the latest activity.  Projects
+with terminals waiting for the user come first, then those with running
+terminals, then by latest activity, and the chats group last.  SESSIONS
+are newest first and keep that order inside each group."
   (let* ((directory-of (lambda (item)
                          (if (bufferp item)
                              (buffer-local-value 'default-directory item)
@@ -1495,11 +1498,13 @@ newest first and keep that order inside each group."
                                        :dir (if (eq root 'chats) "~"
                                               (lispm-agents--directory-key root))
                                        :chats (eq root 'chats)
-                                       :running nil :sessions nil :time 0)
+                                       :running nil :waiting nil :sessions nil :time 0)
                                  groups))))))
       (dolist (buffer running)
         (let ((group (group buffer)))
-          (plist-put group :running (cons buffer (plist-get group :running)))))
+          (plist-put group :running (cons buffer (plist-get group :running)))
+          (when (lispm-agents-buffer-waiting-p buffer)
+            (plist-put group :waiting t))))
       (dolist (session sessions)
         (let ((group (group session)))
           (plist-put group :sessions (cons session (plist-get group :sessions)))
@@ -1512,11 +1517,47 @@ newest first and keep that order inside each group."
                   order)
           (lambda (a b)
             (let ((ca (plist-get a :chats)) (cb (plist-get b :chats))
+                  (wa (plist-get a :waiting)) (wb (plist-get b :waiting))
                   (ra (and (plist-get a :running) t))
                   (rb (and (plist-get b :running) t)))
               (cond ((not (eq ca cb)) cb)
+                    ((not (eq wa wb)) wa)
                     ((not (eq ra rb)) ra)
                     (t (> (plist-get a :time) (plist-get b :time)))))))))
+
+(defvar lispm-agents-status-functions nil
+  "Functions saying what an agent's buffer is doing.
+Each is called with a buffer of an agent, see `lispm-agents-buffer-p',
+and returns a record (:state STATE :kind KIND :progress PROGRESS :msg
+MSG), as a terminal's program reports itself, or nil when it does not
+know the buffer; the first to answer does.  STATE is `idle', `working',
+`done', `blocked', the agent waiting for its user to answer, or
+`error'; KIND, why it is blocked, `permission', `question' or `auth';
+PROGRESS a percentage; MSG what the agent says of it.  What is not
+known is nil.  Lists of the sessions show the record, and put the
+agents waiting for their user first.")
+
+(defun lispm-agents-buffer-status (buffer)
+  "Return what the agent of BUFFER is doing, as the first of
+`lispm-agents-status-functions' to know BUFFER says, or nil."
+  (run-hook-with-args-until-success 'lispm-agents-status-functions buffer))
+
+(defun lispm-agents-buffer-waiting-p (buffer)
+  "Return non-nil when the agent of BUFFER waits for its user, see
+`lispm-agents-buffer-status': blocked on an answer, or failed."
+  (and (memq (plist-get (lispm-agents-buffer-status buffer) :state) '(blocked error)) t))
+
+(defun lispm-agents-waiting-buffers ()
+  "Return the live agent buffers whose agents wait for their user, the
+most urgent first: those blocked on an answer, then those failed, see
+`lispm-agents-buffer-status'; among a state, the most recently used
+first."
+  (let ((buffers (lispm-agents-running-buffers)))
+    (seq-mapcat (lambda (state)
+                  (seq-filter (lambda (buffer)
+                                (eq (plist-get (lispm-agents-buffer-status buffer) :state) state))
+                              buffers))
+                '(blocked error))))
 
 (defun lispm-agents-running-buffers ()
   "Return the live agent terminals, most recently used first."

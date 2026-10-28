@@ -1366,6 +1366,29 @@ result holds besides TEXT."
             (running (lispm-set-state agent 'acting (format "running %s" running)
                                       (cons 'running running)))))))
 
+(defun lispm-agent-status-record (agent)
+  "Return what AGENT is doing as a record (:state STATE :kind KIND :msg
+MSG), as `lispm-agents-status-functions' describe an agent's buffer:
+`blocked' while it waits for its user, on a call awaiting approval
+\(KIND `permission') or at a condition awaiting a restart (`question');
+`error' while calls of its stopped at errors and nothing else holds it;
+`working' in the rest of a turn; else `idle'.  MSG is AGENT's status."
+  (let ((status (lispm-agent-status agent)))
+    (pcase (lispm-agent-state agent)
+      ('idle (list :state 'idle :msg status))
+      ('waiting
+       (let ((asked 0) (stopped 0))
+         (maphash (lambda (_id call)
+                    (pcase (plist-get call :status)
+                      ('ask (cl-incf asked))
+                      ('stopped (cl-incf stopped))))
+                  (lispm-agent-pending agent))
+         (cond ((lispm-agent-condition agent) (list :state 'blocked :kind 'question :msg status))
+               ((> asked 0) (list :state 'blocked :kind 'permission :msg status))
+               ((> stopped 0) (list :state 'error :msg status))
+               (t (list :state 'blocked :msg status)))))
+      (_ (list :state 'working :msg status)))))
+
 (defun lispm--maybe-continue (agent)
   "Request AGENT's next step once all its tool calls have results."
   (when (and (memq (lispm-agent-state agent) '(acting waiting))
