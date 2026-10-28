@@ -266,6 +266,8 @@
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %sが%sを実行しようとしています：%sでC-c C-yを押して確認してください")
   ("No call awaits approval" . "承認待ちの呼び出しはありません")
   ("%s wants to run %s" . "%sが%sを実行しようとしています")
+  ("%s (outside LispM)" . "%s（LispM の外）")
+  ("LispM: Emacs %d serves agents outside LispM; this one serves none" . "LispM: Emacs %d が LispM の外のエージェントに応じています。この Emacs は応じません")
   (("answer" . "yes") . "はい")
   ("Run this call" . "この呼び出しを実行")
   (("answer" . "no") . "いいえ")

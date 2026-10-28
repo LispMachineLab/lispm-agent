@@ -301,6 +301,44 @@ around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
 ~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface
 section; the agents know nothing of it.  Another agent is one call of ~lispm-agents-define~.
 
+** Agents outside LispM
+
+An agent LispM did not start, as Claude Code in another terminal, Codex, an editor's assistant
+or a script, reaches your Emacs over an MCP server LispM runs for them
+(=lisp/lispm-mcp-server.el=).  Register the command =bin/lispm-mcp= with the agent, once, as a
+server it runs over stdio (=~/.lispm/lispm-agent= is where LispM.app keeps this repository;
+=M-: lispm-mcp-server-program= gives the path of yours):
+
+#+begin_src sh
+claude mcp add -s user lispm -- ~/.lispm/lispm-agent/bin/lispm-mcp
+codex mcp add lispm -- ~/.lispm/lispm-agent/bin/lispm-mcp
+#+end_src
+
+Any other MCP client takes the same command.  Each agent connecting is an agent of
+~lispm-default-role~ (or ~lispm-mcp-server-role~) in the directory it runs in, and has
+
+- the read tools the editor's agents have: what is open in Emacs, the selection, Flymake's
+  diagnostics, unsaved changes;
+- LispM's tools an agent of that role has from the start, under their own names:
+  ~list_buffers~, ~read_buffer~, ~edit_buffer~, ~describe_symbol~, ~eval_elisp~, ~run_shell~
+  and the others;
+- ~search_tools~, ~skill~ and ~call_tool~ for the rest of LispM's tools and its skills.
+
+Its calls go by that role's policy, as any agent's do: reading runs at once, while editing,
+shell commands and ~eval_elisp~ ask you in Emacs, the question naming the agent and saying it
+is outside LispM, and shell commands run in the sandbox.  It takes no part in the agents'
+messages, which reach no agent outside LispM.  A call waiting for you may take longer than a
+client waits for a tool by default: give Claude Code =MCP_TOOL_TIMEOUT= (milliseconds), Codex
+=tool_timeout_sec= in the server's entry.
+
+The server starts with LispM in an interactive Emacs; ~(setq lispm-mcp-server-autostart nil)~
+keeps it off, and ~M-x lispm-mcp-server-mode~ switches it.  Its address and a token made at
+each start are in =~/.lispm/mcp-server=, which only you can read, so only your own programs
+connect; requests from web pages are refused.  The first Emacs to serve keeps that file while
+it runs: a second, as an Emacs trying a change, serves nothing.  A client speaking streamable
+HTTP may use the address and token in the file itself.  =bin/lispm-tool= calls the same tools
+from a shell that has no server of its own.
+
 * Backends
 
 LispM speaks OpenAI Chat Completions, which almost every model server implements, and Anthropic

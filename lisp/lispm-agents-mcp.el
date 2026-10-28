@@ -50,7 +50,9 @@
 ;; names the server with `lispm-agents-mcp-announce': a file of
 ;; `lispm-agents-mcp-peer-directory', readable by its owner only, named
 ;; after a variable the agent's commands have and its value, as
-;; HOLON_AGENT_ID=demo, holds the server's address and token.
+;; HOLON_AGENT_ID=demo, holds the server's address and token.  An agent
+;; LispM did not start has no such server: it reaches the one LispM runs
+;; for agents outside it, see lispm-mcp-server.el.
 
 ;;; Code:
 

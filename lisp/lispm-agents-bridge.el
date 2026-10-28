@@ -286,6 +286,22 @@ This is one of `lispm-agents-context-release-functions'."
   "Return the peer SERVER's agent is."
   (lispm-agents-bridge--peer (lispm-agents-bridge--terminal server)))
 
+(cl-defgeneric lispm-agents-bridge-server-agent (server)
+  "Return the LispM agent SERVER's agent acts as, whose role and policy
+its calls of LispM's tools go by.")
+
+(cl-defmethod lispm-agents-bridge-server-agent ((server lispm-agents-mcp))
+  "The LispM agent of the agent of SERVER's terminal."
+  (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+
+(cl-defgeneric lispm-agents-bridge-server-kind (server)
+  "Return what SERVER's agent is, as \"Claude Code\", for the user asked
+about its calls.")
+
+(cl-defmethod lispm-agents-bridge-server-kind ((server lispm-agents-mcp))
+  "What the agent of SERVER's terminal is."
+  (lispm-agents-bridge--kind (lispm-agents-bridge--terminal server)))
+
 (defun lispm-agents-bridge--string (arguments key)
   "Return the string ARGUMENTS hold under KEY; an error if they hold none."
   (let ((value (alist-get key arguments)))
@@ -339,7 +355,7 @@ This is one of `lispm-agents-context-release-functions'."
 
 (defun lispm-agents-bridge--tool-search (server arguments _id)
   "Find LispM's skills and tools as ARGUMENTS say, for SERVER's agent."
-  (let* ((agent (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (query (lispm-agents-bridge--string arguments 'query))
          (limit (alist-get 'max_results arguments))
          (answer lispm-agents-context-answer))
@@ -383,7 +399,7 @@ defined, and those its file names, as are registered."
 Its tools follow, with their inputs' schemas.  The code of a skill of a
 project runs only while the user trusts it, as for LispM's agents; else
 the agent gets the text alone."
-  (let* ((agent (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (name (lispm-agents-bridge--string arguments 'name))
          (skill (lispm-skills--find name agent)))
     (unless skill
@@ -446,14 +462,13 @@ An agent may give it as an object, or as the text of one."
                                   "\n")
                      2000)))
 
-(defun lispm-agents-bridge--ask (terminal agent tool input reasons answer)
-  "Ask the user about AGENT's call of TOOL on INPUT, for TERMINAL's agent.
+(defun lispm-agents-bridge--ask (kind agent tool input reasons answer)
+  "Ask the user about AGENT's call of TOOL on INPUT, for an agent of KIND.
 REASONS say why it is asked.  Run it if they approve; else, or should
 asking fail, give ANSWER the denial."
   (if (condition-case nil
           (funcall lispm-agents-confirm-function
-                   (lispm-tr "%s wants to run %s" (lispm-agents-bridge--kind terminal)
-                             (lispm-tool-name tool))
+                   (lispm-tr "%s wants to run %s" kind (lispm-tool-name tool))
                    (lispm-agents-bridge--detail agent tool input reasons)
                    (lispm-tr-in "permission" "Allow"))
         ((error quit) nil))
@@ -464,8 +479,7 @@ asking fail, give ANSWER the denial."
   "Run the LispM tool ARGUMENTS name, on their input, for SERVER's agent.
 It runs at once, waits for the user's approval or is refused, as the
 policy of the agent acting in LispM decides."
-  (let* ((terminal (lispm-agents-bridge--terminal server))
-         (agent (lispm-agents-bridge-agent terminal))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (name (lispm-agents-bridge--string arguments 'name))
          (tool (lispm-get-tool name))
          (input (lispm-agents-bridge--input arguments))
@@ -474,7 +488,7 @@ policy of the agent acting in LispM decides."
            (error "There is no LispM tool named %s; search_tools finds them" name))
           ((member name lispm-agents-bridge-unserved-tools)
            (error "%s is not called with call_tool%s" name
-                  (if (member name '("list_agents" "send_message" "ask_agent" "search_tools" "skill"))
+                  (if (assoc name (lispm-agents-mcp-served-tools server))
                       ": it is a tool of your own"
                     "")))
           ((not (lispm-agents-bridge--served-p tool))
@@ -484,7 +498,8 @@ policy of the agent acting in LispM decides."
     (pcase-let ((`(,action . ,reasons) (lispm-tool-decision agent tool input)))
       (pcase action
         ('deny (funcall answer (list (lispm-tools-denial agent tool reasons)) t))
-        ('ask (run-at-time 0 nil #'lispm-agents-bridge--ask terminal agent tool input reasons answer))
+        ('ask (run-at-time 0 nil #'lispm-agents-bridge--ask (lispm-agents-bridge-server-kind server)
+                           agent tool input reasons answer))
         (_ (lispm-agents-bridge--run agent tool input answer))))
     'deferred))
 

@@ -266,6 +266,8 @@
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %s möchte %s ausführen: Prüfen Sie es mit C-c C-y in %s")
   ("No call awaits approval" . "Kein Aufruf wartet auf Freigabe")
   ("%s wants to run %s" . "%s möchte %s ausführen")
+  ("%s (outside LispM)" . "%s (außerhalb von LispM)")
+  ("LispM: Emacs %d serves agents outside LispM; this one serves none" . "LispM: Emacs %d bedient Agenten außerhalb von LispM; dieses bedient keine")
   (("answer" . "yes") . "ja")
   ("Run this call" . "Diesen Aufruf ausführen")
   (("answer" . "no") . "nein")

@@ -266,6 +266,8 @@
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %s 想要运行 %s：请在 %s 中用 C-c C-y 审阅")
   ("No call awaits approval" . "没有等待批准的调用")
   ("%s wants to run %s" . "%s 想要运行 %s")
+  ("%s (outside LispM)" . "%s（LispM 之外）")
+  ("LispM: Emacs %d serves agents outside LispM; this one serves none" . "LispM：Emacs %d 已在为 LispM 之外的智能体服务；本 Emacs 不提供服务")
   (("answer" . "yes") . "是")
   ("Run this call" . "运行此调用")
   (("answer" . "no") . "否")

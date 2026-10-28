@@ -79,7 +79,10 @@
 ;; (lispm-agents.el), shown Emacs's state over MCP or Claude's IDE
 ;; protocol (lispm-agents-context.el).  While LispM runs they are peers
 ;; of its agents, which they message and ask, and they use its skills
-;; and tools (lispm-agents-bridge.el).
+;; and tools (lispm-agents-bridge.el).  Agents LispM did not start, run
+;; anywhere else, reach this Emacs over an MCP server of its own, with
+;; the command bin/lispm-mcp, and use its tools under the same policy
+;; (lispm-mcp-server.el).
 ;;
 ;; Start with M-x lispm.  See README.org and DESIGN.org.
 
@@ -111,6 +114,7 @@
 (require 'lispm-settings)
 (require 'lispm-chat)
 (require 'lispm-bar)
+(require 'lispm-mcp-server)
 (require 'lispm-ui)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
@@ -452,6 +456,12 @@ AGENT is the running agent of the current project, or a new one."
 ;; The editor's agents get LispM's tools whenever they are about.
 (with-eval-after-load 'lispm-agents-mcp
   (require 'lispm-agents-bridge))
+
+;; Agents LispM did not start reach this Emacs over MCP, once the user's
+;; init has had its say (lispm-mcp-server.el).
+(if after-init-time
+    (lispm-mcp-server-maybe-start)
+  (add-hook 'after-init-hook #'lispm-mcp-server-maybe-start))
 
 (provide 'lispm)
 ;;; lispm.el ends here
