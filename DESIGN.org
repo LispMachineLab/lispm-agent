@@ -527,6 +527,21 @@ run unasked, which gives the agent everything. So approving one "for good" (~2~ 
 (~lispm-tools-allowance~), and so does approving a call of a tool that always asks. Lisp the
 policy should mediate is what ~run_lisp~ is for.
 
+*A command that only reads is a read.* Most of what an agent runs in the shell looks rather
+than changes: ~ls~, ~grep~, ~git status~, ~git log~, ~gh pr view~. Asking about each would have
+the user approve reading, which the policy lets run unasked; so a tool may say of a call that it
+does less than the tool can (~:class~ in ~lispm-deftool~, ~lispm-tool-call-permission~), and the
+policy decides the call by that class. ~run_shell~ says ~read~ of a command made only of programs
+of ~lispm-shell-read-only-programs~, each as that says it reads (~find~ without ~-delete~ or
+~-exec~, ~git~ with a reading subcommand and none of the options that have it run a program,
+~gh api~ with GET), joined by pipes, ~&&~, ~||~ or ~;~, writing nowhere but =/dev/null=
+(~lispm-shell-read-only-p~). The parser undoes quotes and backslashes and knows nothing else: a
+substitution, backquotes, a subshell, a group, a background job, a here document, an environment
+assignment before the program, a comment or a program named by its path makes the command one it
+cannot read, which asks as any command does. The tool's own class still governs what approving
+for good allows and what a denial says: a reading command approved where reading asks allows that
+exact command, as any command on this machine (below).
+
 *Commands and Lisp are apart.* Shell commands were of class ~exec~, as Lisp is; they have a
 class of their own, ~shell~, so that a policy can let commands run unasked while Lisp asks,
 which is what an agent whose root is on another machine wants (below). A policy that does not
