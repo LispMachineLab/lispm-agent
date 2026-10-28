@@ -7661,6 +7661,125 @@ not what the reply defines itself."
       (should (string-match-p "Nobody waits"
                               (car (lispm-test--call boss "return_value" '((value . 1)))))))))
 
+(ert-deftest lispm-test-chat-box-wrap ()
+  "Narrow boxes wrap whole lines, keeping indentation, diff markers and faces."
+  (let* ((width 24)
+         (text "  alpha beta gamma delta epsilon zeta eta theta")
+         (box (lispm-chat--box (list nil text) width))
+         (lines (split-string box "\n" t))
+         (body (butlast (cdr lines))))
+    (should (> (length body) 2))
+    (should-not (string-search "…" box))
+    (dolist (line lines) (should (= (string-width line) width)))
+    (dolist (line body) (should (string-prefix-p "│   " line)))
+    (should (equal (split-string (mapconcat (lambda (line) (substring line 4 -2)) body " "))
+                   (split-string text)))
+    (should (string-match-p "│   alpha beta gamma +│" box)))
+  ;; No spaces to break at, and characters wider than one column.
+  (dolist (marker '("+" "-" " " "@@"))
+    (let* ((text (concat "  " (propertize (concat marker (make-string 35 ?界))
+                                        'face 'lispm-chat-added)))
+           (box (lispm-chat--box (list text) 23))
+           (lines (split-string box "\n" t))
+           (body (butlast (cdr lines))))
+      (should (> (length body) 3))
+      (should-not (string-search "…" box))
+      (dolist (line lines) (should (= (string-width line) 23)))
+      (dolist (line body)
+        (should (string-prefix-p (concat "│   " marker) line))
+        (should (eq (get-text-property 4 'face line) 'lispm-chat-added))
+        (should (eq (get-text-property (+ 4 (length marker)) 'face line) 'lispm-chat-added)))
+      (should (equal (mapconcat (lambda (line) (string-trim-right (substring line (+ 4 (length marker)) -2)))
+                                body "")
+                     (make-string 35 ?界)))))
+  ;; Lines that fit, including empty lines, keep their original layout.
+  (should (equal (lispm-chat--box '("  ok" nil "") 10)
+                 "╭────────╮\n│   ok   │\n│        │\n╰────────╯\n")))
+
+(ert-deftest lispm-test-chat-approval-wrap ()
+  "Commands and diffs awaiting approval remain whole in a narrow chat."
+  (lispm-test-env
+    (cl-letf (((symbol-function 'lispm-chat--width) (lambda () 58)))
+      (let* ((agent (lispm-defagent tester "Test agent." :root project))
+             (chat (lispm-chat agent))
+             (long (make-string 120 ?x))
+             (command (concat "printf first\nvalue=" long "\nprintf last")))
+        (lispm-test--write (expand-file-name "a.txt" project) "old\n")
+        (setq lispm-test--scripts
+              `((tester
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t1" "run_shell" `((why . "w") (command . ,command))))
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t2" "edit_file"
+                                                     `((why . "w") (path . "a.txt")
+                                                       (old_text . "old") (new_text . ,long))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+        (lispm-test--chat-type chat "go")
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+        (let* ((text (lispm-test--chat-text chat))
+               (lines (seq-filter (lambda (line) (string-prefix-p "│   " line))
+                                  (split-string text "\n")))
+               (shown (mapconcat (lambda (line) (string-trim-right (substring line 4 -2))) lines "")))
+          ;; The separate tool summary and waiting status have ellipses.
+          (should-not (string-match-p "^│.*…" text))
+          (should (string-match-p "^│   printf first +│$" text))
+          (should (string-match-p "^│   printf last +│$" text))
+          (should (string-search (string-replace "\n" "" command) shown))
+          (should (string-search "C-c C-y reviews the whole call in the transcript" text)))
+        (lispm-test--chat-key chat "1")
+        (should (lispm-test--wait (lispm-test--previewed agent)))
+        (let* ((text (lispm-test--chat-text chat))
+               (added (seq-filter (lambda (line) (string-prefix-p "│   +" line))
+                                  (split-string text "\n"))))
+          (should (equal (car (lispm-waiting-calls agent)) "t2"))
+          (should-not (string-match-p "^│.*…" text))
+          (should (> (length added) 2))
+          (should (equal (mapconcat (lambda (line) (string-trim-right (substring line 5 -2))) added "") long))
+          (should (string-search "C-c C-y reviews the whole call in the transcript" text)))
+        (lispm-test--chat-key chat "1")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (equal (lispm-test--file project "a.txt") (concat long "\n")))))))
+
+(ert-deftest lispm-test-chat-review ()
+  "C-c C-y reviews and approves the waiting call in its org transcript."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (transcript (lispm-agent-buffer agent)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "write_file"
+                                                   '((why . "w") (path . "a.txt") (content . "written\n"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lispm-test--previewed agent)))
+      (save-window-excursion
+        (pop-to-buffer chat)
+        (cl-letf (((symbol-function 'read-multiple-choice)
+                   (lambda (&rest _)
+                     (should (eq (current-buffer) transcript))
+                     (should (derived-mode-p 'org-mode))
+                     (should (equal (org-entry-get nil "TOOL_ID") "t1"))
+                     (should-not (org-invisible-p (line-end-position)))
+                     '(?y "yes" "Run this call"))))
+          (lispm-test--chat-key chat "C-c C-y"))
+        (should (eq (window-buffer (selected-window)) transcript))
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (with-selected-window (selected-window)
+          (should (eq (current-buffer) transcript))
+          (should (derived-mode-p 'org-mode))
+          (should (equal (org-entry-get nil "TOOL_ID") "t1"))))
+      (should (equal (lispm-test--file project "a.txt") "written\n")))))
+
+(ert-deftest lispm-test-chat-review-empty ()
+  "Reviewing with no call awaiting approval reports a user error."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent)))
+      (with-current-buffer chat
+        (should-error (lispm-chat-review) :type 'user-error)))))
+
 (ert-deftest lispm-test-chat-approval-answers ()
   "2 approves a command for good, 3 denies with what to do instead."
   (lispm-test-env
