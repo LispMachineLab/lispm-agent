@@ -877,6 +877,18 @@ this machine."
          (not (string-empty-p host))
          (not (string-match-p tramp-local-host-regexp host)))))
 
+(defun lispm-tools-apart-p (agent)
+  "Non-nil if AGENT's shell commands cannot reach Emacs.
+They run on another machine (see `lispm-tools-elsewhere-p'), or on this
+one in the sandbox, which keeps Emacs's server socket and configuration
+from them (see `lispm-sandbox-confines-p').  Such commands cannot change
+the agent's policy, so the user may allow every later one at once."
+  (when agent
+    (let ((root (lispm-agent-root agent)))
+      (if (file-remote-p root)
+          (lispm-tools-elsewhere-p root)
+        (lispm-sandbox-confines-p)))))
+
 (defun lispm-tools--call-key (input)
   "INPUT as an approval for this exact call remembers it: without `why'."
   (if (listp input)
@@ -890,22 +902,28 @@ class `exec', which reaches all of Emacs, this exact call: (NAME .
 INPUT), INPUT without `why'.  Allowing every later call would put the
 agent past its policy, which such a call can change.  So for a tool of
 class `shell', since a shell command reaches Emacs too, unless AGENT's
-root is on another machine (see `lispm-tools-elsewhere-p'): there it
-runs its commands, which cannot change the policy, and the tool is
-allowed.  Approving one call of a tool that always asks is never
-approving the next."
+commands are kept apart from Emacs (see `lispm-tools-apart-p'): on
+another machine, or in the sandbox, they cannot change the policy, and
+the tool is allowed.  Approving one call of a tool that always asks is
+never approving the next."
   (if (or (lispm-tool-always-ask tool)
           (pcase (lispm-tool-permission tool)
             ('exec t)
-            ('shell (not (and agent (lispm-tools-elsewhere-p (lispm-agent-root agent)))))))
+            ('shell (not (lispm-tools-apart-p agent)))))
       (cons (lispm-tool-name tool) (lispm-tools--call-key input))
     (lispm-tool-name tool)))
 
 (defun lispm-tools--allowed-p (agent tool input)
-  "Non-nil if the user allowed AGENT this call of TOOL on INPUT for good."
+  "Non-nil if the user allowed AGENT this call of TOOL on INPUT for good.
+A tool of class `shell' allowed as a whole was allowed while AGENT's
+commands could not reach Emacs (see `lispm-tools-allowance'), and
+holds only while that is so: with the sandbox off again, each command
+asks, as it did before."
   (let ((allowed (lispm-agent-allowed agent))
         (name (lispm-tool-name tool)))
-    (or (member name allowed)
+    (or (and (member name allowed)
+             (or (not (eq (lispm-tool-permission tool) 'shell))
+                 (lispm-tools-apart-p agent)))
         (member (cons name (lispm-tools--call-key input)) allowed))))
 
 (defun lispm-tools--targets (agent tool input)

@@ -64,14 +64,23 @@
 ;; can do whatever Emacs can, change the level included, so keep that
 ;; class at ask or deny when the sandbox matters.  Sandboxed commands
 ;; may never write where Emacs and LispM keep their configuration and
-;; records (`lispm-sandbox--protected'), but a project they may write
-;; can hold files Emacs loads.
+;; records (`lispm-sandbox--protected'), nor see the Emacs server's
+;; socket and authentication files (`lispm-sandbox--server-places'),
+;; so emacsclient cannot carry a command into the running Emacs; a
+;; rule that would open that socket is refused.  A level that
+;; confines (`lispm-sandbox-confines-p') is what lets the user allow
+;; every later command at once (see `lispm-tools-allowance').  A
+;; project commands may write can still hold files Emacs loads.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (require 'lispm-core)
+
+(defvar server-socket-dir)
+(defvar server-auth-dir)
+(defvar internal--daemon-sockname)
 
 (defgroup lispm-sandbox nil
   "Agents' shell commands and MCP servers in an operating-system sandbox."
@@ -166,6 +175,7 @@ A plist, each of whose keys may be left out:
                     the local ones of this machine;
   :unix-sockets     Unix sockets they may connect to, such as
                     /var/run/docker.sock, which may well let them out;
+                    never the Emacs server's, which is refused;
   :pty              non-nil to let them use pseudo-terminals (macOS);
   :apple-events     non-nil to let them send Apple Events and open
                     applications (macOS), which then run outside the
@@ -174,9 +184,10 @@ A plist, each of whose keys may be left out:
 Entries are srt's: file names relative to the project, or globs
 such as **/.env in the read rules; domains such as example.com,
 *.example.com (its subdomains) or example.com:443.  Whatever the
-rules, commands may write their temporary directory and never
-where Emacs and LispM keep their files.  `lispm-sandbox-customize'
-edits the rules, starting from those of a level."
+rules, commands may write their temporary directory, never where
+Emacs and LispM keep their files, and never see the Emacs server's
+socket or keys.  `lispm-sandbox-customize' edits the rules, starting
+from those of a level."
   :type '(plist :key-type symbol
                 :options ((:deny-read (repeat :tag "Files" string))
                           (:allow-read (repeat :tag "Files" string))
@@ -234,15 +245,39 @@ It is made if need be, readable by you alone."
                      (directory-file-name temporary-file-directory)
                      (directory-file-name (file-truename temporary-file-directory)))))
 
+(defun lispm-sandbox--server-places ()
+  "Where the running Emacs can be reached: the server's socket directory
+and its authentication directory, as given and as they really are.
+Sandboxed commands may neither read nor write them: with the socket,
+or a TCP server's key, emacsclient would carry a command's Lisp into
+Emacs, past the sandbox and the policy.  They are `server-socket-dir'
+and `server-auth-dir' when those are bound, else what server.el would
+make them."
+  (let ((socket-dir
+         (cond ((boundp 'server-socket-dir) server-socket-dir)
+               ((and (boundp 'internal--daemon-sockname) internal--daemon-sockname)
+                (file-name-directory internal--daemon-sockname))
+               ((getenv "XDG_RUNTIME_DIR") (expand-file-name "emacs" (getenv "XDG_RUNTIME_DIR")))
+               (t (expand-file-name (format "emacs%d" (user-uid)) (or (getenv "TMPDIR") "/tmp")))))
+        (auth-dir (if (boundp 'server-auth-dir) server-auth-dir (locate-user-emacs-file "server/"))))
+    (delete-dups
+     (mapcan (lambda (dir)
+               (let ((dir (directory-file-name (expand-file-name dir))))
+                 (list dir (directory-file-name (file-truename dir)))))
+             (delq nil (list socket-dir auth-dir))))))
+
 (defun lispm-sandbox--protected ()
   "What sandboxed commands may never write.
 Emacs's configuration and LispM's records, srt among them: a command
 that changed them would get past the sandbox the next time Emacs
-loads them or runs srt."
+loads them or runs srt.  And the Emacs server's places, which they may
+not read either (see `lispm-sandbox--server-places')."
   (delete-dups
-   (mapcar (lambda (file) (directory-file-name (expand-file-name file)))
-           (delq nil (list user-emacs-directory lispm-directory custom-file
-                           "~/.emacs" "~/.emacs.el" "~/.config/emacs")))))
+   (append
+    (mapcar (lambda (file) (directory-file-name (expand-file-name file)))
+            (delq nil (list user-emacs-directory lispm-directory custom-file
+                            "~/.emacs" "~/.emacs.el" "~/.config/emacs")))
+    (lispm-sandbox--server-places))))
 
 ;;;; Settings
 
@@ -309,7 +344,19 @@ They are a plist, as `lispm-sandbox-custom' describes; those of
            unless (memq key lispm-sandbox--rule-keys)
            do (lispm-sandbox--fail (format "%s is no sandbox rule (see `lispm-sandbox-custom')" key)))
   (when (member "*" (plist-get rules :allowed-domains))
-    (lispm-sandbox--fail "srt cannot allow every domain: \"*\" may only be denied")))
+    (lispm-sandbox--fail "srt cannot allow every domain: \"*\" may only be denied"))
+  ;; On macOS a Unix socket rule covers a directory and all below it,
+  ;; whatever the file rules say of them (verified: Seatbelt lets
+  ;; emacsclient connect to a socket in a directory it may not read).
+  (dolist (rule (plist-get rules :unix-sockets))
+    (dolist (socket (let ((given (directory-file-name (expand-file-name rule))))
+                      (list given (directory-file-name (file-truename given)))))
+      (dolist (place (lispm-sandbox--server-places))
+        (when (or (string= socket place)
+                  (string-prefix-p (file-name-as-directory place) socket)
+                  (string-prefix-p (file-name-as-directory socket) place))
+          (lispm-sandbox--fail
+           (format "the Unix socket rule %s would open the Emacs server's %s to commands" rule place)))))))
 
 (defun lispm-sandbox-settings (&optional level extra)
   "srt's settings for LEVEL, by default `lispm-sandbox-level', with the
@@ -324,7 +371,8 @@ names are relative to a sandboxed command's directory: its project."
                   ,@(and (plist-get rules :local-binding) '(:allowLocalBinding t))
                   ,@(and (plist-get rules :unix-sockets)
                          (list :allowUnixSockets (funcall array (plist-get rules :unix-sockets)))))
-        :filesystem (:denyRead ,(funcall array (plist-get rules :deny-read))
+        :filesystem (:denyRead ,(funcall array (plist-get rules :deny-read)
+                                         (lispm-sandbox--server-places))
                      :allowRead ,(funcall array (plist-get rules :allow-read))
                      :allowWrite ,(funcall array (plist-get rules :allow-write)
                                            (list (lispm-sandbox--tmpdir)))
@@ -332,6 +380,20 @@ names are relative to a sandboxed command's directory: its project."
                                           (lispm-sandbox--protected)))
         ,@(and (plist-get rules :pty) '(:allowPty t))
         ,@(and (plist-get rules :apple-events) '(:allowAppleEvents t))))))
+
+(defun lispm-sandbox-confines-p (&optional level)
+  "Non-nil if LEVEL, by default `lispm-sandbox-level', confines commands.
+That is a level other than `none' whose rules are sound and open no way
+out: commands of this machine then run in the sandbox, or not at all
+while srt is missing, and cannot reach Emacs (see
+`lispm-sandbox--server-places').  Rules that allow Apple Events do not
+confine: what they open runs outside the sandbox.  Commands on another
+machine are never the sandbox's; see `lispm-tools-elsewhere-p'."
+  (condition-case nil
+      (when-let* ((rules (lispm-sandbox-rules level)))
+        (lispm-sandbox--check rules)
+        (not (plist-get rules :apple-events)))
+    (lispm-sandbox-error nil)))
 
 (defun lispm-sandbox--some (items)
   "The first few of ITEMS, strings, and how many more there are."

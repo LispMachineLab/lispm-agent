@@ -2499,6 +2499,77 @@ Emacs wherever the root is, is allowed call by call."
         (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
                        '("eval_elisp" (code . "1"))))))))
 
+(ert-deftest lispm-test-shell-allowance-sandboxed ()
+  "Approving a sandboxed shell command for good allows the tool, as it does
+on another machine: a confined command cannot reach Emacs.  The allowance
+holds only while the sandbox confines; with the level back at none, each
+command asks again.  Lisp stays call by call."
+  (lispm-test-env
+    (require 'server)
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (shell (lispm-get-tool "run_shell"))
+           (elisp (lispm-get-tool "eval_elisp"))
+           (input '((why . "w") (command . "make")))
+           (server-socket-dir (expand-file-name "sockets" lispm-directory))
+           (server-auth-dir (expand-file-name "auth/" lispm-directory))
+           (lispm-sandbox-custom nil))
+      (dolist (level '(low middle high custom))
+        (let ((lispm-sandbox-level level))
+          (should (lispm-sandbox-confines-p))
+          (should (lispm-tools-apart-p agent))
+          (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
+          (should (equal (lispm-tools-allowance elisp '((code . "1")) agent)
+                         '("eval_elisp" (code . "1"))))))
+      (let ((lispm-sandbox-level 'none))
+        (should-not (lispm-sandbox-confines-p))
+        (should-not (lispm-tools-apart-p agent))
+        (should (equal (lispm-tools-allowance shell input agent) '("run_shell" (command . "make")))))
+      ;; Rules that let commands out do not confine.
+      (let ((lispm-sandbox-level 'custom))
+        (let ((lispm-sandbox-custom '(:apple-events t)))
+          (should-not (lispm-sandbox-confines-p))
+          (should (consp (lispm-tools-allowance shell input agent))))
+        (let ((lispm-sandbox-custom (list :unix-sockets (list server-socket-dir))))
+          (should-not (lispm-sandbox-confines-p))
+          (should (consp (lispm-tools-allowance shell input agent))))
+        (let ((lispm-sandbox-custom '(:unix-sockets ("/var/run/docker.sock"))))
+          (should (lispm-sandbox-confines-p))
+          (should (equal (lispm-tools-allowance shell input agent) "run_shell"))))
+      ;; The sandbox confines this machine's commands: a root on another
+      ;; machine is allowed as before, one reached through TRAMP on this
+      ;; machine, which the sandbox cannot take, never.
+      (let ((lispm-sandbox-level 'low))
+        (setf (lispm-agent-root agent) "/ssh:vm:/work/")
+        (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
+        (setf (lispm-agent-root agent) "/sudo::/srv/")
+        (should (consp (lispm-tools-allowance shell input agent)))
+        (setf (lispm-agent-root agent) project))
+      ;; Allowed under the sandbox, the tool runs unasked while the sandbox
+      ;; confines, asks again once the level is none, and runs again
+      ;; once the sandbox is back.
+      (let ((lispm-sandbox-level 'low))
+        (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+        (should (equal (lispm-agent-allowed agent) '("run_shell")))
+        (should (eq (lispm-tool-action agent shell input) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'auto)))
+      (let ((lispm-sandbox-level 'none))
+        (should (eq (lispm-tool-action agent shell input) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'auto))
+        ;; Approved for good now, this exact command is allowed, no other.
+        (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+        (should (eq (lispm-tool-action agent shell input) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'ask)))
+      (let ((lispm-sandbox-level 'middle))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'auto)))
+      ;; Only shell tools are checked again: another tool allowed as a
+      ;; whole stays allowed at any level.
+      (push "write_file" (lispm-agent-allowed agent))
+      (let ((lispm-sandbox-level 'none))
+        (should (eq (lispm-tool-action agent (lispm-get-tool "write_file")
+                                       `((path . ,(expand-file-name "f" project)) (content . "x")))
+                    'auto))))))
+
 (ert-deftest lispm-test-shell-reads-unasked ()
   "A shell command that only reads is decided as reading is: unasked by
 default, where a command that may write asks.  Any doubt asks."
@@ -2594,7 +2665,7 @@ No level lets commands write where Emacs and LispM keep their files."
                                     :object-type 'alist :array-type 'list)
         (should (member "example.com" .network.allowedDomains))
         (should (member "registry.npmjs.org" .network.allowedDomains))
-        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places))))
         (should (member "." .filesystem.allowWrite))
         (should (member "~/.npm" .filesystem.allowWrite))
         (should (member "/tmp" .filesystem.allowWrite)))
@@ -2606,18 +2677,58 @@ No level lets commands write where Emacs and LispM keep their files."
       (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'high))
                                     :object-type 'alist :array-type 'list)
         (should (null .network.allowedDomains))
-        (should (equal .filesystem.denyRead '("~")))
+        (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places))))
         (should (member "." .filesystem.allowRead))
         ;; The project, and the sandbox's own temporary directory.
         (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir)))))
       (dolist (level '(low middle high))
-        (let ((protected (plist-get (plist-get (lispm-sandbox-settings level) :filesystem)
-                                    :denyWrite)))
+        (let* ((filesystem (plist-get (lispm-sandbox-settings level) :filesystem))
+               (protected (plist-get filesystem :denyWrite))
+               (hidden (plist-get filesystem :denyRead)))
           (should (seq-contains-p protected (directory-file-name (expand-file-name lispm-directory))))
           (should (seq-contains-p protected (directory-file-name
-                                             (expand-file-name user-emacs-directory))))))
+                                             (expand-file-name user-emacs-directory))))
+          ;; The Emacs server's socket and keys: neither read nor written.
+          (should (lispm-sandbox--server-places))
+          (dolist (place (lispm-sandbox--server-places))
+            (should (seq-contains-p protected place))
+            (should (seq-contains-p hidden place)))))
       (should (equal (lispm-sandbox-settings) (lispm-sandbox-settings lispm-sandbox-level)))
       (should-error (lispm-sandbox-settings 'extreme) :type 'lispm-sandbox-error))))
+
+(ert-deftest lispm-test-sandbox-server-places ()
+  "The Emacs server's places are its socket directory and its authentication
+directory, as given and as they really are; a Unix socket rule that
+covers either is refused, and a level with such a rule does not confine."
+  (lispm-test-env
+    (require 'server)
+    (let* ((real (file-name-as-directory (make-temp-file "lispm-sockets-" t)))
+           (link (expand-file-name "sockets" lispm-directory))
+           (server-auth-dir (expand-file-name "auth/" lispm-directory))
+           (server-socket-dir link))
+      (unwind-protect
+          (progn
+            (make-directory lispm-directory t)
+            (make-symbolic-link (directory-file-name real) link)
+            (let ((places (lispm-sandbox--server-places)))
+              (should (member link places))
+              (should (member (directory-file-name (file-truename real)) places))
+              (should (member (directory-file-name server-auth-dir) places))
+              (should (= (length places) (length (seq-uniq places)))))
+            (dolist (rules (list (list :unix-sockets (list link))
+                                 (list :unix-sockets (list (expand-file-name "server" real)))
+                                 (list :unix-sockets (list (directory-file-name lispm-directory)))
+                                 (list :unix-sockets (list "/var/run/docker.sock" (expand-file-name "server" link)))
+                                 '(:unix-sockets ("/"))))
+              (let ((lispm-sandbox-custom rules))
+                (should-error (lispm-sandbox-settings 'custom) :type 'lispm-sandbox-error)
+                (should-not (lispm-sandbox-confines-p 'custom))))
+            (let ((lispm-sandbox-custom '(:unix-sockets ("/var/run/docker.sock"))))
+              (should (lispm-sandbox-settings 'custom))
+              (should (lispm-sandbox-confines-p 'custom)))
+            (should-not (lispm-sandbox-confines-p 'none))
+            (should (lispm-sandbox-confines-p 'high)))
+        (delete-directory real t)))))
 
 (ert-deftest lispm-test-sandbox-custom ()
   "The level custom has the rules of `lispm-sandbox-custom', Middle's while
@@ -2639,7 +2750,7 @@ there are none; they reach every option srt has for them, and are checked."
         (should (equal .network.deniedDomains '("gist.github.com")))
         (should (eq .network.allowLocalBinding t))
         (should (equal .network.allowUnixSockets '("/var/run/docker.sock")))
-        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places))))
         (should (equal .filesystem.allowRead '("~/.ssh/config")))
         (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir))))
         (should (equal (car .filesystem.denyWrite) "secrets"))
@@ -2692,7 +2803,7 @@ reaches a command that runs.  The result says what the sandbox allowed."
           (should-not (cdr result))
           ;; It started with Middle's settings, and was sent High's.
           (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
-            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+            (should (equal .filesystem.denyRead (append lispm-sandbox-secrets (lispm-sandbox--server-places)))))
           (should (lispm-test--wait
                    (lambda () (file-exists-p (expand-file-name "control" log)))))
           (let-alist (json-parse-string
@@ -2700,7 +2811,7 @@ reaches a command that runs.  The result says what the sandbox allowed."
                         (insert-file-contents (expand-file-name "control" log))
                         (buffer-string))
                       :object-type 'alist :array-type 'list)
-            (should (equal .filesystem.denyRead '("~"))))
+            (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places)))))
           ;; Once it has exited, its channel is gone.
           (should (lispm-test--wait (lambda () (null lispm-sandbox--runs))))
           (should-not (file-exists-p (lispm-sandbox-run-fifo run))))
@@ -2768,7 +2879,7 @@ it has one; a change of the level set then passes it by."
             (should (equal (lispm-sandbox-run-name run) "the MCP server fake"))
             (should (eq (lispm-sandbox-run-level run) 'high)))
           (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
-            (should (equal .filesystem.denyRead '("~"))))
+            (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places)))))
           (setq lispm-sandbox-level 'middle)
           (lispm-sandbox--changed)
           (should-not (file-exists-p (expand-file-name "control" log)))
@@ -2859,7 +2970,7 @@ at every level but none, and leave the level's own lists as they were."
       (should (eq .network.allowLocalBinding t))
       (should (member "." .filesystem.allowWrite))
       (should (member "/srv/data" .filesystem.allowWrite))
-      (should (equal .filesystem.denyRead '("~/.ssh"))))
+      (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places)))))
     (should (equal lispm-sandbox-allowed-domains '("example.com")))
     (should (equal (lispm-sandbox-merge-rules '(:pty t :allow-write (".")) '(:pty nil :allow-write ("b")))
                    '(:pty t :allow-write ("." "b"))))
@@ -2909,7 +3020,7 @@ at all; undefined, it stops."
           (let-alist (lispm-test--json-file settings)
             (should (member "/srv/echo" .filesystem.allowWrite))
             (should (eq .network.allowLocalBinding t))
-            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+            (should (equal .filesystem.denyRead (append lispm-sandbox-secrets (lispm-sandbox--server-places)))))
           (should (lispm-service-stop 'echo))
           (should-not (process-live-p process))
           (should (lispm-test--wait (lambda () (eq (car-safe (lispm-service-status 'echo)) 'exited)))))
@@ -2928,7 +3039,7 @@ at all; undefined, it stops."
                         (car (last (with-temp-buffer
                                      (insert-file-contents control)
                                      (split-string (buffer-string) "\n" t))))))))
-          (should (lispm-test--wait (lambda () (string-search "\"denyRead\":[\"~\"]" (or (last-sent) "")))))
+          (should (lispm-test--wait (lambda () (string-search "\"denyRead\":[\"~\"," (or (last-sent) "")))))
           (let-alist (json-parse-string (last-sent) :object-type 'alist :array-type 'list)
             (should (member "/srv/echo" .filesystem.allowWrite))
             (should (eq .network.allowLocalBinding t))))
