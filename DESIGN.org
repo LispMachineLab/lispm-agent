@@ -268,7 +268,11 @@ under the mouse, as Genera's did. The *inspector* (~lispm-inspect~) shows one ag
 Genera's inspector showed an object: identity, state and model, policy and ceiling, the calls it
 has pending and what they ask for, its inbox, whom it waits on and who waits on it, the files
 its turns changed, its tools and triggers, all of them presentations; agents have it as the tool
-~inspect_agent~.
+~inspect_agent~. GNU Hyperbole recognizes what text names wherever it is, by context rather than
+by knowing it; once it is loaded, each takes the other's ([[file:lisp/lispm-hyperbole.el][lispm-hyperbole.el]]). Its Action Key
+acts on a presentation as ~RET~ does, through an implicit button type tried before its own, and
+~RET~ on text presenting nothing activates the button Hyperbole recognizes there, through
+~lispm-act-functions~, where any other recognizer can join.
 
 *Grounding* ([[file:lisp/lispm-ground.el][lispm-ground.el]]). A model writes a name with the same confidence whether or not
 anything has it, and asking the model again asks the source of the mistake; the image it talks

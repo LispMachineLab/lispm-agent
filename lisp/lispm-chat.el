@@ -1428,11 +1428,13 @@ chosen again."
   "Send what is written, or answer the approval prompt if nothing is.
 While the menu of / commands shows, run the command chosen there.
 Outside the input, act on the object at point (see lispm-inspect.el),
-or show the item at point in full."
+or show the item at point in full, or act as one of
+`lispm-act-functions' does there."
   (interactive)
   (cond ((not (lispm-chat--in-input-p))
          (cond ((lispm-object-at) (lispm-act-at-point))
                ((get-text-property (point) 'lispm-chat-key) (lispm-chat-toggle))
+               ((run-hook-with-args-until-success 'lispm-act-functions))
                (t (goto-char (point-max)))))
         ((and (string-blank-p (lispm-chat--input)) (lispm-chat--prompting-p))
          (lispm-chat-choose))

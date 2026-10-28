@@ -7,10 +7,11 @@
 
 ;; `make deps' runs this: the packages lispm.el requires (its
 ;; Package-Requires header) are installed from GNU ELPA and MELPA into
-;; .deps/, which the other targets use; LispM Kit and LispM UI, which
-;; no archive holds, are the checkouts LISPM_KIT and LISPM_UI put on the
-;; load path.  As a package, LispM gets them the usual way, from
-;; package.el.
+;; .deps/, which the other targets use, and so is Hyperbole, which LispM
+;; does not need, for the tests of lispm-hyperbole.el; LispM Kit and
+;; LispM UI, which no archive holds, are the checkouts LISPM_KIT and
+;; LISPM_UI put on the load path.  As a package, LispM gets them the
+;; usual way, from package.el.
 
 ;;; Code:
 
@@ -18,7 +19,9 @@
 (setq package-user-dir (expand-file-name ".deps")
       package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
                          ("nongnu" . "https://elpa.nongnu.org/nongnu/")
-                         ("melpa" . "https://melpa.org/packages/")))
+                         ("melpa" . "https://melpa.org/packages/"))
+      ;; Its releases, not MELPA's snapshots.
+      package-pinned-packages '((hyperbole . "gnu")))
 (package-initialize)
 (let ((missing (seq-remove (lambda (dep)
                              (or (eq (car dep) 'emacs)
@@ -27,10 +30,11 @@
                                  ;; lispm-ui, are in no archive: a
                                  ;; checkout on the load path.
                                  (locate-library (symbol-name (car dep)))))
-                           (package-desc-reqs
-                            (with-temp-buffer
-                              (insert-file-contents "lisp/lispm.el")
-                              (package-buffer-info))))))
+                           (append (package-desc-reqs
+                                    (with-temp-buffer
+                                      (insert-file-contents "lisp/lispm.el")
+                                      (package-buffer-info)))
+                                   '((hyperbole (9 0)))))))
   (when missing
     (package-refresh-contents)
     (dolist (dep missing)

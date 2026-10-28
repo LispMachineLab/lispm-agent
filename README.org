@@ -72,7 +72,11 @@ any other server see [[*Backends][Backends]].
 | ~C-c C-c~          | interrupt                                                |
 | ~C-c C-t~          | open the org transcript                                  |
 
-| Command               | What it does                                               |
+With [[https://www.gnu.org/software/hyperbole/][GNU Hyperbole]]'s mode on, its Action Key (~M-RET~) acts on an object as ~RET~ does,
+and ~RET~ on other text activates what Hyperbole recognizes there: a commit, a bug, an Info
+node. LispM does not need Hyperbole.
+
+| Command              | What it does                                               |
 |-----------------------+------------------------------------------------------------|
 | ~lispm~               | start an agent in the current project                      |
 | ~lispm-resume~        | resume a recorded session                                  |
