@@ -61,6 +61,8 @@
 (require 'lispm-memory)
 (require 'lispm-inspect)
 (require 'lispm-sandbox)
+(require 'yank-media)
+(require 'dnd)
 
 (declare-function lispm--read-session "lispm" (prompt))
 (declare-function lispm-dashboard "lispm" ())
@@ -279,10 +281,15 @@ A condition still waiting is the prompt below the chat, not an item."
             ('user
              (let ((text (lispm-transcript-section-text section)))
                (unless (string-empty-p text)
-                 (push (list :kind 'user :text text) items))))
+                 (push (list :kind 'user :text text
+                             :images (lispm-transcript--images (plist-get section :body)
+                                                               (plist-get section :end)))
+                       items))))
             ('message
              (push (list :kind 'user :from (plist-get section :arg)
-                         :text (lispm-transcript-section-text section))
+                         :text (lispm-transcript-section-text section)
+                         :images (lispm-transcript--images (plist-get section :body)
+                                                           (plist-get section :end)))
                    items))
             ('event
              (push (list :kind 'event :name (plist-get section :arg)
@@ -429,9 +436,14 @@ presents no code, see `lispm-chat--inline'."
   (let ((defined (and (not plain) (lispm-ground-definitions text)))
         in-code out)
     (dolist (line (split-string text "\n"))
-      (if (lispm-chat--fence-p line)
-          (setq in-code (not in-code))
-        (push (lispm-chat--markdown-line line in-code defined plain) out)))
+      (cond ((lispm-chat--fence-p line)
+             (setq in-code (not in-code)))
+            ;; An image or a video the reply links alone on a line is
+            ;; shown there: the model showing it.
+            ((and (not in-code) (not plain)
+                  (when-let* ((shown (lispm-chat--media-line line)))
+                    (push shown out))))
+            (t (push (lispm-chat--markdown-line line in-code defined plain) out))))
     (string-join (nreverse out) "\n")))
 
 (defun lispm-chat--streaming-markdown (text)
@@ -677,7 +689,8 @@ it names one."
                               (length content) path)
                   (lispm-chat--preview content lispm-chat-preview-lines expanded))))
          ('read
-          (if expanded lines
+          ;; An image or a video read is said in its line, not counted.
+          (if (or expanded (plist-get item :images)) lines
             (let ((n (cl-count-if (lambda (l) (string-match-p "\\`[ \t]*[0-9]+\t" l)) lines)))
               (list (lispm-tr-n "Read %d line" "Read %d lines" n)))))
          ('list
@@ -690,17 +703,44 @@ it names one."
          (_ (lispm-chat--preview lines lispm-chat-preview-lines expanded)))))))
 
 (defun lispm-chat--image (file)
-  "FILE shown as an image, or named where images cannot be shown."
-  (if (and (display-images-p) (file-readable-p file))
-      (propertize (format "[%s]" (file-name-nondirectory file))
-                  'display (create-image file nil nil
-                                         :max-width (min 900 (max 300 (* (lispm-chat--width)
-                                                                         (frame-char-width))))
-                                         :max-height 700))
-    (lispm-tr "[image %s]" (abbreviate-file-name file))))
+  "FILE, an image or a video, shown: the image, or a frame from the
+middle of the video with its name under it; named where images cannot
+be shown.  RET on an image visits it, on a video plays it."
+  (let* ((video (eq (lispm-media-kind file) 'video))
+         (name (file-name-nondirectory file))
+         (shown (and (display-images-p) (file-readable-p file)
+                     (if video (lispm-video-poster file) file))))
+    (lispm-present
+     (cond ((and shown video)
+            (concat (lispm-chat--picture-of shown) "\n" (lispm-tr "▶ %s" name)))
+           (shown (lispm-chat--picture-of shown))
+           (video (lispm-tr "[video %s]" (abbreviate-file-name file)))
+           (t (lispm-tr "[image %s]" (abbreviate-file-name file))))
+     (if video (list 'video file) (list 'file file nil)))))
+
+(defun lispm-chat--media-line (line)
+  "LINE shown as the image or video it links alone, where that file is;
+else nil.  See `lispm-transcript-media-link'."
+  (when-let* ((link (lispm-transcript-media-link line))
+              (file (expand-file-name link (lispm-chat--root)))
+              ((file-exists-p file)))
+    (lispm-chat--image file)))
+
+(defun lispm-chat--with-media (text)
+  "TEXT with each image or video it links alone on a line shown there."
+  (mapconcat (lambda (line) (or (lispm-chat--media-line line) line))
+             (split-string text "\n") "\n"))
+
+(defun lispm-chat--picture-of (file)
+  "The image FILE as a string showing it, as wide as the chat lets it be."
+  (propertize (format "[%s]" (file-name-nondirectory file))
+              'display (create-image file nil nil
+                                     :max-width (min 900 (max 300 (* (lispm-chat--width)
+                                                                     (frame-char-width))))
+                                     :max-height 700)))
 
 (defun lispm-chat--image-lines (item)
-  "Lines showing the images of the tool call ITEM's result."
+  "Lines showing the images and videos of the tool call ITEM's result."
   (when-let* ((images (plist-get item :images)))
     (if (plist-get item :expanded)
         (mapcar #'lispm-chat--image images)
@@ -734,7 +774,9 @@ it names one."
     ('user
      (let* ((from (plist-get item :from))
             (prefix (if from (lispm-tr "[from %s] " from) ""))
-            (shown (propertize (lispm-chat--prompted (concat prefix (plist-get item :text)))
+            ;; An image or a video attached is shown where its link is.
+            (shown (propertize (lispm-chat--prompted (concat prefix (lispm-chat--with-media
+                                                                     (plist-get item :text))))
                                'face 'lispm-chat-user)))
        (when (and from (lispm-get-agent from t))
          (let ((at (+ (string-search prefix shown) (string-search from prefix))))
@@ -1459,6 +1501,60 @@ or show the item at point in full, or act as one of
         (lispm-tell agent text)
         (lispm-chat--schedule agent)))))
 
+(defun lispm-chat-attach (file)
+  "Attach FILE to the message being written: its link goes on a line of
+its own, so the agent knows the file; an image or a video the agent
+sees, and the chat shows.  Interactively, FILE is asked for."
+  (interactive (list (read-file-name (lispm-tr "Attach file: ") nil nil t)) lispm-chat-mode)
+  (unless (lispm-chat--in-input-p) (goto-char (point-max)))
+  (let ((input (lispm-chat--input))
+        (file (expand-file-name file))
+        (root (lispm-chat--root)))
+    (goto-char (point-max))
+    (insert (if (or (string-empty-p input) (string-suffix-p "\n" input)) "" "\n")
+            ;; Named from the root, as the agent names files, when under it.
+            (format "[[file:%s]]\n" (if (file-in-directory-p file root)
+                                        (file-relative-name file root)
+                                      (abbreviate-file-name file))))))
+
+(defun lispm-chat--yank-image (type data)
+  "Attach the image DATA, pasted, of media TYPE to the message being written.
+It is saved in the agent's session, as the images tools return are;
+one of a kind models do not take, TIFF say, is made a PNG first."
+  (let* ((type (symbol-name type))
+         (file (if (rassoc type lispm-transcript--image-types)
+                   (lispm-save-image lispm-chat-agent (base64-encode-string data t) type)
+                 (let ((pasted (make-temp-file "lispm-pasted-" nil
+                                               (concat "." (cadr (split-string type "/"))))))
+                   (with-temp-file pasted
+                     (set-buffer-multibyte nil)
+                     (insert data))
+                   (unwind-protect
+                       (if-let* ((png (lispm-image-as-png pasted)))
+                           (unwind-protect
+                               (lispm-save-image lispm-chat-agent
+                                                 (with-temp-buffer
+                                                   (set-buffer-multibyte nil)
+                                                   (insert-file-contents-literally png)
+                                                   (base64-encode-string (buffer-string) t))
+                                                 "image/png")
+                             (delete-file png))
+                         (user-error "%s" (lispm-tr "Cannot attach a %s image" type)))
+                     (delete-file pasted))))))
+    (lispm-chat-attach file)))
+
+(defun lispm-chat--drop (url _action)
+  "Attach the file dropped on the chat, URL, to the message being written."
+  (when-let* ((file (dnd-get-local-file-name url t)))
+    (lispm-chat-attach file)
+    'private))
+
+(defun lispm-chat-attach-command (_agent argument)
+  "Attach the file ARGUMENT names, asked for if none, to the next message."
+  (if (string-empty-p argument)
+      (call-interactively #'lispm-chat-attach)
+    (lispm-chat-attach (expand-file-name argument (lispm-chat--root)))))
+
 (defun lispm-chat-newline ()
   "Start a new line in the text being written."
   (interactive)
@@ -1554,6 +1650,7 @@ while the menu of / commands shows, to the command chosen there."
     ("cost" lispm-chat-cost ,(lispm-tr-noop "Show the tokens used"))
     ("agents" lispm-chat-agents ,(lispm-tr-noop "Show every agent"))
     ("inspect" lispm-chat-inspect ,(lispm-tr-noop "Inspect this agent, or /inspect NAME another"))
+    ("attach" lispm-chat-attach-command ,(lispm-tr-noop "Attach a file to the next message; an image or a video the agent sees"))
     ("transcript" lispm-chat-transcript ,(lispm-tr-noop "Open the org transcript of this conversation"))
     ("exit" lispm-chat-exit ,(lispm-tr-noop "End this agent")))
   "The / commands: name, function of the agent and the argument, description.
@@ -1567,6 +1664,7 @@ The descriptions are English, translated where shown.")
     ("M-p, M-n" ,(lispm-tr-noop "previous and next messages sent"))
     ("C-c C-c" ,(lispm-tr-noop "interrupt the agent"))
     ("1, 2, 3" ,(lispm-tr-noop "answer an approval prompt (or up, down and RET)"))
+    ("C-c C-a" ,(lispm-tr-noop "attach a file: an image or a video the agent sees (pasting or dropping one attaches it too)"))
     ("C-c C-t" ,(lispm-tr-noop "the org transcript")))
   "The keys /help lists: (KEYS DESCRIPTION), the description English,
 translated where shown.")
@@ -1727,6 +1825,7 @@ ARGUMENT edit edits the rules of the level Custom instead."
   "C-c C-c" #'lispm-chat-interrupt
   "C-c C-k" #'lispm-chat-interrupt
   "C-c C-t" #'lispm-chat-transcript
+  "C-c C-a" #'lispm-chat-attach
   "1" (lispm-chat--answer-key 1)
   "2" (lispm-chat--answer-key 2)
   "3" (lispm-chat--answer-key 3)
@@ -1744,6 +1843,9 @@ Write at the bottom and press RET; / starts a command (/help lists them).
               lispm-chat--expanded (make-hash-table :test #'equal)
               lispm-chat--rendered (make-hash-table :test #'equal))
   (visual-line-mode 1)
+  ;; An image pasted or a file dropped is attached to the message.
+  (yank-media-handler "image/.*" #'lispm-chat--yank-image)
+  (setq-local dnd-protocol-alist (cons '("\\`file:" . lispm-chat--drop) dnd-protocol-alist))
   (add-hook 'completion-at-point-functions #'lispm-chat--complete nil t)
   (add-hook 'after-change-functions #'lispm-chat--update-footer nil t)
   (add-hook 'post-command-hook #'lispm-chat--show-menu nil t)

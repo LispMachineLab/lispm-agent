@@ -58,6 +58,9 @@ any other server see [[*Backends][Backends]].
 - A turn that stops early (a failed request, the step limit, a refusal) offers ways to go on:
   retry, another model, compact, stop.
 - ~C-c C-c~ interrupts; ~/help~ lists the slash commands (~/model~, ~/diff~, ~/undo~, ~/compact~, ...).
+- ~C-c C-a~ attaches a file to the message; so does pasting an image or dropping a file on the
+  chat.  An image or a video the agent sees, as it sees those it reads and tools return, and
+  the chat shows them: the user's in the message, a reply's where the reply links it.
 - Killing the chat ends the agent; ~M-x lispm-resume~ brings back any recorded session.
 
 | Key                | In the chat                                              |
@@ -70,6 +73,7 @@ any other server see [[*Backends][Backends]].
 | ~RET~ on an object | visit the file at its line, inspect the agent, describe the symbol |
 | ~M-p~, ~M-n~       | previous, next message sent                              |
 | ~C-c C-c~          | interrupt                                                |
+| ~C-c C-a~          | attach a file: an image or a video the agent sees        |
 | ~C-c C-t~          | open the org transcript                                  |
 
 With [[https://www.gnu.org/software/hyperbole/][GNU Hyperbole]]'s mode on, its Action Key (~M-RET~) acts on an object as ~RET~ does,
@@ -334,6 +338,9 @@ every option.
 - Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
   ~xref_definitions~, ~xref_references~ and ~flymake_diagnostics~ for any language Emacs supports.
 - ~apropos~, ~describe_symbol~ and ~read_info~ let agents learn Emacs itself.
+- ~read_file~ reads images and videos too: the model sees an image, and a video as frames
+  ffmpeg takes across it (~lispm-video-frames~ of them).  A tool returns a ~lispm-tool-result~
+  to show files of its own, as MCP servers' screenshots are shown.
 
 * Skills
 

@@ -969,6 +969,132 @@ stand in."
               (should (equal (alist-get 'type (aref (alist-get 'content result) 1)) "image")))))
       (delete-directory dir t))))
 
+(ert-deftest lispm-test-media-parsed ()
+  "An image or a video linked alone on a line of a user section, as an org
+link or a Markdown image, goes to the model; other files are text."
+  (let* ((dir (make-temp-file "lispm-media-" t))
+         (png (expand-file-name "shot.png" dir)))
+    (with-temp-file png (insert "png"))
+    (with-temp-file (expand-file-name "clip.mp4" dir) (insert "not a video"))
+    (unwind-protect
+        (with-temp-buffer
+          (setq default-directory (file-name-as-directory dir))
+          (insert (format "* User\nLook at these\n[[file:%s]]\n![clip](clip.mp4)\n[[file:notes.txt]]\n" png))
+          (let* ((lispm-ffmpeg nil) (lispm-ffprobe nil)
+                 (content (append (alist-get 'content (car (plist-get (lispm-transcript-parse) :messages)))
+                                  nil)))
+            (should (equal (mapcar (lambda (b) (alist-get 'type b)) content) '("text" "image" "text")))
+            (should (equal (alist-get 'text (nth 2 content))
+                           "[video clip.mp4; ffmpeg is needed to see it]"))))
+      (delete-directory dir t)))
+  (should (equal (lispm-transcript-media-link "![shot](out/a.png)") "out/a.png"))
+  (should (equal (lispm-transcript-media-link "[[file:~/clip.MOV]]  ") "~/clip.MOV"))
+  (should-not (lispm-transcript-media-link "[[file:a.txt]]"))
+  (should-not (lispm-transcript-media-link "see [[file:a.png]]")))
+
+(ert-deftest lispm-test-media-in-chat ()
+  "The user attaches an image, the agent reads one, a reply shows one: the
+model sees each, and the chat shows them all."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (png (expand-file-name "shot.png" project))
+           (result nil))
+      (with-temp-file png (insert "png"))
+      ;; read_file shows an image, as a result with the file.
+      (let ((lispm-current-agent agent))
+        (lispm-tool-invoke (lispm-get-tool "read_file") `((path . "shot.png"))
+                           (lambda (text errorp &optional images) (setq result (list text errorp images)))))
+      (should (equal result (list "[image shot.png]" nil (list png))))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "read_file" '((path . "shot.png"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Here it is\n![shot](shot.png)")))))
+      ;; C-c C-a attaches a file to the message being written: its link on a line of its own.
+      (with-current-buffer chat
+        (lispm-chat-attach png)
+        (should (equal (lispm-chat--input) "[[file:shot.png]]\n"))
+        (goto-char (point-max))
+        (insert "Look")
+        (lispm-chat-return))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      ;; The model saw the user's image, and the one read_file read.
+      (let ((first (car (last lispm-test--requests)))
+            (second (car lispm-test--requests)))
+        (should (equal (mapcar (lambda (b) (alist-get 'type b))
+                               (alist-get 'content (aref (alist-get 'messages first) 0)))
+                       '("text" "image")))
+        (let ((result (seq-find (lambda (b) (equal (alist-get 'tool_use_id b) "t1"))
+                                (seq-mapcat (lambda (m) (append (alist-get 'content m) nil))
+                                            (alist-get 'messages second)))))
+          (should (equal (mapcar (lambda (b) (alist-get 'type b)) (alist-get 'content result))
+                         '("text" "image")))))
+      (should (string-match-p "^\\*\\*\\* Result\n#\\+begin_example\n\\[image shot\\.png\\]\n#\\+end_example\n\\[\\[file:.*shot\\.png\\]\\]$"
+                              (lispm-test--transcript agent)))
+      ;; The chat: the attachment where the message links it, the call's
+      ;; image behind TAB, the reply's where the reply linked it (named,
+      ;; in batch).
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "λ >> \\[image [^\n]*shot\\.png\\]\n     Look\n" text))
+        (should (string-match-p "⏺ Read(shot\\.png)\n  ⎿  \\[image shot\\.png\\]\n     1 image (TAB to show)" text))
+        (should (string-match-p "⏺ Here it is\n  \\[image [^\n]*shot\\.png\\]\n" text)))
+      ;; /attach PATH attaches too.
+      (lispm-test--chat-type chat "/attach shot.png")
+      (with-current-buffer chat
+        (should (equal (lispm-chat--input) "[[file:shot.png]]\n"))))))
+
+(ert-deftest lispm-test-media-link-from-root ()
+  "A relative link in a user section names a file under the session's root
+when none is next to the session; an absolute or a ~ link is itself."
+  (let* ((dir (make-temp-file "lispm-media-" t))
+         (root (file-name-as-directory (expand-file-name "root" dir)))
+         (sessions (file-name-as-directory (expand-file-name "sessions" dir))))
+    (make-directory root) (make-directory sessions)
+    (with-temp-file (expand-file-name "a.png" root) (insert "png"))
+    (with-temp-file (expand-file-name "b.png" sessions) (insert "png"))
+    (unwind-protect
+        (with-temp-buffer
+          (setq default-directory sessions)
+          (insert (format "#+lispm_root: %s\n* User\n[[file:a.png]]\n[[file:b.png]]\n[[file:%sc.png]]\n[[file:~/d.png]]\n"
+                          root root))
+          (should (equal (lispm-transcript--images (point-min) (point-max))
+                         (list (expand-file-name "a.png" root) (expand-file-name "b.png" sessions)
+                               (expand-file-name "c.png" root) (expand-file-name "~/d.png")))))
+      (delete-directory dir t))))
+
+(ert-deftest lispm-test-video-frames ()
+  "A video reaches the model as frames ffmpeg takes across it, kept once
+taken; over the limit, or without ffmpeg, it is a line of text."
+  (skip-unless (and (executable-find "ffmpeg") (executable-find "ffprobe")))
+  (lispm-test-env
+    (let ((video (expand-file-name "clip.mp4" project))
+          (lispm-video-frames 2))
+      (should (zerop (call-process "ffmpeg" nil nil nil "-v" "error" "-y" "-f" "lavfi"
+                                   "-i" "testsrc=duration=2:size=64x48:rate=5"
+                                   "-pix_fmt" "yuv420p" video)))
+      (should (equal (lispm-video-description video) "clip.mp4, 2.0 s, 64×48"))
+      (should (equal (lispm-video--length 125) "2:05"))
+      (let ((blocks (lispm-transcript--video-blocks video)))
+        (should (equal (length blocks) 3))
+        (should (equal (alist-get 'text (car blocks))
+                       "[video clip.mp4, 2.0 s, 64×48; 2 frames follow, at 0.5 s, 1.5 s]"))
+        (should (equal (alist-get 'media_type (alist-get 'source (nth 1 blocks))) "image/jpeg")))
+      (should (equal (length (directory-files (lispm-video--cache video) nil "\\.jpg\\'")) 2))
+      (should (file-exists-p (lispm-video-poster video)))
+      (let* ((messages (list `((role . "user")
+                               (content . ,(vector (lispm-transcript--text-block "see")
+                                                   (lispm-transcript--image-block video))))))
+             (types (lambda (loaded)
+                      (mapcar (lambda (b) (alist-get 'type b))
+                              (alist-get 'content (car loaded))))))
+        (should (equal (funcall types (lispm-transcript--load-images messages))
+                       '("text" "text" "image" "image")))
+        (let ((lispm-ffmpeg nil))
+          (let ((loaded (lispm-transcript--load-images messages)))
+            (should (equal (funcall types loaded) '("text" "text")))
+            (should (string-match-p "ffmpeg is needed"
+                                    (alist-get 'text (aref (alist-get 'content (car loaded)) 1))))))))))
+
 (ert-deftest lispm-test-mcp ()
   "An MCP server's tools are an agent's: they wait for it, take JSON, return images."
   (lispm-test-env
