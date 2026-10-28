@@ -42,6 +42,9 @@
 (require 'lispm-transcript)
 (require 'lispm-sandbox)
 
+;; Only an Emacs built with image support has it.
+(declare-function image-size "image.c" (spec &optional pixels frame))
+
 (defcustom lispm-rationale-permissions '(write shell exec)
   "Permission classes whose tools take a required `why' argument.
 The model states in one sentence why it makes the call; the user
@@ -1306,7 +1309,8 @@ or cannot be written (see `lispm-tools--check-writable')."
    (if (eq (lispm-media-kind file) 'video)
        (format "[video %s]" (lispm-video-description file))
      (format "[image %s%s]" (file-name-nondirectory file)
-             (if-let* (((display-images-p))
+             (if-let* (((fboundp 'image-size))
+                       ((display-images-p))
                        (size (ignore-errors (image-size (create-image file) t))))
                  (format ", %d×%d" (car size) (cdr size))
                "")))
