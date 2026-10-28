@@ -4999,8 +4999,11 @@ BODY can use `agent'."
                                                           (aref (alist-get 'messages (car lispm-test--requests)) 2))
                                                0))
                      "reviewer@project replied:\nYes, ship it."))
-      ;; The helper's session stays on record.
-      (should (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project")) (lispm-sessions))))))
+      ;; The helper's session stays on record, under its caller's.
+      (let ((session (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project"))
+                               (lispm-sessions))))
+        (should session)
+        (should (equal (plist-get session :parent) (lispm-agent-id boss)))))))
 
 (ert-deftest lispm-test-helper-policy-bounded-by-caller ()
   "A helper may do no more than the agent that asked for it.
@@ -5063,12 +5066,16 @@ The caller waits for none of them, and they stay once they have replied."
                                 (alist-get 'content (aref results 0))))
         (should (string-match-p "\\`Started writer@project (writer, in "
                                 (alist-get 'content (aref results 1))))
-        ;; Each got its request from the caller, and its caller's ceiling.
+        ;; Each got its request from the caller, and its caller's ceiling,
+        ;; and its session is listed under the caller's.
         (dolist (agent (list reviewer writer))
           (should (file-equal-p (lispm-agent-root agent) project))
           (should (string-match-p "Message from boss" (lispm-test--transcript agent)))
           (should (string-match-p "^#\\+lispm_ceiling: .*(write \\. ask)" (lispm-test--transcript agent)))
-          (should (eq (lispm-policy-action agent 'write) 'ask)))
+          (should (eq (lispm-policy-action agent 'write) 'ask))
+          (should (equal (lispm-agent-parent agent) (lispm-agent-id boss)))
+          (should (string-match-p (format "^#\\+lispm_parent: %s$" (regexp-quote (lispm-agent-id boss)))
+                                  (lispm-test--transcript agent))))
         ;; The writer, which replied, stays.
         (accept-process-output nil 0.1)
         (should (memq writer (lispm-agents)))
@@ -8941,9 +8948,99 @@ first prompt; context Codex injects is no prompt."
                     "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship it\"}}\n"
                     "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":\""
                     (make-string (* 2 lispm-agents-transcript-tail-bytes) ?y) "\"}}\n"))
-          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Ship it")))
+          (should (equal (plist-get (car (lispm-agents-codex-sessions)) :title) "Ship it"))
+          ;; A subagent's thread is listed under the thread that spawned it,
+          ;; titled by its task: its prompts are what its parent told it.
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"id\":\"0202\",\"cwd\":\"/tmp\","
+                    "\"timestamp\":\"2026-10-20T08:00:00Z\",\"thread_source\":\"subagent\","
+                    "\"parent_thread_id\":\"0201\",\"agent_nickname\":\"Linnaeus\","
+                    "\"agent_path\":\"/root/integration_review\"}}\n"
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Review the integration\"}}\n"))
+          (let ((session (car (lispm-agents-codex-sessions))))
+            (should (equal (plist-get session :parent) "0201"))
+            (should (equal (plist-get session :title) "integration_review (Linnaeus)"))
+            (should (lispm-agents-session-resumable-p session))))
       (remhash file lispm-agents--session-cache)
       (delete-directory home t))))
+
+(ert-deftest lispm-test-claude-subagents-under-their-session ()
+  "A subagent's transcript, which Claude keeps under the session that ran
+it, is listed as a session under that one, titled by its task, or under
+the subagent that started it; its files are its own, and it is not
+resumed but opened, since Claude resumes sessions of its own only."
+  (lispm-test--with-agents nil
+    (lispm-agents-setup-claude)
+    (let* ((lispm-agents-claude-projects-directory (make-temp-file "lispm-test-claude" t))
+           (project (expand-file-name "-tmp/" lispm-agents-claude-projects-directory))
+           (file (expand-file-name "0199.jsonl" project))
+           (subagents (expand-file-name "0199/subagents/" project))
+           (first (expand-file-name "agent-a1.jsonl" subagents))
+           (second (expand-file-name "agent-a2.jsonl" subagents))
+           (shown nil)
+           (lispm-agents-show-function (lambda (buffer) (setq shown buffer)))
+           (lispm-agents-main-window-function #'selected-window))
+      (unwind-protect
+          (progn
+            (make-directory subagents t)
+            (with-temp-file file
+              (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"message\":{\"role\":\"user\",\"content\":\"Fix the build\"}}\n"))
+            (with-temp-file first
+              (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"isSidechain\":true,\"message\":{\"role\":\"user\",\"content\":\"<task>Find the failing test</task>\"}}\n"))
+            (with-temp-file (expand-file-name "agent-a1.meta.json" subagents)
+              (insert "{\"agentType\":\"Explore\",\"description\":\"Find the failing test\",\"spawnDepth\":1}"))
+            (with-temp-file (expand-file-name "agent-a1.prefix.json" subagents)
+              (insert "{}"))
+            (with-temp-file second
+              (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"isSidechain\":true,\"message\":{\"role\":\"user\",\"content\":\"Read the log\"}}\n"))
+            (with-temp-file (expand-file-name "agent-a2.meta.json" subagents)
+              (insert "{\"agentType\":\"Explore\",\"description\":\"Read the log\",\"spawnDepth\":2,\"parentAgentId\":\"a1\"}"))
+            (let* ((sessions (lispm-agents-claude-sessions))
+                   (session (seq-find (lambda (s) (equal (plist-get s :id) "0199")) sessions))
+                   (one (seq-find (lambda (s) (equal (plist-get s :id) "agent-a1")) sessions))
+                   (two (seq-find (lambda (s) (equal (plist-get s :id) "agent-a2")) sessions)))
+              (should (= (length sessions) 3))
+              (should-not (plist-get session :parent))
+              (should (equal (plist-get one :parent) "0199"))
+              (should (equal (plist-get one :title) "Find the failing test"))
+              (should (equal (plist-get two :parent) "agent-a1"))
+              (should (equal (lispm-agents-claude--session-files one)
+                             (list first (expand-file-name "agent-a1.meta.json" subagents)
+                                   (expand-file-name "agent-a1.prefix.json" subagents))))
+              (should (equal (lispm-agents-claude--session-files two)
+                             (list second (expand-file-name "agent-a2.meta.json" subagents))))
+              (should (equal (lispm-agents-claude--session-files session)
+                             (list file (directory-file-name (expand-file-name "0199" project)))))
+              (should (lispm-agents-session-resumable-p session))
+              (should-not (lispm-agents-session-resumable-p one))
+              ;; The tree follows the parents, in the order given.
+              (should (equal (lispm-agents-session-tree (list two one session))
+                             (list (list session (list one (list two))))))
+              (should (equal (lispm-agents-session-tree (list two))
+                             (list (list two))))
+              (should (string-search "↳ Find the failing test"
+                                     (lispm-agents--session-label
+                                      (plist-put (copy-sequence one) :time 0.0) 60.0)))
+              (lispm-agents-resume-session one)
+              (should (equal (buffer-file-name shown) first))
+              (kill-buffer shown)))
+        (dolist (transcript (list file first second))
+          (remhash transcript lispm-agents--session-cache))
+        (delete-directory lispm-agents-claude-projects-directory t)))))
+
+(ert-deftest lispm-test-agents-session-tree ()
+  "Sessions whose parents are listed go under them, keeping their order;
+one whose parent is not listed, or is itself, stands on its own, and
+agents' ids never mix."
+  (let ((a (list :agent 'codex :id "1"))
+        (b (list :agent 'codex :id "2" :parent "1"))
+        (c (list :agent 'codex :id "3" :parent "1"))
+        (d (list :agent 'claude :id "1" :parent "9"))
+        (e (list :agent 'claude :id "2" :parent "1"))
+        (f (list :agent 'codex :id "4" :parent "4")))
+    (should (equal (lispm-agents-session-tree (list c a d b e f))
+                   (list (list a (list c) (list b)) (list d (list e)) (list f))))
+    (should (equal (lispm-agents-session-tree nil) nil))))
 
 (ert-deftest lispm-test-claude-sessions-titled-by-their-name ()
   "A Claude session is titled by its first prompt until it is named.  The

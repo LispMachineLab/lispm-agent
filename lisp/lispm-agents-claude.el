@@ -58,13 +58,38 @@ A named face, as tab lines inherit an icon's face by name."
 
 ;;;; Sessions
 
+(defun lispm-agents-claude--subagent (file)
+  "Return what Claude records of the subagent whose transcript is FILE,
+as a plist, or nil when FILE is a session's own transcript.
+Claude writes a subagent's transcript as agent-ID.jsonl in the
+subagents directory of the session that started it, and what it knows
+of the subagent beside it, in agent-ID.meta.json: its :description,
+the task it was given, and its :parentAgentId when another subagent
+started it.  The plist has :session, the id of the session the
+transcript is under, besides what that file holds."
+  (let ((directory (file-name-directory file)))
+    (when (equal (file-name-nondirectory (directory-file-name directory)) "subagents")
+      (let ((meta (concat (file-name-sans-extension file) ".meta.json")))
+        (append (list :session (file-name-nondirectory
+                                (directory-file-name (file-name-directory
+                                                      (directory-file-name directory)))))
+                (when (file-readable-p meta)
+                  (ignore-errors
+                    (with-temp-buffer
+                      (insert-file-contents meta)
+                      (json-parse-buffer :object-type 'plist)))))))))
+
 (defun lispm-agents-claude--session (file objects)
   "Return the Claude session recorded in FILE given its head/tail OBJECTS.
 The title is the last custom title or summary, else the first human prompt;
 a custom title file overrides it later, see
 `lispm-agents-claude--titled'.  Return nil for a transcript without
-any prompt or title."
+any prompt or title.  A subagent's transcript, see
+`lispm-agents-claude--subagent', is the session of the agent that ran
+it: its :parent is the session, or the subagent, that started it, and
+its title the task it was given, when Claude recorded it."
   (let* ((all (append (car objects) (cdr objects)))
+         (subagent (lispm-agents-claude--subagent file))
          (title (seq-some (lambda (object)
                             (or (plist-get object :customTitle)
                                 (and (equal (plist-get object :type) "summary")
@@ -78,13 +103,22 @@ any prompt or title."
                                                           :content))))
                                     (and (lispm-agents-human-text-p text) text))))
                            (car objects)))
-         (cwd (seq-some (lambda (object) (plist-get object :cwd)) all)))
-    (when (and cwd (or title prompt))
-      (list :agent 'claude
-            :id (file-name-base file)
-            :cwd cwd
-            :title (or title prompt)
-            :file file))))
+         (cwd (seq-some (lambda (object) (plist-get object :cwd)) all))
+         (task (when-let* ((description (plist-get subagent :description))
+                           ((stringp description))
+                           ((not (string-blank-p description))))
+                 description)))
+    (when (and cwd (or title prompt task))
+      (append (list :agent 'claude
+                    :id (file-name-base file)
+                    :cwd cwd
+                    :title (or title task prompt)
+                    :file file)
+              (when subagent
+                (list :parent (if-let* ((agent (plist-get subagent :parentAgentId))
+                                        ((stringp agent)))
+                                  (concat "agent-" agent)
+                                (plist-get subagent :session))))))))
 
 (defun lispm-agents-claude--json-string (file key)
   "Return the string KEY holds in the JSON object of FILE, or nil when FILE
@@ -122,10 +156,13 @@ not modified."
       session)))
 
 (defun lispm-agents-claude--files ()
-  "Return every top-level Claude Code transcript file."
+  "Return every Claude Code transcript file: the sessions' own, and
+those of the subagents they ran, see `lispm-agents-claude--subagent'."
   (when (file-directory-p lispm-agents-claude-projects-directory)
-    (file-expand-wildcards
-     (expand-file-name "*/*.jsonl" lispm-agents-claude-projects-directory))))
+    (append (file-expand-wildcards
+             (expand-file-name "*/*.jsonl" lispm-agents-claude-projects-directory))
+            (file-expand-wildcards
+             (expand-file-name "*/*/subagents/*.jsonl" lispm-agents-claude-projects-directory)))))
 
 (defun lispm-agents-claude-sessions ()
   "Return every recorded Claude Code session."
@@ -145,10 +182,21 @@ Claude rewrites it."
 
 (defun lispm-agents-claude--session-files (session)
   "Return the files recording Claude SESSION: its transcript, and the
-sibling directory of its subagents' transcripts when there is one."
+sibling directory of its subagents' transcripts when there is one; for
+a subagent's, its transcript and what Claude wrote of it beside it."
   (let* ((file (plist-get session :file))
          (sibling (file-name-sans-extension file)))
-    (if (file-directory-p sibling) (list file sibling) (list file))))
+    (cond ((plist-get session :parent)
+           (cons file (seq-filter #'file-exists-p
+                                  (list (concat sibling ".meta.json")
+                                        (concat sibling ".prefix.json")))))
+          ((file-directory-p sibling) (list file sibling))
+          (t (list file)))))
+
+(defun lispm-agents-claude--resumable-p (session)
+  "Return non-nil when Claude can resume SESSION: a session of its own,
+not a subagent's, which it runs for the session that started it."
+  (not (plist-get session :parent)))
 
 (defun lispm-agents-claude--worktree (directory)
   "Return where DIRECTORY belongs when it is in a Claude Code worktree.
@@ -305,6 +353,7 @@ the id it is given, so its terminal knows its session from the start."
    :sessions #'lispm-agents-claude-sessions
    :rename #'lispm-agents-claude--rename
    :files #'lispm-agents-claude--session-files
+   :resumable #'lispm-agents-claude--resumable-p
    :worktree #'lispm-agents-claude--worktree
    :new-arguments #'lispm-agents-claude--new-arguments
    :resume-arguments (lambda (id) (list "--resume" id))
