@@ -8990,12 +8990,12 @@ names nothing.  A transcript without a prompt is no session."
 (ert-deftest lispm-test-agents-interface-is-emacs ()
   "Without a program drawing an interface around them, the agents run in
 Eat's terminals, are shown with `pop-to-buffer', start in the selected
-window's project and ask with `yes-or-no-p'; such a program says other
-ways, which are followed."
+window's project and ask with LispM UI's `lispm-ui-confirm'; such a
+program says other ways, which are followed."
   (should (eq lispm-agents-terminal-make-function #'lispm-agents-eat-make))
   (should (eq lispm-agents-show-function #'pop-to-buffer))
   (should (eq lispm-agents-main-window-function #'selected-window))
-  (should (eq lispm-agents-confirm-function #'lispm-agents-yes-or-no-p))
+  (should (eq lispm-agents-confirm-function #'lispm-ui-confirm))
   (let* ((made nil) (shown nil) (asked nil) (deleted nil) (answer nil)
          (lispm-agents-terminal-make-function
           (lambda (name program &rest args)
@@ -9026,6 +9026,29 @@ ways, which are followed."
         (setq answer t)
         (lispm-agents-delete-session session)
         (should (equal deleted '("0200")))))))
+
+(ert-deftest lispm-test-agents-confirm-in-lispm-ui ()
+  "Deleting a session asks in the alert of the interface drawing LispM
+UI's, Cancel beside the action; Escape keeps the session.  A program
+asking with the old function asks the same way."
+  (let* ((deleted nil) (alerts nil) (press nil)
+         (lispm-ui-alert-function
+          (lambda (icon message buttons detail)
+            (push (list icon message (mapcar #'car buttons) detail) alerts)
+            (nth 1 (seq-find (lambda (button) (eq (nth 2 button) press)) buttons)))))
+    (lispm-test--with-agents
+        `((tool :name "Tool" :program "emacs"
+                :delete ,(lambda (session) (push (plist-get session :id) deleted))))
+      (let ((session '(:agent tool :id "0200" :title "Old work")))
+        (setq press 'cancel)
+        (lispm-agents-delete-session session)
+        (should-not deleted)
+        (should (equal (car alerts) '(caution "Delete the Tool session “Old work”?" ("Cancel" "Delete")
+                                              "Tool removes it from its store; this cannot be undone.")))
+        (setq press 'default)
+        (lispm-agents-delete-session session)
+        (should (equal deleted '("0200")))))
+    (should (eq (symbol-function 'lispm-agents-yes-or-no-p) 'lispm-ui-confirm))))
 
 (ert-deftest lispm-test-agents-list-claims-sessions ()
   "Listing the sessions tells a terminal started fresh which session it

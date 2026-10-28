@@ -46,7 +46,8 @@
 ;; around them says how through the variables of the section Interface
 ;; below: the terminals agents run in (Eat's by
 ;; default), how an agent's buffer is shown, which window is the main
-;; one, how a deletion is confirmed.
+;; one, how a deletion is confirmed (by default with LispM UI's
+;; `lispm-ui-confirm', which such a program may draw).
 ;;
 ;; An agent run as a CLI takes no part anywhere while its program is not
 ;; on PATH: no menu, button or key offers it and none of its sessions are
@@ -66,6 +67,7 @@
 (require 'subr-x)
 (require 'lispm-agents-context)
 (require 'lispm-i18n)
+(require 'lispm-ui-ask)
 
 (declare-function project-root "project" (project))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
@@ -115,14 +117,15 @@ buffer; see `lispm-agents-show'.")
 starts at the project of its buffer, and a session's transcript or
 directory opens there.")
 
-(defvar lispm-agents-confirm-function #'lispm-agents-yes-or-no-p
+(defvar lispm-agents-confirm-function #'lispm-ui-confirm
   "Function asking whether to go on with something that cannot be undone,
 as deleting a session.  It is called with a question, a detail and the
-name of the action, as \"Delete\", and returns non-nil to go on.")
+name of the action, as \"Delete\", and returns non-nil to go on.
+By default LispM UI's `lispm-ui-confirm' asks: in the alert of the
+interface drawing LispM UI's, see `lispm-ui-alert-function', else with
+`yes-or-no-p'.")
 
-(defun lispm-agents-yes-or-no-p (question detail _action)
-  "Ask QUESTION, with DETAIL, with `yes-or-no-p'."
-  (yes-or-no-p (format "%s %s " question detail)))
+(define-obsolete-function-alias 'lispm-agents-yes-or-no-p #'lispm-ui-confirm "0.12.0")
 
 ;;;; Terminals of Eat
 
