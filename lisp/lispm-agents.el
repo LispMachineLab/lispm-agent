@@ -227,7 +227,11 @@ Every agent has these:
   :sessions    function returning its recorded sessions, as plists
                (:agent :id :cwd :title :time :file); an agent that
                assigns its own ids adds :started, see
-               `lispm-agents-claim-sessions'
+               `lispm-agents-claim-sessions'; a session another of
+               the agent's sessions started, as its subagent's, adds
+               :parent, that session's id, and lists of the sessions
+               draw it under its parent, see
+               `lispm-agents-session-tree'
   :rename      function of a session and a title
 
 and these when they apply:
@@ -240,6 +244,10 @@ and these when they apply:
                for an agent whose sessions have no files of their own
   :transcript  function of a session returning a file of its transcript;
                by default, its :file
+  :resumable   predicate on a session: whether it can be resumed, which
+               every session can without one; one that cannot is opened
+               as its transcript instead, see
+               `lispm-agents-resume-session'
   :worktree    function of a directory returning nil, or where that
                worktree of the agent's belongs: (:root REPOSITORY :label
                LABEL), or (:name NAME :label LABEL) when only the
@@ -614,6 +622,31 @@ sessions cannot be read lists none, and says so."
   (sort (lispm-agents--newest-per-id sessions)
         (lambda (a b) (> (plist-get a :time) (plist-get b :time)))))
 
+(defun lispm-agents-session-tree (sessions)
+  "Return SESSIONS as a tree: a list of (SESSION . CHILDREN), SESSION
+one that no other of SESSIONS started, CHILDREN those it started, as
+their :parent says, see `lispm-agents-define', in turn as subtrees.
+Both keep the order of SESSIONS.  A session whose parent is not among
+SESSIONS, nor among those under it, stands on its own."
+  (let ((children (make-hash-table :test #'equal))
+        (ids (make-hash-table :test #'equal)))
+    (dolist (session sessions)
+      (puthash (cons (plist-get session :agent) (plist-get session :id)) t ids))
+    (cl-labels ((key (session parent)
+                  (cons (plist-get session :agent) parent))
+                (subtree (session)
+                  (cons session (mapcar #'subtree
+                                        (nreverse (gethash (key session (plist-get session :id))
+                                                           children))))))
+      (let ((roots nil))
+        (dolist (session sessions)
+          (let ((parent (plist-get session :parent)))
+            (if (and parent (not (equal parent (plist-get session :id)))
+                     (gethash (key session parent) ids))
+                (push session (gethash (key session parent) children))
+              (push session roots))))
+        (mapcar #'subtree (nreverse roots))))))
+
 (defun lispm-agents-sessions-list (&optional recent)
   "Return every recorded session of the agents that can run here, newest
 first, see `lispm-agents-available'.  An agent whose sessions cannot
@@ -805,7 +838,9 @@ The short id suffix keeps labels unique across sessions with equal titles."
           (propertize (let ((age (lispm-agents-age (plist-get session :time) now)))
                         (concat age (make-string (max 0 (- 10 (string-width age))) ?\s)))
                       'face 'shadow)
-          (lispm-agents-one-line (plist-get session :title) lispm-agents-title-width)
+          (lispm-agents-one-line (concat (and (plist-get session :parent) "↳ ")
+                                         (plist-get session :title))
+                                 lispm-agents-title-width)
           (propertize (lispm-agents--short-id session) 'face 'shadow)))
 
 ;;;; Terminals (effects)
@@ -1063,15 +1098,26 @@ window's buffer, see `lispm-agents-main-window-function'."
                           (complete-with-action action labels string pred)))
                       nil t))))
 
+(defun lispm-agents-session-resumable-p (session)
+  "Return non-nil when SESSION can be resumed, as its agent's :resumable
+says, see `lispm-agents-define'; every session can without one."
+  (if-let* ((resumable (plist-get (lispm-agents-props (plist-get session :agent)) :resumable)))
+      (funcall resumable session)
+    t))
+
 (defun lispm-agents-resume-session (session)
   "Resume SESSION in its original working directory.
 A session already running in a terminal is shown there instead: resuming it
-again would run a second agent on the same session."
+again would run a second agent on the same session.  One that cannot be
+resumed, see `lispm-agents-session-resumable-p', is opened as its
+transcript."
   (let ((agent (plist-get session :agent))
         (id (plist-get session :id))
         (cwd (plist-get session :cwd)))
     (lispm-agents-show
      (or (lispm-agents-session-buffer id)
+         (unless (lispm-agents-session-resumable-p session)
+           (lispm-agents--in-main-window #'find-file (lispm-agents--session-transcript session)))
          (let ((props (lispm-agents--check-available agent)))
            (if-let* ((resume (plist-get props :resume)))
                (funcall resume session)

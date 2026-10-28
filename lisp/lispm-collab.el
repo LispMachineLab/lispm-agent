@@ -307,7 +307,8 @@ Return the agent asked."
       (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-agent-name target)))
     ;; Delegating must not widen what the caller may do.
     (when helper
-      (lispm-set-ceiling helper (lispm-policy caller)))
+      (lispm-set-ceiling helper (lispm-policy caller))
+      (lispm-set-parent helper (lispm-agent-id caller)))
     (push target (lispm-agent-waiting-on caller))
     (when call
       (lispm-collab--record-asked caller call target))
@@ -358,6 +359,7 @@ policy, for the rest of its life."
                                        role))
                             (or root (lispm-agent-root caller)))))
     (lispm-set-ceiling agent (lispm-policy caller))
+    (lispm-set-parent agent (lispm-agent-id caller))
     (lispm-tell agent request :from (lispm-agent-name caller))
     agent))
 

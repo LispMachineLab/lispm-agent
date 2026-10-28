@@ -101,16 +101,44 @@ metadata."
               (payload (plist-get meta :payload))
               (id (plist-get payload :id))
               (cwd (plist-get payload :cwd)))
-    (list :agent 'codex :id id :cwd cwd
-          :title (or (seq-some #'lispm-agents-codex--prompt (car objects))
-                     (seq-some #'lispm-agents-codex--prompt
-                               (lispm-agents-read-json-region
-                                file 0 (min (file-attribute-size (file-attributes file))
-                                            lispm-agents-codex-prompt-bytes)))
-                     (seq-some #'lispm-agents-codex--prompt (cdr objects)))
-          :started (when-let* ((stamp (plist-get payload :timestamp)))
-                     (ignore-errors (float-time (parse-iso8601-time-string stamp))))
-          :file file)))
+    (let ((parent (lispm-agents-codex--parent payload)))
+      (append
+       (list :agent 'codex :id id :cwd cwd
+             :title (or (and parent (lispm-agents-codex--subagent-title payload))
+                        (seq-some #'lispm-agents-codex--prompt (car objects))
+                        (seq-some #'lispm-agents-codex--prompt
+                                  (lispm-agents-read-json-region
+                                   file 0 (min (file-attribute-size (file-attributes file))
+                                               lispm-agents-codex-prompt-bytes)))
+                        (seq-some #'lispm-agents-codex--prompt (cdr objects)))
+             :started (when-let* ((stamp (plist-get payload :timestamp)))
+                        (ignore-errors (float-time (parse-iso8601-time-string stamp))))
+             :file file)
+       (and parent (list :parent parent))))))
+
+(defun lispm-agents-codex--parent (payload)
+  "Return the id of the thread that started the one whose session
+metadata is PAYLOAD, or nil for a thread of the user's own.  Codex runs
+a subagent as a thread of its own, naming in its metadata the thread
+that spawned it."
+  (when-let* ((parent (plist-get payload :parent_thread_id))
+              ((stringp parent))
+              ((not (string-blank-p parent))))
+    parent))
+
+(defun lispm-agents-codex--subagent-title (payload)
+  "Return the title of a Codex subagent whose session metadata is PAYLOAD:
+the name of its task, the last part of its agent path, with the
+nickname Codex gave it; nil when PAYLOAD names neither.  Its prompts
+are what its parent told it, headed by project guidance, no title."
+  (let ((path (plist-get payload :agent_path))
+        (nickname (plist-get payload :agent_nickname)))
+    (cond ((and (stringp path) (not (string-blank-p (file-name-nondirectory path)))
+                (stringp nickname) (not (string-blank-p nickname)))
+           (format "%s (%s)" (file-name-nondirectory path) nickname))
+          ((and (stringp path) (not (string-blank-p (file-name-nondirectory path))))
+           (file-name-nondirectory path))
+          ((and (stringp nickname) (not (string-blank-p nickname))) nickname))))
 
 (defun lispm-agents-codex--thread-names ()
   "Return a hash table from Codex session id to its latest thread name."

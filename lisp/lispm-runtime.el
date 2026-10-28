@@ -322,6 +322,7 @@ the session's agent is started again from its role."
           ;; A helper stays bounded by its caller.
           (when-let* ((ceiling (assoc "ceiling" keywords)))
             (setf (lispm-agent-ceiling agent) (lispm--read-ceiling (cdr ceiling))))
+          (setf (lispm-agent-parent agent) (cdr (assoc "parent" keywords)))
           agent))
        (t (message "%s" (lispm-tr "LispM: no role %s to resume this session with"
                                   (cdr (assoc "role" keywords))))
@@ -363,6 +364,16 @@ opened again, after Emacs stopped or by hand, is bounded alike."
     (with-current-buffer (lispm-agent-buffer agent)
       (let ((print-length nil) (print-level nil))
         (lispm--set-keyword "ceiling" (prin1-to-string ceiling))))
+    (lispm--save-session agent)))
+
+(defun lispm-set-parent (agent parent)
+  "Record that AGENT was started by the agent whose session id is PARENT.
+AGENT's session records it (#+lispm_parent:), so that lists of the
+sessions show AGENT's under PARENT's, see `lispm-sessions'."
+  (setf (lispm-agent-parent agent) parent)
+  (when (buffer-live-p (lispm-agent-buffer agent))
+    (with-current-buffer (lispm-agent-buffer agent)
+      (lispm--set-keyword "parent" parent))
     (lispm--save-session agent)))
 
 (define-minor-mode lispm-session-mode
@@ -506,6 +517,8 @@ the continuation keeps the title the conversation is listed under."
                 ,@(and (lispm-agent-system agent) '(("system" . "t")))
                 ,@(when-let* ((character (lispm-agent-character agent)))
                     `(("character" . ,character)))
+                ,@(when-let* ((parent (lispm-agent-parent agent)))
+                    `(("parent" . ,parent)))
                 ,@(when-let* ((ceiling (lispm-agent-ceiling agent)))
                     `(("ceiling" . ,(let ((print-length nil) (print-level nil))
                                       (prin1-to-string ceiling)))))
@@ -700,15 +713,18 @@ Descriptions are remembered until FILE changes."
                          :root (expand-file-name (or (cdr (assoc "root" keywords)) "~"))
                          :title title
                          :time time
-                         :file file))))))
+                         :file file
+                         :parent (cdr (assoc "parent" keywords))))))))
         (puthash file (cons time description) lispm--session-cache)
         description))))
 
 (defun lispm-sessions ()
   "Every recorded session with some input, newest first.
-Each is a plist (:id :agent :character :role :root :title :time :file),
-:character nil but in a character's; a session
-continued in several files is listed once, by its newest file."
+Each is a plist (:id :agent :character :role :root :title :time :file
+:parent), :character nil but in a character's, :parent the id of the
+session of the agent that started this one, see `lispm-set-parent',
+else nil; a session continued in several files is listed once, by its
+newest file."
   (let ((latest (make-hash-table :test #'equal)))
     (dolist (file (lispm--session-files-in "projects/*/sessions/*.org"))
       (when-let* ((session (lispm--session-description file)))

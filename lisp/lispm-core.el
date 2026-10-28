@@ -309,7 +309,8 @@ Each is called with the character's name and `defined' or `removed'.")
   (usage (list 0 0 0))       ; input, output, cache-read tokens
   ;; Last, so that code compiled against fewer slots still reads the others.
   system                     ; non-nil for an agent of the whole system, in no project
-  character)                 ; name of the character whose conversation it is, if any
+  character                  ; name of the character whose conversation it is, if any
+  parent)                    ; session id of the agent that started it, for a helper or an agent started for another
 
 (defvar lispm--agents nil
   "Alist of (NAME . AGENT) of the live agents, oldest first.")
