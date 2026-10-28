@@ -1337,6 +1337,12 @@ code that does not read is searched for the names."
     ;; Strings that are not file names: with spaces, URLs, regexps.
     (should-not (lispm-tools-code-files "(message \"hello world\" \"http://x/y\" \"\\\\.el$\")"))
     (should (equal (lispm-tools-code-files "(list \"a.b\" \"~/.emacs.d\")") '("a.b" "~/.emacs.d")))
+    ;; Circular syntax reads as a circle: walked once, the writer found once.
+    (should (equal (lispm-tools-code-writes-p "'#1=(insert . #1#)") '(insert)))
+    (should (equal (lispm-tools-code-writes-p "(progn #1=(save-buffer \"a.el\" . #1#) (insert \"x\"))")
+                   '(save-buffer insert)))
+    (should (equal (lispm-tools-code-files "'(delete-file #1=(\"a/b\" . #1#))") '("a/b")))
+    (should (equal (lispm-tools-code-writes-p "'#1=[delete-region #1#]") '(delete-region)))
     ;; Unbalanced code: the names as words.
     (should (equal (lispm-tools-code-writes-p "(progn (save-buffer") '(save-buffer)))
     (should (equal (lispm-tools-code-writes-note "(progn (save-buffer")

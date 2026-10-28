@@ -2283,11 +2283,13 @@ Code naming one of them changes buffers, unless it names it inside a
   :type '(repeat symbol)
   :group 'lispm)
 
-(defun lispm-tools--walk-writes (form temporary writers strings)
+(defun lispm-tools--walk-writes (form temporary writers strings seen)
   "Collect what FORM names into WRITERS and STRINGS, two cons cells.
 TEMPORARY non-nil while inside a `with-temp-buffer' form, where only
 `lispm-tools-file-writers' count; WRITERS and STRINGS hold the symbols
-and strings found, newest first, in their cdr."
+and strings found, newest first, in their cdr.  SEEN, a hash table, holds
+the conses and vectors walked: a form read with circular syntax, such as
+#1=(insert . #1#), is walked once and the walk ends."
   (cond ((symbolp form)
          (when (and form
                     (or (memq form lispm-tools-file-writers)
@@ -2296,14 +2298,18 @@ and strings found, newest first, in their cdr."
            (push form (cdr writers))))
         ((stringp form)
          (unless (member form (cdr strings)) (push form (cdr strings))))
+        ((gethash form seen))
         ((vectorp form)
-         (mapc (lambda (f) (lispm-tools--walk-writes f temporary writers strings)) form))
+         (puthash form t seen)
+         (mapc (lambda (f) (lispm-tools--walk-writes f temporary writers strings seen)) form))
         ((consp form)
          (let ((temporary (or temporary (eq (car-safe form) 'with-temp-buffer))))
-           ;; A dotted or circular tail ends the walk of this list.
-           (while (consp form)
-             (lispm-tools--walk-writes (pop form) temporary writers strings))
-           (when form (lispm-tools--walk-writes form temporary writers strings))))))
+           ;; A dotted tail ends the list; a cons seen before, a circle.
+           (while (and (consp form) (not (gethash form seen)))
+             (puthash form t seen)
+             (lispm-tools--walk-writes (pop form) temporary writers strings seen))
+           (when (and form (not (consp form)))
+             (lispm-tools--walk-writes form temporary writers strings seen))))))
 
 (defun lispm-tools--code-writes (code)
   "What the Lisp CODE, a string, names: (WRITERS . STRINGS), in order.
@@ -2311,11 +2317,12 @@ WRITERS are the symbols of `lispm-tools-file-writers' and
 `lispm-tools-buffer-writers' it names (see `lispm-tools-code-writes-p'),
 STRINGS its strings.  Where CODE stops reading, the rest is searched for
 the writers' names as words, and gives no strings."
-  (let ((writers (list nil)) (strings (list nil)) (at 0) (end (length code)))
+  (let ((writers (list nil)) (strings (list nil)) (seen (make-hash-table :test #'eq))
+        (at 0) (end (length code)))
     (while (< at end)
       (condition-case nil
           (pcase-let ((`(,form . ,next) (read-from-string code at)))
-            (lispm-tools--walk-writes form nil writers strings)
+            (lispm-tools--walk-writes form nil writers strings seen)
             (setq at next))
         ;; The rest does not read: whitespace, or an unbalanced form.
         (error

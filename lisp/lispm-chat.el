@@ -1143,11 +1143,7 @@ ITEMS are the session's items, where the call's preview is."
                                                           "\n"))))
                          (plist-get asked :reasons))
                  (and (stringp why) (list "" (propertize (concat "  " why) 'face 'lispm-chat-dim)))
-                 (and note
-                      (cons "" (mapcar (lambda (line)
-                                         (propertize (concat "  " line) 'face 'lispm-chat-dim))
-                                       (split-string (string-fill note (- (lispm-chat--width) 8))
-                                                     "\n"))))
+                 (and note (list "" (propertize (concat "  " note) 'face 'lispm-chat-dim)))
                  (list "" question)
                  (lispm-chat--options options)
                  (list "" (propertize (lispm-tr "C-c C-y reviews the whole call in the transcript")
