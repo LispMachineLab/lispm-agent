@@ -185,9 +185,13 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
 ~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  A shell
 command made only of programs that read (~lispm-shell-read-only-programs~: ~ls~, ~grep~, ~git log~,
 ~gh pr view~ and the like, piped or chained, writing nowhere but =/dev/null=) is decided as
-reading is; one the shell would expand or run anything through asks.  Other packages can hold
-calls back through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest answer
-wins), as [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
+reading is; one the shell would expand or run anything through asks.  Approving a call "for
+good" allows every later call of its tool for the rest of the Emacs session; for ~eval_elisp~,
+and for a shell command that could reach Emacs, only that exact call again.  A command cannot
+reach Emacs on another machine, or in the sandbox (below): there, approving one for good allows
+every later command, for as long as the sandbox is on.  Other packages can hold calls back
+through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest answer wins), as
+[[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
 
 * Standing agents
 
@@ -382,7 +386,9 @@ bubblewrap on Linux), reaching the network through a proxy that checks each doma
 
 ~M-x lispm-sandbox-set-level~ or ~/sandbox~ switches without restarting: running processes take
 the new network rules at once.  The first level other than None installs srt with npm (Node.js
-22.12+).  The sandbox does not confine ~eval_elisp~, so keep ~exec~ at ~ask~ when it matters.
+22.12+).  No level lets a command write Emacs's configuration or see the Emacs server's socket,
+so a command approved for good in the sandbox allows every later one.  The sandbox does not
+confine ~eval_elisp~, so keep ~exec~ at ~ask~ when it matters.
 
 ** Services
 
