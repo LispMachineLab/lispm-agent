@@ -28,19 +28,23 @@ LispM.app: =curl -fsSL https://lispm.ai/install.sh | sh= (see LispM Desktop).
 Emacs 30.1+, curl, and a model behind an OpenAI Chat Completions or Anthropic Messages
 endpoint.  MELPA must be in ~package-archives~ for the dependencies,
 [[https://github.com/lizqwerscott/mcp.el][mcp.el]] and [[https://codeberg.org/akib/emacs-eat][Eat]], the terminals of Claude Code, Codex and other agents.
-[[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], what every LispM program speaks its language with, comes from git as LispM does,
-for no archive holds it:
+[[https://github.com/LispMachineLab/lispm-kit][LispM Kit]], what every LispM program speaks its language with, and
+[[https://github.com/LispMachineLab/lispm-ui][LispM UI]], which draws LispM's forms, come from git as LispM does, for no
+archive holds them:
 
 #+begin_src emacs-lisp
 (use-package lispm-kit
   :vc (:url "https://github.com/LispMachineLab/lispm-kit" :rev :newest))
+(use-package lispm-ui
+  :vc (:url "https://github.com/LispMachineLab/lispm-ui" :rev :newest))
 (use-package lispm
   :vc (:url "https://github.com/LispMachineLab/lispm-agent" :rev :newest)
   :config (lispm-mode-line-mode 1))     ; busy agents and pending approvals in the mode line
 #+end_src
 
 The package is ~lispm~; without ~use-package~,
-~(package-vc-install "https://github.com/LispMachineLab/lispm-kit")~ and then
+~(package-vc-install "https://github.com/LispMachineLab/lispm-kit")~,
+~(package-vc-install "https://github.com/LispMachineLab/lispm-ui")~ and then
 ~(package-vc-install '(lispm :url "https://github.com/LispMachineLab/lispm-agent"))~.  With
 ~OPENAI_API_KEY~ or ~ANTHROPIC_API_KEY~ in Emacs's environment there is nothing more to set; for
 any other server see [[*Backends][Backends]].
