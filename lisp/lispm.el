@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
 ;; Version: 0.10.1
-;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9"))
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 

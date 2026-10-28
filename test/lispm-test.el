@@ -22,6 +22,7 @@
 (require 'lispm-agents-claude)
 (require 'lispm-agents-codex)
 (require 'lispm-terminal)
+(require 'lispm-kit-i18n-check)
 
 ;; The words as the code writes them, whatever the computer's language:
 ;; a language without a catalog.  The tests of i18n speak others.
@@ -8727,143 +8728,45 @@ last, once, and taken out, LispM's own told from the others."
   (directory-files (expand-file-name "../lisp" lispm-test--dir) t "\\.el\\'"))
 
 (defun lispm-test--messages ()
-  "Return the messages the code gives to translate: a hash table from a
-catalog key (see `lispm-i18n--key') to a plist: :message, :context,
-:plural, the plural's English, and :places, where the message is
-written, as FILE:LINE; and :time for a time format, as
-`lispm-format-time' takes."
-  (let ((messages (make-hash-table :test #'equal)))
-    (dolist (file (lispm-test--source-files))
-      (with-temp-buffer
-        (insert-file-contents file)
-        (emacs-lisp-mode)
-        (let ((name (file-name-nondirectory file)))
-          (goto-char (point-min))
-          (while (re-search-forward
-                  "(\\(lispm-\\(?:tr\\(?:-n\\|-in\\|-noop\\)?\\|format-time\\)\\)[ \t\n]+\"" nil t)
-            (let ((function (intern (match-string 1)))
-                  (start (match-beginning 0)))
-              (unless (nth 8 (save-excursion (syntax-ppss start)))
-                (let* ((line (line-number-at-pos start))
-                       (form (save-excursion (goto-char start) (read (current-buffer))))
-                       (args (cdr form))
-                       (context (cond ((eq function 'lispm-tr-in) (pop args))
-                                      ((eq function 'lispm-tr-noop) (nth 1 args))))
-                       (message (car args))
-                       (key (lispm-i18n--key message context))
-                       (entry (gethash key messages)))
-                  (puthash key
-                           (list :message message :context context
-                                 :plural (or (plist-get entry :plural)
-                                             (and (eq function 'lispm-tr-n) (nth 1 args)))
-                                 :time (or (plist-get entry :time) (eq function 'lispm-format-time))
-                                 :places (append (plist-get entry :places) (list (format "%s:%d" name line))))
-                           messages))))))))
-    messages))
-
-(defun lispm-test--format-arguments (text)
-  "Return the arguments format string TEXT takes, as (INDEX . CONVERSION),
-sorted: `%1$s' takes argument 1, and a plain `%s' the one after the
-last taken."
-  (let ((arguments nil) (next 1) (start 0))
-    (while (string-match "%\\(?:\\([0-9]+\\)\\$\\)?[-+ #0]*[0-9]*\\(?:\\.[0-9]+\\)?\\([a-zA-Z%]\\)" text start)
-      (setq start (match-end 0))
-      (unless (equal (match-string 2 text) "%")
-        (let ((index (if (match-string 1 text) (string-to-number (match-string 1 text)) next)))
-          (push (cons index (match-string 2 text)) arguments)
-          (setq next (1+ index)))))
-    (sort arguments (lambda (a b) (< (car a) (car b))))))
-
-(defconst lispm-test--translated-languages '(de fr ja zh-Hans zh-Hant)
-  "The languages whose catalogs translate every message.")
-
-(defconst lispm-test--spellings
-  '(("colour" . "color") ("centre" . "center") ("grey" . "gray") ("favourite" . "favorite")
-    ("behaviour" . "behavior") ("cancelled" . "canceled") ("labelled" . "labeled"))
-  "Words Britain and the United States spell apart: (BRITISH . AMERICAN),
-the start of a word.  Customize stays, Emacs's name for its settings.")
-
-(defun lispm-test--spelled-p (text spellings)
-  "Return non-nil when TEXT has a word starting as one of SPELLINGS."
-  (let ((case-fold-search t))
-    (seq-some (lambda (spelling) (string-match-p (concat "\\b" spelling) text)) spellings)))
+  "Return the messages LispM Agent's code gives to translate; see
+`lispm-kit-i18n-messages'."
+  (lispm-kit-i18n-messages (lispm-test--source-files)
+                           :tr 'lispm-tr :tr-n 'lispm-tr-n :tr-in 'lispm-tr-in
+                           :tr-noop 'lispm-tr-noop :format-time 'lispm-format-time))
 
 (ert-deftest lispm-test-i18n-translates-every-message ()
   "Every language but English translates every message the code gives,
 a plural in as many forms as the language has; no catalog holds a
-message the code no longer gives."
+message the code no longer gives, and each says its language's name."
   (let ((messages (lispm-test--messages)))
     (should (> (hash-table-count messages) 300))
-    (dolist (language (mapcar #'car lispm-languages))
-      (let ((catalog (plist-get (lispm-i18n-read-catalog language) :messages))
-            (forms (if (alist-get language lispm-i18n-plural-forms) 2 1)))
-        (should (plist-get (lispm-i18n-read-catalog language) :name))
-        (maphash (lambda (key _)
-                   (should-not (list language 'stale key)))
-                 (let ((stale (copy-hash-table catalog)))
-                   (maphash (lambda (key _) (remhash key stale)) messages)
-                   stale))
-        (when (memq language lispm-test--translated-languages)
-          (maphash (lambda (key entry)
-                     (let ((translation (gethash key catalog)))
-                       (unless (and translation
-                                    (if (plist-get entry :plural)
-                                        (or (and (stringp translation) (= forms 1))
-                                            (and (consp translation) (= (length translation) forms)))
-                                      (stringp translation)))
-                         (should-not (list language 'missing key)))))
-                   messages))))))
+    (should-not (lispm-kit-i18n-problems 'lispm messages '(nameless stale missing)))))
 
 (ert-deftest lispm-test-i18n-keeps-arguments ()
   "A translation takes the arguments its message takes, in any order; a
 time format, its own."
-  (let ((messages (lispm-test--messages)))
-    (dolist (language (mapcar #'car lispm-languages))
-      (maphash (lambda (key translation)
-                 (when-let* ((entry (gethash key messages))
-                             ((not (plist-get entry :time))))
-                   (let ((expected (lispm-test--format-arguments (plist-get entry :message))))
-                     (dolist (text (ensure-list translation))
-                       (let ((arguments (lispm-test--format-arguments text)))
-                         ;; A plural's form may leave the count unsaid, as
-                         ;; "one item" does.
-                         (unless (or (equal arguments expected)
-                                     (and (plist-get entry :plural)
-                                          (equal arguments (cl-remove-if (lambda (a) (equal (cdr a) "d"))
-                                                                         expected))))
-                           (should-not (list language key text))))))))
-               (plist-get (lispm-i18n-read-catalog language) :messages)))))
+  (should-not (lispm-kit-i18n-problems 'lispm (lispm-test--messages) '(arguments))))
 
 (ert-deftest lispm-test-i18n-english-spelling ()
   "The code's English spells as Britain does: American English changes
 every message spelled so, and British English every one spelled the
 American way; neither keeps the other's spelling."
-  (let ((messages (lispm-test--messages))
-        (british (mapcar #'car lispm-test--spellings))
-        (american (mapcar #'cdr lispm-test--spellings)))
-    (pcase-dolist (`(,language ,from) `((en-US ,british) (en-GB ,american)))
-      (let ((catalog (plist-get (lispm-i18n-read-catalog language) :messages)))
-        (maphash (lambda (key entry)
-                   (dolist (text (cons (plist-get entry :message) (ensure-list (plist-get entry :plural))))
-                     (when (and (lispm-test--spelled-p text from) (not (gethash key catalog)))
-                       (should-not (list language 'spelled-as-written key))))
-                   (dolist (text (ensure-list (gethash key catalog)))
-                     (should-not (and (lispm-test--spelled-p text from) (list language key text)))))
-                 messages)))))
+  (should-not (lispm-kit-i18n-problems 'lispm (lispm-test--messages)
+                                       '(spelled-as-written spelling))))
 
 (defmacro lispm-test--in-french (&rest body)
   "Run BODY speaking French, from a catalog of the test's own."
   (declare (indent 0))
-  `(let ((lispm-i18n--catalogs nil)
+  `(let ((lispm-kit-i18n--catalogs nil)
          (lispm-language 'fr))
-     (cl-letf (((symbol-function 'lispm-i18n-read-catalog)
-                (lambda (_language)
+     (cl-letf (((symbol-function 'lispm-kit-i18n-read-catalog)
+                (lambda (_domain _language)
                   (let ((table (make-hash-table :test #'equal)))
                     (puthash "Step %d of %d" "Étape %1$d sur %2$d" table)
                     (puthash "%d item" '("%d élément" "%d éléments") table)
-                    (puthash (lispm-i18n--key "Open" "state") "Ouvert" table)
+                    (puthash (lispm-kit-i18n-key "Open" "state") "Ouvert" table)
                     (puthash "Open" "Ouvrir" table)
-                    (puthash (lispm-i18n--key "Low" "sandbox level") "Faible" table)
+                    (puthash (lispm-kit-i18n-key "Low" "sandbox level") "Faible" table)
                     (puthash "no sandbox" "aucun bac à sable" table)
                     (puthash "No agent named %s" "Aucun agent nommé %s" table)
                     (puthash "Welcome to %s!" "Bienvenue dans %s !" table)
@@ -8901,11 +8804,14 @@ United States, else British, American English when none is spoken."
                            "en_US.UTF-8" "en-HK" "en-GB" "fr-CA" "de_CH" "ja-JP" "ko-KR" "C"))
                  '(zh-Hant zh-Hans zh-Hant zh-Hant zh-Hans zh-Hans en-US en-US
                    en-US en-GB en-GB fr de ja nil nil)))
-  (let ((lispm-i18n--system-languages '("yue-Hant-HK" "ja-HK" "en-US")))
+  (let ((lispm-kit-i18n--system-languages '("yue-Hant-HK" "ja-HK" "en-US"))
+        (lispm-kit-i18n--system-language '(unread)))
     (should (eq (lispm-system-language) 'ja)))
-  (let ((lispm-i18n--system-languages '("ko-KR")))
+  (let ((lispm-kit-i18n--system-languages '("ko-KR"))
+        (lispm-kit-i18n--system-language '(unread)))
     (should (eq (lispm-system-language) 'en-US)))
-  (let ((lispm-i18n--system-languages '("zh-Hant-TW"))
+  (let ((lispm-kit-i18n--system-languages '("zh-Hant-TW"))
+        (lispm-kit-i18n--system-language '(unread))
         (lispm-language nil))
     (should (eq (lispm-current-language) 'zh-Hant))
     (let ((lispm-language-functions (list #'ignore (lambda () 'de))))
@@ -8922,7 +8828,8 @@ command ends, when the language spoken changes; so does a program saying
 its language changed, unless `lispm-language' chooses one."
   (let ((lispm-language 'en)
         (lispm-language-changed-hook nil)
-        (lispm-i18n--system-languages '("ja-JP"))
+        (lispm-kit-i18n--system-languages '("ja-JP"))
+        (lispm-kit-i18n--system-language '(unread))
         (drawn 0))
     (add-hook 'lispm-language-changed-hook (lambda () (setq drawn (1+ drawn))))
     (unwind-protect
@@ -8996,23 +8903,7 @@ inspector's text; the user is told in the language spoken."
 (defun lispm-test-report-catalogs ()
   "Print, for each language, the messages its catalog lacks and those it
 holds no longer.  Run with `make i18n'."
-  (let ((messages (lispm-test--messages)))
-    (dolist (language (mapcar #'car lispm-languages))
-      (let ((catalog (plist-get (lispm-i18n-read-catalog language) :messages))
-            (missing 0) (stale 0))
-        (when (memq language lispm-test--translated-languages)
-          (maphash (lambda (key entry)
-                     (unless (gethash key catalog)
-                       (setq missing (1+ missing))
-                       (princ (format "%s: missing %S (%s)\n" language key
-                                      (string-join (plist-get entry :places) " ")))))
-                   messages))
-        (maphash (lambda (key _)
-                   (unless (gethash key messages)
-                     (setq stale (1+ stale))
-                     (princ (format "%s: stale %S\n" language key))))
-                 catalog)
-        (princ (format "%s: %d missing, %d stale\n" language missing stale))))))
+  (lispm-kit-i18n-report 'lispm (lispm-test--messages)))
 
 ;;;; The editor's agents
 

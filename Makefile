@@ -1,4 +1,7 @@
 EMACS ?= emacs
+# LispM Kit, whose engine translates LispM's words: a checkout beside
+# this one by default.
+LISPM_KIT ?= ../lispm-kit
 # The sources, in lisp/, in the order they require each other.
 ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
@@ -7,7 +10,8 @@ ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-we
       lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-form.el lispm-characters.el lispm-agents-bridge.el lispm-ground.el lispm-inspect.el lispm-settings.el \
       lispm-chat.el lispm-bar.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
-DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))"
+DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))" \
+       -L $(LISPM_KIT)
 
 .PHONY: all deps compile test i18n demo clean
 
@@ -16,7 +20,7 @@ all: compile test
 deps: .deps/.installed
 
 .deps/.installed: lisp/lispm.el test/install-deps.el
-	$(EMACS) -Q --batch -l test/install-deps.el
+	$(EMACS) -Q --batch -L $(LISPM_KIT) -l test/install-deps.el
 	touch $@
 
 # Warnings are errors: CI compiles with every supported Emacs.
