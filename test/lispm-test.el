@@ -9042,6 +9042,69 @@ agents' ids never mix."
                    (list (list a (list c) (list b)) (list d (list e)) (list f))))
     (should (equal (lispm-agents-session-tree nil) nil))))
 
+(ert-deftest lispm-test-agents-buffer-status ()
+  "What an agent's buffer is doing is what the first status function to
+know it says; those blocked on their user, then those failed, are
+waiting, and projects whose terminals wait come first."
+  (let* ((asks (generate-new-buffer "*codex:one*"))
+         (failed (generate-new-buffer "*codex:two*"))
+         (busy (generate-new-buffer "*codex:three*"))
+         (records `((,asks :state blocked :kind permission) (,failed :state error)
+                    (,busy :state working :progress 40)))
+         (lispm-agents-status-functions
+          (list (lambda (_buffer) nil)
+                (lambda (buffer) (cdr (assq buffer records)))))
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p))
+    (unwind-protect
+        (lispm-test--with-agents '((codex :name "Codex" :program "emacs"))
+          (dolist (buffer (list asks failed busy))
+            (with-current-buffer buffer
+              (setq lispm-agents-buffer-agent 'codex)))
+          (with-current-buffer asks (setq default-directory "/tmp/asks/"))
+          (with-current-buffer failed (setq default-directory "/tmp/failed/"))
+          (with-current-buffer busy (setq default-directory "/tmp/busy/"))
+          (should (equal (lispm-agents-buffer-status asks) '(:state blocked :kind permission)))
+          (should-not (lispm-agents-buffer-status (current-buffer)))
+          (should (lispm-agents-buffer-waiting-p asks))
+          (should (lispm-agents-buffer-waiting-p failed))
+          (should-not (lispm-agents-buffer-waiting-p busy))
+          (should (equal (lispm-agents-waiting-buffers) (list asks failed)))
+          (let ((groups (lispm-agents-group-by-directory
+                         (list (list :agent 'codex :id "1" :cwd "/tmp/busy/" :title "Busy" :time 9.0)
+                               (list :agent 'codex :id "2" :cwd "/tmp/asks/" :title "Asks" :time 2.0)
+                               (list :agent 'codex :id "3" :cwd "/tmp/quiet/" :title "Quiet" :time 8.0))
+                         (list busy asks))))
+            (should (equal (mapcar (lambda (group) (plist-get group :dir)) groups)
+                           '("/tmp/asks" "/tmp/busy" "/tmp/quiet")))
+            (should (plist-get (car groups) :waiting))
+            (should-not (plist-get (cadr groups) :waiting))))
+      (mapc #'kill-buffer (list asks failed busy)))))
+
+(ert-deftest lispm-test-agent-status-record ()
+  "An agent's state is told as a record of what it does: blocked on an
+approval or a condition, failed at a stopped call, working, or idle."
+  (lispm-test-env
+    (lispm-defrole worker "Works.")
+    (let ((agent (lispm-start 'worker project)))
+      (should (equal (lispm-agent-status-record agent) '(:state idle :msg nil)))
+      (lispm-set-state agent 'requesting "thinking")
+      (should (equal (lispm-agent-status-record agent) '(:state working :msg "thinking")))
+      (puthash "c1" (list :name "write_file" :status 'ask) (lispm-agent-pending agent))
+      (lispm-set-state agent 'waiting "1 call awaits approval")
+      (should (equal (lispm-agent-status-record agent)
+                     '(:state blocked :kind permission :msg "1 call awaits approval")))
+      (puthash "c1" (list :name "write_file" :status 'stopped) (lispm-agent-pending agent))
+      (should (equal (lispm-agent-status-record agent)
+                     '(:state error :msg "1 call awaits approval")))
+      (setf (lispm-agent-condition agent) '(:id "x" :title "Context full"))
+      (should (equal (plist-get (lispm-agent-status-record agent) :kind) 'question))
+      (clrhash (lispm-agent-pending agent))
+      (setf (lispm-agent-condition agent) nil)
+      (lispm-set-state agent 'idle)
+      (should (equal (plist-get (lispm-agent-status-record agent) :state) 'idle))
+      (lispm-retire agent))))
+
 (ert-deftest lispm-test-claude-sessions-titled-by-their-name ()
   "A Claude session is titled by its first prompt until it is named.  The
 name lives beside the transcript, which Claude rewrites, and a blank one
