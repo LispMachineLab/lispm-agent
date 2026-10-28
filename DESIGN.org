@@ -531,7 +531,13 @@ that cannot reach Emacs is the exception: on another machine, or confined by the
 A shell tool allowed as a whole holds only while that is so: ~lispm-tools--allowed-p~ checks
 it again at each call, so a level set back to None has every writing command ask, as it did
 before, until the sandbox is back or the command is approved as that exact command. Lisp the
-policy should mediate is what ~run_lisp~ is for.
+policy should mediate is what ~run_lisp~ is for. What Lisp touches cannot be told before it runs,
+so no call of ~eval_elisp~ is reclassed by its code; but code naming a function that changes
+buffers or files (~lispm-tools-code-writes-p~: ~lispm-tools-file-writers~ anywhere,
+~lispm-tools-buffer-writers~ outside ~with-temp-buffer~) says so in its approval, in the chat
+and in the transcript's preview, with the files it names, since it shows no diff as the edit
+tools would; the tool's description sends the model to the edit tools for files and buffers.
+The journal still records what it changed (below).
 
 *A command that only reads is a read.* Most of what an agent runs in the shell looks rather
 than changes: ~ls~, ~grep~, ~git status~, ~git log~, ~gh pr view~. Asking about each would have

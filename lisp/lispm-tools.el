@@ -2261,6 +2261,105 @@ allows."
         (end-of-file nil))
       (nreverse forms))))
 
+(defcustom lispm-tools-file-writers
+  '(save-buffer save-some-buffers write-file write-region append-to-file
+    with-temp-file delete-file rename-file copy-file make-directory
+    delete-directory make-symbolic-link set-file-modes)
+  "Functions that change files on disk.
+Code naming one of them changes files: see `lispm-tools-code-writes-p'."
+  :type '(repeat symbol)
+  :group 'lispm)
+
+(defcustom lispm-tools-buffer-writers
+  '(insert insert-before-markers delete-region erase-buffer delete-char
+    kill-region kill-line kill-buffer replace-regexp replace-string
+    replace-regexp-in-region replace-string-in-region indent-region
+    comment-region uncomment-region upcase-region downcase-region
+    set-buffer-modified-p)
+  "Functions that change the text of a buffer.
+Code naming one of them changes buffers, unless it names it inside a
+`with-temp-buffer' form, whose buffer is gone once it ends: see
+`lispm-tools-code-writes-p'."
+  :type '(repeat symbol)
+  :group 'lispm)
+
+(defun lispm-tools--walk-writes (form temporary writers strings)
+  "Collect what FORM names into WRITERS and STRINGS, two cons cells.
+TEMPORARY non-nil while inside a `with-temp-buffer' form, where only
+`lispm-tools-file-writers' count; WRITERS and STRINGS hold the symbols
+and strings found, newest first, in their cdr."
+  (cond ((symbolp form)
+         (when (and form
+                    (or (memq form lispm-tools-file-writers)
+                        (and (not temporary) (memq form lispm-tools-buffer-writers)))
+                    (not (memq form (cdr writers))))
+           (push form (cdr writers))))
+        ((stringp form)
+         (unless (member form (cdr strings)) (push form (cdr strings))))
+        ((vectorp form)
+         (mapc (lambda (f) (lispm-tools--walk-writes f temporary writers strings)) form))
+        ((consp form)
+         (let ((temporary (or temporary (eq (car-safe form) 'with-temp-buffer))))
+           ;; A dotted or circular tail ends the walk of this list.
+           (while (consp form)
+             (lispm-tools--walk-writes (pop form) temporary writers strings))
+           (when form (lispm-tools--walk-writes form temporary writers strings))))))
+
+(defun lispm-tools--code-writes (code)
+  "What the Lisp CODE, a string, names: (WRITERS . STRINGS), in order.
+WRITERS are the symbols of `lispm-tools-file-writers' and
+`lispm-tools-buffer-writers' it names (see `lispm-tools-code-writes-p'),
+STRINGS its strings.  Where CODE stops reading, the rest is searched for
+the writers' names as words, and gives no strings."
+  (let ((writers (list nil)) (strings (list nil)) (at 0) (end (length code)))
+    (while (< at end)
+      (condition-case nil
+          (pcase-let ((`(,form . ,next) (read-from-string code at)))
+            (lispm-tools--walk-writes form nil writers strings)
+            (setq at next))
+        ;; The rest does not read: whitespace, or an unbalanced form.
+        (error
+         (dolist (name (append lispm-tools-file-writers lispm-tools-buffer-writers))
+           (when (and (not (memq name (cdr writers)))
+                      (string-match-p (concat "\\_<" (regexp-quote (symbol-name name)) "\\_>")
+                                      (substring code at)))
+             (push name (cdr writers))))
+         (setq at end))))
+    (cons (nreverse (cdr writers)) (nreverse (cdr strings)))))
+
+(defun lispm-tools-code-writes-p (code)
+  "The functions changing buffers or files that the Lisp CODE names, or nil.
+CODE is a string of forms.  Those of `lispm-tools-file-writers' count
+wherever they appear; those of `lispm-tools-buffer-writers' outside a
+`with-temp-buffer' form.  A quoted name counts as much as a call, so
+\(mapc #\\='delete-file files) does.  Code that does not read is searched
+for the names as words."
+  (car (lispm-tools--code-writes code)))
+
+(defun lispm-tools-code-files (code)
+  "The strings in the Lisp CODE that look like file names, in order.
+A string with no whitespace, naming a directory (a slash, not of a
+URL) or ending in a file extension."
+  (seq-filter (lambda (s)
+                (and (> (length s) 1)
+                     (not (string-match-p "[[:space:]\\\\]\\|://" s))
+                     (or (string-search "/" s)
+                         (string-match-p "\\`[^.]+\\.[A-Za-z0-9]\\{1,5\\}\\'" s))))
+              (cdr (lispm-tools--code-writes code))))
+
+(defun lispm-tools-code-writes-note (code)
+  "What the user is told of the Lisp CODE if it changes buffers or files.
+Nil if it names none of `lispm-tools-file-writers' and
+`lispm-tools-buffer-writers' (see `lispm-tools-code-writes-p'); else
+that it does, that no diff shows it, and the files it names (see
+`lispm-tools-code-files')."
+  (when (lispm-tools-code-writes-p code)
+    (let ((files (lispm-tools-code-files code)))
+      (concat (lispm-tr "This code changes buffers or files; it shows no diff, as the edit tools would.")
+              (if files
+                  (concat " " (lispm-tr "It names %s." (string-join files ", ")))
+                "")))))
+
 (defcustom lispm-eval-timeout 120
   "Seconds eval_elisp waits for a value promised with `lispm-async'."
   :type 'integer
@@ -2380,9 +2479,14 @@ with the backtrace of the code, innermost call first.  A tool you
 define here with lispm-deftool is yours from your next step on, and
 other agents can find it with search_tools; it lasts until Emacs
 exits, unless you keep it in a skill with write_skill, which
-search_tools finds."
+search_tools finds.
+Files and buffers are changed with the edit tools (edit_file,
+write_file, edit_buffer, edit_definition), which show the user a diff
+to approve and can be undone as one step.  Lisp that saves or rewrites
+a file gets no such review: it is for what the edit tools cannot do."
   :permission exec
   :async t
+  :preview #'lispm-tools-code-writes-note
   (let* ((agent lispm-current-agent)
          (output (generate-new-buffer " *lispm-eval*" t))
          (standard-output output)

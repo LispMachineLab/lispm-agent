@@ -31,6 +31,8 @@
   ("Do you want to evaluate this code from %s?" . "要對來自 %s 的這段程式碼求值嗎？")
   ("Do you want to evaluate this code?" . "要對這段程式碼求值嗎？")
   ("It may load the files beside it: %s." . "它可能會載入旁邊的檔案：%s。")
+  ("This code changes buffers or files; it shows no diff, as the edit tools would." . "這段程式碼會更改緩衝區或檔案；它不像編輯工具那樣顯示差異。")
+  ("It names %s." . "它提到了 %s。")
   ("Bash command" . "Bash 指令")
   ("Yes, and don't ask again for this exact command" . "是，且不再詢問完全相同的指令")
   ("Evaluate Emacs Lisp" . "對 Emacs Lisp 求值")
