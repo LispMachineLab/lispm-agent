@@ -9236,6 +9236,81 @@ of the agents drawn: so it is shown again rather than resumed twice."
           (should (eq (lispm-agents-session-buffer "0199") buffer)))
       (kill-buffer buffer))))
 
+(ert-deftest lispm-test-agents-alive-is-not-running ()
+  "An agent inside Emacs is alive while its buffer lives, and running only
+while it works or waits for its user: its session is found and written
+to idle or not, but an idle one is not listed among the running.  A
+terminal runs while its process lives, whatever its program does."
+  (let* ((chat (generate-new-buffer "*lispm chat*"))
+         (terminal (generate-new-buffer "*codex:project*"))
+         (project (file-name-as-directory (make-temp-file "lispm-test-project" t)))
+         (other (file-name-as-directory (make-temp-file "lispm-test-other" t)))
+         (state 'idle)
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (lispm-agents-status-functions
+          (list (lambda (buffer) (and (eq buffer chat) (list :state state))))))
+    (unwind-protect
+        (lispm-test--with-agents
+            `((codex :name "Codex" :program "emacs")
+              (lispm :name "LispM" :new ignore :buffer-p ,(lambda (buffer) (eq buffer chat))))
+          (with-current-buffer chat
+            (setq default-directory project
+                  lispm-agents-buffer-session-id "0300"))
+          (with-current-buffer terminal
+            (setq default-directory other
+                  lispm-agents-buffer-agent 'codex
+                  lispm-agents-buffer-session-id "0199"))
+          (should (lispm-agents-alive-p chat))
+          (should-not (lispm-agents-running-p chat))
+          (should (lispm-agents-alive-p terminal))
+          (should (lispm-agents-running-p terminal))
+          (should (equal (lispm-agents-live-buffers) (list chat terminal)))
+          (should (equal (lispm-agents-running-buffers) (list terminal)))
+          (should (eq (lispm-agents-session-buffer "0300") chat))
+          (should (eq (lispm-agents-session-buffer "0199") terminal))
+          (dolist (busy '(working blocked error))
+            (setq state busy)
+            (should (lispm-agents-running-p chat)))
+          (setq state 'done)
+          (should-not (lispm-agents-running-p chat))
+          (setq state 'working)
+          (should (equal (lispm-agents-running-buffers) (list chat terminal)))
+          ;; Sending prefers the project's agent, idle or not.
+          (setq state 'idle)
+          (cl-letf (((symbol-function 'lispm-agents-project-directory)
+                     (lambda () project)))
+            (should (eq (lispm-agents--pick-terminal) chat)))
+          (kill-buffer chat)
+          (should-not (lispm-agents-alive-p chat))
+          (should-not (lispm-agents-session-buffer "0300")))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list chat terminal))
+      (delete-directory project t)
+      (delete-directory other t))))
+
+(ert-deftest lispm-test-agents-user-wrote-unarchives ()
+  "A session the user writes to leaves the archive, and the lists of
+sessions are told once; one not archived, or written to again, changes
+nothing."
+  (lispm-test--with-agents '((lispm :name "LispM" :new ignore))
+    (let ((session '(:agent lispm :id "0300"))
+          (told 0))
+      (dlet ((lispm-agents-sessions-changed-hook (list (lambda () (cl-incf told)))))
+        (should-not (lispm-agents-user-wrote 'lispm "0300"))
+        (should (= told 0))
+        (lispm-agents--set-archived session t)
+        (should (lispm-agents-archived-p session))
+        (should (lispm-agents-user-wrote 'lispm "0300"))
+        (should-not (lispm-agents-archived-p session))
+        (should (= told 1))
+        (should-not (lispm-agents-user-wrote 'lispm "0300"))
+        (should-not (lispm-agents-user-wrote 'lispm nil))
+        (should (= told 1))
+        ;; The state file says so too.
+        (setq lispm-agents--archived 'unloaded)
+        (should-not (lispm-agents-archived-p session))))))
+
 ;;;; The editor's agents as peers
 
 (defun lispm-test--http-post (port token body)
