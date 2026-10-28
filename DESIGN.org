@@ -534,7 +534,8 @@ the user approve reading, which the policy lets run unasked; so a tool may say o
 does less than the tool can (~:class~ in ~lispm-deftool~, ~lispm-tool-call-permission~), and the
 policy decides the call by that class. ~run_shell~ says ~read~ of a command made only of programs
 of ~lispm-shell-read-only-programs~, each as that says it reads (~find~ without ~-delete~ or
-~-exec~, ~git~ with a reading subcommand and none of the options that have it run a program,
+~-exec~, ~sed~ whose script only prints, deletes or substitutes, never writes a file or runs a
+command, ~git~ with a reading subcommand and none of the options that have it run a program,
 ~gh api~ with GET), joined by pipes, ~&&~, ~||~ or ~;~, writing nowhere but =/dev/null=
 (~lispm-shell-read-only-p~). The parser undoes quotes and backslashes and knows nothing else: a
 substitution, backquotes, a subshell, a group, a background job, a here document, an environment

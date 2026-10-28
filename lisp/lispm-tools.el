@@ -1872,6 +1872,7 @@ For files use edit_file."
 (defcustom lispm-shell-read-only-programs
   '(("ls" . t) ("dir" . t) ("tree" . t) ("pwd" . t) ("file" . t) ("stat" . t)
     ("du" . t) ("df" . t) ("cat" . t) ("head" . t) ("tail" . t) ("wc" . t)
+    ("zcat" . t) ("gzcat" . t) ("zgrep" . t) ("sed" . lispm-shell--sed-reads-p)
     ("grep" . t) ("egrep" . t) ("fgrep" . t) ("rg" . t) ("ag" . t)
     ("find" . lispm-shell--find-reads-p) ("fd" . lispm-shell--fd-reads-p)
     ("echo" . t) ("printf" . t) ("true" . t) ("false" . t) ("test" . t) ("[" . t)
@@ -1896,7 +1897,8 @@ A command made only of such calls, such as `git status', is of class
 unasked under the default policy, where other commands ask.  Programs
 that run what they are given, such as sh, xargs, env with a command or
 sudo, must not be here, nor any that writes: a reader of files that
-can also write them, such as sed with -i, needs a function.  A program
+can also write them, as sed does with -i or its w command, needs a
+function.  A program
 is named without a directory: a command naming one by its path asks."
   :type '(alist :key-type (string :tag "Program")
                 :value-type (choice (const :tag "Always" t) (function :tag "When")))
@@ -2045,6 +2047,113 @@ this cannot read is one that may write."
 (defun lispm-shell--env-reads-p (args)
   "Non-nil if env with ARGS only prints the environment: it runs nothing."
   (seq-every-p (lambda (arg) (member arg '("-0" "--null"))) args))
+
+(defun lispm-shell--sed-reads-p (args)
+  "Non-nil if sed with ARGS only reads: it edits no file in place, and its
+scripts only print, delete, substitute and the like, never write a file
+or run a command (see `lispm-shell--sed-script-reads-p')."
+  (catch 'lispm-shell-unsure
+    (let (scripts positionals (options t))
+      (while args
+        (let ((arg (pop args)))
+          (cond ((or (not options) (equal arg "-") (not (string-prefix-p "-" arg)))
+                 (push arg positionals))
+                ((equal arg "--") (setq options nil))
+                ((string-prefix-p "--" arg)
+                 (cond ((string-prefix-p "--expression=" arg)
+                        (push (substring arg (length "--expression=")) scripts))
+                       ((equal arg "--expression") (push (pop args) scripts))
+                       ((equal arg "--line-length") (pop args))
+                       ((not (member arg '("--quiet" "--silent" "--regexp-extended" "--null-data"
+                                           "--separate" "--unbuffered" "--debug" "--sandbox" "--posix"
+                                           "--help" "--version")))
+                        ;; --in-place, --file, or something unknown.
+                        (throw 'lispm-shell-unsure nil))))
+                (t
+                 ;; Letters, each an option: -ne SCRIPT, -E, -i.
+                 (let ((letters (string-to-list (substring arg 1))))
+                   (while letters
+                     (let ((letter (pop letters)))
+                       (cond ((memq letter '(?n ?E ?r ?s ?u ?z ?a))) ; a: BSD's append mode
+                             ((memq letter '(?e ?l))
+                              ;; Takes a value: the rest of the word, or the next argument.
+                              (let ((value (if letters (apply #'string letters) (pop args))))
+                                (setq letters nil)
+                                (when (eq letter ?e) (push value scripts))))
+                             (t (throw 'lispm-shell-unsure nil))))))))))
+      (when (and (null scripts) positionals)
+        (push (car (last positionals)) scripts))
+      (and scripts (seq-every-p #'lispm-shell--sed-script-reads-p scripts)))))
+
+(defun lispm-shell--sed-script-reads-p (script)
+  "Non-nil if the sed SCRIPT only reads: no w or W command, no e command, no
+w or e flag on s.  Addresses, p, d, s, y, q, =, n, N, and the other
+commands that touch only the stream are read; what this cannot parse
+is not."
+  (let ((length (length script)) (i 0)
+        (digits '(?0 ?1 ?2 ?3 ?4 ?5 ?6 ?7 ?8 ?9)))
+    (cl-labels ((char () (and (< i length) (aref script i)))
+                (skip (chars) (while (and (char) (memq (char) chars)) (cl-incf i)))
+                (to-eol () (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))
+                (delimited (delim)
+                  ;; Past the text up to and including the unescaped DELIM.
+                  (let (done)
+                    (while (and (char) (not done))
+                      (cond ((eq (char) ?\\) (cl-incf i 2))
+                            ((eq (char) delim) (cl-incf i) (setq done t))
+                            (t (cl-incf i))))
+                    (unless done (throw 'lispm-shell-unsure nil))))
+                (address ()
+                  (cond ((null (char)) nil)
+                        ((memq (char) digits) (skip digits) t)
+                        ((eq (char) ?$) (cl-incf i) t)
+                        ((eq (char) ?/) (cl-incf i) (delimited ?/) t)
+                        ((eq (char) ?\\) (cl-incf i)
+                         (let ((delim (char))) (cl-incf i) (delimited delim)) t))))
+      (catch 'lispm-shell-unsure
+        (while (< i length)
+          (skip '(?\s ?\t ?\n ?\;))
+          (when (char)
+            ;; Addresses: one, or two apart by a comma, each maybe with ~N or +N.
+            (when (address)
+              (when (memq (char) '(?~ ?+)) (cl-incf i) (skip digits))
+              (when (eq (char) ?,)
+                (cl-incf i)
+                (skip '(?\s))
+                (unless (or (address) (and (memq (char) '(?~ ?+)) (progn (cl-incf i) t)))
+                  (throw 'lispm-shell-unsure nil))
+                (skip digits)))
+            (skip '(?\s))
+            (when (eq (char) ?!) (cl-incf i) (skip '(?\s)))
+            (let ((command (char)))
+              (unless command (throw 'lispm-shell-unsure nil))
+              (cl-incf i)
+              (pcase command
+                ((or ?p ?P ?d ?D ?= ?n ?N ?h ?H ?g ?G ?x ?z ?F ?{ ?}))
+                ((or ?q ?Q ?l) (skip (cons ?\s digits)))
+                (?s (let ((delim (char)))
+                      (unless delim (throw 'lispm-shell-unsure nil))
+                      (cl-incf i)
+                      (delimited delim)
+                      (delimited delim)
+                      ;; Flags: g, p, I, i, m, M, a number; never w or e.
+                      (while (and (char) (not (memq (char) '(?\; ?\n ?} ?\s))))
+                        (unless (or (memq (char) '(?g ?p ?I ?i ?m ?M)) (memq (char) digits))
+                          (throw 'lispm-shell-unsure nil))
+                        (cl-incf i))))
+                (?y (let ((delim (char)))
+                      (unless delim (throw 'lispm-shell-unsure nil))
+                      (cl-incf i)
+                      (delimited delim)
+                      (delimited delim)))
+                ;; Text to the end of the line: appended, inserted or read in,
+                ;; a label, a comment.
+                ((or ?a ?i ?c ?r ?R ?: ?#) (to-eol))
+                ((or ?b ?t ?T) (while (and (char) (not (memq (char) '(?\; ?\n ?})))) (cl-incf i)))
+                ;; w, W and e write a file or run a command; anything else is
+                ;; not known to read.
+                (_ (throw 'lispm-shell-unsure nil))))))
+        t))))
 
 (defun lispm-shell--positionals (args consuming)
   "The ARGS that are not options; CONSUMING are options that take the next ARG."

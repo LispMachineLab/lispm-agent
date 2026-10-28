@@ -2510,7 +2510,13 @@ default, where a command that may write asks.  Any doubt asks."
                          "git stash list" "git worktree list" "echo hi | wc -l" "ls && git status"
                          "head -20 f\ntail -5 f" "ls 2>/dev/null" "ls 2>&1" "wc -l < file"
                          "grep \">\" f" "grep -r \"a|b\" ." "echo '$(x)'" "echo ${HOME}" "ls *.{el,org}"
-                         "find . -name x" "fd pattern" "gh pr view 1" "gh api repos/o/r" "env"))
+                         "find . -name x" "fd pattern" "gh pr view 1" "gh api repos/o/r" "env"
+                         "sed -n '282,307p;409,443p' lisp/a.el; sed -n '15760,15848p' test/b.el; git status --short"
+                         "sed -n 10,20p f" "sed -ne '/^(defun/p' f" "sed 's/a/b/g' f" "sed -E 's|x|y|;2d' f"
+                         "sed -n '/start/,/end/p' f" "sed '$!N;P;D' f" "sed -n '1~2p' f" "sed 's/w/e/' f"
+                         "sed --expression='5q' f" "sed -n '/x/{p;q}' f" "zcat f.gz | grep -A18 x"
+                         "grep -n defun ../lispm-ui/p.el | head -65; sed -n '50,120p' ../lispm-ui/p.el"
+                         "tail -65 /tmp/t.log; grep -n 'FAILED\\|unexpected' /tmp/t.log"))
         (should (lispm-shell-read-only-p command))
         (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'read))
         (should (eq (lispm-tool-action agent shell `((command . ,command))) 'auto)))
@@ -2520,7 +2526,10 @@ default, where a command that may write asks.  Any doubt asks."
                          "ls >> out" "cat `x`" "ls $(x)" "echo \"$(x)\"" "cat <(ls)" "(ls)" "{ ls; }"
                          "FOO=1 ls" "/bin/ls" "ls # comment" "ls \"unterminated" "" "   "
                          "find . -delete" "find . -exec rm {} \;" "fd -x rm" "env rm x" "xargs rm"
-                         "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "gh pr merge 1" "gh pr view 1 --web"
+                         "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "sed -i '' s/a/b/ f" "sed -ni p f"
+                         "sed --in-place=.bak s/a/b/ f" "sed 's/a/b/w out' f" "sed -n '/x/w out' f"
+                         "sed 's/a/b/e' f" "sed -f script.sed f" "sed 'e rm f' f" "sed" "sed -n"
+                         "emacs -Q --batch --eval '(princ 1)'" "gh pr merge 1" "gh pr view 1 --web"
                          "gh api -X POST repos/o/r" "gh api repos/o/r -f a=b"))
         (should-not (lispm-shell-read-only-p command))
         (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'shell))
