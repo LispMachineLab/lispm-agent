@@ -91,11 +91,25 @@ Genera's did."
     (`(file ,file ,line) (if line
                              (lispm-tr "RET: visit %s at line %d" (abbreviate-file-name file) line)
                            (lispm-tr "RET: visit %s" (abbreviate-file-name file))))
+    (`(video ,file) (lispm-tr "RET: play %s" (abbreviate-file-name file)))
     (`(buffer ,name) (lispm-tr "RET: show buffer %s" name))
     (`(agent ,name) (lispm-tr "RET: inspect %s" name))
     (`(symbol ,symbol) (lispm-tr "RET: describe %s" symbol))
     (`(tool ,name) (lispm-tr "RET: go to the definition of the tool %s" name))
     (`(call ,_agent ,id) (lispm-tr "RET: show call %s in the transcript" id))))
+
+(defcustom lispm-play-video-function #'lispm-open-with-system
+  "How RET on a video in the chat plays it: a function of the file.
+By default the system opens it with the program it has for videos."
+  :type 'function
+  :group 'lispm)
+
+(defun lispm-open-with-system (file)
+  "Open FILE with the program the system has for it, outside Emacs."
+  (let ((file (expand-file-name file)))
+    (cond ((eq system-type 'darwin) (call-process "open" nil 0 nil file))
+          ((executable-find "xdg-open") (call-process "xdg-open" nil 0 nil file))
+          (t (browse-url-of-file file)))))
 
 (defun lispm-object-at (&optional pos)
   "The object presented at POS (default: point), or nil."
@@ -109,6 +123,7 @@ Genera's did."
      (when line
        (goto-char (point-min))
        (forward-line (1- line))))
+    (`(video ,file) (funcall lispm-play-video-function file))
     (`(buffer ,name)
      (pop-to-buffer (or (get-buffer name) (user-error "%s" (lispm-tr "No buffer named %s" name)))))
     (`(agent ,name) (lispm-inspect (lispm-get-agent name)))

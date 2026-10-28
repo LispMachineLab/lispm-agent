@@ -298,6 +298,12 @@ A tool with a schema of its own gets INPUT whole."
                 (lispm-tools--argument key type value opts))))
           (lispm-tool-params tool)))
 
+(cl-defstruct (lispm-tool-result (:constructor lispm-tool-result (text &optional images)))
+  "The result of a tool that shows something: TEXT, and IMAGES, a list of
+the image and video files the model sees with it, which the transcript
+links and the chat shows.  A tool returns one, or hands one to `done'."
+  text images)
+
 (defun lispm-tools--result-text (result)
   "RESULT of a tool as text for the model."
   (let ((text (cond ((stringp result) result)
@@ -383,6 +389,9 @@ runs."
          (result nil)
          (finish (lambda (value &optional errorp images)
                    (unless called
+                     (when (lispm-tool-result-p value)
+                       (setq images (append images (lispm-tool-result-images value))
+                             value (lispm-tool-result-text value)))
                      (let ((args (list (lispm-tools--result-text value) errorp images)))
                        (setq called t)
                        (if running
@@ -1291,20 +1300,36 @@ or cannot be written (see `lispm-tools--check-writable')."
 
 ;;;; Built-in tools: reading
 
+(defun lispm-tools--media (file)
+  "The result of reading FILE, an image or a video: said in a line, and shown."
+  (lispm-tool-result
+   (if (eq (lispm-media-kind file) 'video)
+       (format "[video %s]" (lispm-video-description file))
+     (format "[image %s%s]" (file-name-nondirectory file)
+             (if-let* (((display-images-p))
+                       (size (ignore-errors (image-size (create-image file) t))))
+                 (format ", %d×%d" (car size) (cdr size))
+               "")))
+   (list file)))
+
 (lispm-deftool read_file
     ((path string "File path, absolute or relative to your root directory, or a place [[file:PATH::LINE]].")
      (offset integer "First line to return, 1-based (default: the place's line, else 1)." :optional t)
      (limit integer "Maximum number of lines (default 2000)." :optional t))
-  "Read a text file; lines come prefixed with their numbers.
-If the file is open in Emacs, you get the buffer's current contents,
-unsaved edits included: what the user sees.  Other agents name places
-as org links, [[file:PATH::LINE]]: pass one as the path to read there."
+  "Read a file: a text file's lines come prefixed with their numbers;
+an image (png, jpg, gif, webp) you see; a video (mp4, mov, webm, mkv)
+you see as frames taken across it.  If a text file is open in Emacs,
+you get the buffer's current contents, unsaved edits included: what
+the user sees.  Other agents name places as org links,
+[[file:PATH::LINE]]: pass one as the path to read there."
   :permission read
   (let* ((file (lispm-tools--file path))
          (offset (or offset (cdr (lispm-tools-reference path))))
          (open (find-buffer-visiting file))
          (state (and open (lispm-tools--sync open))))
-    (cond ((memq state '(current conflict held))
+    (cond ((and (lispm-media-kind file) (file-readable-p file))
+           (lispm-tools--media file))
+          ((memq state '(current conflict held))
            ;; Out of step with its file, the buffer is what the user
            ;; sees, or what the runtime holds: say so.
            (concat (pcase state

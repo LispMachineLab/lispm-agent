@@ -38,6 +38,7 @@ implementation:
 | Long conversations        | clear old tool output; else memory, summary, new file; at idle   | ~lispm-compact~, ~lispm-compact-idle~                   |
 | Multi-agent collaboration | inboxes and delegation (an asynchronous tool)                    | [[file:lisp/lispm-collab.el][lispm-collab.el]]: ~ask_agent~, ~send_message~             |
 | Tools from elsewhere      | MCP servers' tools become LispM tools; images become files       | [[file:lisp/lispm-mcp.el][lispm-mcp.el]]: ~lispm-mcp-servers~                    |
+| Images and videos         | files linked in the transcript; a video as frames ffmpeg takes   | [[file:lisp/lispm-transcript.el][lispm-transcript.el]]: ~lispm-video-frames~     |
 | Lisp development          | definitions edited, evaluated and tested in the running image    | [[file:lisp/lispm-develop.el][lispm-develop.el]]: ~edit_definition~, ~ert_run~          |
 | Model APIs                | two API shapes behind one internal format                        | [[file:lisp/lispm-api.el][lispm-api.el]], [[file:lisp/lispm-openai.el][lispm-openai.el]], [[file:lisp/lispm-anthropic.el][lispm-anthropic.el]]   |
 
@@ -911,7 +912,7 @@ all. So the runtime executes the tool calls of any response that was not cut sho
 (~max_tokens~, ~refusal~), whatever its stop reason; a feature a server lacks, such as
 ~tool-errors~, is left out of its entry, and LispM falls back (failures marked in the text).
 
-* 10. MCP servers and images
+* 10. MCP servers, images and videos
 
 Tools need not be written in Lisp: the tools of any Model Context Protocol server become an
 agent's tools. LispM does not speak the protocol itself; it depends on mcp.el, which does, and
@@ -973,6 +974,26 @@ Only the latest ~lispm-context-images~ images are sent; older ones become a line
 batch at a time, so that the request prefix, and the cache bound to it, changes only once a
 batch. Chat Completions accepts images in user messages but not in tool messages, so there the
 images follow the tool messages in a user message of their own.
+
+The link is the whole mechanism, so it works wherever a link is. A user section holding one
+alone on a line (an org link, or a Markdown image ~![alt](file)~) sends that file as an image
+block after the text: the user attaches a file with ~C-c C-a~ or ~/attach~, by pasting an
+image (~yank-media~; one of a kind models do not take, TIFF from the macOS clipboard say, is
+made a PNG by sips or ffmpeg), or by dropping a file on the chat, and the chat inserts the link.
+~read_file~ on an image returns a ~lispm-tool-result~, text with the file, which any tool may
+return to show something: the result's section links the file, and the model sees it. A reply
+that links an image alone on a line shows it in the chat, where the link is: the agent showing
+something to the user. The chat shows a user's or a reply's media in place, a result's behind
+~TAB~, as before.
+
+*Videos.* Models take images, not videos, so a video (mp4, mov, webm, mkv) is a file linked the
+same way, and goes to the model as ~lispm-video-frames~ frames taken evenly across it by ffmpeg,
+at most ~lispm-video-frame-width~ wide, after a line saying its length and size (ffprobe); the
+frames are kept in ~lispm-directory~'s cache, named after the file, its size and its time, so
+a video costs ffmpeg once. Without ffmpeg the line says so. A video counts as one of the
+~lispm-context-images~, dropped with its frames. The chat shows a video by a frame from its
+middle, its name under it; ~RET~ plays it with the program the system has for videos
+(~lispm-play-video-function~). Emacs itself plays no video, and LispM does not pretend to.
 
 Computer use is then not something LispM implements: on macOS, Peekaboo is configured as a
 server, and an agent sees the screen through ~see~ and acts through ~click~, ~type~, ~press~,
