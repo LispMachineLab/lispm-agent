@@ -870,12 +870,26 @@ agent running inside Emacs."
            (lispm-agents-emacs-buffer-agent buffer))
        t))
 
-(defun lispm-agents-running-p (buffer)
-  "Return non-nil when BUFFER exists and still runs a live process.
-The session of an agent running inside Emacs runs while its buffer lives."
+(defun lispm-agents-alive-p (buffer)
+  "Return non-nil when BUFFER holds an agent that can still be talked to:
+a terminal whose process lives, or the live buffer of a session of an
+agent running inside Emacs.  An alive agent need not be doing anything,
+see `lispm-agents-running-p'."
   (if (and buffer (lispm-agents-emacs-buffer-agent buffer))
       (buffer-live-p buffer)
     (and buffer (lispm-agents-terminal-live-p buffer))))
+
+(defun lispm-agents-running-p (buffer)
+  "Return non-nil when the agent of BUFFER runs: a terminal whose process
+lives, whatever its program does, or an agent inside Emacs that works or
+waits for its user, see `lispm-agents-buffer-status'.  The buffer of an
+agent inside Emacs lives on while the agent idles between turns: that
+agent is alive, see `lispm-agents-alive-p', not running."
+  (and (lispm-agents-alive-p buffer)
+       (or (not (lispm-agents-emacs-buffer-agent buffer))
+           (memq (plist-get (lispm-agents-buffer-status buffer) :state)
+                 '(working blocked error)))
+       t))
 
 (defvar-local lispm-agents-buffer-session-id nil
   "Id of the session this agent terminal runs, when known.")
@@ -963,7 +977,7 @@ from the transcripts: its session is the earliest one of its agent that
 began in the terminal's directory at or after its launch and that no other
 terminal runs.  Terminals claim in launch order, so two started in one
 directory take the sessions in the order they began."
-  (let* ((running (lispm-agents-running-buffers))
+  (let* ((running (lispm-agents-live-buffers))
          (claimed (delq nil (mapcar (lambda (buffer)
                                       (buffer-local-value 'lispm-agents-buffer-session-id buffer))
                                     running)))
@@ -1032,7 +1046,7 @@ once its first prompt is recorded, and a renamed session follows its new name."
   (let ((titles (make-hash-table :test #'equal)))
     (dolist (session sessions)
       (puthash (plist-get session :id) (plist-get session :title) titles))
-    (dolist (buffer (lispm-agents-running-buffers))
+    (dolist (buffer (lispm-agents-live-buffers))
       (with-current-buffer buffer
         (when-let* ((title (and lispm-agents-buffer-session-id
                                 (gethash lispm-agents-buffer-session-id titles))))
@@ -1150,13 +1164,11 @@ DIRECTORY defaults to the project root of the main window's buffer."
                                          (file-name-nondirectory (directory-file-name directory)))))))))
 
 (defun lispm-agents--pick-terminal ()
-  "Return the agent terminal to send to, preferring the current project.
-Ask when several running agent terminals qualify."
+  "Return the agent buffer to send to, preferring the current project:
+one whose agent can be talked to, idle or not, see `lispm-agents-alive-p'.
+Ask when several qualify."
   (let* ((root (lispm-agents-project-directory))
-         (running (seq-filter (lambda (buffer)
-                                (and (lispm-agents-buffer-p buffer)
-                                     (lispm-agents-running-p buffer)))
-                              (buffer-list)))
+         (running (lispm-agents-live-buffers))
          (local (seq-filter (lambda (buffer)
                               (file-in-directory-p
                                (buffer-local-value 'default-directory buffer) root))
@@ -1290,7 +1302,8 @@ makes, else its :file."
     (plist-get session :file)))
 
 (defun lispm-agents--session-running-p (session)
-  "Return non-nil when SESSION runs in a live agent terminal."
+  "Return non-nil when SESSION is held by a live agent buffer, its agent
+running or idle, see `lispm-agents-session-buffer'."
   (lispm-agents-session-buffer (plist-get session :id)))
 
 (defun lispm-agents-rename-session (session)
@@ -1306,6 +1319,17 @@ makes, else its :file."
   "Archive SESSION, or unarchive it when it is archived."
   (lispm-agents--set-archived session (not (lispm-agents-archived-p session)))
   (run-hooks 'lispm-agents-sessions-changed-hook))
+
+(defun lispm-agents-user-wrote (agent id)
+  "Say the user wrote to the session ID of AGENT.
+A session the user writes to again is in use, so an archived one leaves
+the archive and lists of the sessions show it again; one merely looked
+at stays archived.  Return non-nil when the session left the archive."
+  (let ((session (list :agent agent :id id)))
+    (when (and id (lispm-agents-archived-p session))
+      (lispm-agents--set-archived session nil)
+      (run-hooks 'lispm-agents-sessions-changed-hook)
+      t)))
 
 (defun lispm-agents-delete-session (session)
   "Delete SESSION after confirmation.
@@ -1559,11 +1583,17 @@ first."
                               buffers))
                 '(blocked error))))
 
-(defun lispm-agents-running-buffers ()
-  "Return the live agent terminals, most recently used first."
+(defun lispm-agents-live-buffers ()
+  "Return the agent buffers whose agents can be talked to, see
+`lispm-agents-alive-p', most recently used first."
   (seq-filter (lambda (buffer)
-                (and (lispm-agents-buffer-p buffer) (lispm-agents-running-p buffer)))
+                (and (lispm-agents-buffer-p buffer) (lispm-agents-alive-p buffer)))
               (buffer-list)))
+
+(defun lispm-agents-running-buffers ()
+  "Return the agent buffers whose agents run, see `lispm-agents-running-p',
+most recently used first."
+  (seq-filter #'lispm-agents-running-p (lispm-agents-live-buffers)))
 
 (defun lispm-agents-running-ids (buffers)
   "Return the ids of the sessions agent terminal BUFFERS run, where known.
@@ -1574,10 +1604,11 @@ about a minute of each other share their leading characters."
                     buffers)))
 
 (defun lispm-agents-session-buffer (id)
-  "Return the running agent terminal of the session with ID, or nil."
+  "Return the live agent buffer of the session with ID, or nil: the one
+its agent is talked to in, running or idle, see `lispm-agents-alive-p'."
   (seq-find (lambda (buffer)
               (equal (buffer-local-value 'lispm-agents-buffer-session-id buffer) id))
-            (lispm-agents-running-buffers)))
+            (lispm-agents-live-buffers)))
 
 (defun lispm-agents-image-icon (file &rest args)
   "Return FILE, an image, as a one-line icon of an agent.
