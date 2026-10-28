@@ -990,8 +990,9 @@ See `lispm-asked-condition'."
 
 (defun lispm-chat-yes-always ()
   "Approve the call, and every later call of its tool by this agent.
-For a tool that runs any Lisp, or commands that reach Emacs, only this
-exact call (see `lispm-tools-allowance')."
+For a tool that runs any Lisp, or commands that can reach Emacs, which
+is any command on this machine outside the sandbox, only this exact
+call (see `lispm-tools-allowance')."
   (interactive)
   (lispm-allow lispm-chat-agent (lispm-chat--waiting))
   (goto-char (point-max)))
