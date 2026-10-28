@@ -50,12 +50,18 @@
 ;;; Code:
 
 (require 'lispm-core)
+(require 'lispm-agents)
 (require 'lispm-tools)
 (require 'lispm-runtime)
 (require 'lispm-ground)
 
 (declare-function lispm-show "lispm" (agent))
 (declare-function lispm-chat-transcript "lispm-chat" (agent &optional argument))
+(declare-function lispm-agents-roster-buffer "lispm-agents-roster" (key))
+(declare-function lispm-agents-roster-waits "lispm-agents-roster" (buffer))
+(declare-function lispm-agents-bridge-mailbox "lispm-agents-bridge" (terminal))
+(declare-function lispm-agents-bridge-observe-work "lispm-agents-bridge" (terminal work))
+(declare-function lispm-agents-work-input-summary "lispm-agents" (input))
 
 ;;;; Presentations
 
@@ -298,20 +304,39 @@ the reply defines."
                 (t ""))
           (lispm--oneline (or (plist-get entry :text) "") 70)))
 
+(defun lispm-inspect-data (agent)
+  "The sources the inspector shares with data readers, for AGENT.
+Return a plist with :pending, an alist of call id to call in transcript
+order; :entry and :inbox, the input being handled and queued inputs;
+:waiting-on and :waited-on-by, agents on either side of a delegation;
+and :journal, the turn to snapshot alist.  These are the agent's own
+objects: readers must not change them.  No transcript or diary is read."
+  (let (pending)
+    (maphash (lambda (id call) (push (cons id call) pending))
+             (lispm-agent-pending agent))
+    (list :pending (sort pending (lambda (a b)
+                                  (< (or (ignore-errors (marker-position (plist-get (cdr a) :marker))) 0)
+                                     (or (ignore-errors (marker-position (plist-get (cdr b) :marker))) 0))))
+          :entry (lispm-agent-entry agent)
+          :inbox (lispm-agent-inbox agent)
+          :waiting-on (delete-dups (copy-sequence (lispm-agent-waiting-on agent)))
+          :waited-on-by (seq-filter (lambda (other) (memq agent (lispm-agent-waiting-on other)))
+                                    (lispm-agents))
+          :journal (lispm-agent-journal agent))))
+
 (defun lispm-inspect-sections (agent)
   "What the inspector shows of AGENT: a list of (TITLE . LINES).
 LINES are strings, whose objects are presented."
   (let* ((buffer (lispm-agent-buffer agent))
          (file (and (buffer-live-p buffer) (buffer-file-name buffer)))
          (condition (lispm-agent-condition agent))
-         (pending (let (calls)
-                    (maphash (lambda (id call) (push (cons id call) calls))
-                             (lispm-agent-pending agent))
-                    (sort calls (lambda (a b)
-                                  (< (or (ignore-errors (marker-position (plist-get (cdr a) :marker))) 0)
-                                     (or (ignore-errors (marker-position (plist-get (cdr b) :marker))) 0))))))
-         (waited-by (seq-filter (lambda (other) (memq agent (lispm-agent-waiting-on other)))
-                                (lispm-agents)))
+         (data (lispm-inspect-data agent))
+         (pending (plist-get data :pending))
+         (entry (plist-get data :entry))
+         (inbox (plist-get data :inbox))
+         (waiting-on (plist-get data :waiting-on))
+         (waited-by (plist-get data :waited-on-by))
+         (journal (plist-get data :journal))
          (usage (lispm-agent-usage agent)))
     (delq nil
           (list
@@ -381,26 +406,25 @@ LINES are strings, whose objects are presented."
                                                                 ""))
                                                       'face 'shadow))))
                               pending)))
-           (and (or (lispm-agent-entry agent) (lispm-agent-inbox agent))
+           (and (or entry inbox)
                 (cons (lispm-tr "Inbox")
-                      (append (and (lispm-agent-entry agent)
+                      (append (and entry
                                    (list (lispm-inspect--line (lispm-tr "handling")
-                                                              (lispm-inspect--entry (lispm-agent-entry agent)))))
+                                                              (lispm-inspect--entry entry))))
                               (mapcar (lambda (entry) (lispm-inspect--line (lispm-tr "queued") (lispm-inspect--entry entry)))
-                                      (lispm-agent-inbox agent)))))
-           (and (or (lispm-agent-waiting-on agent) waited-by)
+                                      inbox))))
+           (and (or waiting-on waited-by)
                 (cons (lispm-tr "Delegation")
                       (delq nil
-                            (list (and (lispm-agent-waiting-on agent)
+                            (list (and waiting-on
                                        (lispm-inspect--line (lispm-tr "waits on")
                                                             (mapconcat #'lispm-inspect--agent-name
-                                                                       (delete-dups (copy-sequence
-                                                                                     (lispm-agent-waiting-on agent)))
+                                                                       waiting-on
                                                                        ", ")))
                                   (and waited-by
                                        (lispm-inspect--line (lispm-tr "waited on by")
                                                             (mapconcat #'lispm-inspect--agent-name waited-by ", ")))))))
-           (and (seq-some #'cdr (lispm-agent-journal agent))
+           (and (seq-some #'cdr journal)
                 (cons (lispm-tr "Journal")
                       (mapcar (pcase-lambda (`(,turn . ,snapshots))
                                 (lispm-inspect--line
@@ -412,7 +436,7 @@ LINES are strings, whose objects are presented."
                                                   (lispm-present (plist-get (cdr s) :name)
                                                                  (list 'buffer (plist-get (cdr s) :name))))))
                                             snapshots ", ")))
-                              (seq-filter #'cdr (lispm-agent-journal agent)))))
+                              (seq-filter #'cdr journal))))
            (and (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
                 (cons (lispm-tr "Extensions")
                       (delq nil
@@ -425,6 +449,125 @@ LINES are strings, whose objects are presented."
                                        (lispm-inspect--line (lispm-tr "triggers")
                                                             (mapconcat (lambda (trigger) (plist-get trigger :name))
                                                                        (lispm-agent-triggers agent) ", ")))))))))))
+
+(defun lispm-inspect--copy-data (data)
+  "Copy plain DATA, including the strings in its lists and vectors.
+Buffers, numbers and symbols keep their identities.  Sources shared
+with the runtime can then be returned without exposing mutable text."
+  (cond ((stringp data) (substring-no-properties data))
+        ((consp data) (cons (lispm-inspect--copy-data (car data))
+                           (lispm-inspect--copy-data (cdr data))))
+        ((vectorp data) (apply #'vector (mapcar #'lispm-inspect--copy-data data)))
+        (t data)))
+
+(defconst lispm-inspect--recent-call-limit 20
+  "Maximum number of completed calls a roster inspector returns.")
+
+(defun lispm-inspect--call-data (id call)
+  "The public work record of the pending CALL with ID.
+The summary is of the input it awaits approval for, when it asks on
+another call's behalf, as in `lispm-inspect-sections'."
+  (list :id id :name (plist-get call :name)
+        :input-summary (lispm-agents-work-input-summary (plist-get (lispm-asked call) :input))
+        :status (plist-get call :status)))
+
+(defun lispm-inspect--recent-calls (agent)
+  "AGENT's latest completed calls of this turn, in transcript order.
+Read only the current turn's transcript, when an inspector asks for
+it, and return at most `lispm-inspect--recent-call-limit' records.
+The runtime marks the turn's start: later events and an unsent draft
+are not new turns.  Nil when that exact boundary is unknown, as for
+a turn recovered from a session written without it."
+  (when-let* (((> (lispm-agent-turn agent) 0))
+              (buffer (lispm-agent-buffer agent))
+              ((buffer-live-p buffer))
+              (turn-start (buffer-local-value 'lispm--turn-start buffer))
+              ((eql (car turn-start) (lispm-agent-turn agent)))
+              (marker (cdr turn-start))
+              ((and (markerp marker) (eq (marker-buffer marker) buffer))))
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (let (calls)
+            (dolist (section (lispm-transcript-sections marker))
+              (when (and (eq (plist-get section :kind) 'assistant)
+                         (not (plist-get section :ignore)))
+                (dolist (part (lispm-transcript-parts section))
+                  (when (and (eq (plist-get part :kind) 'tool)
+                             (not (gethash (plist-get part :id) (lispm-agent-pending agent))))
+                    (push (list :id (plist-get part :id) :name (plist-get part :name)
+                                :input-summary (lispm-agents-work-input-summary (plist-get part :input))
+                                :status (pcase (plist-get part :state)
+                                          ("DONE" 'done) ("FAILED" 'failed) ("DENIED" 'denied)))
+                          calls)))))
+            (nreverse (seq-take calls lispm-inspect--recent-call-limit))))))))
+
+(defun lispm-inspect--mailbox-entry (entry stored state)
+  "The public fields of mailbox ENTRY, supplemented by STORED, in STATE.
+STORED is its persisted inbox record, when known.  Runtime callbacks
+and transcript positions never form part of the returned record."
+  (when entry
+    (let ((record (list :state state)))
+      (dolist (field '(:id :agent :session :from :to :event :reply-to :request-id :queued :text))
+        (setq record (plist-put record field (or (plist-get entry field) (plist-get stored field)))))
+      record)))
+
+(defun lispm-inspect--mailbox (agent data)
+  "The handling and queued entries of AGENT from its inspector DATA.
+Read the project's inbox only here, to fill metadata unknown in
+memory.  A running entry's text is held in memory, not in that file."
+  (let* ((entry (plist-get data :entry))
+         (inbox (plist-get data :inbox))
+         (stored (and (or entry inbox)
+                      (condition-case nil
+                          (lispm-inbox-entries (lispm-agent-root agent))
+                        (file-error nil)))))
+    (cl-flet ((record (entry state)
+                 (lispm-inspect--mailbox-entry
+                  entry (seq-find (lambda (other)
+                                    (equal (plist-get entry :id) (plist-get other :id)))
+                                  stored)
+                  state)))
+      (list :handling (record entry 'running)
+            :queued (mapcar (lambda (entry) (record entry 'queued)) inbox)))))
+
+(defun lispm-agents-roster-details (key)
+  "Return the lazy work and mailbox snapshot of the agent named by KEY.
+KEY is (KIND SESSION-ID), as `lispm-agents-roster' returns.  Return
+nil for an absent or archived session.  :work holds :turn,
+:pending-calls, :recent-calls (at most twenty, completed in this turn)
+and :files, the files in this turn's in-memory journal.  Call records
+have :id, :name, :input-summary and :status.  :mailbox holds :handling
+and :queued entries, with their known sender, reply-to, time and text.
+:waits-on, :waited-on-by and :request-ids describe delegation edges.
+Terminal kinds may supply :work-details in `lispm-agents-define';
+unknown work or a provider-owned mailbox is nil.  Unlike the cheap
+roster this function may read one agent's current transcript and inbox.
+The returned lists and strings belong to the caller."
+  (require 'lispm-agents-roster)
+  (when-let* ((buffer (lispm-agents-roster-buffer key)))
+    (let* ((agent (buffer-local-value 'lispm-session-agent buffer))
+           (data (and agent (lispm-inspect-data agent)))
+           (work (if agent
+                     (list :turn (lispm-agent-turn agent)
+                           :pending-calls (mapcar (pcase-lambda (`(,id . ,call))
+                                                   (lispm-inspect--call-data id call))
+                                                 (plist-get data :pending))
+                           :recent-calls (lispm-inspect--recent-calls agent)
+                           :files (delete-dups
+                                   (delq nil (mapcar (lambda (snapshot) (plist-get (cdr snapshot) :file))
+                                                      (cdr (assq (lispm-agent-turn agent)
+                                                                 (plist-get data :journal)))))))
+                   (when-let* ((details (plist-get (lispm-agents-props (car key)) :work-details)))
+                     (let ((work (funcall details buffer)))
+                       (lispm-agents-bridge-observe-work buffer work)
+                       work))))
+           (mailbox (if agent (lispm-inspect--mailbox agent data)
+                      (lispm-agents-bridge-mailbox buffer))))
+      (lispm-inspect--copy-data
+       (append (list :key key :work work :mailbox mailbox)
+               (lispm-agents-roster-waits buffer))))))
 
 (defun lispm-inspect-text (agent)
   "What the inspector shows of AGENT, as plain text, in English: what an

@@ -251,6 +251,60 @@ else its rollout's end is read."
       ('working nil)
       (_ (lispm-agents-codex-turn-ended-p (lispm-agents-read-json-tail file))))))
 
+(defun lispm-agents-codex--work (objects)
+  "Return work recorded in the latest turn of Codex tail OBJECTS.
+A turn boundary must be present to attribute calls.  The :turn-ended
+flag also serves mailbox settlement.  Calls have :id,
+:name, :input-summary and :status, `running' until their output is
+recorded, then `done'.  Output does not reliably identify failure or
+permission state; neither it nor call arguments are a journal of files."
+  (let (turn turn-time seen calls)
+    (dolist (object objects)
+      (let* ((type (plist-get object :type))
+             (payload (plist-get object :payload))
+             (kind (plist-get payload :type)))
+        (cond
+         ((and (equal type "event_msg")
+               (member kind '("task_started" "turn_started" "user_message")))
+          (setq turn (plist-get payload :turn_id)
+                turn-time (when-let* ((stamp (plist-get object :timestamp)))
+                            (ignore-errors (float-time (parse-iso8601-time-string stamp))))
+                seen t calls nil))
+         ((and (equal type "turn_context")
+               (or (not seen) (not (equal turn (plist-get payload :turn_id)))))
+          (setq turn (plist-get payload :turn_id)
+                turn-time (when-let* ((stamp (plist-get object :timestamp)))
+                            (ignore-errors (float-time (parse-iso8601-time-string stamp))))
+                seen t calls nil)))
+        (when (and seen (equal type "response_item"))
+          (pcase kind
+            ((or "function_call" "custom_tool_call")
+             (push (list :id (plist-get payload :call_id) :name (plist-get payload :name)
+                         :input-summary (lispm-agents-work-input-summary
+                                         (or (plist-get payload :arguments) (plist-get payload :input)))
+                         :status 'running)
+                   calls))
+            ((or "function_call_output" "custom_tool_call_output")
+             (when-let* ((call (seq-find (lambda (call)
+                                          (equal (plist-get call :id) (plist-get payload :call_id)))
+                                        calls)))
+               (setf (plist-get call :status) 'done)))))))
+    (list :turn turn :turn-time turn-time
+          :turn-ended (and (lispm-agents-codex-turn-ended-p objects) t)
+          :pending-calls (seq-filter (lambda (call) (eq (plist-get call :status) 'running)) calls)
+          :recent-calls (seq-take (seq-remove (lambda (call)
+                                              (eq (plist-get call :status) 'running))
+                                            calls)
+                                  20)
+          :files nil)))
+
+(defun lispm-agents-codex--work-details (terminal)
+  "Return the work known from the bounded rollout tail of TERMINAL.
+The tail is cached by file size and modification time.  A turn boundary
+outside it, permission state and files touched are unknown."
+  (when-let* ((file (lispm-agents-codex--terminal-rollout terminal)))
+    (lispm-agents-cached-work file #'lispm-agents-codex--work)))
+
 ;;;; Emacs's state, over MCP
 
 (defconst lispm-agents-codex-token-variable "LISPM_EMACS_MCP_TOKEN"
@@ -316,7 +370,8 @@ exclusion replaces any `shell_environment_policy.exclude' of config.toml."
    :chats (list lispm-agents-codex-chats-directory)
    :resume-arguments (lambda (id) (list "resume" id))
    :context #'lispm-agents-codex--context
-   :ready #'lispm-agents-codex--ready-p))
+   :ready #'lispm-agents-codex--ready-p
+   :work-details #'lispm-agents-codex--work-details))
 
 (provide 'lispm-agents-codex)
 ;;; lispm-agents-codex.el ends here

@@ -266,6 +266,7 @@
   ("%s is idle" . "%sは待機中です")
   ("λ %s wants to run %s: answer in %s" . "λ %sが%sを実行しようとしています：%sで答えてください")
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %sが%sを実行しようとしています：%sでC-c C-yを押して確認してください")
+  ("Approve these calls for %s: %s? " . "%s の次の呼び出しを承認しますか: %s？ ")
   ("No call awaits approval" . "承認待ちの呼び出しはありません")
   ("%s wants to run %s" . "%sが%sを実行しようとしています")
   (("answer" . "yes") . "はい")

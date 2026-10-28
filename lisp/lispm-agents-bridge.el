@@ -88,8 +88,14 @@ keeping a LispM agent's own memory and tasks.")
 (put 'lispm-agents-bridge--agent 'permanent-local t)
 
 (defvar-local lispm-agents-bridge--queue nil
-  "Messages waiting for the agent of this terminal to be free, oldest first.")
+  "Messages waiting for the agent of this terminal to be free, oldest first.
+Each is a plist with :id, :from, :to, :reply-to, :request-id, :queued,
+:text and :delivery-text, the text as the terminal receives it.")
 (put 'lispm-agents-bridge--queue 'permanent-local t)
+
+(defvar-local lispm-agents-bridge--handling nil
+  "Message last given to this terminal, until its turn is known to have ended.")
+(put 'lispm-agents-bridge--handling 'permanent-local t)
 
 (defvar-local lispm-agents-bridge--given nil
   "When the agent of this terminal was last given a message, as a float
@@ -178,7 +184,90 @@ it was given, or has had `lispm-agents-bridge-settle-time' to be."
         (progn (when given
                  (with-current-buffer terminal (setq lispm-agents-bridge--given nil)))
                nil)
+      ;; Seeing work after delivery, and then readiness, settles that
+      ;; message even without a background session reader.
+      (when (and (null given) (buffer-local-value 'lispm-agents-bridge--handling terminal))
+        (with-current-buffer terminal (setq lispm-agents-bridge--handling nil))
+        (lispm-agents-roster-notify terminal '(mailbox)))
       (or (null given) (> (- (float-time) given) lispm-agents-bridge-settle-time)))))
+
+(defun lispm-agents-bridge-mailbox-summary (terminal)
+  "Return the known mailbox counts of TERMINAL without copying its texts.
+The result has :handling, non-nil while a delivered message's turn has
+not been seen to end, and :queued, the number waiting.  A program with
+:deliver owns its queue, so both fields are nil.  No transcript is read."
+  (unless (lispm-agents-bridge--prop terminal :deliver)
+    (list :handling (and (buffer-local-value 'lispm-agents-bridge--handling terminal) t)
+          :queued (length (buffer-local-value 'lispm-agents-bridge--queue terminal)))))
+
+(defun lispm-agents-bridge-mailbox (terminal)
+  "Return the known mailbox of TERMINAL, or nil for a program's own queue.
+The result has :handling, the entry whose turn has not been seen to end,
+and :queued, entries oldest first.  Entries have :id, :from, :to,
+:reply-to, :request-id, :queued (float seconds) and :text.  This only
+copies memory; it neither reads a transcript nor asks whether the
+terminal is ready.  A :deliver program owns its mailbox, which is unknown."
+  (unless (lispm-agents-bridge--prop terminal :deliver)
+    (let ((public (lambda (entry)
+                    (when entry
+                      (let ((copy (copy-tree entry)))
+                        (cl-remf copy :delivery-text)
+                        (cl-remf copy :delivered)
+                        copy)))))
+      (list :handling (funcall public (buffer-local-value 'lispm-agents-bridge--handling terminal))
+            :queued (mapcar public (buffer-local-value 'lispm-agents-bridge--queue terminal))))))
+
+(defun lispm-agents-bridge--message-change (terminal entry type)
+  "Report the message ENTRY of TERMINAL as TYPE to roster observers."
+  (lispm-agents-roster-notify
+   terminal '(mailbox)
+   (list :type type :id (plist-get entry :id)
+         :from (plist-get entry :from) :to (plist-get entry :to)
+         :request-id (plist-get entry :request-id))))
+
+(defun lispm-agents-bridge--settle (terminal)
+  "Forget TERMINAL's handling entry when its reader knows its turn ended.
+A transcript older than delivery cannot say that the message was handled."
+  (when-let* ((entry (buffer-local-value 'lispm-agents-bridge--handling terminal))
+              (kind (buffer-local-value 'lispm-agents-buffer-agent terminal))
+              (id (buffer-local-value 'lispm-agents-buffer-session-id terminal))
+              (session (lispm-agents-known-session kind id))
+              (time (plist-get session :time))
+              ((numberp time))
+              (delivered (plist-get entry :delivered))
+              ((numberp delivered))
+              ((> time delivered))
+              ((plist-get session :turn-ended)))
+    (with-current-buffer terminal
+      (setq lispm-agents-bridge--handling nil))
+    (lispm-agents-roster-notify terminal '(mailbox))))
+
+(defun lispm-agents-bridge-observe-work (terminal work)
+  "Settle TERMINAL's handling message when WORK records its completed turn.
+WORK is the bounded, cached work a provider read lazily or after terminal
+output.  An older transcript cannot settle a newly delivered message.
+The turn's own time must follow delivery, or the bridge must have
+observed work since delivery.  A metadata write alone proves neither."
+  (when-let* ((entry (buffer-local-value 'lispm-agents-bridge--handling terminal))
+              (delivered (plist-get entry :delivered))
+              ((numberp delivered))
+              (time (plist-get work :time))
+              ((numberp time))
+              ((> time delivered))
+              ((or (when-let* ((turn-time (plist-get work :turn-time)))
+                     (>= turn-time delivered))
+                   (null (buffer-local-value 'lispm-agents-bridge--given terminal))))
+              ((plist-get work :turn-ended)))
+    (with-current-buffer terminal (setq lispm-agents-bridge--handling nil))
+    (lispm-agents-roster-notify terminal '(mailbox))))
+
+(defun lispm-agents-bridge-observe (terminal)
+  "Observe TERMINAL's mailbox after actual output, without a polling timer.
+Only a terminal with a handling entry reads work, through its provider's
+bounded cache.  Roster snapshots never call this function."
+  (when (buffer-local-value 'lispm-agents-bridge--handling terminal)
+    (when-let* ((details (lispm-agents-bridge--prop terminal :work-details)))
+      (lispm-agents-bridge-observe-work terminal (funcall details terminal)))))
 
 (defun lispm-agents-bridge-flush ()
   "Give each agent free for one the first message waiting for it.
@@ -192,8 +281,12 @@ Look again later while messages wait."
         (when (with-demoted-errors "lispm-agents-bridge: %S"
                 (lispm-agents-bridge--free-p terminal))
           (with-current-buffer terminal
-            (setq lispm-agents-bridge--given (float-time))
-            (lispm-agents-terminal-submit terminal (pop lispm-agents-bridge--queue))))
+            (let ((entry (pop lispm-agents-bridge--queue)))
+              (setq lispm-agents-bridge--given (float-time)
+                    lispm-agents-bridge--handling
+                    (plist-put entry :delivered lispm-agents-bridge--given))
+              (lispm-agents-terminal-submit terminal (plist-get entry :delivery-text))
+              (lispm-agents-bridge--message-change terminal entry 'message-delivered))))
         (when (buffer-local-value 'lispm-agents-bridge--queue terminal)
           (setq waiting t))))
     (when waiting
@@ -204,25 +297,44 @@ Look again later while messages wait."
   "Look at once whether agents with messages waiting are free: a session
 reader has read the transcripts anew, which may say so.
 This is on `lispm-agents-sessions-arrived-hook'."
+  (dolist (terminal (lispm-agents-bridge-terminals))
+    (lispm-agents-bridge--settle terminal))
   (when lispm-agents-bridge--timer
     (cancel-timer lispm-agents-bridge--timer)
     (setq lispm-agents-bridge--timer (run-at-time 0 nil #'lispm-agents-bridge-flush))))
 
-(defun lispm-agents-bridge-deliver (terminal text)
-  "Put TEXT to the agent of TERMINAL as its user's next message, once it is
-free for it.  Return non-nil if it was given TEXT at once.  An error if
-the agent has ended, or takes no messages."
-  (let ((name (lispm-agents-bridge-name terminal)))
+(defun lispm-agents-bridge-deliver (terminal text &optional metadata)
+  "Put TEXT to the agent of TERMINAL as its user's next message, once free.
+METADATA, else `lispm-collab-delivery-metadata', preserves the message's
+:id, :from, :to, :reply-to, :request-id, :queued and original :text.
+Unknown fields are nil; a missing id or queued time is assigned here.
+Return non-nil if TEXT was given at once.  An error if the agent has
+ended, or takes no messages."
+  (let* ((name (lispm-agents-bridge-name terminal))
+         (metadata (or metadata lispm-collab-delivery-metadata))
+         (entry (list :id (or (plist-get metadata :id) (lispm-agents-uuid))
+                      :from (plist-get metadata :from)
+                      :to (or (plist-get metadata :to) name)
+                      :reply-to (plist-get metadata :reply-to)
+                      :request-id (or (plist-get metadata :request-id)
+                                      (plist-get metadata :reply-to))
+                      :queued (or (plist-get metadata :queued) (float-time))
+                      :text (or (plist-get metadata :text) text)
+                      :delivery-text text)))
     (unless (lispm-agents-terminal-live-p terminal)
       (error "%s has ended" name))
     (unless (lispm-agents-bridge--takes-messages-p terminal)
       (error "%s takes no messages: LispM cannot tell when it waits for one" name))
     (if-let* ((deliver (lispm-agents-bridge--prop terminal :deliver)))
-        (funcall deliver terminal text)
+        (let ((given (funcall deliver terminal text)))
+          (lispm-agents-bridge--message-change
+           terminal entry (if given 'message-delivered 'message-queued))
+          given)
       (with-current-buffer terminal
-        (setq lispm-agents-bridge--queue (append lispm-agents-bridge--queue (list text))))
+        (setq lispm-agents-bridge--queue (append lispm-agents-bridge--queue (list entry))))
+      (lispm-agents-bridge--message-change terminal entry 'message-queued)
       (lispm-agents-bridge-flush)
-      (not (memq text (buffer-local-value 'lispm-agents-bridge--queue terminal))))))
+      (not (memq entry (buffer-local-value 'lispm-agents-bridge--queue terminal))))))
 
 (defun lispm-agents-bridge--state (terminal)
   "What the agent of TERMINAL is doing, as list_agents says it."

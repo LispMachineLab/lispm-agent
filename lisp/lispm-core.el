@@ -42,6 +42,8 @@
 (require 'lispm-i18n)
 (require 'lispm-exec)
 
+(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
+
 (defgroup lispm nil
   "An Emacs-native agent runtime."
   :group 'tools
@@ -464,11 +466,15 @@ conversation (see `lispm-character-agent')."
     (lispm--apply-role agent role)
     (setq lispm--agents (append lispm--agents
                                 (list (cons (lispm-agent-name agent) agent))))
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify agent '(agents)))
     agent))
 
 (defun lispm-forget-agent (agent)
   "Remove AGENT from the live agents."
-  (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents)))
+  (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents))
+  (when (fboundp 'lispm-agents-roster-notify)
+    (lispm-agents-roster-notify agent '(agents))))
 
 (defun lispm-register-agent (name &rest props)
   "Declare the standing agent NAME and return it.
@@ -489,6 +495,8 @@ define a role NAME.  Redeclaring a live agent keeps its runtime state."
           (lispm-agent-standing agent) t
           (lispm-agent-system agent) (and (plist-get props :system) t))
     (lispm--apply-role agent role)
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify agent '(root)))
     (run-hook-with-args 'lispm-agent-declared-functions agent)
     agent))
 

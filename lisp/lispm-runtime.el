@@ -62,6 +62,10 @@
 (require 'lispm-journal)
 
 (declare-function lispm-git-commit "lispm-memory" (agent message))
+(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
+(declare-function lispm-agents-roster--named-key "lispm-agents-roster" (name))
+
+(defvar lispm-agents-roster-change-functions)
 
 (defcustom lispm-save-sessions t
   "Whether to save session files at the end of every turn."
@@ -166,6 +170,13 @@ or the agent stopped, gives the handover up.")
 
 (defvar-local lispm--live nil
   "Markers (START . END) of the response being streamed in, or nil.")
+
+(defvar-local lispm--turn-start nil
+  "The turn begun in this buffer and its input heading: (TURN . MARKER).
+The marker records the exact boundary when a turn starts, so later
+events or a draft for the next turn cannot move the work inspector's
+boundary.  A resumed turn has a nil marker: its exact boundary was
+not recorded, and must not be guessed from intervening events.")
 
 (defvar-local lispm--tools nil
   "Schemas of the tools the session in this buffer offers the model.
@@ -371,6 +382,8 @@ opened again, after Emacs stopped or by hand, is bounded alike."
 AGENT's session records it (#+lispm_parent:), so that lists of the
 sessions show AGENT's under PARENT's, see `lispm-sessions'."
   (setf (lispm-agent-parent agent) parent)
+  (when (fboundp 'lispm-agents-roster-notify)
+    (lispm-agents-roster-notify agent '(parent)))
   (when (buffer-live-p (lispm-agent-buffer agent))
     (with-current-buffer (lispm-agent-buffer agent)
       (lispm--set-keyword "parent" parent))
@@ -809,12 +822,26 @@ the next input."
 
 ;;;; Turns
 
+(defun lispm--roster-entry-relations (agent entry)
+  "Report the request-id relation of AGENT's mailbox ENTRY changing.
+The sender's request ids change with the recipient's mailbox.  When
+its key is unknown, compare relations globally rather than inventing
+an endpoint.  Ordinary messages without a request id need no scan."
+  (when (and (or (plist-get entry :request-id) (plist-get entry :reply-to))
+             (bound-and-true-p lispm-agents-roster-change-functions)
+             (fboundp 'lispm-agents-roster-notify))
+    (lispm-agents-roster-notify agent '(request-ids))
+    (if-let* ((key (and (fboundp 'lispm-agents-roster--named-key)
+                        (lispm-agents-roster--named-key (plist-get entry :from)))))
+        (lispm-agents-roster-notify key '(request-ids))
+      (lispm-agents-roster-notify nil '(relations)))))
+
 (defun lispm-reply-value (reply)
   "The value a turn returned with REPLY, as a turn callback gets it; or nil.
 An agent returns one with return_value: data, decoded from JSON."
   (and (stringp reply) (> (length reply) 0) (get-text-property 0 'lispm-value reply)))
 
-(cl-defun lispm-tell (agent text &key from event callback reply-to)
+(cl-defun lispm-tell (agent text &key from event callback reply-to request-id)
   "Give AGENT the input TEXT; it starts working as soon as it is idle.
 FROM names the agent sending it; EVENT describes the hook or timer
 that produced it (pending events with the same description are
@@ -823,20 +850,30 @@ reply when the turn handling TEXT ends, and a value the turn returned
 with it, if any (see `lispm-reply-value').  REPLY-TO, a string, says who
 waits for that reply in a way that outlives Emacs: the input is kept
 in the project's inbox file until its turn ends, and if Emacs stops
-before, `lispm-inbox-callback-function' makes a callback of it again."
+before, `lispm-inbox-callback-function' makes a callback of it again.
+REQUEST-ID identifies an in-memory peer request for data observers;
+it is separate from the durable routing information in REPLY-TO."
   (let* ((agent (lispm-get-agent agent))
-         (same nil))
+         (same nil)
+         entry)
     ;; Opening the session first takes back what was queued for it.
     (lispm-session-buffer agent)
     (setq same (and event (seq-find (lambda (e) (equal (plist-get e :event) event))
                                     (lispm-agent-inbox agent))))
     (if same
-        (plist-put same :text text)
+        (setq entry (plist-put same :text text))
+      (setq entry (list :id (lispm-inbox-new-id) :text text :from from :event event
+                        :callback callback :reply-to reply-to :request-id request-id
+                        :queued (format-time-string "[%Y-%m-%d %a %H:%M]")))
       (setf (lispm-agent-inbox agent)
-            (append (lispm-agent-inbox agent)
-                    (list (list :id (lispm-inbox-new-id) :text text :from from :event event
-                                :callback callback :reply-to reply-to
-                                :queued (format-time-string "[%Y-%m-%d %a %H:%M]"))))))
+            (append (lispm-agent-inbox agent) (list entry))))
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify
+       agent '(mailbox)
+       (unless same
+         (list :type 'message-queued :id (plist-get entry :id) :from from
+               :to (list 'lispm (lispm-agent-id agent)) :request-id (or request-id reply-to)))))
+    (lispm--roster-entry-relations agent entry)
     (lispm-inbox-save agent)
     (run-at-time 0 nil #'lispm--drain-inbox agent)
     agent))
@@ -868,6 +905,8 @@ handed over to a continuation, and the turn starts there."
       (progn
         (push (or entry (list :id (lispm-inbox-new-id) :text (lispm--take-input agent)))
               (lispm-agent-inbox agent))
+        (when (fboundp 'lispm-agents-roster-notify)
+          (lispm-agents-roster-notify agent '(mailbox)))
         (lispm-inbox-save agent)
         (lispm-compact agent))
     (lispm--start-turn agent entry)))
@@ -893,13 +932,27 @@ is given up: the session goes on."
         (lispm-agent-entry agent) (if (plist-get entry :id)
                                       entry
                                     (plist-put (copy-sequence entry) :id (lispm-inbox-new-id))))
+  (lispm--in-session agent
+    (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
+    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)))
   (when entry
     (lispm--in-session agent
       (let ((input (lispm--input-heading-p)))
         (when input (delete-region input (point-max))))
       (lispm--newline)
+      (setcdr lispm--turn-start (copy-marker (point)))
       (insert (lispm-transcript-section (lispm-transcript-input-title entry) (plist-get entry :text)))))
+  (unless entry
+    (lispm--in-session agent
+      (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
+        (setcdr lispm--turn-start (copy-marker (match-beginning 0))))))
   (lispm-inbox-save agent)
+  (when (fboundp 'lispm-agents-roster-notify)
+    (lispm-agents-roster-notify
+     agent '(mailbox turn)
+     (list :type 'message-taken :id (plist-get (lispm-agent-entry agent) :id)
+           :from (plist-get entry :from) :to (list 'lispm (lispm-agent-id agent))
+           :request-id (or (plist-get entry :request-id) (plist-get entry :reply-to)))))
   (with-demoted-errors "LispM: taking a snapshot: %S"
     (lispm-journal-begin agent))
   (lispm--request agent))
@@ -1241,6 +1294,7 @@ once every call has a result."
             (let ((id (alist-get 'id b)))
               (pcase-let ((`(,_ ,status ,reasons) (alist-get id decisions nil nil #'equal)))
                 (puthash id (list :status status
+                                  :turn (lispm-agent-turn agent)
                                   :name (alist-get 'name b)
                                   :tool (lispm-get-tool (alist-get 'name b))
                                   :input (alist-get 'input b)
@@ -1326,6 +1380,8 @@ STATE overrides the call's final TODO keyword.  IMAGES are files the
 result holds besides TEXT."
   (when-let* ((call (gethash id (lispm-agent-pending agent))))
     (remhash id (lispm-agent-pending agent))
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify agent '(calls)))
     (let ((marker (plist-get call :marker)))
       (lispm--in-session agent
         (when (and marker (marker-buffer marker))
@@ -1389,6 +1445,16 @@ MSG), as `lispm-agents-status-functions' describe an agent's buffer:
                (t (list :state 'blocked :msg status)))))
       (_ (list :state 'working :msg status)))))
 
+(defun lispm-agent-buffer-status-record (buffer)
+  "Return the status record of BUFFER's LispM agent, or nil.
+This supplies `lispm-agents-buffer-status' independently of roster
+observers, as the runtime's agent status does for other interfaces."
+  (when-let* ((agent (buffer-local-value 'lispm-session-agent buffer)))
+    (lispm-agent-status-record agent)))
+
+(with-eval-after-load 'lispm-agents
+  (add-hook 'lispm-agents-status-functions #'lispm-agent-buffer-status-record t))
+
 (defun lispm--maybe-continue (agent)
   "Request AGENT's next step once all its tool calls have results."
   (when (and (memq (lispm-agent-state agent) '(acting waiting))
@@ -1398,11 +1464,17 @@ MSG), as `lispm-agents-status-functions' describe an agent's buffer:
 (defun lispm--finish-turn (agent &optional note)
   "End AGENT's turn, adding NOTE to the transcript if non-nil."
   (let ((callbacks (lispm-agent-turn-callbacks agent))
+        (waiting-on (lispm-agent-waiting-on agent))
+        (entry (lispm-agent-entry agent))
         (reply (or (lispm-agent-last-reply agent) "")))
     (setf (lispm-agent-turn-callbacks agent) nil
           (lispm-agent-process agent) nil
           (lispm-agent-waiting-on agent) nil
           (lispm-agent-condition agent) nil)
+    (when (and waiting-on (fboundp 'lispm-agents-roster-notify))
+      (lispm-agents-roster-notify agent '(waits-on request-ids))
+      (dolist (target waiting-on)
+        (lispm-agents-roster-notify target '(waited-on-by request-ids))))
     (clrhash (lispm-agent-pending agent))
     (lispm--in-session agent
       (lispm--newline)
@@ -1424,6 +1496,7 @@ MSG), as `lispm-agents-status-functions' describe an agent's buffer:
     ;; Only once whoever waited has the reply: if Emacs stopped before,
     ;; the entry would tell them again.
     (setf (lispm-agent-entry agent) nil)
+    (lispm--roster-entry-relations agent entry)
     (lispm-inbox-save agent)
     (run-hook-with-args 'lispm-turn-end-functions agent reply)
     (when (lispm-agent-inbox agent)
@@ -1544,7 +1617,10 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
         (lispm--tool-done agent id "Interrupted: the user aborted the turn." t "FAILED")))
     (let ((inbox (unless keep-inbox (lispm-agent-inbox agent))))
       (unless keep-inbox (setf (lispm-agent-inbox agent) nil))
+      (when (and inbox (fboundp 'lispm-agents-roster-notify))
+        (lispm-agents-roster-notify agent '(mailbox)))
       (dolist (entry inbox)
+        (lispm--roster-entry-relations agent entry)
         (when-let* ((callback (plist-get entry :callback)))
           (funcall callback (format "(%s was stopped before handling this)"
                                     (lispm-agent-name agent))))))
@@ -1694,6 +1770,9 @@ looked up when a call runs."
         (unless (seq-find (lambda (e) (equal (plist-get e :id) (plist-get entry :id)))
                           (lispm-agent-inbox agent))
           (setf (lispm-agent-inbox agent) (append (lispm-agent-inbox agent) (list entry)))))
+      (when (and queued (fboundp 'lispm-agents-roster-notify))
+        (lispm-agents-roster-notify agent '(mailbox))
+        (dolist (entry queued) (lispm--roster-entry-relations agent entry)))
       (cond ((or calls condition (and running (not (lispm--input-heading-p))))
              (lispm--resume-turn agent running calls condition))
             (running
@@ -1710,6 +1789,9 @@ not known (a session saved before inputs were kept there).  CALLS are
 the calls the transcript leaves without a result, CONDITION the
 condition it waits at, if any; see `lispm--resume-calls'."
   (cl-incf (lispm-agent-turn agent))
+  (lispm--in-session agent
+    (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
+    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)))
   (setf (lispm-agent-steps agent) 0
         (lispm-agent-auto-restarts agent) nil
         (lispm-agent-entry agent) entry
@@ -1731,7 +1813,8 @@ condition it waits at, if any; see `lispm--resume-calls'."
                              (lispm--tool-error (plist-get call :id) (plist-get call :name)
                                                 (plist-get call :stopped) marker))))
         (puthash (plist-get call :id)
-                 (list :status (cond (condition 'stopped)
+                 (list :turn (lispm-agent-turn agent)
+                       :status (cond (condition 'stopped)
                                      ((member (plist-get call :state) '("WAITING" "APPROVED"))
                                       'ask)
                                      (t 'run))
@@ -1941,6 +2024,54 @@ of the condition it waits at."
                                     (car (plist-get condition :restarts))))
           (id (lispm-resolve agent id 'approve))
           (t (user-error "%s" (lispm-tr "No call awaits approval"))))))
+
+(defun lispm--approval-snapshot (agent)
+  "AGENT's current turn's permission calls, in transcript order.
+Each entry is (ID CALL ASKING), retaining the call and the approval
+it awaits so an answer cannot approve a later call in its place."
+  (cl-loop for id in (lispm-waiting-calls agent)
+           for call = (gethash id (lispm-agent-pending agent))
+           when (or (null (plist-get call :turn))
+                    (eql (plist-get call :turn) (lispm-agent-turn agent)))
+           collect (list id call (plist-get call :asking))))
+
+(defun lispm--approve-snapshot (agent turn calls)
+  "Approve CALLS of AGENT's TURN that still await the same permission.
+CALLS is an approval snapshot; return the number approved.  A call
+may finish synchronously, start another turn or ask another permission:
+none of those new permissions is included."
+  (let ((count 0))
+    (pcase-dolist (`(,id ,call ,asking) calls)
+      (when (and (eql turn (lispm-agent-turn agent))
+                 (eq call (gethash id (lispm-agent-pending agent)))
+                 (eq (plist-get call :status) 'ask)
+                 (eq asking (plist-get call :asking)))
+        (cl-incf count)
+        (lispm-resolve agent id 'approve)))
+    count))
+
+(defun lispm-approve-all-for (agent)
+  "Approve every pending permission call of AGENT's current turn.
+Return the number approved.  Conditions and calls stopped at errors
+are left for their own restart; no permission of another agent, a
+later turn or a call that starts while approving these is approved."
+  (lispm--approve-snapshot agent (lispm-agent-turn agent) (lispm--approval-snapshot agent)))
+
+(defun lispm-approve-all ()
+  "List and approve every pending permission call of this agent's turn."
+  (interactive)
+  (let* ((agent (lispm--buffer-agent))
+         (turn (lispm-agent-turn agent))
+         (calls (lispm--approval-snapshot agent)))
+    (unless calls
+      (user-error "%s" (lispm-tr "No call awaits approval")))
+    (when (yes-or-no-p
+           (lispm-tr "Approve these calls for %s: %s? "
+                     (lispm-agent-name agent)
+                     (mapconcat (pcase-lambda (`(,id ,call ,_))
+                                  (format "%s (%s)" id (plist-get (lispm-asked call) :name)))
+                                calls ", ")))
+      (lispm--approve-snapshot agent turn calls))))
 
 (defun lispm-deny-for (agent reason &optional id)
   "Deny AGENT's call ID, by default its first awaiting an answer, for REASON.
