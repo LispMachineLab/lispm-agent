@@ -7579,7 +7579,7 @@ and its last line, as `lispm-chat--markdown' draws it whole with nothing
 presented: at every step, inside code blocks and after them, and from
 the start again for another reply."
   (with-temp-buffer
-    (let ((text "# Plan\nRun `ls` and **then** *this*.\n```sh\nmake test\n\n```\nDone, see `README.md`.\n\nNext"))
+    (let ((text "# Plan\nRun `ls` and **then** *this*.\n[[buffer:*lispm assistant@project<2>*][Other chat]]\n[[file:**draft**.el::2][Draft]]\n```sh\nmake test\n\n```\nDone, see `README.md`.\n\nNext"))
       (dotimes (k (1+ (length text)))
         (let ((part (substring text 0 k)))
           (should (equal-including-properties (lispm-chat--streaming-markdown part)
@@ -7587,6 +7587,25 @@ the start again for another reply."
       (should (equal (car lispm-chat--streamed) (string-remove-suffix "Next" text)))
       (should (equal-including-properties (lispm-chat--streaming-markdown "Other\n*reply*")
                                           (lispm-chat--markdown "Other\n*reply*" t))))))
+
+(ert-deftest lispm-test-chat-org-link-targets ()
+  "Markdown rendering preserves the literal targets of Org links."
+  (lispm-test-env
+    (let ((default-directory project))
+      (dolist (name '("*lispm assistant@lisp_machine<2>*"
+                      "**double stars**" "`literal`_name"))
+        (let* ((link (format "[[buffer:%s][Other session]]" name))
+               (shown (lispm-chat--present
+                       (lispm-chat--markdown (concat "**Open** " link " and *continue*.")))))
+          (should (equal (substring-no-properties shown) (concat "Open " link " and continue.")))
+          (should (equal (lispm-test--object shown "Other session") (list 'buffer name)))))
+      (dolist (name '("*draft*.el" "**draft**.el" "`draft`.el" "_draft_.el"))
+        (let* ((file (expand-file-name name project))
+               (link (format "[[file:%s::2][Draft]]" name)))
+          (lispm-test--write file "one\ntwo\n")
+          (let ((shown (lispm-chat--present (lispm-chat--markdown link))))
+            (should (equal (substring-no-properties shown) link))
+            (should (equal (lispm-test--object shown "Draft") (list 'file file 2)))))))))
 
 (ert-deftest lispm-test-chat-live-reply-presented-once ()
   "A reply streaming in presents nothing it names: that is looked up once,
@@ -7862,6 +7881,39 @@ Tools take the places and buffers agents name as org links."
             (lispm-chat-return)
             (should (equal (buffer-file-name) a))
             (should (= (line-number-at-pos) 2))))))))
+
+(ert-deftest lispm-test-chat-buffer-link-activation ()
+  "RET and a click on a rendered buffer link select the other chat."
+  (lispm-test-env
+    (let* ((agent (lispm-start 'assistant project))
+           (chat (lispm-chat agent))
+           (other (lispm-start 'assistant project))
+           (target (lispm-chat other))
+           (link (format "[[buffer:%s][Other session]]" (buffer-name target))))
+      (setq lispm-test--scripts
+            `((,(lispm-agent-name agent)
+               ,(lispm-test--msg "end_turn" (lispm-test--text link)))))
+      (lispm-test--chat-type chat "Show the other session")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (lispm-chat-redraw chat)
+      (save-window-excursion
+        (pop-to-buffer chat)
+        (goto-char (point-min))
+        (search-forward link)
+        (search-backward "Other session")
+        (let* ((position (point))
+               (map (get-text-property position 'keymap)))
+          (should (equal (lispm-object-at position) (list 'buffer (buffer-name target))))
+          (goto-char position)
+          (lispm-chat-return)
+          (should (eq (window-buffer (selected-window)) target))
+          (should-not (eq (window-buffer (selected-window)) (lispm-agent-buffer other)))
+          (pop-to-buffer chat)
+          (should (eq (keymap-lookup map "<follow-link>") 'mouse-face))
+          (funcall (keymap-lookup map "<mouse-2>")
+                   (list 'mouse-2 (list (selected-window) position '(0 . 0) 0)))
+          (should (eq (window-buffer (selected-window)) target))
+          (should-not (eq (window-buffer (selected-window)) (lispm-agent-buffer other))))))))
 
 (ert-deftest lispm-test-ground ()
   "Code in replies is checked against this Emacs, as PceEmacs checks a
