@@ -115,6 +115,9 @@ LispM: those talking with the agents, whose messages reach none of them.")
 (defvar lispm-mcp-server--token nil
   "The token agents outside LispM connect with, while the server runs.")
 
+(defvar lispm-mcp-server--owned-file nil
+  "Absolute descriptor name whose ownership lock this Emacs holds.")
+
 (defvar lispm-mcp-server--sessions (make-hash-table :test #'equal)
   "The sessions of agents outside LispM: their Mcp-Session-Id, or (shell
 . DIRECTORY) for the commands of a directory, to the session.")
@@ -123,10 +126,34 @@ LispM: those talking with the agents, whose messages reach none of them.")
                                         (:constructor lispm-mcp-server--session-make))
   "The session of an agent outside LispM, working in DIRECTORY.
 ID is its Mcp-Session-Id; NAME and KIND are what its client calls itself;
-AGENT is the LispM agent it acts as; USED is when it last asked anything."
-  id name kind agent used)
+AGENT is the LispM agent it acts as; USED is when it last asked anything.
+CLOSED invalidates queued calls; PENDING holds answers not yet delivered."
+  id name kind agent used closed pending)
 
 ;;;; Sessions
+
+(defun lispm-mcp-server--close (key session)
+  "End SESSION kept under KEY, cancelling its work and pending answers."
+  (when (eq (gethash key lispm-mcp-server--sessions) session)
+    (remhash key lispm-mcp-server--sessions))
+  (unless (lispm-mcp-server-session-closed session)
+    ;; Invalidate callbacks before cleanup can yield to a pending approval.
+    (setf (lispm-mcp-server-session-closed session) t)
+    (when-let* ((agent (lispm-mcp-server-session-agent session)))
+      (run-hook-wrapped
+       'lispm-session-end-functions
+       (lambda (function)
+         (condition-case err (funcall function agent)
+           ((error quit) (message "LispM MCP session cleanup: %s" (error-message-string err))))
+         nil))
+      ;; run_shell and other subprocess tools also use the native agent tag.
+      (dolist (process (process-list))
+        (when (eq (process-get process 'lispm-agent) agent)
+          (process-put process 'lispm-aborted t)
+          (ignore-errors (delete-process process)))))
+    (dolist (answer (lispm-mcp-server-session-pending session))
+      (condition-case err (funcall answer '("Cancelled: the session has ended.") t)
+        ((error quit) (message "LispM MCP pending answer: %s" (error-message-string err)))))))
 
 (defun lispm-mcp-server--name (client)
   "The name of the agent of CLIENT, its clientInfo: its client's name, in
@@ -162,7 +189,7 @@ X-LispM-Directory names, if a local one, else the home directory."
                               (lispm-mcp-server-session-used (cdr oldest))))
                    (setq oldest (cons key session))))
                lispm-mcp-server--sessions)
-      (remhash (car oldest) lispm-mcp-server--sessions)))
+      (lispm-mcp-server--close (car oldest) (cdr oldest))))
   (puthash key session lispm-mcp-server--sessions)
   session)
 
@@ -218,6 +245,29 @@ role `lispm-mcp-server-role' names, in SESSION's directory."
 (cl-defmethod lispm-agents-bridge-server-kind ((session lispm-mcp-server-session))
   "What SESSION's agent is, as its client says, outside LispM."
   (lispm-mcp-server-session-kind session))
+
+(cl-defmethod lispm-agents-bridge-server-live-p ((session lispm-mcp-server-session))
+  "Whether SESSION has not been ended by DELETE, eviction or server stop."
+  (not (lispm-mcp-server-session-closed session)))
+
+(cl-defmethod lispm-agents-bridge-server-answer ((session lispm-mcp-server-session) answer)
+  "Settle ANSWER once, including when SESSION ends before its tool does."
+  (let (done callback)
+    (setq callback
+          (lambda (text &optional errorp)
+            (unless done
+              (setq done t)
+              (setf (lispm-mcp-server-session-pending session)
+                    (delq callback (lispm-mcp-server-session-pending session)))
+              (funcall answer
+                       (if (lispm-mcp-server-session-closed session)
+                           '("Cancelled: the session has ended.")
+                         text)
+                       (or (lispm-mcp-server-session-closed session) errorp)))))
+    (if (lispm-mcp-server-session-closed session)
+        (funcall callback '("Cancelled: the session has ended.") t)
+      (push callback (lispm-mcp-server-session-pending session)))
+    callback))
 
 ;;;; Tools
 
@@ -291,7 +341,7 @@ POST /call/NAME answer bin/lispm-tool."
         (cond
          ((equal method "DELETE")
           (if session
-              (progn (remhash key lispm-mcp-server--sessions) '("200 OK"))
+              (progn (lispm-mcp-server--close key session) '("200 OK"))
             '("404 Not Found")))
          ((not (equal method "POST")) '("405 Method Not Allowed"))
          ((and (consp message) (equal (alist-get 'method message) "initialize"))
@@ -335,42 +385,74 @@ which keeps `lispm-mcp-server-file' while it runs, or nil."
   "Name the server in `lispm-mcp-server-file', readable by its owner only.
 The file holds the token, so one left by a crash is replaced rather than
 written with whatever permissions it had."
-  (let ((file (expand-file-name lispm-mcp-server-file)))
+  (let* ((file lispm-mcp-server--owned-file)
+         (temporary (make-temp-file (concat file "."))))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (write-region (format "http://127.0.0.1:%d\n%s\n%d\n"
+                                (process-contact lispm-mcp-server--process :service)
+                                lispm-mcp-server--token (emacs-pid))
+                        nil temporary nil 'silent)
+          ;; Readers see the complete old descriptor or the complete new one.
+          (rename-file temporary file t))
+      (when (file-exists-p temporary) (delete-file temporary)))))
+
+(defun lispm-mcp-server--claim ()
+  "Claim descriptor ownership atomically, returning nil when already held.
+Emacs's file locks identify the owning process and recover dead owners.
+Use a dedicated name, so visiting the descriptor cannot release this lock."
+  (let* ((file (expand-file-name lispm-mcp-server-file))
+         (owner (concat file ".owner"))
+         (create-lockfiles t))
     (with-file-modes #o700
       (make-directory (file-name-directory file) t))
-    (ignore-errors (delete-file file))
-    (with-file-modes #o600
-      (write-region (format "http://127.0.0.1:%d\n%s\n%d\n"
-                            (process-contact lispm-mcp-server--process :service)
-                            lispm-mcp-server--token (emacs-pid))
-                    nil file nil 'silent))))
+    (catch 'held
+      (cl-letf (((symbol-function 'ask-user-about-lock)
+                 (lambda (&rest _) (throw 'held nil))))
+        (lock-file owner))
+      ;; Some filesystems cannot create locks.  Never publish without one.
+      (unless (eq (file-locked-p owner) t)
+        (error "Could not claim LispM MCP server ownership: %s" file))
+      (setq lispm-mcp-server--owned-file file)
+      t)))
 
 (defun lispm-mcp-server--start ()
   "Start the server and name it in `lispm-mcp-server-file'.
 Return non-nil if it started: it does not while another Emacs serves."
-  (if-let* ((holder (lispm-mcp-server-holder)))
-      (progn (message "%s" (lispm-tr "LispM: Emacs %d serves agents outside LispM; this one serves none"
-                                     holder))
-             nil)
-    (setq lispm-mcp-server--token (lispm-agents-uuid)
-          lispm-mcp-server--process (lispm-local-http-serve "lispm-mcp-server"
-                                                            #'lispm-mcp-server--authorized-p
-                                                            #'lispm-mcp-server--respond))
-    (lispm-mcp-server--announce)
-    (add-hook 'kill-emacs-hook #'lispm-mcp-server--stop)
-    t))
+  (when (lispm-mcp-server--claim)
+    (let (started)
+      (unwind-protect
+          ;; Also respect a running server from before ownership locks existed.
+          (if-let* ((holder (lispm-mcp-server-holder)))
+              (message "%s" (lispm-tr "LispM: Emacs %d serves agents outside LispM; this one serves none"
+                                       holder))
+            (setq lispm-mcp-server--token (lispm-agents-uuid)
+                  lispm-mcp-server--process (lispm-local-http-serve "lispm-mcp-server"
+                                                                  #'lispm-mcp-server--authorized-p
+                                                                  #'lispm-mcp-server--respond))
+            (lispm-mcp-server--announce)
+            (add-hook 'kill-emacs-hook #'lispm-mcp-server--stop)
+            (setq started t))
+        (unless started (lispm-mcp-server--stop)))
+      started)))
 
 (defun lispm-mcp-server--stop ()
   "Stop the server, end its sessions, and delete `lispm-mcp-server-file'
 if it still names this server."
-  (when lispm-mcp-server--process
-    (when (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token)
-      (ignore-errors (delete-file (expand-file-name lispm-mcp-server-file))))
-    (delete-process lispm-mcp-server--process))
-  (setq lispm-mcp-server--process nil
-        lispm-mcp-server--token nil)
-  (clrhash lispm-mcp-server--sessions)
-  (remove-hook 'kill-emacs-hook #'lispm-mcp-server--stop))
+  (unwind-protect
+      (maphash #'lispm-mcp-server--close lispm-mcp-server--sessions)
+    (when lispm-mcp-server--process
+      (let ((lispm-mcp-server-file (or lispm-mcp-server--owned-file lispm-mcp-server-file)))
+        (when (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token)
+          (ignore-errors (delete-file (expand-file-name lispm-mcp-server-file)))))
+      (delete-process lispm-mcp-server--process))
+    (setq lispm-mcp-server--process nil
+          lispm-mcp-server--token nil)
+    (when lispm-mcp-server--owned-file
+      (unlock-file (concat lispm-mcp-server--owned-file ".owner"))
+      (setq lispm-mcp-server--owned-file nil))
+    (remove-hook 'kill-emacs-hook #'lispm-mcp-server--stop)))
 
 ;;;###autoload
 (define-minor-mode lispm-mcp-server-mode

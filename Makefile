@@ -39,9 +39,11 @@ test: deps
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-test.el -l test/lispm-elisp-test.el \
 	  -l test/lispm-runtime-tools-test.el -l test/lispm-session-tools-test.el \
 	  -l test/lispm-process-tools-test.el -l test/lispm-tool-search-test.el \
+	  -l test/lispm-mcp-lifecycle-test.el \
 	  -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
 	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'
+	python3 test/lispm-mcp-client-test.py
 
 test-kernel: deps
 	LISPM_KERNEL_PROGRAM=$(abspath $(LISPM_KERNEL))/build/lispm-kernel \
