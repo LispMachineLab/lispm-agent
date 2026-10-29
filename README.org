@@ -305,6 +305,11 @@ around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
 ~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface
 section; the agents know nothing of it.  Another agent is one call of ~lispm-agents-define~.
 
+In the desktop sidebar, right-click a stopped Claude or Codex session and choose
+*Resume with…* to enter a model name.  It resumes the same session in its original
+directory, passing ~--model~ to the CLI.  Other CLI agents can offer this action
+by providing ~:model-arguments~ in ~lispm-agents-define~.
+
 * Backends
 
 LispM speaks OpenAI Chat Completions, which almost every model server implements, and Anthropic

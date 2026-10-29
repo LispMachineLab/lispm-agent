@@ -266,6 +266,8 @@ An agent run as a CLI in a terminal has these:
                      the agent takes one it is given, else nil
   :resume-arguments  function of a session's id returning ARGUMENTS
                      resuming it
+  :model-arguments   optional function of a model name returning arguments
+                     selecting it; enables resuming with a chosen model
   :arguments   function of a directory returning the arguments of every
                run there
   :context     function of a directory returning a server showing the
@@ -1119,15 +1121,37 @@ says, see `lispm-agents-define'; every session can without one."
       (funcall resumable session)
     t))
 
-(defun lispm-agents-resume-session (session)
+(defun lispm-agents-session-model-resumable-p (session)
+  "Return non-nil when SESSION's CLI can resume with a chosen model.
+Its agent must supply :model-arguments and :resume-arguments, see
+`lispm-agents-define'.  This does not check whether SESSION is running."
+  (let ((props (lispm-agents-props (plist-get session :agent))))
+    (and (plist-get props :program)
+         (plist-get props :resume-arguments)
+         (plist-get props :model-arguments)
+         (not (plist-get props :resume))
+         (lispm-agents-session-resumable-p session))))
+
+(defun lispm-agents-resume-session (session &optional model)
   "Resume SESSION in its original working directory.
 A session already running in a terminal is shown there instead: resuming it
 again would run a second agent on the same session.  One that cannot be
 resumed, see `lispm-agents-session-resumable-p', is opened as its
-transcript."
+transcript.
+With MODEL, resume with that model using the agent's :model-arguments.
+MODEL must not be blank; a running session or one that cannot resume with
+a model signals a user error instead."
   (let ((agent (plist-get session :agent))
         (id (plist-get session :id))
         (cwd (plist-get session :cwd)))
+    (when model
+      (setq model (string-trim model))
+      (when (string-empty-p model)
+        (user-error (lispm-tr "Model must not be empty")))
+      (unless (lispm-agents-session-model-resumable-p session)
+        (user-error (lispm-tr "This session cannot be resumed with a different model")))
+      (when (lispm-agents-session-buffer id)
+        (user-error (lispm-tr "Session is running; exit its terminal first"))))
     (lispm-agents-show
      (or (lispm-agents-session-buffer id)
          (unless (lispm-agents-session-resumable-p session)
@@ -1139,9 +1163,19 @@ transcript."
                                    (format "%s:%s:%s" agent
                                            (file-name-nondirectory (directory-file-name cwd))
                                            (lispm-agents--short-id session))
-                                   (funcall (plist-get props :resume-arguments) id)
+                                   (append (funcall (plist-get props :resume-arguments) id)
+                                           (when model
+                                             (funcall (plist-get props :model-arguments) model)))
                                    id
                                    (plist-get session :title))))))))
+
+(defvar lispm-agents-model-history nil
+  "Model names entered when resuming agent sessions.")
+
+(defun lispm-agents-resume-session-with-model (session)
+  "Prompt for a model name and resume SESSION with it."
+  (lispm-agents-resume-session
+   session (read-string (lispm-tr "Resume with model: ") nil 'lispm-agents-model-history)))
 
 (defun lispm-agents-sessions ()
   "Choose a recorded session of any agent and resume it."
@@ -1371,6 +1405,7 @@ cannot be deleted.  `lispm-agents-confirm-function' asks."
   "Perform the context menu ACTION on SESSION."
   (pcase action
     ('resume (lispm-agents-resume-session session))
+    ('resume-with (lispm-agents-resume-session-with-model session))
     ('rename (lispm-agents-rename-session session))
     ('archive (lispm-agents-toggle-archive-session session))
     ('delete (lispm-agents-delete-session session))
