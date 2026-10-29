@@ -90,6 +90,9 @@ BODY can use `project', a scratch directory for agents to work in."
   (declare (indent 0))
   `(let* ((tmp (file-name-as-directory (make-temp-file "lispm-test-" t)))
           (lispm-directory (expand-file-name "home/" tmp))
+          (lispm-agents-state-file (expand-file-name "agent-sessions.eld" tmp))
+          (lispm-agents--opened-times nil)
+          (lispm-agents--archived 'unloaded)
           (project (expand-file-name "project/" tmp))
           (lispm-git nil)
           ;; Titles are asked for in tests of their own.
@@ -11506,8 +11509,8 @@ sessions; RET on a recorded one resumes it in the listener."
       (setq lispm-terminal--recorded nil)
       (should (string-match-p
                (concat "\\`Sessions \\? keys\n\n▸ λ LispM *\n\n"
-                       "  Agents\n  New session *\n    assistant@project\n\n"
-                       "  Recent\n  Fix the build 0m\n    assistant@project\n\\'")
+                       "  Agents\n  New session *\n    assistant@project\n"
+                       "  Fix the build 0m\n    assistant@project\n\\'")
                (lispm-test--terminal-text)))
       (with-current-buffer lispm-terminal--sessions-name
         (goto-char (point-min))
@@ -11665,6 +11668,8 @@ was asked takes its place."
 (require 'lispm-roster-event-test)
 (require 'lispm-agents-session-metadata-test)
 (require 'lispm-agents-session-order-test)
+(require 'lispm-native-session-order-test)
+(require 'lispm-terminal-session-order-test)
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here
