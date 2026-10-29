@@ -90,6 +90,9 @@ BODY can use `project', a scratch directory for agents to work in."
   (declare (indent 0))
   `(let* ((tmp (file-name-as-directory (make-temp-file "lispm-test-" t)))
           (lispm-directory (expand-file-name "home/" tmp))
+          (lispm-agents-state-file (expand-file-name "agent-sessions.eld" tmp))
+          (lispm-agents--opened-times nil)
+          (lispm-agents--archived 'unloaded)
           (project (expand-file-name "project/" tmp))
           (lispm-git nil)
           ;; Titles are asked for in tests of their own.
@@ -9582,10 +9585,10 @@ sessions cannot be read lists none, and the others still list theirs."
   (lispm-test--with-agents
       `((lispm :name "LispM" :new ignore
                :sessions ,(lambda ()
-                            (list (list :agent 'lispm :id "a" :time 1.0)
-                                  (list :agent 'lispm :id "b" :time 3.0))))
+                            (list (list :agent 'lispm :id "a" :started 1.0 :time 1.0)
+                                  (list :agent 'lispm :id "b" :started 3.0 :time 3.0))))
         (codex :name "Codex" :program "emacs"
-               :sessions ,(lambda () (list (list :agent 'codex :id "c" :time 2.0))))
+               :sessions ,(lambda () (list (list :agent 'codex :id "c" :started 2.0 :time 2.0))))
         (broken :name "Broken" :new ignore :sessions ,(lambda () (error "No store"))))
     (let ((inhibit-message t))
       (should (equal (mapcar (lambda (s) (plist-get s :id)) (lispm-agents-sessions-list))
@@ -9602,7 +9605,7 @@ as they are.  The session list and the picker never ask a reader."
         (arrived 0))
     (add-hook 'lispm-agents-sessions-arrived-hook (lambda () (setq arrived (1+ arrived))))
     (cl-flet ((session (agent id time title)
-                (list :agent agent :id id :time time :title title :cwd "/tmp/project/")))
+                (list :agent agent :id id :started time :time time :title title :cwd "/tmp/project/")))
       (lispm-test--with-agents
           `((lispm :name "LispM" :new ignore
                    :sessions ,(lambda () (list (session 'lispm "l" 2.0 "L"))))
@@ -9819,7 +9822,7 @@ agents' ids never mix."
 (ert-deftest lispm-test-agents-buffer-status ()
   "What an agent's buffer is doing is what the first status function to
 know it says; those blocked on their user, then those failed, are
-waiting, and projects whose terminals wait come first."
+waiting, without changing the projects' opening order."
   (let* ((asks (generate-new-buffer "*codex:one*"))
          (failed (generate-new-buffer "*codex:two*"))
          (busy (generate-new-buffer "*codex:three*"))
@@ -9845,13 +9848,13 @@ waiting, and projects whose terminals wait come first."
           (should-not (lispm-agents-buffer-waiting-p busy))
           (should (equal (lispm-agents-waiting-buffers) (list asks failed)))
           (let ((groups (lispm-agents-group-by-directory
-                         (list (list :agent 'codex :id "1" :cwd "/tmp/busy/" :title "Busy" :time 9.0)
-                               (list :agent 'codex :id "2" :cwd "/tmp/asks/" :title "Asks" :time 2.0)
-                               (list :agent 'codex :id "3" :cwd "/tmp/quiet/" :title "Quiet" :time 8.0))
+                         (list (list :agent 'codex :id "1" :cwd "/tmp/busy/" :title "Busy" :started 9.0 :time 9.0)
+                               (list :agent 'codex :id "2" :cwd "/tmp/asks/" :title "Asks" :started 2.0 :time 2.0)
+                               (list :agent 'codex :id "3" :cwd "/tmp/quiet/" :title "Quiet" :started 8.0 :time 8.0))
                          (list busy asks))))
             (should (equal (mapcar (lambda (group) (plist-get group :dir)) groups)
-                           '("/tmp/asks" "/tmp/busy" "/tmp/quiet")))
-            (should (plist-get (car groups) :waiting))
+                           '("/tmp/busy" "/tmp/quiet" "/tmp/asks")))
+            (should (plist-get (car (last groups)) :waiting))
             (should-not (plist-get (cadr groups) :waiting))))
       (mapc #'kill-buffer (list asks failed busy)))))
 
@@ -11547,8 +11550,8 @@ sessions; RET on a recorded one resumes it in the listener."
       (setq lispm-terminal--recorded nil)
       (should (string-match-p
                (concat "\\`Sessions \\? keys\n\n▸ λ LispM *\n\n"
-                       "  Agents\n  New session *\n    assistant@project\n\n"
-                       "  Recent\n  Fix the build 0m\n    assistant@project\n\\'")
+                       "  Agents\n  New session *\n    assistant@project\n"
+                       "  Fix the build 0m\n    assistant@project\n\\'")
                (lispm-test--terminal-text)))
       (with-current-buffer lispm-terminal--sessions-name
         (goto-char (point-min))
@@ -11705,6 +11708,11 @@ was asked takes its place."
 (require 'lispm-roster-bridge-test)
 (require 'lispm-roster-runtime-test)
 (require 'lispm-roster-event-test)
+(require 'lispm-agents-session-metadata-test)
+(require 'lispm-agents-session-order-test)
+(require 'lispm-agents-archive-tree-test)
+(require 'lispm-native-session-order-test)
+(require 'lispm-terminal-session-order-test)
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

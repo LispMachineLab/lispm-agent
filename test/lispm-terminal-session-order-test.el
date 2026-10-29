@@ -1,0 +1,90 @@
+;;; lispm-terminal-session-order-test.el --- Standalone session trees -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'lispm-terminal)
+
+(ert-deftest lispm-test-terminal-session-tree-merges-live-and-recorded ()
+  "The standalone list keeps parents, merges live rows, and ignores replies."
+  (lispm-test-env
+    (let* ((system (lispm-agent--create :name 'lispm :id "system" :standing t))
+           (child (lispm-agent--create :name 'child :id "child" :parent "parent"))
+           (sibling (lispm-agent--create :name 'sibling :id "sibling" :parent "parent"))
+           (grandchild (lispm-agent--create :name 'grandchild :id "grandchild" :parent "child"))
+           (other (lispm-agent--create :name 'other :id "other"))
+           (live (list child system other grandchild sibling))
+           (lispm-terminal-recent 1)
+           (lispm-terminal--recorded
+            (list (list :id "parent" :started 100 :time 9999 :title "Parent")
+                  (list :id "child" :started 200 :time 9999 :title "Old child")
+                  (list :id "newest" :started 400 :time 400 :title "Newest")
+                  (list :id "omitted" :started 50 :time 8888 :title "Omitted"))))
+      (dolist (entry '(("child" . 200) ("sibling" . 250) ("grandchild" . 210) ("other" . 300)))
+        (lispm-agents-session-opened 'lispm (car entry) (cdr entry)))
+      (cl-letf (((symbol-function 'lispm-system-agent) (lambda () system))
+                ((symbol-function 'lispm-agents) (lambda () live)))
+        (let ((entries (lispm-terminal--entries)))
+          (should (equal (mapcar (lambda (entry) (plist-get entry :id)) entries)
+                         '("system" "newest" "other" "parent" "sibling" "child" "grandchild")))
+          (should (equal (mapcar (lambda (entry) (plist-get entry :depth)) entries)
+                         '(0 0 0 0 1 1 2)))
+          (should (equal (lispm-terminal--alive) (list system other sibling child grandchild)))
+          (should (eq (plist-get (nth 5 entries) :agent) child)))
+        ;; Buffer/agent enumeration order and latest output cannot reorder rows.
+        (setq live (reverse live))
+        (setf (plist-get (car lispm-terminal--recorded) :time) 99999)
+        (should (equal (mapcar (lambda (entry) (plist-get entry :id)) (lispm-terminal--entries))
+                       '("system" "newest" "other" "parent" "sibling" "child" "grandchild")))
+        ;; Reopening the parent moves its whole subtree ahead of newer history.
+        (lispm-agents-session-opened 'lispm "parent" 500)
+        (should (equal (mapcar (lambda (entry) (plist-get entry :id)) (lispm-terminal--entries))
+                       '("system" "parent" "sibling" "child" "grandchild" "other")))))))
+
+(ert-deftest lispm-test-terminal-session-tree-text-and-navigation ()
+  "Indented children retain entry properties, navigation, and RET actions."
+  (let* ((system (lispm-agent--create :name 'lispm :id "system" :standing t))
+         (child (lispm-agent--create :name 'child :id "child" :parent "parent"))
+         (parent (list :id "parent" :title "Parent" :agent "Parent agent" :time (float-time)))
+         (entries (list (list :kind 'system :id "system" :agent system :depth 0)
+                        (list :kind 'recorded :id "parent" :session parent :depth 0)
+                        (list :kind 'agent :id "child" :agent child :depth 1)))
+         (shown nil))
+    (cl-letf (((symbol-function 'lispm-terminal--entries) (lambda () entries))
+              ((symbol-function 'lispm-terminal-agent) (lambda () child))
+              ((symbol-function 'lispm-terminal--conversation) (lambda (agent) (and (eq agent child) "Child")))
+              ((symbol-function 'lispm-awaiting) #'ignore)
+              ((symbol-function 'lispm-agent-working-p) #'ignore)
+              ((symbol-function 'lispm-resume-session) (lambda (id) (and (equal id "parent") 'resumed-parent)))
+              ((symbol-function 'lispm-terminal-show) (lambda (agent &optional _) (setq shown agent))))
+      (with-temp-buffer
+        (insert (lispm-terminal--sessions-text 40))
+        (should (string-match-p "\n  Parent .*\n    Parent agent\n  ▸ Child .*\n      child\n"
+                                (buffer-string)))
+        (goto-char (point-min))
+        (lispm-terminal-next-entry)
+        (should (equal (plist-get (lispm-terminal--entry-at) :id) "system"))
+        (lispm-terminal-next-entry)
+        (should (equal (plist-get (lispm-terminal--entry-at) :id) "parent"))
+        (lispm-terminal-talk (lispm-terminal--entry-at))
+        (should (eq shown 'resumed-parent))
+        (lispm-terminal-next-entry)
+        (should (equal (plist-get (lispm-terminal--entry-at) :id) "child"))
+        (lispm-terminal-talk (lispm-terminal--entry-at))
+        (should (eq shown child))
+        (lispm-terminal-previous-entry)
+        (should (equal (plist-get (lispm-terminal--entry-at) :id) "parent"))))))
+
+(ert-deftest lispm-test-terminal-unstarted-agents-remain-distinct ()
+  "Standing agents without session ids remain visible as separate rows."
+  (lispm-test-env
+    (let* ((system (lispm-agent--create :name 'lispm :standing t))
+           (one (lispm-agent--create :name 'one :standing t))
+           (two (lispm-agent--create :name 'two :standing t))
+           (lispm-terminal--recorded nil))
+      (cl-letf (((symbol-function 'lispm-system-agent) (lambda () system))
+                ((symbol-function 'lispm-agents) (lambda () (list two one system)))
+                ((symbol-function 'lispm-sessions) #'ignore))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :agent)) (lispm-terminal--entries))
+                       (list system one two)))))))
+
+(provide 'lispm-terminal-session-order-test)
+;;; lispm-terminal-session-order-test.el ends here

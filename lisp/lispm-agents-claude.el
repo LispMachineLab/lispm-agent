@@ -88,7 +88,8 @@ a custom title file overrides it later, see
 any prompt or title.  A subagent's transcript, see
 `lispm-agents-claude--subagent', is the session of the agent that ran
 it: its :parent is the session, or the subagent, that started it, and
-its title the task it was given, when Claude recorded it."
+its title the task it was given, when Claude recorded it.  Its :started
+time is the first timestamp in the transcript head, in float seconds."
   (let* ((all (append (car objects) (cdr objects)))
          (subagent (lispm-agents-claude--subagent file))
          (title (seq-some (lambda (object)
@@ -114,6 +115,13 @@ its title the task it was given, when Claude recorded it."
                     :id (file-name-base file)
                     :cwd cwd
                     :title (or title task prompt)
+                    :started (seq-some
+                              (lambda (object)
+                                (when-let* ((stamp (plist-get object :timestamp))
+                                            ((stringp stamp)))
+                                  (ignore-errors
+                                    (float-time (parse-iso8601-time-string stamp)))))
+                              (car objects))
                     :file file)
               (when subagent
                 (list :parent (if-let* ((agent (plist-get subagent :parentAgentId))

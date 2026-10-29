@@ -31,7 +31,7 @@
 ;; rename and delete its sessions, and then takes part in all this module
 ;; adds around it:
 ;;
-;; - a unified, newest-first list of every recorded session of the agents,
+;; - a unified list of every recorded session, most recently opened first,
 ;;   resuming the chosen one in its original working directory
 ;;   (`lispm-agents-sessions');
 ;; - commands that start a fresh agent at the current project root, in
@@ -226,9 +226,10 @@ Every agent has these:
   :command     the command starting a session at the current project root
   :key         the key of :command in the keymaps of `lispm-agents-key-maps'
   :sessions    function returning its recorded sessions, as plists
-               (:agent :id :cwd :title :time :file); an agent that
-               assigns its own ids adds :started, see
-               `lispm-agents-claim-sessions'; a session another of
+               (:agent :id :cwd :title :started :time :file), :started
+               the creation time and :time transcript freshness, both
+               float seconds; :started also ties new terminals to ids,
+               see `lispm-agents-claim-sessions'; a session another of
                the agent's sessions started, as its subagent's, adds
                :parent, that session's id, and lists of the sessions
                draw it under its parent, see
@@ -477,12 +478,14 @@ built in first, then the others in the order they were defined."
 (defun lispm-agents-emacs-buffer-agent (buffer)
   "Return the in-Emacs agent kind whose session BUFFER holds, or nil.
 LispM's own session buffers are recognised even without a host having
-registered session-list commands for the `lispm' kind."
+registered session-list commands for the `lispm' kind.  A registered
+:buffer-p instead chooses which view represents a live native session."
   (or (car (seq-find (lambda (entry)
                       (when-let* ((buffer-p (plist-get (cdr entry) :buffer-p)))
                         (funcall buffer-p buffer)))
                     lispm-agents-defined))
-      (and (boundp 'lispm-session-agent)
+      (and (not (plist-get (lispm-agents-props 'lispm) :buffer-p))
+           (boundp 'lispm-session-agent)
            (buffer-local-value 'lispm-session-agent buffer)
            'lispm)))
 
@@ -684,9 +687,15 @@ sessions cannot be read lists none, and says so."
            nil)))
 
 (defun lispm-agents--sort-sessions (sessions)
-  "Return SESSIONS, the newest transcript of each id only, newest first."
+  "Return SESSIONS, one transcript per id, most recently opened first.
+Transcript modification times select the freshest copy, never its position."
   (sort (lispm-agents--newest-per-id sessions)
-        (lambda (a b) (> (plist-get a :time) (plist-get b :time)))))
+        (lambda (a b)
+          (let ((ta (lispm-agents-session-opened-time a))
+                (tb (lispm-agents-session-opened-time b)))
+            (if (= ta tb)
+                (string< (lispm-agents--session-key a) (lispm-agents--session-key b))
+              (> ta tb))))))
 
 (defun lispm-agents-session-tree (sessions)
   "Return SESSIONS as a tree: a list of (SESSION . CHILDREN), SESSION
@@ -695,9 +704,27 @@ their :parent says, see `lispm-agents-define', in turn as subtrees.
 Both keep the order of SESSIONS.  A session whose parent is not among
 SESSIONS, nor among those under it, stands on its own."
   (let ((children (make-hash-table :test #'equal))
-        (ids (make-hash-table :test #'equal)))
+        (ids (make-hash-table :test #'equal))
+        (parents (make-hash-table :test #'equal))
+        (visited (make-hash-table :test #'equal)))
     (dolist (session sessions)
       (puthash (cons (plist-get session :agent) (plist-get session :id)) t ids))
+    (dolist (session sessions)
+      (let* ((key (cons (plist-get session :agent) (plist-get session :id)))
+             (parent (cons (plist-get session :agent) (plist-get session :parent))))
+        (when (and (cdr parent) (not (equal key parent)) (gethash parent ids))
+          (puthash key parent parents))))
+    ;; Broken metadata must not hide a whole cycle of sessions.  Cut one
+    ;; edge per cycle before recursively building the forest.
+    (dolist (session sessions)
+      (let ((key (cons (plist-get session :agent) (plist-get session :id))) path)
+        (while (and key (not (gethash key visited)))
+          (puthash key 'visiting visited)
+          (push key path)
+          (setq key (gethash key parents)))
+        (when (and key (eq (gethash key visited) 'visiting))
+          (remhash key parents))
+        (dolist (seen path) (puthash seen 'done visited))))
     (cl-labels ((key (session parent)
                   (cons (plist-get session :agent) parent))
                 (subtree (session)
@@ -706,10 +733,9 @@ SESSIONS, nor among those under it, stands on its own."
                                                            children))))))
       (let ((roots nil))
         (dolist (session sessions)
-          (let ((parent (plist-get session :parent)))
-            (if (and parent (not (equal parent (plist-get session :id)))
-                     (gethash (key session parent) ids))
-                (push session (gethash (key session parent) children))
+          (let ((parent (gethash (key session (plist-get session :id)) parents)))
+            (if parent
+                (push session (gethash parent children))
               (push session roots))))
         (mapcar #'subtree (nreverse roots))))))
 
@@ -722,12 +748,13 @@ readers are never asked, so the list is complete, see
 `lispm-agents-sessions-snapshot'.  RECENT non-nil takes sessions read a
 while ago, or none yet, as that function says.  The terminals running
 sessions learn theirs from them, see `lispm-agents-refresh-buffer-titles'."
-  (let ((sessions (lispm-agents--sort-sessions
+  (let ((sessions (lispm-agents--newest-per-id
                    (mapcan (pcase-lambda (`(,agent . ,props))
                              (lispm-agents--agent-sessions agent props nil recent))
                            (lispm-agents-available)))))
+    (lispm-agents--index-session-parents sessions)
     (lispm-agents-refresh-buffer-titles sessions)
-    sessions))
+    (lispm-agents--sort-sessions sessions)))
 
 ;;;;; Session readers
 ;;
@@ -834,16 +861,19 @@ see `lispm-agents-add-session-reader'; PENDING are the agents
 whose readers have nothing yet, in the order agents are offered.  Agents
 without a reader are read as they are now.  A list of the sessions
 draws this."
-  (let ((pending nil))
-    (cons (lispm-agents--sort-sessions
+  (let* ((pending nil)
+         (sessions
+          (lispm-agents--newest-per-id
            (mapcan (pcase-lambda (`(,agent . ,props))
                      (let ((sessions (lispm-agents--agent-sessions
                                       agent props (alist-get agent lispm-agents--session-readers))))
                        (if (eq sessions 'pending)
                            (progn (push agent pending) nil)
                          sessions)))
-                   (lispm-agents-available)))
-          (nreverse pending))))
+                   (lispm-agents-available)))))
+    (lispm-agents--index-session-parents sessions)
+    (lispm-agents-refresh-buffer-titles sessions)
+    (cons (lispm-agents--sort-sessions sessions) (nreverse pending))))
 
 ;;;; Presentation (pure)
 
@@ -1001,9 +1031,10 @@ same NAME is returned instead of restarted."
     (unless (file-directory-p directory)
       (user-error (lispm-tr "Working directory no longer exists: %s") directory))
     (let* ((default-directory (file-name-as-directory directory))
+           (running (lispm-agents-running-p (get-buffer (format "*%s*" name))))
            ;; A new agent gets servers showing it Emacs's state; a running
            ;; terminal returned as is keeps those it has.
-           (servers (unless (lispm-agents-running-p (get-buffer (format "*%s*" name)))
+           (servers (unless running
                       (when-let* ((context (plist-get props :context)))
                         (delq nil (ensure-list
                                    (if (memq (cdr (func-arity context)) '(0 1))
@@ -1020,9 +1051,17 @@ same NAME is returned instead of restarted."
         (lispm-agents-context-bind server buffer))
       (with-current-buffer buffer
         (setq lispm-agents-buffer-agent agent
-              lispm-agents-buffer-session-id (or id lispm-agents-buffer-session-id)
-              lispm-agents-buffer-title (or title lispm-agents-buffer-title)
-              lispm-agents-buffer-launched (or lispm-agents-buffer-launched (float-time))))
+              lispm-agents-buffer-session-id (if running
+                                                 (or id lispm-agents-buffer-session-id)
+                                               id)
+              lispm-agents-buffer-title (if running (or title lispm-agents-buffer-title) title)
+              lispm-agents-buffer-launched (if running lispm-agents-buffer-launched
+                                            (float-time)))
+        (unless running
+          (setq lispm-agents-buffer-session nil)
+          (kill-local-variable 'lispm-agents--claimed-at)
+          (lispm-agents-session-opened agent lispm-agents-buffer-session-id
+                                       lispm-agents-buffer-launched)))
       ;; Agents record their sessions as they go, so closing the terminal
       ;; loses nothing a resume cannot restore: kill it without asking.
       (when-let* ((process (get-buffer-process buffer)))
@@ -1052,7 +1091,9 @@ directory take the sessions in the order they began."
          (claimed (delq nil (mapcar (lambda (buffer)
                                       (buffer-local-value 'lispm-agents-buffer-session-id buffer))
                                     running)))
-         (candidates (sort (seq-filter (lambda (session) (plist-get session :started))
+         (candidates (sort (seq-filter (lambda (session)
+                                         (and (plist-get session :started)
+                                              (not (plist-get session :parent))))
                                        sessions)
                            (lambda (a b) (< (plist-get a :started) (plist-get b :started))))))
     (dolist (buffer (sort (seq-filter
@@ -1078,8 +1119,23 @@ directory take the sessions in the order they began."
                         candidates)))
             (setq lispm-agents-buffer-session-id (plist-get session :id)
                   lispm-agents-buffer-session session)
+            (lispm-agents-session-opened agent lispm-agents-buffer-session-id
+                                         lispm-agents-buffer-launched)
             (lispm-agents-roster-notify buffer '(agents key parent root))
             (push (plist-get session :id) claimed)))))))
+
+(defun lispm-agents--opened-buffer (agent buffer time &optional id)
+  "Record custom AGENT BUFFER opened at TIME, optionally with session ID.
+Preserve an opening the callback already recorded while creating BUFFER."
+  (with-current-buffer buffer
+    (let* ((id (or id lispm-agents-buffer-session-id))
+           (recorded (and id (gethash (lispm-agents--session-key (list :agent agent :id id))
+                                     (lispm-agents--opened-times)))))
+      (setq lispm-agents-buffer-launched
+            (max time (or lispm-agents-buffer-launched 0) (or recorded 0)))
+      (unless (equal recorded lispm-agents-buffer-launched)
+        (lispm-agents-session-opened agent id lispm-agents-buffer-launched))))
+  buffer)
 
 (defvar-local lispm-agents--claimed-at nil
   "When this terminal last had the sessions listed to learn its own.")
@@ -1234,7 +1290,8 @@ a model signals a user error instead."
            (lispm-agents--in-main-window #'find-file (lispm-agents--session-transcript session)))
          (let ((props (lispm-agents--check-available agent)))
            (if-let* ((resume (plist-get props :resume)))
-               (funcall resume session)
+               (let ((time (float-time)))
+                 (lispm-agents--opened-buffer agent (funcall resume session) time id))
              (lispm-agents--launch agent cwd
                                    (format "%s:%s:%s" agent
                                            (file-name-nondirectory (directory-file-name cwd))
@@ -1265,7 +1322,8 @@ DIRECTORY defaults to the project root of the main window's buffer."
          (directory (or directory (lispm-agents-default-directory))))
     (lispm-agents-show
      (if-let* ((new (plist-get props :new)))
-         (funcall new directory)
+         (let ((time (float-time)))
+           (lispm-agents--opened-buffer agent (funcall new directory) time))
        (pcase-let ((`(,id . ,args) (when-let* ((new-arguments (plist-get props :new-arguments)))
                                      (funcall new-arguments))))
          (lispm-agents--launch agent directory (lispm-agents-fresh-name agent directory)
@@ -1338,15 +1396,73 @@ The text is pasted into the agent's composer without submitting it."
 ;;;; Session management
 
 (defconst lispm-agents-state-file (locate-user-emacs-file "agent-sessions.eld")
-  "File holding Emacs-side session state, currently the archived sessions.
+  "File holding Emacs-side archives and session opening times.
 Archiving hides a session in Emacs only; it never alters agent data.")
 
 (defvar lispm-agents--archived 'unloaded
-  "Keys of archived sessions, or `unloaded' before the state file is read.")
+  "Keys of explicitly archived sessions, or `unloaded' before reading state.")
+
+(defvar lispm-agents--session-parents nil
+  "Parent index as (STATE-FILE . HASH-TABLE), built before filtering sessions.
+Keys include the provider, just as the persisted archive keys do.")
+
+(defvar lispm-agents--effective-archive nil
+  "Cached inherited archive state as (STATE-FILE KEYS PARENTS HASH-TABLE).
+KEYS and PARENTS are the explicit archive list and parent index used.")
+
+(defvar lispm-agents--opened-times nil
+  "Cached opening times as (STATE-FILE . HASH-TABLE), keyed by session.")
 
 (defun lispm-agents--session-key (session)
   "Return the key identifying SESSION across agents, \"AGENT:ID\"."
   (format "%s:%s" (plist-get session :agent) (plist-get session :id)))
+
+(defun lispm-agents--index-session-parents (sessions &optional merge)
+  "Index parent links from unfiltered SESSIONS, including absent parents.
+Archive inheritance is independent of project directories and of whether
+the parent transcript itself can still be read.  Each new reading replaces
+the index, so changed parent metadata cannot leave stale relationships.
+With MERGE, copy the known graph and update only supplied rows, for callers
+with partial records.  Binding the index and effective cache lets a caller
+use such a graph locally without replacing a complete session reading."
+  (let ((parents (if (and merge (equal (car lispm-agents--session-parents) lispm-agents-state-file))
+                     (copy-hash-table (cdr lispm-agents--session-parents))
+                   (make-hash-table :test #'equal))))
+    (dolist (session sessions)
+      (let ((key (lispm-agents--session-key session)))
+        (if-let* ((parent (plist-get session :parent)))
+            (puthash key (lispm-agents--session-key (list :agent (plist-get session :agent) :id parent))
+                     parents)
+          (remhash key parents))))
+    (setq lispm-agents--session-parents (cons lispm-agents-state-file parents))))
+
+(defun lispm-agents--effective-archive ()
+  "Return a hash of explicit archive keys and all their known descendants.
+Build it once per reading or archive change, in linear time.  Missing
+parents still convey their archive state; cycles terminate at visited keys."
+  (let* ((keys (lispm-agents--archived-keys))
+         (parents (and (equal (car lispm-agents--session-parents) lispm-agents-state-file)
+                       (cdr lispm-agents--session-parents)))
+         (cached lispm-agents--effective-archive))
+    (unless (and (equal (car cached) lispm-agents-state-file)
+                 (eq (nth 1 cached) keys)
+                 (eq (nth 2 cached) parents))
+      (let ((children (make-hash-table :test #'equal))
+            (archived (make-hash-table :test #'equal))
+            (pending (copy-sequence keys)))
+        (when parents
+          (maphash (lambda (child parent)
+                     (puthash parent (cons child (gethash parent children)) children))
+                   parents))
+        (while pending
+          (let ((key (pop pending)))
+            (unless (gethash key archived)
+              (puthash key t archived)
+              (dolist (child (gethash key children))
+                (push child pending)))))
+        (setq lispm-agents--effective-archive
+              (list lispm-agents-state-file keys parents archived))))
+    (nth 3 lispm-agents--effective-archive)))
 
 (defun lispm-agents--read-state ()
   "Return the plist the state file holds, or nil without one.
@@ -1357,7 +1473,8 @@ A file holding no such plist is moved aside, to the same name ending in
       (let ((state (with-temp-buffer
                      (insert-file-contents file)
                      (condition-case nil (read (current-buffer)) (error 'unreadable)))))
-        (if (and (plistp state) (listp (plist-get state :archived)))
+        (if (and (plistp state) (listp (plist-get state :archived))
+                 (listp (plist-get state :opened)))
             state
           (let ((aside (concat file ".unreadable")))
             (rename-file file aside t)
@@ -1372,23 +1489,94 @@ A file holding no such plist is moved aside, to the same name ending in
           (plist-get (lispm-agents--read-state) :archived)))
   lispm-agents--archived)
 
+(defun lispm-agents--opened-times ()
+  "Return session opening times, reading the current state file once."
+  (unless (equal (car lispm-agents--opened-times) lispm-agents-state-file)
+    (let ((times (make-hash-table :test #'equal)))
+      (dolist (entry (plist-get (lispm-agents--read-state) :opened))
+        (when (and (consp entry) (stringp (car entry)) (numberp (cdr entry)))
+          (puthash (car entry) (cdr entry) times)))
+      (setq lispm-agents--opened-times (cons lispm-agents-state-file times))))
+  (cdr lispm-agents--opened-times))
+
+(defun lispm-agents-session-opened-time (session)
+  "Return when SESSION was last opened, or originally started.
+Sessions without either timestamp sort last.  :time remains transcript
+freshness and is never used for ordering."
+  (or (gethash (lispm-agents--session-key session) (lispm-agents--opened-times))
+      (plist-get session :started)
+      0))
+
+(defun lispm-agents--write-state (state)
+  "Atomically save STATE without replacing unrelated session metadata."
+  (let ((part (concat lispm-agents-state-file ".part")))
+    (make-directory (file-name-directory lispm-agents-state-file) t)
+    (with-temp-file part
+      (let ((print-length nil) (print-level nil))
+        (prin1 state (current-buffer))))
+    (rename-file part lispm-agents-state-file t)))
+
+(defun lispm-agents-session-opened (agent id &optional time)
+  "Record that AGENT's session ID was launched or resumed at TIME.
+TIME defaults to now.  Merely selecting an already live session must
+not call this.  The ordering survives closing Emacs and archiving."
+  (when id
+    (let* ((key (lispm-agents--session-key (list :agent agent :id id)))
+           (time (or time (float-time)))
+           (times (lispm-agents--opened-times))
+           (state (lispm-agents--read-state)))
+      (puthash key time times)
+      (lispm-agents--write-state
+       (plist-put state :opened
+                  (cons (cons key time) (assoc-delete-all key (plist-get state :opened))))))))
+
 (defun lispm-agents-archived-p (session)
-  "Return non-nil when SESSION is archived."
-  (member (lispm-agents--session-key session) (lispm-agents--archived-keys)))
+  "Return non-nil when SESSION or one of its ancestors is archived.
+Session lists index every parent link before callers filter their rows.
+Only explicit archive choices are persisted; descendants inherit them."
+  (let ((archived (lispm-agents--effective-archive)))
+    (or (gethash (lispm-agents--session-key session) archived)
+        (when-let* ((parent (plist-get session :parent)))
+          (gethash (lispm-agents--session-key (list :agent (plist-get session :agent) :id parent))
+                   archived)))))
 
 (defun lispm-agents--set-archived (session archived)
-  "Mark SESSION ARCHIVED or not and persist the archived set."
+  "Mark SESSION explicitly ARCHIVED or not and persist the archive choices.
+Inherited descendants are not written individually, so restoring a parent
+restores them without changing any independently archived child."
   (let ((key (lispm-agents--session-key session))
         (keys (lispm-agents--archived-keys)))
-    (setq lispm-agents--archived (if archived
-                                     (cons key (delete key keys))
-                                  (delete key keys)))
-    (let ((part (concat lispm-agents-state-file ".part")))
-      (with-temp-file part
-        (let ((print-length nil) (print-level nil))
-          (prin1 (list :archived lispm-agents--archived) (current-buffer))))
-      ;; Renamed into place, so the file is there whole or not at all.
-      (rename-file part lispm-agents-state-file t))))
+    (lispm-agents--save-archived (if archived
+                                   (cons key (remove key keys))
+                                 (remove key keys)))))
+
+(defun lispm-agents--save-archived (keys)
+  "Persist the explicit archive KEYS and invalidate inherited state."
+  (setq lispm-agents--archived keys
+        lispm-agents--effective-archive nil)
+  (lispm-agents--write-state
+   (plist-put (lispm-agents--read-state) :archived keys)))
+
+(defun lispm-agents--archived-ancestors (session)
+  "Return the explicitly archived keys of SESSION and its known ancestors.
+The same-provider parent index is walked only for this user action, never
+once per row.  A cycle visits each key at most once."
+  (let ((parents (and (equal (car lispm-agents--session-parents) lispm-agents-state-file)
+                      (cdr lispm-agents--session-parents)))
+        (explicit (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal))
+        (key (lispm-agents--session-key session))
+        (parent (when-let* ((id (plist-get session :parent)))
+                  (lispm-agents--session-key (list :agent (plist-get session :agent) :id id))))
+        result)
+    (dolist (archived (lispm-agents--archived-keys))
+      (puthash archived t explicit))
+    (while (and key (not (gethash key seen)))
+      (puthash key t seen)
+      (when (gethash key explicit) (push key result))
+      (setq key (or parent (and parents (gethash key parents)))
+            parent nil))
+    result))
 
 (defun lispm-agents--rename (session title)
   "Rename SESSION to TITLE the way its own agent records names, see the
@@ -1426,18 +1614,26 @@ running or idle, see `lispm-agents-session-buffer'."
     (run-hooks 'lispm-agents-sessions-changed-hook)))
 
 (defun lispm-agents-toggle-archive-session (session)
-  "Archive SESSION, or unarchive it when it is archived."
-  (lispm-agents--set-archived session (not (lispm-agents-archived-p session)))
+  "Archive SESSION's subtree, or undo its own explicit archive choice.
+A session inheriting its archive state must be restored through its parent."
+  (let* ((key (lispm-agents--session-key session))
+         (explicit (member key (lispm-agents--archived-keys))))
+    (when (remove key (lispm-agents--archived-ancestors session))
+      (user-error (lispm-tr "This session is archived with its parent; unarchive the parent first")))
+    (lispm-agents--set-archived session (not explicit)))
   (run-hooks 'lispm-agents-sessions-changed-hook))
 
 (defun lispm-agents-user-wrote (agent id)
   "Say the user wrote to the session ID of AGENT.
 A session the user writes to again is in use, so an archived one leaves
-the archive and lists of the sessions show it again; one merely looked
-at stays archived.  Return non-nil when the session left the archive."
+the archive along with any archived ancestors hiding it.  Independently
+archived siblings stay archived.  One merely looked at stays archived.
+Return non-nil when archive choices changed."
   (let ((session (list :agent agent :id id)))
-    (when (and id (lispm-agents-archived-p session))
-      (lispm-agents--set-archived session nil)
+    (when-let* ((id)
+                (keys (lispm-agents--archived-ancestors session)))
+      (lispm-agents--save-archived
+       (seq-difference (lispm-agents--archived-keys) keys #'equal))
       (run-hooks 'lispm-agents-sessions-changed-hook)
       t)))
 
@@ -1607,23 +1803,34 @@ A project is the root from `lispm-agents--resolve-roots', so worktrees
 and subdirectories join their repository and chat locations share one `chats'
 group.  Return a list of plists
   (:key KEY :dir DIR :chats CHATS :running BUFFERS :waiting WAITING
-   :sessions SESSIONS :time T)
+   :sessions SESSIONS :time T :opened OPENED)
 where KEY folds case (macOS paths are case-insensitive), DIR is the root for
 display, WAITING non-nil when one of BUFFERS waits for the user, see
-`lispm-agents-buffer-waiting-p', and T is the latest activity.  Projects
-with terminals waiting for the user come first, then those with running
-terminals, then by latest activity, and the chats group last.  SESSIONS
-are newest first and keep that order inside each group."
+`lispm-agents-buffer-waiting-p', T is the latest activity, and OPENED is
+the latest launch or resume.  Projects sort by OPENED, with chats last.
+Descendants join their root session's project even across directories.
+SESSIONS keep their order inside each group."
   (let* ((directory-of (lambda (item)
                          (if (bufferp item)
                              (buffer-local-value 'default-directory item)
                            (plist-get item :cwd))))
          (roots (lispm-agents--resolve-roots
                  (delete-dups (mapcar directory-of (append running sessions)))))
+         (session-roots (make-hash-table :test #'equal))
          (groups (make-hash-table :test #'equal))
          (order nil))
+    (cl-labels ((assign (tree root)
+                  (puthash (lispm-agents--session-key (car tree)) root session-roots)
+                  (dolist (child (cdr tree)) (assign child root))))
+      (dolist (tree (lispm-agents-session-tree sessions))
+        (assign tree (cdr (assoc (plist-get (car tree) :cwd) roots)))))
     (cl-flet ((group (item)
-                (let* ((root (cdr (assoc (funcall directory-of item) roots)))
+                (let* ((session (if (bufferp item)
+                                    (list :agent (lispm-agents-of-buffer item)
+                                          :id (buffer-local-value 'lispm-agents-buffer-session-id item))
+                                  item))
+                       (root (or (gethash (lispm-agents--session-key session) session-roots)
+                                 (cdr (assoc (funcall directory-of item) roots))))
                        (key (if (eq root 'chats) 'chats (downcase root))))
                   (or (gethash key groups)
                       (progn
@@ -1633,16 +1840,20 @@ are newest first and keep that order inside each group."
                                        :dir (if (eq root 'chats) "~"
                                               (lispm-agents--directory-key root))
                                        :chats (eq root 'chats)
-                                       :running nil :waiting nil :sessions nil :time 0)
+                                       :running nil :waiting nil :sessions nil :time 0 :opened 0)
                                  groups))))))
       (dolist (buffer running)
         (let ((group (group buffer)))
           (plist-put group :running (cons buffer (plist-get group :running)))
+          (plist-put group :opened (max (plist-get group :opened)
+                                        (or (buffer-local-value 'lispm-agents-buffer-launched buffer) 0)))
           (when (lispm-agents-buffer-waiting-p buffer)
             (plist-put group :waiting t))))
       (dolist (session sessions)
         (let ((group (group session)))
           (plist-put group :sessions (cons session (plist-get group :sessions)))
+          (plist-put group :opened (max (plist-get group :opened)
+                                        (lispm-agents-session-opened-time session)))
           (plist-put group :time (max (plist-get group :time)
                                       (plist-get session :time))))))
     (sort (mapcar (lambda (key)
@@ -1651,14 +1862,11 @@ are newest first and keep that order inside each group."
                       (plist-put group :sessions (nreverse (plist-get group :sessions)))))
                   order)
           (lambda (a b)
-            (let ((ca (plist-get a :chats)) (cb (plist-get b :chats))
-                  (wa (plist-get a :waiting)) (wb (plist-get b :waiting))
-                  (ra (and (plist-get a :running) t))
-                  (rb (and (plist-get b :running) t)))
+            (let ((ca (plist-get a :chats)) (cb (plist-get b :chats)))
               (cond ((not (eq ca cb)) cb)
-                    ((not (eq wa wb)) wa)
-                    ((not (eq ra rb)) ra)
-                    (t (> (plist-get a :time) (plist-get b :time)))))))))
+                    ((= (plist-get a :opened) (plist-get b :opened))
+                     (string< (plist-get a :dir) (plist-get b :dir)))
+                    (t (> (plist-get a :opened) (plist-get b :opened)))))))))
 
 (defvar lispm-agents-status-functions nil
   "Functions saying what an agent's buffer is doing.
@@ -1669,8 +1877,8 @@ know the buffer; the first to answer does.  STATE is `idle', `working',
 `done', `blocked', the agent waiting for its user to answer, or
 `error'; KIND, why it is blocked, `permission', `question' or `auth';
 PROGRESS a percentage; MSG what the agent says of it.  What is not
-known is nil.  Lists of the sessions show the record, and put the
-agents waiting for their user first.")
+known is nil.  Lists of the sessions show the record without changing
+their opening order.")
 
 (defun lispm-agents-buffer-status (buffer)
   "Return what the agent of BUFFER is doing, as the first of

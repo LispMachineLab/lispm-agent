@@ -33,15 +33,16 @@
 ;;     Fix the build           ! │ ⏺ Three things: …
 ;;       assistant@lispm         │
 ;;                               │ ──────────────────────────────
-;;     Recent                    │ λ >> █
+;;                               │ λ >> █
 ;;     Explain the sandbox    2h │ ──────────────────────────────
 ;;       lispm                   │   / for commands · RET send · …
 ;;    Fri 23 Oct 14:02   ryan   ~   lispm   idle          gpt-5 via openai
 ;;
 ;; On the left, the sessions: LispM itself, the system's own agent (see
-;; lispm-bar.el), then the other agents alive, then the sessions
-;; recorded.  On the right, the listener: the chat of one of them, where
-;; everything is done by asking.  At the bottom, the who line, as on
+;; lispm-bar.el), then live and recorded sessions in opening order, each
+;; session under the one that started it.  On the right, the listener:
+;; the chat of one of them, where everything is done by asking.  At the
+;; bottom, the who line, as on
 ;; the Lisp Machine: the time, who you are, the project and the agent
 ;; the listener talks to, what it is doing, and its model.
 ;;
@@ -66,6 +67,7 @@
 ;;; Code:
 
 (require 'lispm)
+(require 'lispm-agents)
 
 (defgroup lispm-terminal nil
   "LispM as a terminal: the sessions, a listener and a who line."
@@ -77,7 +79,8 @@
   :type 'natnum)
 
 (defcustom lispm-terminal-recent 100
-  "How many recorded sessions the terminal lists at most."
+  "How many recent recorded sessions the terminal lists.
+Their ancestors and those of live sessions are included as well."
   :type 'natnum)
 
 (defface lispm-terminal-who-line '((t :inverse-video t :extend t))
@@ -201,10 +204,9 @@ Return the chat."
     chat))
 
 (defun lispm-terminal--alive ()
-  "The agents alive, as the sessions list them: LispM itself, then the
-others, the newest first."
-  (cons (lispm-system-agent)
-        (reverse (seq-remove #'lispm-system-agent-p (lispm-agents)))))
+  "The agents alive, in the same tree order as the sessions list."
+  (delq nil (mapcar (lambda (entry) (plist-get entry :agent))
+                    (lispm-terminal--entries))))
 
 (defun lispm-terminal-next (&optional n)
   "Talk to the next agent alive in the sessions; with N, the Nth next."
@@ -260,24 +262,74 @@ edge: a terminal shows `$' in the last one when something reaches it."
   (propertize " " 'display `(space :align-to (- right ,(+ 2 (string-width text))))))
 
 (defun lispm-terminal--recorded ()
-  "The recorded sessions to list, newest first."
+  "All recorded sessions, including ancestors outside the recent preview."
   (or lispm-terminal--recorded
-      (setq lispm-terminal--recorded (seq-take (lispm-sessions) lispm-terminal-recent))))
+      (setq lispm-terminal--recorded (lispm-sessions))))
+
+(defun lispm-terminal--session-node (entry)
+  "Return ENTRY's identity and ancestry for the common session tree."
+  (let* ((agent (plist-get entry :agent))
+         (session (plist-get entry :session))
+         (id (plist-get entry :id)))
+    (list :agent 'lispm
+          ;; A standing agent can be declared before its first session.
+          :id (or id (format "live:%s" (lispm-agent-name agent)))
+          :parent (unless (eq (plist-get entry :kind) 'system)
+                    (if agent (lispm-agent-parent agent) (plist-get session :parent)))
+          :started (if agent (lispm--session-started id) (plist-get session :started))
+          :entry entry)))
 
 (defun lispm-terminal--entries ()
   "The sessions the terminal lists, as plists: :kind, `system', `agent'
 or `recorded'; :id, the session's id; and :agent, or :session, a
-recorded session as `lispm-sessions' describes it."
-  (let* ((alive (lispm-terminal--alive))
-         (ids (mapcar #'lispm-agent-id alive)))
-    (append (mapcar (lambda (agent)
-                      (list :kind (if (lispm-system-agent-p agent) 'system 'agent)
-                            :id (lispm-agent-id agent) :agent agent))
-                    alive)
-            (mapcar (lambda (session)
-                      (list :kind 'recorded :id (plist-get session :id) :session session))
-                    (seq-remove (lambda (session) (member (plist-get session :id) ids))
-                                (lispm-terminal--recorded))))))
+recorded session as `lispm-sessions' describes it.  :depth is its tree
+indentation.  Siblings sort by opening time, with LispM itself first.
+Live sessions replace their recorded rows; the recent preview retains
+every available ancestor of its sessions."
+  (let* ((system (lispm-system-agent))
+         (alive (cons system (seq-remove #'lispm-system-agent-p (lispm-agents))))
+         (nodes (make-hash-table :test #'equal))
+         (selected (make-hash-table :test #'equal)))
+    (dolist (session (lispm-terminal--recorded))
+      (let ((node (lispm-terminal--session-node
+                   (list :kind 'recorded :id (plist-get session :id) :session session))))
+        (puthash (plist-get node :id) node nodes)))
+    (dolist (agent alive)
+      (let ((node (lispm-terminal--session-node
+                   (list :kind (if (eq agent system) 'system 'agent)
+                         :id (lispm-agent-id agent) :agent agent))))
+        (puthash (plist-get node :id) node nodes)
+        (puthash (plist-get node :id) t selected)))
+    (let* ((sessions
+            (sort (hash-table-values nodes)
+                  (lambda (a b)
+                    (let ((ta (lispm-agents-session-opened-time a))
+                          (tb (lispm-agents-session-opened-time b)))
+                      (if (= ta tb) (string< (plist-get a :id) (plist-get b :id))
+                        (> ta tb))))))
+           (recent (seq-take (seq-filter
+                              (lambda (node)
+                                (eq (plist-get (plist-get node :entry) :kind) 'recorded))
+                              sessions)
+                            lispm-terminal-recent)))
+      (dolist (node recent) (puthash (plist-get node :id) t selected))
+      ;; Keep context even when a newly resumed child has an old parent.
+      (dolist (node sessions)
+        (when (gethash (plist-get node :id) selected)
+          (let ((parent (plist-get node :parent)))
+            (while (and parent (gethash parent nodes) (not (gethash parent selected)))
+              (puthash parent t selected)
+              (setq parent (plist-get (gethash parent nodes) :parent))))))
+      (let* ((trees (lispm-agents-session-tree
+                     (seq-filter (lambda (node) (gethash (plist-get node :id) selected)) sessions)))
+             (system-tree (seq-find (lambda (tree)
+                                      (eq (plist-get (plist-get (car tree) :entry) :kind) 'system))
+                                    trees)))
+        (cl-labels ((flatten (tree depth)
+                      (cons (plist-put (plist-get (car tree) :entry) :depth depth)
+                            (mapcan (lambda (child) (flatten child (1+ depth))) (cdr tree)))))
+          (mapcan (lambda (tree) (flatten tree 0))
+                  (cons system-tree (delq system-tree trees))))))))
 
 (defvar lispm-terminal--first-prompts (make-hash-table :test #'equal)
   "The first message of each session listed, by id: read once, as reading
@@ -320,17 +372,18 @@ recorded session's age."
 (defun lispm-terminal--entry-string (entry width current)
   "ENTRY as the sessions show it, WIDTH columns wide; CURRENT if the
 listener shows it."
-  (let* ((mark (lispm-terminal--mark entry))
+  (let* ((indent (make-string (* 2 (or (plist-get entry :depth) 0)) ?\s))
+         (mark (lispm-terminal--mark entry))
          (title (lispm--oneline (lispm-terminal--title entry)
-                                (max 4 (- width 5 (string-width mark)))))
+                                (max 4 (- width 5 (length indent) (string-width mark)))))
          (detail (lispm-terminal--detail entry)))
     (propertize
-     (concat (if current (propertize "▸ " 'face 'lispm-chat-accent) "  ")
+     (concat indent (if current (propertize "▸ " 'face 'lispm-chat-accent) "  ")
              (if current (propertize title 'face 'lispm-terminal-current) title)
              (lispm-terminal--align-right mark)
              mark "\n"
              (if (and detail (not (string-empty-p detail)))
-                 (concat "    " (propertize (lispm--oneline detail (max 4 (- width 5)))
+                 (concat indent "    " (propertize (lispm--oneline detail (max 4 (- width 5 (length indent))))
                                            'face 'lispm-terminal-dim)
                          "\n")
                ""))
@@ -347,19 +400,17 @@ listener shows it."
          (id (and current (lispm-agent-id current)))
          (string (lambda (entry)
                    (lispm-terminal--entry-string entry width (equal (plist-get entry :id) id))))
-         (agents (seq-filter (lambda (entry) (eq (plist-get entry :kind) 'agent)) entries))
-         (recorded (seq-filter (lambda (entry) (eq (plist-get entry :kind) 'recorded)) entries)))
+         (others (cdr entries)))
     (concat (propertize (lispm-tr "Sessions") 'face 'bold)
             (lispm-terminal--align-right (lispm-tr "? keys"))
             (propertize (lispm-tr "? keys") 'face 'lispm-terminal-dim)
             "\n\n"
             (funcall string (car entries))
-            (when agents
-              (concat (lispm-terminal--heading (lispm-tr "Agents"))
-                      (mapconcat string agents "")))
-            (when recorded
-              (concat (lispm-terminal--heading (lispm-tr "Recent"))
-                      (mapconcat string recorded ""))))))
+            (when others
+              (concat (lispm-terminal--heading
+                       (if (seq-some (lambda (entry) (eq (plist-get entry :kind) 'agent)) others)
+                           (lispm-tr "Agents") (lispm-tr "Recent")))
+                      (mapconcat string others ""))))))
 
 (defun lispm-terminal--entry-at (&optional pos)
   "The entry of the sessions at POS, by default point."

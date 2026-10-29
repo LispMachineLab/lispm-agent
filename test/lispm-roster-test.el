@@ -96,6 +96,29 @@ Archives are absent; snapshots neither scan transcripts nor expose strings."
       (should (equal (plist-get record :actions) '(open-chat)))
       (should-not (lispm-agents-roster-details nil)))))
 
+(ert-deftest lispm-test-roster-inherits-archive-without-session-list ()
+  "Live descendants inherit archives before any sidebar scans sessions."
+  (lispm-test-env
+    (let* ((parent (lispm-start 'assistant project))
+           (child (lispm-start 'assistant project))
+           (grandchild (lispm-start 'assistant project))
+           (other (lispm-start 'assistant project))
+           (lispm-agents--session-parents nil)
+           (lispm-agents--effective-archive nil)
+           (lispm-agents--archived (list (format "lispm:%s" (lispm-agent-id parent)))))
+      (lispm-set-parent child (lispm-agent-id parent))
+      (lispm-set-parent grandchild (lispm-agent-id child))
+      (cl-letf (((symbol-function 'lispm-agents-sessions-list)
+                 (lambda (&rest _) (ert-fail "Unexpected transcript scan")))
+                ((symbol-function 'lispm-agents-sessions-snapshot)
+                 (lambda (&rest _) (ert-fail "Unexpected session snapshot"))))
+        (should (equal (mapcar (lambda (record) (plist-get record :key)) (lispm-agents-roster))
+                       (list (list 'lispm (lispm-agent-id other)))))
+        (should-not (lispm-agents-roster-buffer (list 'lispm (lispm-agent-id grandchild))))
+        (should (eq (lispm-agents-roster-buffer (list 'lispm (lispm-agent-id other)))
+                    (lispm-agent-buffer other))))
+      (should-not lispm-agents--session-parents))))
+
 (ert-deftest lispm-test-roster-coalesces ()
   "Several changes in one command yield one batch and ordered envelopes."
   (lispm-test-env

@@ -124,8 +124,10 @@ with ~lispm-bar-activity-functions~, and show the bar elsewhere with ~lispm-bar-
 
 ~M-x lispm-terminal~ makes the frame LispM's terminal, after the Lisp Machine's console: no
 menu bar, tool bar, tabs or scroll bars, only the keyboard and conversations.  The sessions are
-on the left: LispM itself first, then the agents alive, then the recorded sessions, an agent's
-state (~✻~ at work, ~!~ awaiting you) or a session's age beside each.  The listener, on the
+on the left: LispM itself first, then live and recorded sessions together, each below the
+session that started it.  Siblings sort by their latest opening or resume, newest first;
+replies do not move them.  An agent's state (~✻~ at work, ~!~ awaiting you) or a session's age
+appears beside each.  The listener, on the
 right, is the chat of one of them, where everything is done by asking.  The who line at the
 bottom says, as the Lisp Machine's did, the time, who you are, the project and agent the
 listener talks to, what it is doing, and its model.  It works the same in a window and in a
@@ -364,6 +366,8 @@ from a shell that has no server of its own.
 ~lispm-agents-roster~ returns alive, unarchived conversations as plists with stable
 ~(KIND SESSION-ID)~ keys, identity, status, character, mailbox counts, wait edges and actions.
 It reads no transcripts or diaries; unknown data is nil, including an unclaimed terminal key.
+Descendants inherit their parent's archive state; restoring a parent restores its inherited
+descendants while preserving any child archived independently.
 
 ~lispm-agents-roster-details KEY~ lazily reads one agent's work and full mailbox, with pending
 calls, at most twenty recent calls and this turn's journal files.  Claude Code and Codex use

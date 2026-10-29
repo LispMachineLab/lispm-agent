@@ -39,6 +39,8 @@
   agents                     ; runtime agent, including bridge proxies -> buffer
   names                      ; agent name, peer name or LispM session id -> buffer
   parents                    ; bridge proxy session id -> terminal buffer
+  sessions                   ; buffer -> already known session metadata
+  archived                   ; effective archive keys for this live graph
   waits)                     ; buffer -> wait and request plist
 
 (defvar lispm-agents-roster--index nil
@@ -87,11 +89,12 @@ invented for it.  This never asks a session reader to scan files."
 (defun lispm-agents-roster-buffer (key)
   "Return the live, unarchived buffer identified by KEY, or nil."
   (when key
-    (let ((buffer (if lispm-agents-roster--index
-                      (gethash key (lispm-agents-roster--index-by-key lispm-agents-roster--index))
-                    (seq-find (lambda (buffer) (equal key (lispm-agents-roster-key buffer)))
-                              (lispm-agents-live-buffers)))))
-      (unless (lispm-agents-archived-p (list :agent (car key) :id (cadr key))) buffer))))
+    (let* ((index (or lispm-agents-roster--index
+                      (lispm-agents-roster--build-index (lispm-agents-live-buffers))))
+           (buffer (gethash key (lispm-agents-roster--index-by-key index))))
+      (unless (gethash (lispm-agents--session-key (list :agent (car key) :id (cadr key)))
+                       (lispm-agents-roster--index-archived index))
+        buffer))))
 
 (defun lispm-agents-roster--named-key (name)
   "Return the known key of agent or peer NAME for a source notification."
@@ -115,13 +118,18 @@ invented for it.  This never asks a session reader to scan files."
                  :buffers buffers :keys (make-hash-table :test #'eq)
                  :by-key (make-hash-table :test #'equal) :agents (make-hash-table :test #'eq)
                  :names (make-hash-table :test #'equal) :parents (make-hash-table :test #'equal)
+                 :sessions (make-hash-table :test #'eq)
                  :waits (make-hash-table :test #'eq)))
          (names (lispm-agents-roster--index-names index)))
     (dolist (buffer buffers)
       (let ((key (lispm-agents-roster--buffer-key buffer))
             (agent (lispm-agents-roster--agent buffer)))
         (puthash buffer key (lispm-agents-roster--index-keys index))
-        (when key (puthash key buffer (lispm-agents-roster--index-by-key index)))
+        (when key
+          (puthash key buffer (lispm-agents-roster--index-by-key index))
+          (puthash buffer (or (lispm-agents-known-session (car key) (cadr key))
+                              (buffer-local-value 'lispm-agents-buffer-session buffer))
+                   (lispm-agents-roster--index-sessions index)))
         (when agent
           (puthash agent buffer (lispm-agents-roster--index-agents index))
           (puthash (symbol-name (lispm-agent-name agent)) buffer names)
@@ -130,8 +138,35 @@ invented for it.  This never asks a session reader to scan files."
           (puthash name buffer names))
         (when-let* ((proxy (buffer-local-value 'lispm-agents-bridge--agent buffer)))
           (puthash (lispm-agent-id proxy) buffer (lispm-agents-roster--index-parents index)))))
+    (setf (lispm-agents-roster--index-archived index) (lispm-agents-roster--archive-index index))
     (lispm-agents-roster--build-wait-index index)
     index))
+
+(defun lispm-agents-roster--archive-index (index)
+  "Resolve archives from INDEX's live parents without scanning transcripts.
+Overlay known live relations on the last full session graph for this
+snapshot only; a partial roster must not erase historical parent links."
+  (let ((lispm-agents--session-parents lispm-agents--session-parents)
+        (lispm-agents--effective-archive nil)
+        sessions bridges)
+    (dolist (buffer (lispm-agents-roster--index-buffers index))
+      (when-let* ((key (gethash buffer (lispm-agents-roster--index-keys index))))
+        (let* ((agent (buffer-local-value 'lispm-session-agent buffer))
+               (session (gethash buffer (lispm-agents-roster--index-sessions index)))
+               (parent (if agent (lispm-agent-parent agent) (plist-get session :parent)))
+               (proxy (and parent agent (gethash parent (lispm-agents-roster--index-parents index))))
+               (parent-key (and proxy (gethash proxy (lispm-agents-roster--index-keys index)))))
+          ;; Unknown terminal metadata cannot clear a cached relation.
+          (when (or agent session)
+            (push (list :agent (car key) :id (cadr key) :parent parent) sessions))
+          (when parent-key
+            (push (cons (lispm-agents--session-key (list :agent (car key) :id (cadr key)))
+                        (lispm-agents--session-key (list :agent (car parent-key) :id (cadr parent-key))))
+                  bridges)))))
+    (lispm-agents--index-session-parents sessions t)
+    (dolist (edge bridges)
+      (puthash (car edge) (cdr edge) (cdr lispm-agents--session-parents)))
+    (lispm-agents--effective-archive)))
 
 (defun lispm-agents-roster--add-wait (index buffer field value)
   "Add VALUE to BUFFER's relation FIELD in INDEX, ignoring unknown values."
@@ -188,8 +223,7 @@ builds a fresh index so settled requests never remain cached."
   (let* ((kind (lispm-agents-of-buffer buffer))
          (key (lispm-agents-roster-key buffer))
          (agent (buffer-local-value 'lispm-session-agent buffer))
-         (session (and key (or (lispm-agents-known-session kind (cadr key))
-                               (buffer-local-value 'lispm-agents-buffer-session buffer))))
+         (session (gethash buffer (lispm-agents-roster--index-sessions lispm-agents-roster--index)))
          (parent (if agent (lispm-agent-parent agent) (plist-get session :parent)))
          (parent-proxy (and parent agent
                             (gethash parent (lispm-agents-roster--index-parents lispm-agents-roster--index))))
@@ -201,7 +235,8 @@ builds a fresh index so settled requests never remain cached."
                       (list :handling (and (lispm-agent-entry agent) t)
                             :queued (length (lispm-agent-inbox agent)))
                     (lispm-agents-bridge-mailbox-summary buffer))))
-    (unless (and key (lispm-agents-archived-p (list :agent kind :id (cadr key))))
+    (unless (and key (gethash (lispm-agents--session-key (list :agent kind :id (cadr key)))
+                              (lispm-agents-roster--index-archived lispm-agents-roster--index)))
       (when (and lispm-agents-roster-change-functions (not agent)
                  (null (buffer-local-value 'lispm-agents-roster--terminal-data buffer)))
         (with-current-buffer buffer

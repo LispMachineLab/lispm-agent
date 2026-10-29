@@ -55,6 +55,7 @@
 (require 'diff-mode)
 (require 'project)
 (require 'lispm-core)
+(require 'lispm-agents)
 (require 'lispm-transcript)
 (require 'lispm-api)
 (require 'lispm-tools)
@@ -303,6 +304,20 @@ needs nothing more."
 (defvar lispm--visiting nil
   "The agent whose session file is being visited, while it is.")
 
+(defvar lispm--inhibit-session-opening nil
+  "Non-nil while visiting a transcript only to edit its metadata.")
+
+(defun lispm--record-session-opening (agent &optional time)
+  "Record AGENT's actual session opening at TIME, defaulting to now.
+Merely displaying an existing session or continuing it in another file
+does not call this.  No desktop or background reader is needed."
+  (unless lispm--inhibit-session-opening
+    (let ((time (or time (float-time))))
+      (with-current-buffer (lispm-agent-buffer agent)
+        (setq lispm-agents-buffer-session-id (lispm-agent-id agent)
+              lispm-agents-buffer-launched time))
+      (lispm-agents-session-opened 'lispm (lispm-agent-id agent) time))))
+
 (defun lispm--file-keywords (file)
   "The #+lispm_ keywords of session FILE, read without visiting it."
   (with-temp-buffer
@@ -424,7 +439,10 @@ Tool calls awaiting approval are WAITING headings: review them with
             ;; tools grouping buffers by directory, see the project.
             (setq default-directory (lispm-agent-root agent)))
           (when (and agent (not (buffer-live-p (lispm-agent-buffer agent))))
-            (setf (lispm-agent-buffer agent) (current-buffer)))
+            (setf (lispm-agent-buffer agent) (current-buffer))
+            ;; Explicit visits are recorded by `lispm-session-buffer';
+            ;; opening a transcript directly adopts and records it here.
+            (unless lispm--visiting (lispm--record-session-opening agent)))
           (when (and agent (eq (lispm-agent-buffer agent) (current-buffer)))
             (lispm--resume-calls agent))))
     (remove-hook 'org-after-todo-state-change-hook #'lispm--todo-state-changed t)
@@ -559,7 +577,8 @@ the continuation keeps the title the conversation is listed under."
 
 (defun lispm--visit-session (agent file)
   "Make FILE AGENT's session buffer; return the buffer."
-  (let ((buffer (let ((lispm--visiting agent)) (find-file-noselect file))))
+  (let* ((lispm--visiting agent)
+         (buffer (find-file-noselect file)))
     (with-current-buffer buffer
       (setq lispm-session-agent agent)
       (lispm-session-mode 1)
@@ -608,7 +627,8 @@ is none, a fresh session starts."
         buffer
       (when (lispm-agent-busy-p agent)
         (user-error "%s" (lispm-tr "%s is busy" (lispm-agent-name agent))))
-      (let ((file (and (not new) (lispm-agent-standing agent)
+      (let ((opened (float-time))
+            (file (and (not new) (lispm-agent-standing agent)
                        (lispm--latest-session-file agent))))
         ;; A standing agent goes on with its session: its id is the session's.
         (when-let* ((id (and file (cdr (assoc "id" (lispm--file-keywords file))))))
@@ -620,6 +640,7 @@ is none, a fresh session starts."
             (setf (lispm-agent-id agent) (lispm--new-id)))
           (setq file (lispm--create-session-file agent)))
         (prog1 (lispm--visit-session agent file)
+          (lispm--record-session-opening agent opened)
           (when new (lispm-inbox-save agent)))))))
 
 (defun lispm--project-root (&optional directory)
@@ -718,6 +739,23 @@ its request was made from, for the turn to be taken up again."
               ((not (string-empty-p text))))
     (car (split-string text "\n"))))
 
+(defun lispm--session-started (id)
+  "Return the creation time encoded in session ID, or nil when unknown.
+`lispm--new-id' records local time as YYYYMMDD-HHMMSS before its suffix.
+Unlike a transcript's modification time, this survives later responses
+and continuation files."
+  (when (and (stringp id)
+             (string-match-p "\\`[0-9]\\{8\\}-[0-9]\\{6\\}-[[:xdigit:]]\\{4\\}\\'" id))
+    (ignore-errors
+      (let ((time (encode-time (string-to-number (substring id 13 15))
+                               (string-to-number (substring id 11 13))
+                               (string-to-number (substring id 9 11))
+                               (string-to-number (substring id 6 8))
+                               (string-to-number (substring id 4 6))
+                               (string-to-number (substring id 0 4)))))
+        (when (equal (format-time-string "%Y%m%d-%H%M%S" time) (substring id 0 15))
+          (float-time time))))))
+
 (defun lispm--session-description (file)
   "Describe the session recorded in FILE, or nil if it holds none.
 Descriptions are remembered until FILE changes."
@@ -737,6 +775,7 @@ Descriptions are remembered until FILE changes."
                          :role (cdr (assoc "role" keywords))
                          :root (expand-file-name (or (cdr (assoc "root" keywords)) "~"))
                          :title title
+                         :started (lispm--session-started (cdr (assoc "id" keywords)))
                          :time time
                          :file file
                          :parent (cdr (assoc "parent" keywords))))))))
@@ -744,8 +783,8 @@ Descriptions are remembered until FILE changes."
         description))))
 
 (defun lispm-sessions ()
-  "Every recorded session with some input, newest first.
-Each is a plist (:id :agent :character :role :root :title :time :file
+  "Every recorded session with some input, most recently opened first.
+Each is a plist (:id :agent :character :role :root :title :started :time :file
 :parent), :character nil but in a character's, :parent the id of the
 session of the agent that started this one, see `lispm-set-parent',
 else nil; a session continued in several files is listed once, by its
@@ -756,8 +795,16 @@ newest file."
         (let ((seen (gethash (plist-get session :id) latest)))
           (when (or (null seen) (> (plist-get session :time) (plist-get seen :time)))
             (puthash (plist-get session :id) session latest)))))
-    (sort (hash-table-values latest)
-          (lambda (a b) (> (plist-get a :time) (plist-get b :time))))))
+    (cl-flet ((opened (session)
+                ;; Native :agent names the individual, not the provider.
+                (lispm-agents-session-opened-time
+                 (list :agent 'lispm :id (plist-get session :id)
+                       :started (plist-get session :started)))))
+      (sort (hash-table-values latest)
+            (lambda (a b)
+              (let ((ta (opened a)) (tb (opened b)))
+                (if (= ta tb) (string< (plist-get a :id) (plist-get b :id))
+                  (> ta tb))))))))
 
 (defun lispm-session-files (id)
   "Every file recording the session ID."
@@ -766,7 +813,8 @@ newest file."
 
 (defun lispm-rename-session (file title)
   "Give the session recorded in FILE the TITLE shown in session lists."
-  (let* ((visiting (find-buffer-visiting file))
+  (let* ((lispm--inhibit-session-opening t)
+         (visiting (find-buffer-visiting file))
          (buffer (or visiting (find-file-noselect file))))
     (with-current-buffer buffer
       (lispm--set-keyword "title" title)
