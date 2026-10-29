@@ -92,5 +92,58 @@
           (should (= (lispm-test--native-opened agent) 400))
           (should (buffer-live-p (lispm-agent-buffer agent))))))))
 
+(ert-deftest lispm-test-native-generic-callbacks-record-opening-once ()
+  "Generic providers preserve the native opening of either buffer interface."
+  (dolist (interface '(transcript chat))
+    (lispm-test-env
+      (let ((now 100.0) (clock (symbol-function 'float-time))
+            (writer (symbol-function 'lispm-agents-session-opened))
+            (writes nil) native
+            (lispm-agents-show-function #'ignore)
+            (lispm-agents-sessions-changed-hook nil))
+        (cl-labels ((view (agent)
+                      (let ((buffer (if (eq interface 'chat)
+                                        (lispm-chat agent)
+                                      (lispm-agent-buffer agent))))
+                        ;; A custom provider identifies its returned buffer;
+                        ;; only the runtime owns its actual opening time.
+                        (with-current-buffer buffer
+                          (setq lispm-agents-buffer-session-id (lispm-agent-id agent)))
+                        buffer)))
+          (lispm-test--with-agents
+              `((lispm :name "LispM"
+                       :new ,(lambda (directory)
+                               (cl-incf now)
+                               (view (setq native (lispm-start 'assistant directory))))
+                       :resume ,(lambda (session)
+                                  (cl-incf now)
+                                  (view (setq native (lispm-resume-file (plist-get session :file)))))
+                       :buffer-p ,(lambda (buffer)
+                                    (buffer-local-value (if (eq interface 'chat)
+                                                            'lispm-chat-agent
+                                                          'lispm-session-agent)
+                                                        buffer))))
+            (cl-letf (((symbol-function 'float-time)
+                       (lambda (&optional time) (if time (funcall clock time) now)))
+                      ((symbol-function 'lispm-agents-session-opened)
+                       (lambda (&rest args) (push args writes) (apply writer args))))
+              (let* ((buffer (lispm-agents-new 'lispm project))
+                     (id (lispm-agent-id native))
+                     (session (list :agent 'lispm :id id :cwd project :title "Native session"
+                                    :file (buffer-file-name (lispm-agent-buffer native)))))
+                (should (equal writes (list (list 'lispm id 101.0))))
+                (should (= (lispm-test--native-opened native) 101.0))
+                (should (= (buffer-local-value 'lispm-agents-buffer-launched buffer) 101.0))
+                (lispm-retire native)
+                (setq writes nil now 200.0)
+                (let ((resumed (lispm-agents-resume-session session)))
+                  (should (equal writes (list (list 'lispm id 201.0))))
+                  (should (= (lispm-test--native-opened native) 201.0))
+                  (should (= (buffer-local-value 'lispm-agents-buffer-launched resumed) 201.0))
+                  (setq writes nil now 300.0)
+                  (should (eq (lispm-agents-resume-session session) resumed))
+                  (should-not writes)
+                  (should (= (lispm-test--native-opened native) 201.0)))))))))))
+
 (provide 'lispm-native-session-order-test)
 ;;; lispm-native-session-order-test.el ends here

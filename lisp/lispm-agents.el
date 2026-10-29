@@ -478,12 +478,14 @@ built in first, then the others in the order they were defined."
 (defun lispm-agents-emacs-buffer-agent (buffer)
   "Return the in-Emacs agent kind whose session BUFFER holds, or nil.
 LispM's own session buffers are recognised even without a host having
-registered session-list commands for the `lispm' kind."
+registered session-list commands for the `lispm' kind.  A registered
+:buffer-p instead chooses which view represents a live native session."
   (or (car (seq-find (lambda (entry)
                       (when-let* ((buffer-p (plist-get (cdr entry) :buffer-p)))
                         (funcall buffer-p buffer)))
                     lispm-agents-defined))
-      (and (boundp 'lispm-session-agent)
+      (and (not (plist-get (lispm-agents-props 'lispm) :buffer-p))
+           (boundp 'lispm-session-agent)
            (buffer-local-value 'lispm-session-agent buffer)
            'lispm)))
 
@@ -1121,11 +1123,16 @@ directory take the sessions in the order they began."
             (push (plist-get session :id) claimed)))))))
 
 (defun lispm-agents--opened-buffer (agent buffer time &optional id)
-  "Record custom AGENT BUFFER opened at TIME, optionally with session ID."
+  "Record custom AGENT BUFFER opened at TIME, optionally with session ID.
+Preserve an opening the callback already recorded while creating BUFFER."
   (with-current-buffer buffer
-    (setq lispm-agents-buffer-launched (max time (or lispm-agents-buffer-launched 0)))
-    (lispm-agents-session-opened agent (or id lispm-agents-buffer-session-id)
-                                 lispm-agents-buffer-launched))
+    (let* ((id (or id lispm-agents-buffer-session-id))
+           (recorded (and id (gethash (lispm-agents--session-key (list :agent agent :id id))
+                                     (lispm-agents--opened-times)))))
+      (setq lispm-agents-buffer-launched
+            (max time (or lispm-agents-buffer-launched 0) (or recorded 0)))
+      (unless (equal recorded lispm-agents-buffer-launched)
+        (lispm-agents-session-opened agent id lispm-agents-buffer-launched))))
   buffer)
 
 (defvar-local lispm-agents--claimed-at nil
