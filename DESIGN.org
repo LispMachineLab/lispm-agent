@@ -534,8 +534,19 @@ ceiling, or call a tool's function past its checks. The policy cannot mediate wh
 does, only whether it runs: it runs if the user approves it, or if the policy lets its class
 run unasked, which gives the agent everything. So approving one "for good" (~2~ in the chat,
 ~a~ in the review) allows that exact call again, with the same input, never every later one
-(~lispm-tools-allowance~), and so does approving a call of a tool that always asks. Lisp the
-policy should mediate is what ~run_lisp~ is for.
+(~lispm-tools-allowance~), and so does approving a call of a tool that always asks. A command
+that cannot reach Emacs is the exception: on another machine, or confined by the sandbox
+(both below), approving one command for good allows every later one (~lispm-tools-apart-p~).
+A shell tool allowed as a whole holds only while that is so: ~lispm-tools--allowed-p~ checks
+it again at each call, so a level set back to None has every writing command ask, as it did
+before, until the sandbox is back or the command is approved as that exact command. Lisp the
+policy should mediate is what ~run_lisp~ is for. What Lisp touches cannot be told before it runs,
+so no call of ~eval_elisp~ is reclassed by its code; but code naming a function that changes
+buffers or files (~lispm-tools-code-writes-p~: ~lispm-tools-file-writers~ anywhere,
+~lispm-tools-buffer-writers~ outside ~with-temp-buffer~) says so in its approval, in the chat
+and in the transcript's preview, with the files it names, since it shows no diff as the edit
+tools would; the tool's description sends the model to the edit tools for files and buffers.
+The journal still records what it changed (below).
 
 *A command that only reads is a read.* Most of what an agent runs in the shell looks rather
 than changes: ~ls~, ~grep~, ~git status~, ~git log~, ~gh pr view~. Asking about each would have
@@ -543,7 +554,8 @@ the user approve reading, which the policy lets run unasked; so a tool may say o
 does less than the tool can (~:class~ in ~lispm-deftool~, ~lispm-tool-call-permission~), and the
 policy decides the call by that class. ~run_shell~ says ~read~ of a command made only of programs
 of ~lispm-shell-read-only-programs~, each as that says it reads (~find~ without ~-delete~ or
-~-exec~, ~git~ with a reading subcommand and none of the options that have it run a program,
+~-exec~, ~sed~ whose script only prints, deletes or substitutes, never writes a file or runs a
+command, ~git~ with a reading subcommand and none of the options that have it run a program,
 ~gh api~ with GET), joined by pipes, ~&&~, ~||~ or ~;~, writing nowhere but =/dev/null=
 (~lispm-shell-read-only-p~). The parser undoes quotes and backslashes and knows nothing else: a
 substitution, backquotes, a subshell, a group, a background job, a here document, an environment
@@ -574,6 +586,24 @@ cannot be had, or the root is on another machine, which srt cannot confine, the 
 with the reason: a sandbox that stepped aside when missing would be worse than none, since it
 would still be trusted. Emacs Lisp stays unconfined, so ~exec~ keeps asking; and no level lets
 a command write Emacs's configuration or ~lispm-directory~, which holds srt itself.
+
+*The sandbox keeps commands from Emacs.* A confined command could still reach the running
+Emacs through its server: ~emacsclient --eval~ carries Lisp in by the socket in
+~server-socket-dir~, under =TMPDIR= on macOS, which levels Low and Middle let commands write,
+or by a TCP server's key in ~server-auth-dir~. So every level denies both directories, as
+given and as they really are, to reading and to writing (~lispm-sandbox--server-places~), and
+a Custom rule for Unix sockets that is, contains or lies under either is refused
+(~lispm-sandbox--check~). Verified on macOS 27 (Seatbelt) with srt 0.0.81 against a scratch
+=emacs --batch= server: at every level ~emacsclient~ fails, by socket name and by socket path,
+and the socket directory can be neither listed nor written; Seatbelt denies the connect itself
+whatever the file rules say, which is why the Unix socket rule has to be checked, since a
+rule covering =TMPDIR= let ~emacsclient~ through a directory it could not read. On Linux srt
+denies Unix sockets by seccomp and mounts a tmpfs over a directory denied to reading, so the
+socket is not there to find; that side is read from srt's source, not run. This is what lets a
+confined command be allowed for good as one on another machine is
+(~lispm-sandbox-confines-p~): the level is not None, its rules are sound, and they do not
+allow Apple Events, which open programs outside the sandbox. Whether a command is confined
+is asked when its call is decided, never remembered with the allowance.
 
 *A root on another machine.* Hosted harnesses give each agent a computer of its own, a VM in
 their cloud, so that what it does cannot reach the user's. LispM's agents live in the user's

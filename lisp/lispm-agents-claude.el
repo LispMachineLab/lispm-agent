@@ -357,6 +357,7 @@ the id it is given, so its terminal knows its session from the start."
    :worktree #'lispm-agents-claude--worktree
    :new-arguments #'lispm-agents-claude--new-arguments
    :resume-arguments (lambda (id) (list "--resume" id))
+   :model-arguments (lambda (model) (list "--model" model))
    :arguments #'lispm-agents-claude--arguments
    :context #'lispm-agents-claude--context
    :ready #'lispm-agents-claude--ready-p))

@@ -1311,6 +1311,43 @@ not one, has every tool ask."
 
 ;;;; Emacs itself, and skills
 
+(ert-deftest lispm-test-code-writes ()
+  "Code that names a function changing buffers or files is seen to write,
+with the files it names; a temporary buffer's text does not count, and
+code that does not read is searched for the names."
+  (lispm-test-env
+    (should-not (lispm-tools-code-writes-p "(+ 1 2)"))
+    (should-not (lispm-tools-code-writes-p "(with-temp-buffer (insert \"a\") (buffer-string))"))
+    (should-not (lispm-tools-code-writes-p "(with-temp-buffer (insert-file-contents \"a.txt\") (buffer-string))"))
+    (should-not (lispm-tools-code-writes-note "(+ 1 2)"))
+    ;; The live case: a file rewritten in its buffer and saved.
+    (let ((code (concat "(with-current-buffer (find-file-noselect \"lisp/x.el\")\n"
+                        "  (goto-char (point-min)) (delete-region (point) (+ (point) 80))\n"
+                        "  (insert \"new\") (save-buffer))")))
+      (should (equal (lispm-tools-code-writes-p code) '(delete-region insert save-buffer)))
+      (should (equal (lispm-tools-code-files code) '("lisp/x.el")))
+      (should (equal (lispm-tools-code-writes-note code)
+                     "This code changes buffers or files; it shows no diff, as the edit tools would. It names lisp/x.el.")))
+    ;; Saving from a temporary buffer writes a file; a name passed as a
+    ;; function writes as a call does.
+    (should (equal (lispm-tools-code-writes-p "(with-temp-buffer (insert \"a\") (write-region nil nil \"~/o.txt\"))")
+                   '(write-region)))
+    (should (equal (lispm-tools-code-writes-p "(mapc #'delete-file (directory-files \"/tmp/x\" t \"\\\\.log$\"))")
+                   '(delete-file)))
+    ;; Strings that are not file names: with spaces, URLs, regexps.
+    (should-not (lispm-tools-code-files "(message \"hello world\" \"http://x/y\" \"\\\\.el$\")"))
+    (should (equal (lispm-tools-code-files "(list \"a.b\" \"~/.emacs.d\")") '("a.b" "~/.emacs.d")))
+    ;; Circular syntax reads as a circle: walked once, the writer found once.
+    (should (equal (lispm-tools-code-writes-p "'#1=(insert . #1#)") '(insert)))
+    (should (equal (lispm-tools-code-writes-p "(progn #1=(save-buffer \"a.el\" . #1#) (insert \"x\"))")
+                   '(save-buffer insert)))
+    (should (equal (lispm-tools-code-files "'(delete-file #1=(\"a/b\" . #1#))") '("a/b")))
+    (should (equal (lispm-tools-code-writes-p "'#1=[delete-region #1#]") '(delete-region)))
+    ;; Unbalanced code: the names as words.
+    (should (equal (lispm-tools-code-writes-p "(progn (save-buffer") '(save-buffer)))
+    (should (equal (lispm-tools-code-writes-note "(progn (save-buffer")
+                   "This code changes buffers or files; it shows no diff, as the edit tools would."))))
+
 (ert-deftest lispm-test-eval-async ()
   "eval_elisp waits for a value promised with lispm-async."
   (lispm-test-env
@@ -2499,6 +2536,138 @@ Emacs wherever the root is, is allowed call by call."
         (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
                        '("eval_elisp" (code . "1"))))))))
 
+(ert-deftest lispm-test-shell-allowance-call-key ()
+  "Remembering a command does not depend on argument order or its timeout.
+The command stays exact, and stricter checks still ask."
+  (lispm-test-env
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (shell (lispm-get-tool "run_shell"))
+           (lispm-sandbox-level 'none)
+           (input '((timeout . 30) (why . "Build") (command . "make")))
+           (original (copy-tree input)))
+      (should (eq (lispm-tool-action agent shell input) 'ask))
+      (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+      (should (equal input original))
+      (dolist (again '(((command . "make") (timeout . 30) (why . "Build again"))
+                       ((timeout . 60) (command . "make"))
+                       ((command . "make"))
+                       ((command . "make") (timeout . :null))))
+        (should (eq (lispm-tool-action agent shell again) 'auto)))
+      (dolist (other '(((command . "make test") (timeout . 30))
+                       ((command . "make ") (timeout . 30))
+                       ((command . "make") (directory . "/tmp"))
+                       ((command . "make") (timeout . "invalid"))))
+        (should (eq (lispm-tool-action agent shell other) 'ask)))
+      (let ((lispm-tool-action-functions (list (lambda (&rest _) '(ask . "Check again.")))))
+        (should (equal (lispm-tool-decision agent shell '((command . "make") (timeout . 60)))
+                       '(ask "Check again."))))
+      ;; An allowance made before keys were normalized survives a code
+      ;; reload in this Emacs; its data is neither rewritten nor widened.
+      (setf (lispm-agent-allowed agent) '(("run_shell" (timeout . 30) (command . "make"))))
+      (should (eq (lispm-tool-action agent shell '((command . "make"))) 'auto))
+      (should (eq (lispm-tool-action agent shell '((command . "make test"))) 'ask))
+      (should (equal (lispm-agent-allowed agent)
+                     '(("run_shell" (timeout . 30) (command . "make"))))))))
+
+(ert-deftest lispm-test-allowance-call-key-conservative ()
+  "Exact approvals preserve duplicate arguments, nested values and code.
+Only program-running tools treat timeout as an execution limit rather than input."
+  (lispm-test-env
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (tool (lispm-tool--create :name "custom_exec" :permission 'exec))
+           (input '((payload (a . 1) (b . 2)) (timeout . 30) (code . "(+ 1 2)")))
+           (original (copy-tree input)))
+      (push (lispm-tools-allowance tool input agent) (lispm-agent-allowed agent))
+      (should (equal input original))
+      (should (eq (lispm-tool-action agent tool
+                                    '((code . "(+ 1 2)") (why . "Again")
+                                      (timeout . 30) (payload (a . 1) (b . 2))))
+                  'auto))
+      (dolist (other '(((payload (b . 2) (a . 1)) (timeout . 30) (code . "(+ 1 2)"))
+                       ((payload (a . 1) (b . 2)) (timeout . 60) (code . "(+ 1 2)"))
+                       ((payload (a . 1) (b . 2)) (timeout . 30) (code . "(+ 1  2)"))))
+        (should (eq (lispm-tool-action agent tool other) 'ask)))
+      (let ((shell (lispm-get-tool "run_shell"))
+            (lispm-sandbox-level 'none)
+            (duplicate '((command . "make") (timeout . 30) (timeout . 60))))
+        (push (lispm-tools-allowance shell duplicate agent) (lispm-agent-allowed agent))
+        (should (eq (lispm-tool-action agent shell duplicate) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "make") (timeout . 30))) 'ask))
+        (should (eq (lispm-tool-action agent shell
+                                      '((command . "make") (timeout . 60) (timeout . 30)))
+                    'ask))))))
+
+(ert-deftest lispm-test-shell-allowance-sandboxed ()
+  "Approving a sandboxed shell command for good allows the tool, as it does
+on another machine: a confined command cannot reach Emacs.  The allowance
+holds only while the sandbox confines; with the level back at none, each
+command asks again.  Lisp stays call by call."
+  (lispm-test-env
+    (require 'server)
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (shell (lispm-get-tool "run_shell"))
+           (elisp (lispm-get-tool "eval_elisp"))
+           (input '((why . "w") (command . "make")))
+           (server-socket-dir (expand-file-name "sockets" lispm-directory))
+           (server-auth-dir (expand-file-name "auth/" lispm-directory))
+           (lispm-sandbox-custom nil))
+      (dolist (level '(low middle high custom))
+        (let ((lispm-sandbox-level level))
+          (should (lispm-sandbox-confines-p))
+          (should (lispm-tools-apart-p agent))
+          (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
+          (should (equal (lispm-tools-allowance elisp '((code . "1")) agent)
+                         '("eval_elisp" (code . "1"))))))
+      (let ((lispm-sandbox-level 'none))
+        (should-not (lispm-sandbox-confines-p))
+        (should-not (lispm-tools-apart-p agent))
+        (should (equal (lispm-tools-allowance shell input agent) '("run_shell" (command . "make")))))
+      ;; Rules that let commands out do not confine.
+      (let ((lispm-sandbox-level 'custom))
+        (let ((lispm-sandbox-custom '(:apple-events t)))
+          (should-not (lispm-sandbox-confines-p))
+          (should (consp (lispm-tools-allowance shell input agent))))
+        (let ((lispm-sandbox-custom (list :unix-sockets (list server-socket-dir))))
+          (should-not (lispm-sandbox-confines-p))
+          (should (consp (lispm-tools-allowance shell input agent))))
+        (let ((lispm-sandbox-custom '(:unix-sockets ("/var/run/docker.sock"))))
+          (should (lispm-sandbox-confines-p))
+          (should (equal (lispm-tools-allowance shell input agent) "run_shell"))))
+      ;; The sandbox confines this machine's commands: a root on another
+      ;; machine is allowed as before, one reached through TRAMP on this
+      ;; machine, which the sandbox cannot take, never.
+      (let ((lispm-sandbox-level 'low))
+        (setf (lispm-agent-root agent) "/ssh:vm:/work/")
+        (should (equal (lispm-tools-allowance shell input agent) "run_shell"))
+        (setf (lispm-agent-root agent) "/sudo::/srv/")
+        (should (consp (lispm-tools-allowance shell input agent)))
+        (setf (lispm-agent-root agent) project))
+      ;; Allowed under the sandbox, the tool runs unasked while the sandbox
+      ;; confines, asks again once the level is none, and runs again
+      ;; once the sandbox is back.
+      (let ((lispm-sandbox-level 'low))
+        (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+        (should (equal (lispm-agent-allowed agent) '("run_shell")))
+        (should (eq (lispm-tool-action agent shell input) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'auto)))
+      (let ((lispm-sandbox-level 'none))
+        (should (eq (lispm-tool-action agent shell input) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'ask))
+        (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'auto))
+        ;; Approved for good now, this exact command is allowed, no other.
+        (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+        (should (eq (lispm-tool-action agent shell input) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'ask)))
+      (let ((lispm-sandbox-level 'middle))
+        (should (eq (lispm-tool-action agent shell '((command . "rm -rf x"))) 'auto)))
+      ;; Only shell tools are checked again: another tool allowed as a
+      ;; whole stays allowed at any level.
+      (push "write_file" (lispm-agent-allowed agent))
+      (let ((lispm-sandbox-level 'none))
+        (should (eq (lispm-tool-action agent (lispm-get-tool "write_file")
+                                       `((path . ,(expand-file-name "f" project)) (content . "x")))
+                    'auto))))))
+
 (ert-deftest lispm-test-shell-reads-unasked ()
   "A shell command that only reads is decided as reading is: unasked by
 default, where a command that may write asks.  Any doubt asks."
@@ -2510,7 +2679,13 @@ default, where a command that may write asks.  Any doubt asks."
                          "git stash list" "git worktree list" "echo hi | wc -l" "ls && git status"
                          "head -20 f\ntail -5 f" "ls 2>/dev/null" "ls 2>&1" "wc -l < file"
                          "grep \">\" f" "grep -r \"a|b\" ." "echo '$(x)'" "echo ${HOME}" "ls *.{el,org}"
-                         "find . -name x" "fd pattern" "gh pr view 1" "gh api repos/o/r" "env"))
+                         "find . -name x" "fd pattern" "gh pr view 1" "gh api repos/o/r" "env"
+                         "sed -n '282,307p;409,443p' lisp/a.el; sed -n '15760,15848p' test/b.el; git status --short"
+                         "sed -n 10,20p f" "sed -ne '/^(defun/p' f" "sed 's/a/b/g' f" "sed -E 's|x|y|;2d' f"
+                         "sed -n '/start/,/end/p' f" "sed '$!N;P;D' f" "sed -n '1~2p' f" "sed 's/w/e/' f"
+                         "sed --expression='5q' f" "sed -n '/x/{p;q}' f" "zcat f.gz | grep -A18 x"
+                         "grep -n defun ../lispm-ui/p.el | head -65; sed -n '50,120p' ../lispm-ui/p.el"
+                         "tail -65 /tmp/t.log; grep -n 'FAILED\\|unexpected' /tmp/t.log"))
         (should (lispm-shell-read-only-p command))
         (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'read))
         (should (eq (lispm-tool-action agent shell `((command . ,command))) 'auto)))
@@ -2518,9 +2693,12 @@ default, where a command that may write asks.  Any doubt asks."
                          "git tag v1" "git config user.name x" "git stash pop" "git worktree add x"
                          "git remote add x y" "git -c core.pager=x log" "ls; rm x" "ls &" "ls > out"
                          "ls >> out" "cat `x`" "ls $(x)" "echo \"$(x)\"" "cat <(ls)" "(ls)" "{ ls; }"
-                         "FOO=1 ls" "/bin/ls" "ls # comment" "ls \"unterminated" "" "   "
+                         "FOO=1 ls" "/bin/ls" "ls \"unterminated" "" "   "
                          "find . -delete" "find . -exec rm {} \;" "fd -x rm" "env rm x" "xargs rm"
-                         "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "gh pr merge 1" "gh pr view 1 --web"
+                         "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "sed -i '' s/a/b/ f" "sed -ni p f"
+                         "sed --in-place=.bak s/a/b/ f" "sed 's/a/b/w out' f" "sed -n '/x/w out' f"
+                         "sed 's/a/b/e' f" "sed -f script.sed f" "sed 'e rm f' f" "sed" "sed -n"
+                         "emacs -Q --batch --eval '(princ 1)'" "gh pr merge 1" "gh pr view 1 --web"
                          "gh api -X POST repos/o/r" "gh api repos/o/r -f a=b"))
         (should-not (lispm-shell-read-only-p command))
         (should (eq (lispm-tool-call-permission shell `((command . ,command))) 'shell))
@@ -2542,6 +2720,41 @@ default, where a command that may write asks.  Any doubt asks."
       (setf (lispm-agent-policy agent) '((read . ask)))
       (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask))
       (should (equal (lispm-tools-allowance shell '((command . "ls")) agent) '("run_shell" (command . "ls")))))))
+
+(ert-deftest lispm-test-shell-read-only-chains ()
+  "Directory changes and comments leave every actual command under policy."
+  (lispm-test-env
+    (let ((agent (lispm-make-agent 'assistant project))
+          (shell (lispm-get-tool "run_shell")))
+      (dolist (command '("gh repo list LispMachineLab --limit 100 --json name; ls"
+                         "cd /tmp && git status" "cd 'a b'; rg needle ."
+                         "cd -P -- ../src && git diff" "cd -L .\npwd"
+                         "cd -- -directory && ls" "cd - && ls" "cd && pwd"
+                         "git status # inspect" "# inspect\ngit status"
+                         "ls # $(unknown) ; rm ignored\ngit status"
+                         "cd /tmp && # inspect\ngit status"
+                         "git status \\\n# inspect\ngit diff"
+                         "git sta\\\ntus" "git \"sta\\\ntus\""
+                         "printf '%s' '# literal' a#b \\#literal"))
+        (should (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'auto)))
+      (dolist (command '("gh repo create x" "gh repo clone o/r" "gh repo list --web"
+                         "cd /tmp && rm x" "cd /tmp; git push"
+                         "cd /tmp\nrm x" "cd /tmp && ls > out"
+                         "cd --help" "cd -q /tmp" "cd old new"
+                         "\"c\\d\" /tmp && ls" "git \"sta\\tus\""
+                         "cd $(unknown) && ls" "cd `unknown` && ls"
+                         "ls # inspect\nrm x" "ls # inspect \\\nrm x"
+                         "ls \\\n# inspect\nrm x" "ls # inspect\nr\\\nm x"
+                         "cat < /nonexistent\\ #not-comment; unknown-command"
+                         "cat < '/nonexistent #not-comment'; unknown-command"
+                         "cat < \"/nonexistent #not-comment\"; unknown-command"
+                         "cat < $file" "cat <$(unknown-command)" "cat < /tmp/*"
+                         "# no command" "cd /tmp && python3 -c 'print(1)'"
+                         "cd /tmp && for x in a; do ls; done"
+                         "cd /tmp && env ls" "cd /tmp && /bin/ls"))
+        (should-not (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'ask))))))
 
 ;;;; The sandbox
 
@@ -2585,7 +2798,7 @@ No level lets commands write where Emacs and LispM keep their files."
                                     :object-type 'alist :array-type 'list)
         (should (member "example.com" .network.allowedDomains))
         (should (member "registry.npmjs.org" .network.allowedDomains))
-        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places))))
         (should (member "." .filesystem.allowWrite))
         (should (member "~/.npm" .filesystem.allowWrite))
         (should (member "/tmp" .filesystem.allowWrite)))
@@ -2597,18 +2810,58 @@ No level lets commands write where Emacs and LispM keep their files."
       (let-alist (json-parse-string (json-serialize (lispm-sandbox-settings 'high))
                                     :object-type 'alist :array-type 'list)
         (should (null .network.allowedDomains))
-        (should (equal .filesystem.denyRead '("~")))
+        (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places))))
         (should (member "." .filesystem.allowRead))
         ;; The project, and the sandbox's own temporary directory.
         (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir)))))
       (dolist (level '(low middle high))
-        (let ((protected (plist-get (plist-get (lispm-sandbox-settings level) :filesystem)
-                                    :denyWrite)))
+        (let* ((filesystem (plist-get (lispm-sandbox-settings level) :filesystem))
+               (protected (plist-get filesystem :denyWrite))
+               (hidden (plist-get filesystem :denyRead)))
           (should (seq-contains-p protected (directory-file-name (expand-file-name lispm-directory))))
           (should (seq-contains-p protected (directory-file-name
-                                             (expand-file-name user-emacs-directory))))))
+                                             (expand-file-name user-emacs-directory))))
+          ;; The Emacs server's socket and keys: neither read nor written.
+          (should (lispm-sandbox--server-places))
+          (dolist (place (lispm-sandbox--server-places))
+            (should (seq-contains-p protected place))
+            (should (seq-contains-p hidden place)))))
       (should (equal (lispm-sandbox-settings) (lispm-sandbox-settings lispm-sandbox-level)))
       (should-error (lispm-sandbox-settings 'extreme) :type 'lispm-sandbox-error))))
+
+(ert-deftest lispm-test-sandbox-server-places ()
+  "The Emacs server's places are its socket directory and its authentication
+directory, as given and as they really are; a Unix socket rule that
+covers either is refused, and a level with such a rule does not confine."
+  (lispm-test-env
+    (require 'server)
+    (let* ((real (file-name-as-directory (make-temp-file "lispm-sockets-" t)))
+           (link (expand-file-name "sockets" lispm-directory))
+           (server-auth-dir (expand-file-name "auth/" lispm-directory))
+           (server-socket-dir link))
+      (unwind-protect
+          (progn
+            (make-directory lispm-directory t)
+            (make-symbolic-link (directory-file-name real) link)
+            (let ((places (lispm-sandbox--server-places)))
+              (should (member link places))
+              (should (member (directory-file-name (file-truename real)) places))
+              (should (member (directory-file-name server-auth-dir) places))
+              (should (= (length places) (length (seq-uniq places)))))
+            (dolist (rules (list (list :unix-sockets (list link))
+                                 (list :unix-sockets (list (expand-file-name "server" real)))
+                                 (list :unix-sockets (list (directory-file-name lispm-directory)))
+                                 (list :unix-sockets (list "/var/run/docker.sock" (expand-file-name "server" link)))
+                                 '(:unix-sockets ("/"))))
+              (let ((lispm-sandbox-custom rules))
+                (should-error (lispm-sandbox-settings 'custom) :type 'lispm-sandbox-error)
+                (should-not (lispm-sandbox-confines-p 'custom))))
+            (let ((lispm-sandbox-custom '(:unix-sockets ("/var/run/docker.sock"))))
+              (should (lispm-sandbox-settings 'custom))
+              (should (lispm-sandbox-confines-p 'custom)))
+            (should-not (lispm-sandbox-confines-p 'none))
+            (should (lispm-sandbox-confines-p 'high)))
+        (delete-directory real t)))))
 
 (ert-deftest lispm-test-sandbox-custom ()
   "The level custom has the rules of `lispm-sandbox-custom', Middle's while
@@ -2630,7 +2883,7 @@ there are none; they reach every option srt has for them, and are checked."
         (should (equal .network.deniedDomains '("gist.github.com")))
         (should (eq .network.allowLocalBinding t))
         (should (equal .network.allowUnixSockets '("/var/run/docker.sock")))
-        (should (equal .filesystem.denyRead '("~/.ssh")))
+        (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places))))
         (should (equal .filesystem.allowRead '("~/.ssh/config")))
         (should (equal .filesystem.allowWrite (list "." (lispm-sandbox--tmpdir))))
         (should (equal (car .filesystem.denyWrite) "secrets"))
@@ -2683,7 +2936,7 @@ reaches a command that runs.  The result says what the sandbox allowed."
           (should-not (cdr result))
           ;; It started with Middle's settings, and was sent High's.
           (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
-            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+            (should (equal .filesystem.denyRead (append lispm-sandbox-secrets (lispm-sandbox--server-places)))))
           (should (lispm-test--wait
                    (lambda () (file-exists-p (expand-file-name "control" log)))))
           (let-alist (json-parse-string
@@ -2691,7 +2944,7 @@ reaches a command that runs.  The result says what the sandbox allowed."
                         (insert-file-contents (expand-file-name "control" log))
                         (buffer-string))
                       :object-type 'alist :array-type 'list)
-            (should (equal .filesystem.denyRead '("~"))))
+            (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places)))))
           ;; Once it has exited, its channel is gone.
           (should (lispm-test--wait (lambda () (null lispm-sandbox--runs))))
           (should-not (file-exists-p (lispm-sandbox-run-fifo run))))
@@ -2759,7 +3012,7 @@ it has one; a change of the level set then passes it by."
             (should (equal (lispm-sandbox-run-name run) "the MCP server fake"))
             (should (eq (lispm-sandbox-run-level run) 'high)))
           (let-alist (lispm-test--json-file (expand-file-name "settings.json" log))
-            (should (equal .filesystem.denyRead '("~"))))
+            (should (equal .filesystem.denyRead (append '("~") (lispm-sandbox--server-places)))))
           (setq lispm-sandbox-level 'middle)
           (lispm-sandbox--changed)
           (should-not (file-exists-p (expand-file-name "control" log)))
@@ -2850,7 +3103,7 @@ at every level but none, and leave the level's own lists as they were."
       (should (eq .network.allowLocalBinding t))
       (should (member "." .filesystem.allowWrite))
       (should (member "/srv/data" .filesystem.allowWrite))
-      (should (equal .filesystem.denyRead '("~/.ssh"))))
+      (should (equal .filesystem.denyRead (append '("~/.ssh") (lispm-sandbox--server-places)))))
     (should (equal lispm-sandbox-allowed-domains '("example.com")))
     (should (equal (lispm-sandbox-merge-rules '(:pty t :allow-write (".")) '(:pty nil :allow-write ("b")))
                    '(:pty t :allow-write ("." "b"))))
@@ -2900,7 +3153,7 @@ at all; undefined, it stops."
           (let-alist (lispm-test--json-file settings)
             (should (member "/srv/echo" .filesystem.allowWrite))
             (should (eq .network.allowLocalBinding t))
-            (should (equal .filesystem.denyRead lispm-sandbox-secrets)))
+            (should (equal .filesystem.denyRead (append lispm-sandbox-secrets (lispm-sandbox--server-places)))))
           (should (lispm-service-stop 'echo))
           (should-not (process-live-p process))
           (should (lispm-test--wait (lambda () (eq (car-safe (lispm-service-status 'echo)) 'exited)))))
@@ -2919,7 +3172,7 @@ at all; undefined, it stops."
                         (car (last (with-temp-buffer
                                      (insert-file-contents control)
                                      (split-string (buffer-string) "\n" t))))))))
-          (should (lispm-test--wait (lambda () (string-search "\"denyRead\":[\"~\"]" (or (last-sent) "")))))
+          (should (lispm-test--wait (lambda () (string-search "\"denyRead\":[\"~\"," (or (last-sent) "")))))
           (let-alist (json-parse-string (last-sent) :object-type 'alist :array-type 'list)
             (should (member "/srv/echo" .filesystem.allowWrite))
             (should (eq .network.allowLocalBinding t))))
@@ -3519,6 +3772,109 @@ are not saved: saving it would ask."
 
 ;;;; The loop
 
+(defun lispm-test--approval-events (agent)
+  "Approval event alists in AGENT's transcript, in transcript order."
+  (with-current-buffer (lispm-agent-buffer agent)
+    (save-excursion
+      (goto-char (point-min))
+      (let (events)
+        (while (re-search-forward "^\\*\\*\\* Approval$" nil t)
+          (push (lispm--json-decode
+                 (lispm-transcript--block
+                  (point) (lispm-transcript-subtree-end (line-beginning-position) 3)))
+                events))
+        (nreverse events)))))
+
+(ert-deftest lispm-test-approval-events ()
+  "Calls without previews keep requests and decisions, outside model context."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "a1" "eval_elisp" '((code . "(+ 1 2)")))
+                                 (lispm-test--tool "a2" "eval_elisp" '((code . "(+ 1 2)")))
+                                 (lispm-test--tool "a3" "eval_elisp" '((code . "(+ 2 3)"))))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "a4" "eval_elisp" '((code . "(+ 1 2)"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Compute")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((events (lispm-test--approval-events agent)))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
+                       '("requested" "requested" "requested")))
+        (dolist (event events)
+          (should (equal (alist-get 'tool event) "eval_elisp"))
+          (should (string-match-p "\\`[0-9-]+T[0-9:]+Z\\'" (alist-get 'time event))))
+        (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
+        (should (equal (lispm-test--transcript agent)
+                       (lispm--file-text (buffer-file-name (lispm-agent-buffer agent))))))
+      (lispm-allow agent "a1")
+      (lispm-resolve agent "a3" 'deny "Use the earlier answer.")
+      ;; A repeated answer has no effect and must not fabricate an event.
+      (lispm-resolve agent "a3" 'deny "Again")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let* ((events (lispm-test--approval-events agent))
+             (decisions (seq-remove (lambda (e) (equal (alist-get 'event e) "requested")) events)))
+        (should (= (length events) 6))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) decisions)
+                       '("allow" "approve" "deny")))
+        (should (equal (alist-get 'scope (nth 0 decisions)) "exact"))
+        (should (equal (alist-get 'source (nth 0 decisions)) "user"))
+        (should (equal (alist-get 'source (nth 1 decisions)) "allowance"))
+        (should (equal (alist-get 'reason (nth 2 decisions)) "Use the earlier answer."))
+        (should-not (seq-find (lambda (e) (equal (alist-get 'call_id e) "a4")) events)))
+      (should (equal (lispm-test--transcript agent)
+                     (lispm--file-text (buffer-file-name (lispm-agent-buffer agent)))))
+      ;; The model sees exactly the same messages with the audit removed.
+      (let ((text (lispm-test--transcript agent))
+            (messages (with-current-buffer (lispm-agent-buffer agent)
+                        (plist-get (lispm-transcript-parse) :messages))))
+        (with-temp-buffer
+          (insert text)
+          (goto-char (point-min))
+          (while (re-search-forward "^\\*\\*\\* Approval$" nil t)
+            (let ((start (line-beginning-position)))
+              (delete-region start (lispm-transcript-subtree-end start 3))
+              (goto-char start)))
+          (should (equal messages (plist-get (lispm-transcript-parse) :messages))))))))
+
+(ert-deftest lispm-test-approval-events-nested ()
+  "Successive nested calls retain their requests and separate decisions."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (lispm-tool-action-functions
+           (list (lambda (_agent tool _input)
+                   (when (equal (lispm-tool-name tool) "write_file")
+                     '(ask . "This file needs review."))))))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "p1" "run_lisp"
+                                                   '((code . "(progn (write_file :path \"a.txt\" :content \"a\" :why \"test\") (write_file :path \"b.txt\" :content \"b\" :why \"test\"))"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Write a file")
+      (should (lispm-test--wait (lispm-test--previewed agent)))
+      (let ((request (car (lispm-test--approval-events agent))))
+        (should (equal (alist-get 'tool request) "write_file"))
+        (should (equal (alist-get 'call_id request) "p1"))
+        (should (equal (append (alist-get 'reasons request) nil) '("This file needs review."))))
+      (lispm-resolve agent "p1" 'approve)
+      (should (lispm-test--wait (lispm-test--previewed agent 2)))
+      (lispm-resolve agent "p1" 'deny "Keep only a.txt.")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((events (lispm-test--approval-events agent)))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
+                       '("requested" "approve" "requested" "deny")))
+        (dolist (event events)
+          (should (equal (alist-get 'call_id event) "p1"))
+          (should (equal (alist-get 'tool event) "write_file"))))
+      (let ((decision (cadr (lispm-test--approval-events agent))))
+        (should (equal (alist-get 'tool decision) "write_file"))
+        (should (equal (alist-get 'scope decision) "once")))
+      (should (equal (lispm-test--file project "a.txt") "a\n"))
+      (should-not (file-exists-p (expand-file-name "b.txt" project))))))
+
 (ert-deftest lispm-test-turn-with-approval ()
   "A turn: an automatic read, an edit approved through org, a reply, a revert."
   (lispm-test-env
@@ -3637,6 +3993,9 @@ nothing."
       (should (equal (lispm-waiting-calls agent) '("t1" "t2")))
       (should (= (length held) 2))
       (should-not announced)
+      (should (equal (mapcar (lambda (e) (alist-get 'event e))
+                            (lispm-test--approval-events agent))
+                     '("requested" "requested")))
       (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
       ;; t2 is denied before its diff is made.
       (lispm-resolve agent "t2" 'deny)
@@ -3653,6 +4012,7 @@ nothing."
       (lispm-resolve agent "t1" 'approve)
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+      (should (= (length (lispm-test--approval-events agent)) 4))
       (should-not (file-exists-p (expand-file-name "b.txt" project))))))
 
 (defun lispm-test--input-heading-p (agent)
@@ -3851,6 +4211,9 @@ process died with Emacs, is recorded as interrupted."
                         (lispm-resume-file file))))
         ;; The call awaiting approval is known again ...
         (should (equal (lispm-waiting-calls revived) '("t2")))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e))
+                              (lispm-test--approval-events revived))
+                       '("requested" "resumed")))
         (should (eq (lispm-agent-state revived) 'waiting))
         ;; ... the one that was running is not left without a result ...
         (should (string-match-p "^\\*\\* FAILED run_shell" (lispm-test--transcript revived)))
@@ -7216,7 +7579,7 @@ and its last line, as `lispm-chat--markdown' draws it whole with nothing
 presented: at every step, inside code blocks and after them, and from
 the start again for another reply."
   (with-temp-buffer
-    (let ((text "# Plan\nRun `ls` and **then** *this*.\n```sh\nmake test\n\n```\nDone, see `README.md`.\n\nNext"))
+    (let ((text "# Plan\nRun `ls` and **then** *this*.\n[[buffer:*lispm assistant@project<2>*][Other chat]]\n[[file:**draft**.el::2][Draft]]\n```sh\nmake test\n\n```\nDone, see `README.md`.\n\nNext"))
       (dotimes (k (1+ (length text)))
         (let ((part (substring text 0 k)))
           (should (equal-including-properties (lispm-chat--streaming-markdown part)
@@ -7224,6 +7587,25 @@ the start again for another reply."
       (should (equal (car lispm-chat--streamed) (string-remove-suffix "Next" text)))
       (should (equal-including-properties (lispm-chat--streaming-markdown "Other\n*reply*")
                                           (lispm-chat--markdown "Other\n*reply*" t))))))
+
+(ert-deftest lispm-test-chat-org-link-targets ()
+  "Markdown rendering preserves the literal targets of Org links."
+  (lispm-test-env
+    (let ((default-directory project))
+      (dolist (name '("*lispm assistant@lisp_machine<2>*"
+                      "**double stars**" "`literal`_name"))
+        (let* ((link (format "[[buffer:%s][Other session]]" name))
+               (shown (lispm-chat--present
+                       (lispm-chat--markdown (concat "**Open** " link " and *continue*.")))))
+          (should (equal (substring-no-properties shown) (concat "Open " link " and continue.")))
+          (should (equal (lispm-test--object shown "Other session") (list 'buffer name)))))
+      (dolist (name '("*draft*.el" "**draft**.el" "`draft`.el" "_draft_.el"))
+        (let* ((file (expand-file-name name project))
+               (link (format "[[file:%s::2][Draft]]" name)))
+          (lispm-test--write file "one\ntwo\n")
+          (let ((shown (lispm-chat--present (lispm-chat--markdown link))))
+            (should (equal (substring-no-properties shown) link))
+            (should (equal (lispm-test--object shown "Draft") (list 'file file 2)))))))))
 
 (ert-deftest lispm-test-chat-live-reply-presented-once ()
   "A reply streaming in presents nothing it names: that is looked up once,
@@ -7500,6 +7882,39 @@ Tools take the places and buffers agents name as org links."
             (should (equal (buffer-file-name) a))
             (should (= (line-number-at-pos) 2))))))))
 
+(ert-deftest lispm-test-chat-buffer-link-activation ()
+  "RET and a click on a rendered buffer link select the other chat."
+  (lispm-test-env
+    (let* ((agent (lispm-start 'assistant project))
+           (chat (lispm-chat agent))
+           (other (lispm-start 'assistant project))
+           (target (lispm-chat other))
+           (link (format "[[buffer:%s][Other session]]" (buffer-name target))))
+      (setq lispm-test--scripts
+            `((,(lispm-agent-name agent)
+               ,(lispm-test--msg "end_turn" (lispm-test--text link)))))
+      (lispm-test--chat-type chat "Show the other session")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (lispm-chat-redraw chat)
+      (save-window-excursion
+        (pop-to-buffer chat)
+        (goto-char (point-min))
+        (search-forward link)
+        (search-backward "Other session")
+        (let* ((position (point))
+               (map (get-text-property position 'keymap)))
+          (should (equal (lispm-object-at position) (list 'buffer (buffer-name target))))
+          (goto-char position)
+          (lispm-chat-return)
+          (should (eq (window-buffer (selected-window)) target))
+          (should-not (eq (window-buffer (selected-window)) (lispm-agent-buffer other)))
+          (pop-to-buffer chat)
+          (should (eq (keymap-lookup map "<follow-link>") 'mouse-face))
+          (funcall (keymap-lookup map "<mouse-2>")
+                   (list 'mouse-2 (list (selected-window) position '(0 . 0) 0)))
+          (should (eq (window-buffer (selected-window)) target))
+          (should-not (eq (window-buffer (selected-window)) (lispm-agent-buffer other))))))))
+
 (ert-deftest lispm-test-ground ()
   "Code in replies is checked against this Emacs, as PceEmacs checks a
 Prolog program: symbols nothing defines, calls with the wrong number of
@@ -7661,6 +8076,125 @@ not what the reply defines itself."
       (should (string-match-p "Nobody waits"
                               (car (lispm-test--call boss "return_value" '((value . 1)))))))))
 
+(ert-deftest lispm-test-chat-box-wrap ()
+  "Narrow boxes wrap whole lines, keeping indentation, diff markers and faces."
+  (let* ((width 24)
+         (text "  alpha beta gamma delta epsilon zeta eta theta")
+         (box (lispm-chat--box (list nil text) width))
+         (lines (split-string box "\n" t))
+         (body (butlast (cdr lines))))
+    (should (> (length body) 2))
+    (should-not (string-search "…" box))
+    (dolist (line lines) (should (= (string-width line) width)))
+    (dolist (line body) (should (string-prefix-p "│   " line)))
+    (should (equal (split-string (mapconcat (lambda (line) (substring line 4 -2)) body " "))
+                   (split-string text)))
+    (should (string-match-p "│   alpha beta gamma +│" box)))
+  ;; No spaces to break at, and characters wider than one column.
+  (dolist (marker '("+" "-" " " "@@"))
+    (let* ((text (concat "  " (propertize (concat marker (make-string 35 ?界))
+                                        'face 'lispm-chat-added)))
+           (box (lispm-chat--box (list text) 23))
+           (lines (split-string box "\n" t))
+           (body (butlast (cdr lines))))
+      (should (> (length body) 3))
+      (should-not (string-search "…" box))
+      (dolist (line lines) (should (= (string-width line) 23)))
+      (dolist (line body)
+        (should (string-prefix-p (concat "│   " marker) line))
+        (should (eq (get-text-property 4 'face line) 'lispm-chat-added))
+        (should (eq (get-text-property (+ 4 (length marker)) 'face line) 'lispm-chat-added)))
+      (should (equal (mapconcat (lambda (line) (string-trim-right (substring line (+ 4 (length marker)) -2)))
+                                body "")
+                     (make-string 35 ?界)))))
+  ;; Lines that fit, including empty lines, keep their original layout.
+  (should (equal (lispm-chat--box '("  ok" nil "") 10)
+                 "╭────────╮\n│   ok   │\n│        │\n╰────────╯\n")))
+
+(ert-deftest lispm-test-chat-approval-wrap ()
+  "Commands and diffs awaiting approval remain whole in a narrow chat."
+  (lispm-test-env
+    (cl-letf (((symbol-function 'lispm-chat--width) (lambda () 58)))
+      (let* ((agent (lispm-defagent tester "Test agent." :root project))
+             (chat (lispm-chat agent))
+             (long (make-string 120 ?x))
+             (command (concat "printf first\nvalue=" long "\nprintf last")))
+        (lispm-test--write (expand-file-name "a.txt" project) "old\n")
+        (setq lispm-test--scripts
+              `((tester
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t1" "run_shell" `((why . "w") (command . ,command))))
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t2" "edit_file"
+                                                     `((why . "w") (path . "a.txt")
+                                                       (old_text . "old") (new_text . ,long))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+        (lispm-test--chat-type chat "go")
+        (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+        (let* ((text (lispm-test--chat-text chat))
+               (lines (seq-filter (lambda (line) (string-prefix-p "│   " line))
+                                  (split-string text "\n")))
+               (shown (mapconcat (lambda (line) (string-trim-right (substring line 4 -2))) lines "")))
+          ;; The separate tool summary and waiting status have ellipses.
+          (should-not (string-match-p "^│.*…" text))
+          (should (string-match-p "^│   printf first +│$" text))
+          (should (string-match-p "^│   printf last +│$" text))
+          (should (string-search (string-replace "\n" "" command) shown))
+          (should (string-search "C-c C-y reviews the whole call in the transcript" text)))
+        (lispm-test--chat-key chat "1")
+        (should (lispm-test--wait (lispm-test--previewed agent)))
+        (let* ((text (lispm-test--chat-text chat))
+               (added (seq-filter (lambda (line) (string-prefix-p "│   +" line))
+                                  (split-string text "\n"))))
+          (should (equal (car (lispm-waiting-calls agent)) "t2"))
+          (should-not (string-match-p "^│.*…" text))
+          (should (> (length added) 2))
+          (should (equal (mapconcat (lambda (line) (string-trim-right (substring line 5 -2))) added "") long))
+          (should (string-search "C-c C-y reviews the whole call in the transcript" text)))
+        (lispm-test--chat-key chat "1")
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (should (equal (lispm-test--file project "a.txt") (concat long "\n")))))))
+
+(ert-deftest lispm-test-chat-review ()
+  "C-c C-y reviews and approves the waiting call in its org transcript."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (transcript (lispm-agent-buffer agent)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "write_file"
+                                                   '((why . "w") (path . "a.txt") (content . "written\n"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lispm-test--previewed agent)))
+      (save-window-excursion
+        (pop-to-buffer chat)
+        (cl-letf (((symbol-function 'read-multiple-choice)
+                   (lambda (&rest _)
+                     (should (eq (current-buffer) transcript))
+                     (should (derived-mode-p 'org-mode))
+                     (should (equal (org-entry-get nil "TOOL_ID") "t1"))
+                     (should-not (org-invisible-p (line-end-position)))
+                     '(?y "yes" "Run this call"))))
+          (lispm-test--chat-key chat "C-c C-y"))
+        (should (eq (window-buffer (selected-window)) transcript))
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (with-selected-window (selected-window)
+          (should (eq (current-buffer) transcript))
+          (should (derived-mode-p 'org-mode))
+          (should (equal (org-entry-get nil "TOOL_ID") "t1"))))
+      (should (equal (lispm-test--file project "a.txt") "written\n")))))
+
+(ert-deftest lispm-test-chat-review-empty ()
+  "Reviewing with no call awaiting approval reports a user error."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent)))
+      (with-current-buffer chat
+        (should-error (lispm-chat-review) :type 'user-error)))))
+
 (ert-deftest lispm-test-chat-approval-answers ()
   "2 approves a command for good, 3 denies with what to do instead."
   (lispm-test-env
@@ -7697,6 +8231,42 @@ not what the reply defines itself."
       ;; A standing agent outlives its chat.
       (kill-buffer chat)
       (should (lispm-get-agent 'tester t)))))
+
+(ert-deftest lispm-test-chat-eval-writes-note ()
+  "An eval_elisp call whose code changes buffers or files says so in its
+approval box and in the transcript's preview; one that computes does not."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (code (concat "(with-current-buffer (find-file-noselect \"lisp/x.el\")\n"
+                         "  (erase-buffer) (insert \"new\") (save-buffer))")))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "eval_elisp" `((why . "w") (code . ,code))))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "eval_elisp" '((why . "w") (code . "(+ 1 2)"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "│ Evaluate Emacs Lisp +│\n│ +│\n│   (with-current-buffer" text))
+        (should (string-match-p "This code changes buffers or files" text))
+        (should (string-match-p "Do you want to evaluate this\\?" text)))
+      (should (string-match-p "\\*\\*\\* Preview\n#\\+begin_src diff\nThis code changes buffers or files; it shows no diff, as the edit tools would\\. It names lisp/x\\.el\\."
+                              (lispm-test--transcript agent)))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "use edit_file")))
+        (lispm-test--chat-key chat "3"))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
+                                                (equal (car (lispm-waiting-calls agent)) "t2")))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "│   (\\+ 1 2)" text))
+        (should-not (string-match-p "This code changes buffers or files\\|\\*\\*\\* Preview" text)))
+      (should-not (string-match-p "\\*\\*\\* Preview\n#\\+begin_src diff\n#\\+end_src" (lispm-test--transcript agent)))
+      (lispm-test--chat-key chat "1")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (file-exists-p (expand-file-name "lisp/x.el" project)))
+      (should (string-match-p "⏺ Eval(.*)\n  ⎿  The user denied this call\\. Their reason: use edit_file"
+                              (lispm-test--chat-text chat)))
+      (should (string-match-p "=> 3" (lispm-test--chat-text chat))))))
 
 (ert-deftest lispm-test-chat-busy ()
   "While the agent works the chat shows it, queues what you send, and interrupts."
@@ -9358,6 +9928,126 @@ program says other ways, which are followed."
         (setq answer t)
         (lispm-agents-delete-session session)
         (should (equal deleted '("0200")))))))
+
+(ert-deftest lispm-test-agents-resume-with-model-cli ()
+  "Claude and Codex resume the same session with an optional model argv.
+A live session is reused normally, but never silently ignores a model."
+  (let* ((made nil) (buffers nil) (shown nil)
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (lispm-agents-show-function (lambda (buffer) (setq shown buffer)))
+         (lispm-agents-terminal-make-function
+          (lambda (name program &rest args)
+            (push (list default-directory program args) made)
+            (let ((buffer (get-buffer-create (format "*%s*" name))))
+              (push buffer buffers)
+              buffer))))
+    (unwind-protect
+        (lispm-test--with-agents nil
+          (cl-letf (((symbol-function 'executable-find) #'identity))
+            (lispm-agents-setup-claude)
+            (lispm-agents-setup-codex)
+            (pcase-dolist (`(,agent ,flag) '((claude "--resume") (codex "resume")))
+              ;; Keep the real CLI argument builders without starting servers.
+              (let ((props (lispm-agents-props agent)))
+                (setf (plist-get props :context) nil
+                      (plist-get props :arguments) nil))
+              (let* ((id (format "lispm-test-resume-%s" agent))
+                     (session (list :agent agent :id id :cwd temporary-file-directory
+                                    :title "Continue this work")))
+                (should (lispm-agents-session-model-resumable-p session))
+                (let ((buffer (lispm-agents-resume-session session "  gateway/custom model  ")))
+                  (should (eq shown buffer))
+                  (should (equal (car made)
+                                 (list temporary-file-directory (symbol-name agent)
+                                       (list flag id "--model" "gateway/custom model"))))
+                  (should (eq (buffer-local-value 'lispm-agents-buffer-agent buffer) agent))
+                  (should (equal (buffer-local-value 'lispm-agents-buffer-session-id buffer) id))
+                  (should (equal (buffer-local-value 'lispm-agents-buffer-title buffer)
+                                 "Continue this work"))
+                  (let ((count (length made)))
+                    (should (eq (lispm-agents-resume-session session) buffer))
+                    (should-error (lispm-agents-resume-session session "another-model")
+                                  :type 'user-error)
+                    (should (= (length made) count))
+                    (should (buffer-live-p buffer)))
+                  (kill-buffer buffer))
+                (lispm-agents-resume-session session)
+                (should (equal (nth 2 (car made)) (list flag id)))
+                (kill-buffer shown)))))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))
+
+(ert-deftest lispm-test-agents-resume-with-model-compatible-providers ()
+  "Old one-argument resume callbacks still work without a model.
+Unsupported providers and Claude subagent transcripts reject a model."
+  (let* ((called nil) (made nil)
+         (buffer (generate-new-buffer " *lispm-test-resume-provider*"))
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-show-function #'ignore)
+         (lispm-agents-terminal-make-function
+          (lambda (_name _program &rest args) (push args made) buffer)))
+    (unwind-protect
+        (lispm-test--with-agents
+            `((old-cli :name "Old CLI" :program "emacs"
+                       :resume-arguments ,(lambda (id) (list "resume" id)))
+              (internal :name "Internal" :new ignore
+                        :resume ,(lambda (session) (push session called) buffer))
+              (custom :name "Custom" :program "emacs"
+                      :resume-arguments ,(lambda (id) (list "resume" id))
+                      :model-arguments ,(lambda (model) (list "--model" model))
+                      :resume ,(lambda (session) (push session called) buffer)))
+          (dolist (agent '(old-cli internal custom))
+            (let ((session (list :agent agent :id (symbol-name agent)
+                                 :cwd temporary-file-directory :title "Old work")))
+              (should-not (lispm-agents-session-model-resumable-p session))
+              (should-error (lispm-agents-resume-session session "custom-model")
+                            :type 'user-error)
+              (should (eq (lispm-agents-resume-session session) buffer))))
+          (should (equal made '(("resume" "old-cli"))))
+          (should (equal (mapcar (lambda (session) (plist-get session :agent)) called)
+                         '(custom internal)))
+          (lispm-agents-setup-claude)
+          (let ((child '(:agent claude :id "agent-child" :parent "parent")))
+            (should-not (lispm-agents-session-model-resumable-p child))
+            (should-error (lispm-agents-resume-session child "custom-model") :type 'user-error))
+          (should (equal made '(("resume" "old-cli")))))
+      (kill-buffer buffer))))
+
+(ert-deftest lispm-test-agents-resume-with-model-prompt ()
+  "The context action prompts with model history; blank and cancelled
+input start nothing, while a custom name reaches the resume arguments."
+  (let* ((made nil) (prompt nil) (answer "  ")
+         (lispm-agents-model-history '("earlier-model"))
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-show-function #'ignore)
+         (buffer (generate-new-buffer " *lispm-test-resume-prompt*")))
+    (unwind-protect
+        (lispm-test--with-agents nil
+          (lispm-agents-setup-claude)
+          (let ((session (list :agent 'claude :id "prompt-session"
+                               :cwd temporary-file-directory :title "Old work")))
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest args)
+                         (setq prompt args)
+                         (if (eq answer 'cancel) (signal 'quit nil) answer)))
+                      ((symbol-function 'lispm-agents--launch)
+                       (lambda (&rest args) (push args made) buffer))
+                      ((symbol-function 'executable-find) #'identity))
+              (should-error (lispm-agents-session-act 'resume-with session) :type 'user-error)
+              (should-not made)
+              (setq answer 'cancel)
+              (should (eq (condition-case nil
+                              (progn (lispm-agents-session-act 'resume-with session) 'returned)
+                            (quit 'cancelled))
+                          'cancelled))
+              (should-not made)
+              (setq answer "  provider/custom-model  ")
+              (lispm-agents-session-act 'resume-with session)
+              (should (equal prompt '("Resume with model: " nil lispm-agents-model-history)))
+              (should (equal (nth 3 (car made))
+                             '("--resume" "prompt-session" "--model" "provider/custom-model"))))))
+      (kill-buffer buffer))))
 
 (ert-deftest lispm-test-agents-confirm-in-lispm-ui ()
   "Deleting a session asks in the alert of the interface drawing LispM

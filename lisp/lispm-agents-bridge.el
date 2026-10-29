@@ -365,8 +365,10 @@ about its calls.")
        (condition-case err
            (pcase-let ((`(,found . ,others)
                         (lispm-tools--discover agent query
-                                               (if (integerp limit) limit lispm-tool-search-results))))
-             (let ((found (seq-filter #'lispm-agents-bridge--served-p found)))
+                                               (if (integerp limit) limit lispm-tool-search-results)
+                                               #'lispm-agents-bridge--served-p)))
+             (let ((help (lispm-tools--selection-help
+                          agent query found others #'lispm-agents-bridge--served-p)))
                (funcall answer
                         (list (concat
                                (if (or found others)
@@ -382,6 +384,7 @@ about its calls.")
                                                                         found "\n")))))
                                     "\n")
                                  (format "Nothing matches %S." query))
+                               (when help (concat "\n" help))
                                (if problems (concat "\n" (string-join problems "\n")) ""))))))
          (error (funcall answer (list (error-message-string err)) t)))))
     'deferred))

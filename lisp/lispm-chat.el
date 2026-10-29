@@ -382,20 +382,34 @@ the reply defines.  PLAIN presents no code, for a reply still streaming
 in: it is presented once it is complete."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
-                line)))
-    (setq line (replace-regexp-in-string
-                "\\*\\*\\([^*\n]+\\)\\*\\*"
-                (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
-    (lispm-chat--italics
-     (replace-regexp-in-string
-      "`\\([^`\n]+\\)`"
-      ;; The match data say what of the match to replace: presenting
-      ;; the code must leave them as they are.
-      (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
-                    (if plain
-                        code
-                      (save-match-data (lispm-present-code code (lispm-chat--root) defined)))))
-      line t t))))
+                line))
+        (start 0) parts)
+    ;; Org links name literal objects: the stars in *scratch*, for
+    ;; example, are part of the buffer's name, not Markdown emphasis.
+    (while (string-match lispm-present--link-re line start)
+      (let ((beg (match-beginning 0)) (end (match-end 0)))
+        (push (lispm-chat--inline-markdown (substring line start beg) defined plain) parts)
+        (push (substring line beg end) parts)
+        (setq start end)))
+    (push (lispm-chat--inline-markdown (substring line start) defined plain) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun lispm-chat--inline-markdown (line &optional defined plain)
+  "Show Markdown emphasis and code in LINE, which contains no Org links.
+DEFINED and PLAIN are as in `lispm-chat--inline'."
+  (setq line (replace-regexp-in-string
+              "\\*\\*\\([^*\n]+\\)\\*\\*"
+              (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
+  (lispm-chat--italics
+   (replace-regexp-in-string
+    "`\\([^`\n]+\\)`"
+    ;; The match data say what of the match to replace: presenting
+    ;; the code must leave them as they are.
+    (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
+                  (if plain
+                      code
+                    (save-match-data (lispm-present-code code (lispm-chat--root) defined)))))
+    line t t)))
 
 (defun lispm-chat--italics (line)
   "LINE with its Markdown emphasis, *TEXT* or _TEXT_, in italics.
@@ -513,7 +527,10 @@ drawn whole, a long reply took longer at every step."
      :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact command"))
     ("eval_elisp" :shown "Eval" :ask code :title ,(lispm-tr-noop "Evaluate Emacs Lisp")
      :question ,(lispm-tr-noop "Do you want to evaluate this?")
-     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code"))
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code")
+     ;; Code that writes shows no diff, as the edit tools would: say so.
+     :note ,(lambda (input _preview)
+              (lispm-tools-code-writes-note (or (alist-get 'code input) ""))))
     ("run_lisp" :shown "Lisp" :ask code :title ,(lispm-tr-noop "Run a Lisp program")
      :question ,(lispm-tr-noop "Do you want to run this?"))
     ("search_files" :shown ,(lispm-tr-noop "Search" "tool") :result search)
@@ -856,20 +873,43 @@ new item at each step, and the old steps are not kept."
     (prog1 (mapcar (lambda (item) (lispm-chat--item-string item drawn)) items)
       (setq lispm-chat--rendered drawn))))
 
+(defun lispm-chat--wrap-line (line width)
+  "Parts of LINE fitting WIDTH columns, with their text properties.
+Break after a space when one fits, otherwise at the display width.
+Continuations keep the leading whitespace and repeat a diff's + or -
+marker, or @@ for a hunk.  A context line keeps its leading spaces.
+Leave room for text if the indentation itself would fill the width."
+  (if (<= (string-width line) width)
+      (list line)
+    (string-match "\\`[ \t]*\\(?:[+-]\\|@@\\)?" line)
+    (let ((prefix (truncate-string-to-width (match-string 0 line) (max 0 (- width 2))))
+          parts)
+      (while (> (string-width line) width)
+        (let* ((end (length (truncate-string-to-width line width)))
+               (space (cl-position ?\s line :from-end t :end end)))
+          (when (and space (>= space (length prefix)))
+            (setq end (1+ space)))
+          (push (substring line 0 end) parts)
+          (setq line (concat prefix (substring line end)))))
+      (nreverse (cons line parts)))))
+
 (defun lispm-chat--box (lines width &optional face)
   "LINES framed in a rounded box WIDTH columns wide, the frame in FACE.
-Lines that are nil are left out."
+Lines that are nil are left out.  Long lines wrap with their properties
+and indentation; diff continuations repeat +, -, or @@, and context
+lines keep their leading spaces."
   (let* ((face (or face 'lispm-chat-dim))
          (inner (- width 4))
          (bar (lambda (left right)
                 (propertize (concat left (make-string (- width 2) ?─) right) 'face face))))
     (concat (funcall bar "╭" "╮") "\n"
             (mapconcat (lambda (line)
-                         (let ((line (truncate-string-to-width line inner nil nil "…")))
-                           (concat (propertize "│ " 'face face) line
-                                   (make-string (max 0 (- inner (string-width line))) ?\s)
-                                   (propertize " │" 'face face))))
-                       (delq nil (copy-sequence lines)) "\n")
+                         (concat (propertize "│ " 'face face) line
+                                 (make-string (max 0 (- inner (string-width line))) ?\s)
+                                 (propertize " │" 'face face)))
+                       (mapcan (lambda (line) (and line (lispm-chat--wrap-line line inner)))
+                               lines)
+                       "\n")
             "\n" (funcall bar "╰" "╯") "\n")))
 
 (defface lispm-chat-name '((t :inherit bold :height 1.3))
@@ -990,8 +1030,9 @@ See `lispm-asked-condition'."
 
 (defun lispm-chat-yes-always ()
   "Approve the call, and every later call of its tool by this agent.
-For a tool that runs any Lisp, or commands that reach Emacs, only this
-exact call (see `lispm-tools-allowance')."
+For a tool that runs any Lisp, or commands that can reach Emacs, which
+is any command on this machine outside the sandbox, only this exact
+call (see `lispm-tools-allowance')."
   (interactive)
   (lispm-allow lispm-chat-agent (lispm-chat--waiting))
   (goto-char (point-max)))
@@ -1118,7 +1159,9 @@ ITEMS are the session's items, where the call's preview is."
                  (and (stringp why) (list "" (propertize (concat "  " why) 'face 'lispm-chat-dim)))
                  (and note (list "" (propertize (concat "  " note) 'face 'lispm-chat-dim)))
                  (list "" question)
-                 (lispm-chat--options options))
+                 (lispm-chat--options options)
+                 (list "" (propertize (lispm-tr "C-c C-y reviews the whole call in the transcript")
+                                      'face 'lispm-chat-dim)))
          (lispm-chat--width) 'lispm-chat-pending))
        'keymap lispm-chat-approval-map))))
 
@@ -1665,6 +1708,7 @@ The descriptions are English, translated where shown.")
     ("C-c C-c" ,(lispm-tr-noop "interrupt the agent"))
     ("1, 2, 3" ,(lispm-tr-noop "answer an approval prompt (or up, down and RET)"))
     ("C-c C-a" ,(lispm-tr-noop "attach a file: an image or a video the agent sees (pasting or dropping one attaches it too)"))
+    ("C-c C-y" ,(lispm-tr-noop "review the call awaiting approval, in full, in the org transcript"))
     ("C-c C-t" ,(lispm-tr-noop "the org transcript")))
   "The keys /help lists: (KEYS DESCRIPTION), the description English,
 translated where shown.")
@@ -1781,6 +1825,14 @@ ARGUMENT edit edits the rules of the level Custom instead."
       (rename-buffer (file-name-nondirectory buffer-file-name) t))
     (pop-to-buffer buffer)))
 
+(defun lispm-chat-review ()
+  "Show the call awaiting approval in the org transcript, and decide."
+  (interactive)
+  (let ((agent lispm-chat-agent)
+        (id (lispm-chat--waiting)))
+    (lispm-chat-transcript agent)
+    (lispm--review-call agent id)))
+
 (defun lispm-chat-inspect (agent argument)
   "Inspect AGENT, or the agent ARGUMENT names."
   (lispm-inspect (if (string-empty-p argument) agent (lispm-get-agent argument))))
@@ -1825,6 +1877,7 @@ ARGUMENT edit edits the rules of the level Custom instead."
   "C-c C-c" #'lispm-chat-interrupt
   "C-c C-k" #'lispm-chat-interrupt
   "C-c C-t" #'lispm-chat-transcript
+  "C-c C-y" #'lispm-chat-review
   "C-c C-a" #'lispm-chat-attach
   "1" (lispm-chat--answer-key 1)
   "2" (lispm-chat--answer-key 2)

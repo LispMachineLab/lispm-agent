@@ -315,6 +315,7 @@ exclusion replaces any `shell_environment_policy.exclude' of config.toml."
    :worktree #'lispm-agents-codex--worktree
    :chats (list lispm-agents-codex-chats-directory)
    :resume-arguments (lambda (id) (list "resume" id))
+   :model-arguments (lambda (model) (list "--model" model))
    :context #'lispm-agents-codex--context
    :ready #'lispm-agents-codex--ready-p))
 
