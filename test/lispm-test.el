@@ -9671,6 +9671,126 @@ program says other ways, which are followed."
         (lispm-agents-delete-session session)
         (should (equal deleted '("0200")))))))
 
+(ert-deftest lispm-test-agents-resume-with-model-cli ()
+  "Claude and Codex resume the same session with an optional model argv.
+A live session is reused normally, but never silently ignores a model."
+  (let* ((made nil) (buffers nil) (shown nil)
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-terminal-modes '(fundamental-mode))
+         (lispm-agents-terminal-live-p-function #'buffer-live-p)
+         (lispm-agents-show-function (lambda (buffer) (setq shown buffer)))
+         (lispm-agents-terminal-make-function
+          (lambda (name program &rest args)
+            (push (list default-directory program args) made)
+            (let ((buffer (get-buffer-create (format "*%s*" name))))
+              (push buffer buffers)
+              buffer))))
+    (unwind-protect
+        (lispm-test--with-agents nil
+          (cl-letf (((symbol-function 'executable-find) #'identity))
+            (lispm-agents-setup-claude)
+            (lispm-agents-setup-codex)
+            (pcase-dolist (`(,agent ,flag) '((claude "--resume") (codex "resume")))
+              ;; Keep the real CLI argument builders without starting servers.
+              (let ((props (lispm-agents-props agent)))
+                (setf (plist-get props :context) nil
+                      (plist-get props :arguments) nil))
+              (let* ((id (format "lispm-test-resume-%s" agent))
+                     (session (list :agent agent :id id :cwd temporary-file-directory
+                                    :title "Continue this work")))
+                (should (lispm-agents-session-model-resumable-p session))
+                (let ((buffer (lispm-agents-resume-session session "  gateway/custom model  ")))
+                  (should (eq shown buffer))
+                  (should (equal (car made)
+                                 (list temporary-file-directory (symbol-name agent)
+                                       (list flag id "--model" "gateway/custom model"))))
+                  (should (eq (buffer-local-value 'lispm-agents-buffer-agent buffer) agent))
+                  (should (equal (buffer-local-value 'lispm-agents-buffer-session-id buffer) id))
+                  (should (equal (buffer-local-value 'lispm-agents-buffer-title buffer)
+                                 "Continue this work"))
+                  (let ((count (length made)))
+                    (should (eq (lispm-agents-resume-session session) buffer))
+                    (should-error (lispm-agents-resume-session session "another-model")
+                                  :type 'user-error)
+                    (should (= (length made) count))
+                    (should (buffer-live-p buffer)))
+                  (kill-buffer buffer))
+                (lispm-agents-resume-session session)
+                (should (equal (nth 2 (car made)) (list flag id)))
+                (kill-buffer shown)))))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer))) buffers))))
+
+(ert-deftest lispm-test-agents-resume-with-model-compatible-providers ()
+  "Old one-argument resume callbacks still work without a model.
+Unsupported providers and Claude subagent transcripts reject a model."
+  (let* ((called nil) (made nil)
+         (buffer (generate-new-buffer " *lispm-test-resume-provider*"))
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-show-function #'ignore)
+         (lispm-agents-terminal-make-function
+          (lambda (_name _program &rest args) (push args made) buffer)))
+    (unwind-protect
+        (lispm-test--with-agents
+            `((old-cli :name "Old CLI" :program "emacs"
+                       :resume-arguments ,(lambda (id) (list "resume" id)))
+              (internal :name "Internal" :new ignore
+                        :resume ,(lambda (session) (push session called) buffer))
+              (custom :name "Custom" :program "emacs"
+                      :resume-arguments ,(lambda (id) (list "resume" id))
+                      :model-arguments ,(lambda (model) (list "--model" model))
+                      :resume ,(lambda (session) (push session called) buffer)))
+          (dolist (agent '(old-cli internal custom))
+            (let ((session (list :agent agent :id (symbol-name agent)
+                                 :cwd temporary-file-directory :title "Old work")))
+              (should-not (lispm-agents-session-model-resumable-p session))
+              (should-error (lispm-agents-resume-session session "custom-model")
+                            :type 'user-error)
+              (should (eq (lispm-agents-resume-session session) buffer))))
+          (should (equal made '(("resume" "old-cli"))))
+          (should (equal (mapcar (lambda (session) (plist-get session :agent)) called)
+                         '(custom internal)))
+          (lispm-agents-setup-claude)
+          (let ((child '(:agent claude :id "agent-child" :parent "parent")))
+            (should-not (lispm-agents-session-model-resumable-p child))
+            (should-error (lispm-agents-resume-session child "custom-model") :type 'user-error))
+          (should (equal made '(("resume" "old-cli")))))
+      (kill-buffer buffer))))
+
+(ert-deftest lispm-test-agents-resume-with-model-prompt ()
+  "The context action prompts with model history; blank and cancelled
+input start nothing, while a custom name reaches the resume arguments."
+  (let* ((made nil) (prompt nil) (answer "  ")
+         (lispm-agents-model-history '("earlier-model"))
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-show-function #'ignore)
+         (buffer (generate-new-buffer " *lispm-test-resume-prompt*")))
+    (unwind-protect
+        (lispm-test--with-agents nil
+          (lispm-agents-setup-claude)
+          (let ((session (list :agent 'claude :id "prompt-session"
+                               :cwd temporary-file-directory :title "Old work")))
+            (cl-letf (((symbol-function 'read-string)
+                       (lambda (&rest args)
+                         (setq prompt args)
+                         (if (eq answer 'cancel) (signal 'quit nil) answer)))
+                      ((symbol-function 'lispm-agents--launch)
+                       (lambda (&rest args) (push args made) buffer))
+                      ((symbol-function 'executable-find) #'identity))
+              (should-error (lispm-agents-session-act 'resume-with session) :type 'user-error)
+              (should-not made)
+              (setq answer 'cancel)
+              (should (eq (condition-case nil
+                              (progn (lispm-agents-session-act 'resume-with session) 'returned)
+                            (quit 'cancelled))
+                          'cancelled))
+              (should-not made)
+              (setq answer "  provider/custom-model  ")
+              (lispm-agents-session-act 'resume-with session)
+              (should (equal prompt '("Resume with model: " nil lispm-agents-model-history)))
+              (should (equal (nth 3 (car made))
+                             '("--resume" "prompt-session" "--model" "provider/custom-model"))))))
+      (kill-buffer buffer))))
+
 (ert-deftest lispm-test-agents-confirm-in-lispm-ui ()
   "Deleting a session asks in the alert of the interface drawing LispM
 UI's, Cancel beside the action; Escape keeps the session.  A program
