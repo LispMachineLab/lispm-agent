@@ -188,14 +188,20 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
 
 ~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  A shell
 command made only of programs that read (~lispm-shell-read-only-programs~: ~ls~, ~grep~, ~git log~,
-~gh pr view~ and the like, piped or chained, writing nowhere but =/dev/null=) is decided as
-reading is; one the shell would expand or run anything through asks.  Approving a call "for
-good" allows every later call of its tool for the rest of the Emacs session; for ~eval_elisp~,
+~gh pr view~, ~gh repo list~ and the like, piped or chained, writing nowhere but =/dev/null=)
+is decided as reading is; one the shell would expand or run anything through asks.  Approving
+a call "for good" allows every later call of its tool for the rest of the Emacs session; for ~eval_elisp~,
 and for a shell command that could reach Emacs, only that exact call again.  A command cannot
 reach Emacs on another machine, or in the sandbox (below): there, approving one for good allows
 every later command, for as long as the sandbox is on.  Other packages can hold calls back
 through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest answer wins), as
 [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
+
+Shell comments and a ~cd~ before a read-only command do not make it ask.  Remembered exact
+calls ignore top-level argument order and ~why~; ~run_shell~ also ignores ~timeout~, while its command
+text must still match.  Native tool requests, decisions and resumed approvals are timestamped
+in ~Approval~ subsections of the Org transcript, with decision scope and extra check reasons.
+They are saved with the session and are not sent to the model.
 
 * Standing agents
 

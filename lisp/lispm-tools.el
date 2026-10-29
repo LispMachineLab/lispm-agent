@@ -889,18 +889,35 @@ the agent's policy, so the user may allow every later one at once."
           (lispm-tools-elsewhere-p root)
         (lispm-sandbox-confines-p)))))
 
-(defun lispm-tools--call-key (input)
-  "INPUT as an approval for this exact call remembers it: without `why'."
-  (if (listp input)
-      (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input)
-    input))
+(defun lispm-tools--call-key (input &optional tool)
+  "INPUT as an exact-call approval for TOOL remembers it, without `why'.
+Distinct top-level parameter names are sorted: their order does not
+change the call.  Duplicate names, malformed objects and nested values
+are kept as given.  For run_shell, a valid `timeout' only limits the
+execution time; the command, not that limit, is what was approved."
+  (if (not (proper-list-p input))
+      input
+    (let ((key (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input))
+          names)
+      (if (not (seq-every-p (lambda (entry)
+                             (and (consp entry) (symbolp (car entry))
+                                  (not (memq (car entry) names))
+                                  (push (car entry) names)))
+                           key))
+          key
+        (when (and tool (equal (lispm-tool-name tool) "run_shell")
+                   (eq (lispm-tool-permission tool) 'shell)
+                   (let ((timeout (alist-get 'timeout key)))
+                     (or (integerp timeout) (memq timeout '(nil :null)))))
+          (setq key (assq-delete-all 'timeout key)))
+        (sort key (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))))))
 
 (defun lispm-tools-allowance (tool input &optional agent)
   "What approving AGENT's call of TOOL on INPUT for good adds to its allowed.
 The tool's name: every later call of it runs at once.  For a tool of
 class `exec', which reaches all of Emacs, this exact call: (NAME .
-INPUT), INPUT without `why'.  Allowing every later call would put the
-agent past its policy, which such a call can change.  So for a tool of
+KEY), KEY from `lispm-tools--call-key'.  Allowing every later call would
+put the agent past its policy, which such a call can change.  So for a tool of
 class `shell', since a shell command reaches Emacs too, unless AGENT's
 commands are kept apart from Emacs (see `lispm-tools-apart-p'): on
 another machine, or in the sandbox, they cannot change the policy, and
@@ -910,7 +927,7 @@ never approving the next."
           (pcase (lispm-tool-permission tool)
             ('exec t)
             ('shell (not (lispm-tools-apart-p agent)))))
-      (cons (lispm-tool-name tool) (lispm-tools--call-key input))
+      (cons (lispm-tool-name tool) (lispm-tools--call-key input tool))
     (lispm-tool-name tool)))
 
 (defun lispm-tools--allowed-p (agent tool input)
@@ -920,11 +937,17 @@ commands could not reach Emacs (see `lispm-tools-allowance'), and
 holds only while that is so: with the sandbox off again, each command
 asks, as it did before."
   (let ((allowed (lispm-agent-allowed agent))
-        (name (lispm-tool-name tool)))
+        (name (lispm-tool-name tool))
+        (key (lispm-tools--call-key input tool)))
     (or (and (member name allowed)
              (or (not (eq (lispm-tool-permission tool) 'shell))
                  (lispm-tools-apart-p agent)))
-        (member (cons name (lispm-tools--call-key input)) allowed))))
+        ;; Earlier approvals kept parameter order and shell timeouts.
+        ;; Compare their keys too, without changing the stored entries.
+        (seq-some (lambda (entry)
+                    (and (consp entry) (equal (car entry) name)
+                         (equal (lispm-tools--call-key (cdr entry) tool) key)))
+                  allowed))))
 
 (defun lispm-tools--targets (agent tool input)
   "Files AGENT's call of TOOL with INPUT changes, as far as can be told before.
@@ -1903,6 +1926,7 @@ For files use edit_file."
     ("date" . t) ("cal" . t) ("uname" . t) ("hostname" . t) ("whoami" . t) ("id" . t)
     ("uptime" . t) ("printenv" . t) ("locale" . t) ("ps" . t) ("pgrep" . t) ("lsof" . t)
     ("sw_vers" . t) ("arch" . t) ("nproc" . t)
+    ("cd" . lispm-shell--cd-reads-p)
     ("env" . lispm-shell--env-reads-p)
     ("git" . lispm-shell--git-reads-p)
     ("gh" . lispm-shell--gh-reads-p))
@@ -1925,12 +1949,13 @@ is named without a directory: a command naming one by its path asks."
 (defun lispm-shell--words (command)
   "COMMAND's simple commands, each a list of words, or `unsure'.
 Words are split as the shell splits them, quotes and backslashes
-undone, at spaces, newlines, |, ||, && and ;.  Anything that would
-have the shell do more than run programs on words is `unsure': a
+undone, at spaces, newlines, |, ||, && and ;.  Comments end at the
+next newline; escaped newlines elsewhere join lines.  Anything that
+would have the shell do more than run programs on words is `unsure': a
 redirection other than to /dev/null, from a file or of one descriptor
 to another; a command or process substitution, backquotes included; a
 subshell, group or function; a job put in the background; a here
-document; an environment assignment before a program; a comment.  So
+document; an environment assignment before a program.  So
 is an empty command."
   (let ((length (length command))
         (i 0)
@@ -1953,6 +1978,13 @@ is an empty command."
                         (while (and (char) (not (memq (char) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
                           (cl-incf i))
                         (let ((target (substring command target-start i)))
+                          ;; Only literal targets: quoting or expansion can
+                          ;; hide a word boundary, including a later #.
+                          (when (seq-some (lambda (c)
+                                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~
+                                                      ?\( ?\) ?{ ?} ?\[ ?\])))
+                                          target)
+                            (unsure))
                           (pcase op
                             ((or ">" ">>" "&>")
                              (unless (equal target "/dev/null") (unsure)))
@@ -1971,7 +2003,11 @@ is an empty command."
               (cond ((eq c ?\") (setq quote nil) (cl-incf i))
                     ((eq c ?\\)
                      (cl-incf i)
-                     (when (char) (add (char)) (cl-incf i)))
+                     (when (char)
+                       (unless (eq (char) ?\n)
+                         (unless (memq (char) '(?$ ?` ?\" ?\\)) (add ?\\))
+                         (add (char)))
+                       (cl-incf i)))
                     ((eq c ?`) (unsure))
                     ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
                      (unsure))
@@ -1981,7 +2017,9 @@ is an empty command."
               (cl-incf i))
              ((eq c ?\\)
               (cl-incf i)
-              (when (char) (add (char)) (cl-incf i)))
+              (when (char)
+                (unless (eq (char) ?\n) (add (char)))
+                (cl-incf i)))
              ((memq c '(?\s ?\t))
               (end-word)
               (cl-incf i))
@@ -2009,7 +2047,7 @@ is an empty command."
              ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
               (unsure))
              ((and (eq c ?#) (not in-word))
-              (unsure))
+              (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))
              ((and (memq c '(?{ ?})) (not in-word)
                    (let ((next (and (< (1+ i) length) (aref command (1+ i)))))
                      (or (null next) (memq next '(?\s ?\t ?\n ?\;)))))
@@ -2052,6 +2090,16 @@ this cannot read is one that may write."
                                         (string-prefix-p (concat option "=") arg))))
                              options))
                  args)))
+
+(defun lispm-shell--cd-reads-p (args)
+  "Non-nil for cd's ordinary directory change, with at most one operand.
+Only -L, -P and -- are recognized; other shell-specific forms ask."
+  (while (member (car args) '("-L" "-P")) (setq args (cdr args)))
+  (let ((end-options (equal (car args) "--")))
+    (when end-options (setq args (cdr args)))
+    (and (<= (length args) 1)
+         (or (null args) end-options (equal (car args) "-")
+             (not (string-prefix-p "-" (car args)))))))
 
 (defun lispm-shell--find-reads-p (args)
   "Non-nil if find with ARGS only reads: it neither deletes nor runs nor writes."
@@ -2250,7 +2298,7 @@ reflog, worktree, submodule and notes read while their arguments only ask."
   '(("pr" "view" "list" "checks" "diff" "status")
     ("issue" "view" "list" "status")
     ("run" "list" "view")
-    ("repo" "view")
+    ("repo" "view" "list")
     ("release" "list" "view")
     ("auth" "status")
     ("label" "list")

@@ -45,6 +45,8 @@
 ;;                                  Lisp program does, awaiting approval
 ;;   *** Preview                    diff shown while awaiting approval,
 ;;                                  after why it asks, if a check said
+;;   *** Approval                   timestamped request or decision as JSON;
+;;                                  kept for the user, never sent to the model
 ;;   *** Result                     the tool's output (or *** Error); tagged
 ;;                                  :cleared:, it is no longer sent
 ;;   *** Stopped                    an error the call stopped at, awaiting a
@@ -549,6 +551,12 @@ item of a list before DIFF (see `lispm-tool-decision')."
           (if diff
               (concat "#+begin_src diff\n" (lispm-transcript-body diff) "#+end_src\n")
             "")))
+
+(defun lispm-transcript-approval (event)
+  "An approval EVENT alist as an audit subsection, never sent to the model."
+  (concat "*** Approval\n#+begin_src json\n"
+          (lispm-transcript-body (lispm--json-pretty event))
+          "#+end_src\n"))
 
 (defun lispm-transcript--reasons (beg end)
   "The reasons a Preview section between BEG and END gives, a list of strings.
