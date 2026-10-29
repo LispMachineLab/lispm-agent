@@ -39,8 +39,8 @@
 
 (defvar lispm-local-http-respond nil
   "While a server's handler runs, a function sending the request a response.
-It takes (STATUS BODY TYPE), as the handler returns it.  A handler that
-answers later keeps it and returns `deferred'.")
+It takes (STATUS BODY TYPE HEADERS), as the handler returns it.  A
+handler that answers later keeps it and returns `deferred'.")
 
 (defun lispm-local-http-headers (head)
   "Return the headers of the HTTP request HEAD as an alist of downcased names."
@@ -55,8 +55,9 @@ answers later keeps it and returns `deferred'.")
 AUTHORIZE is called with a request's headers, an alist of downcased names
 to values, and must return non-nil to admit it.  HANDLER is called with
 the method, the path, the headers and the decoded body, and returns
-\(STATUS BODY TYPE): an HTTP status such as \"200 OK\", a unibyte body, or
-nil for none, and the body's content type, JSON when left out; or
+\(STATUS BODY TYPE HEADERS): an HTTP status such as \"200 OK\", a unibyte
+body, or nil for none, the body's content type, JSON when left out, and
+more headers of the response, an alist of names to values; or
 `deferred', to send it later with `lispm-local-http-respond'.  The port
 is `(process-contact SERVER :service)'."
   (make-network-process
@@ -106,12 +107,14 @@ is `(process-contact SERVER :service)'."
       (lispm-local-http--reply connection '("431 Request Header Fields Too Large"))))))
 
 (defun lispm-local-http--reply (connection response)
-  "Send CONNECTION the (STATUS BODY TYPE) RESPONSE and close it."
-  (pcase-let ((`(,status ,body ,type) response))
+  "Send CONNECTION the (STATUS BODY TYPE HEADERS) RESPONSE and close it."
+  (pcase-let ((`(,status ,body ,type ,headers) response))
     (process-send-string
      connection
      (concat "HTTP/1.1 " status "\r\n"
              (if body (format "Content-Type: %s\r\n" (or type "application/json")) "")
+             (mapconcat (pcase-lambda (`(,name . ,value)) (format "%s: %s\r\n" name value))
+                        headers "")
              (format "Content-Length: %d\r\nConnection: close\r\n\r\n" (length body))
              body))
     (process-send-eof connection)))

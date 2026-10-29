@@ -1,0 +1,190 @@
+#!/bin/sh
+# Copyright (C) 2026  Ryan.K
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# lispm-mcp: LispM, the user's Emacs, as an MCP server over stdio.
+#
+#   claude mcp add lispm -- /path/to/lispm-agent/bin/lispm-mcp
+#   codex mcp add lispm -- /path/to/lispm-agent/bin/lispm-mcp
+#
+# Any MCP client runs it as a server of its own, in the directory its
+# agent works in.  It hands each message it reads, a line each, to the
+# server LispM runs for agents outside it (lispm-mcp-server.el), and
+# writes each answer on a line of its own: one message at a time, so a
+# call waiting for the user's approval holds back those after it.  It
+# finds the server in the file $LISPM_MCP_SERVER, ~/.lispm/mcp-server by
+# default, which LispM writes readable by its owner only: the server's
+# address, then its token.  When LispM has started again, it connects
+# anew.  It exits with status 2 when no LispM answers.
+
+set -u
+umask 077
+server=${LISPM_MCP_SERVER:-$HOME/.lispm/mcp-server}
+directory=$(pwd)
+session=
+init=
+reader=
+child=
+stopping=
+nl='
+'
+work=$(mktemp -d "${TMPDIR:-/tmp}/lispm-mcp.XXXXXX") || exit 2
+headers=$work/headers
+: > "$headers"
+
+fail() {
+  echo "lispm-mcp: $1" >&2
+  exit 2
+}
+
+check_stop() {
+  case $stopping in
+    0) exit 0 ;;
+    2) fail "cannot read client input" ;;
+  esac
+}
+
+# The server's address and token, read anew for each message.
+connect() {
+  { read -r url && read -r token; } < "$server" 2>/dev/null ||
+    fail "no LispM serves agents outside it: $server names none"
+}
+
+# The headers of every request.  The token goes in them, read from a
+# file descriptor, not in argv.
+request_headers() {
+  printf 'Authorization: Bearer %s\n' "$token"
+  printf 'X-LispM-Directory: %s\n' "$directory"
+  [ -z "$session" ] || printf 'Mcp-Session-Id: %s\n' "$session"
+}
+
+# POST the message $1; set status and body.
+post() {
+  connect
+  check_stop
+  printf '%s' "$1" > "$work/request" || fail "cannot save the request"
+  curl -sS --noproxy '*' -D "$headers" -H @/dev/fd/3 \
+         -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+         --data-binary @"$work/request" -w '\n%{http_code}' "$url/mcp" \
+         > "$work/response" 3<<EOF &
+$(request_headers)
+EOF
+  child=$!
+  check_stop
+  # A shell runs traps promptly while waiting for a background child.
+  wait "$child"
+  code=$?
+  check_stop
+  child=
+  [ "$code" = 0 ] || fail "LispM did not answer at $url"
+  response=$(cat "$work/response")
+  status=${response##*"$nl"}
+  body=${response%"$nl"*}
+}
+
+# The session the last response opened, if it opened one.
+opened() {
+  sed -n 's/^[Mm][Cc][Pp]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]-[Ii][Dd]:[[:space:]]*\([^[:space:]]*\).*/\1/p' \
+      "$headers" | tail -n 1
+}
+
+# Open a session anew, as the client first did: LispM has started again.
+reconnect() {
+  session=
+  post "$init"
+  session=$(opened)
+  [ -n "$session" ] || fail "LispM did not take this agent again (HTTP $status)"
+  post '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+}
+
+# End the session, if LispM still runs.
+bye() {
+  [ -n "$session" ] || return 0
+  { read -r url && read -r token; } < "$server" 2>/dev/null || return 0
+  curl -sS --noproxy '*' --connect-timeout 1 --max-time 2 \
+       -o /dev/null -X DELETE -H @/dev/fd/3 "$url/mcp" 3<<EOF 2>/dev/null
+$(request_headers)
+EOF
+}
+
+# Read independently of curl, so even a waiting approval cannot hide EOF.
+# A ready marker publishes a complete line; the reader never blocks on the
+# request worker and may still reach EOF when many messages are queued.
+read_input() {
+  trap - EXIT HUP INT TERM USR1 USR2
+  number=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    if ! { printf '%s' "$line" > "$work/input.$number" &&
+           : > "$work/ready.$number"; }; then
+      kill -USR1 "$owner"
+      return
+    fi
+    number=$((number + 1))
+  done
+  kill -USR2 "$owner"
+}
+
+cleanup() {
+  code=$?
+  trap '' HUP INT TERM USR1 USR2
+  # No child must outlive its stdio client, even while the server waits.
+  for pid in "$reader" "$child"; do
+    [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || :
+  done
+  for pid in "$reader" "$child"; do
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || :
+  done
+  # Initialize may have opened a session just before the client closed.
+  newly_opened=$(opened)
+  [ -z "$newly_opened" ] || session=$newly_opened
+  bye || :
+  rm -rf "$work"
+  exit "$code"
+}
+
+trap cleanup EXIT
+# Record first, then stop after each child PID has been saved.  A signal
+# between launching a child and assigning $! must not leave it behind.
+trap 'stopping=0' HUP INT TERM USR2
+trap 'stopping=2' USR1
+owner=$$
+exec 4<&0
+read_input <&4 &
+reader=$!
+exec 4<&-
+number=0
+while :; do
+  check_stop
+  if [ ! -f "$work/ready.$number" ]; then
+    sleep 0.05 &
+    child=$!
+    check_stop
+    wait "$child"
+    check_stop
+    child=
+    continue
+  fi
+  line=$(cat "$work/input.$number")
+  rm -f "$work/input.$number" "$work/ready.$number"
+  number=$((number + 1))
+  post "$line"
+  if [ -n "$(opened)" ]; then
+    session=$(opened)
+    init=$line
+  elif [ "$status" = 404 ] && [ -n "$init" ]; then
+    reconnect
+    post "$line"
+  fi
+  if [ -n "$body" ]; then
+    printf '%s\n' "$body"
+  else
+    case $status in
+      2??) ;;
+      *) fail "LispM refused the message (HTTP $status)" ;;
+    esac
+  fi
+done

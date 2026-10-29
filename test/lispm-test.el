@@ -10822,7 +10822,13 @@ system may lack: a version 4 UUID, a new one each time."
 INPUT, if non-nil, on its standard input, while this Emacs serves.
 Return (STATUS . OUTPUT)."
   (let* ((output (generate-new-buffer " *lispm-tool*"))
-         (process-environment (append environment process-environment))
+         ;; Never the user's LispM, which it would reach failing a server
+         ;; of the test's own.
+         (process-environment (append environment
+                                      (list (concat "LISPM_MCP_SERVER="
+                                                    (expand-file-name "lispm-test-no-server"
+                                                                      temporary-file-directory)))
+                                      process-environment))
          (process (make-process :name "lispm-tool" :buffer output :noquery t
                                 :connection-type 'pipe :sentinel #'ignore
                                 :command (cons lispm-agents-mcp-tool-program arguments))))
@@ -10909,6 +10915,299 @@ which a config file readable by its owner alone names, deleted with it."
           (should (equal (lispm-agents-mcp-served-tools server) lispm-agents-mcp-extra-tools)))
       (lispm-agents-context-stop server))
     (should-not (file-exists-p config))))
+
+;;;; Agents outside LispM
+
+(defun lispm-test--http (port method path headers &optional body)
+  "Send METHOD PATH with HEADERS, an alist, and BODY to the local server on
+PORT.  Return (STATUS HEADERS BODY): the status code, the response's
+headers, with downcased names, and its body."
+  (let* ((response "")
+         (process (make-network-process
+                   :name "lispm-test-http" :host "127.0.0.1" :service port :coding 'binary
+                   :filter (lambda (_process bytes) (setq response (concat response bytes)))
+                   :sentinel #'ignore))
+         (bytes (encode-coding-string (or body "") 'utf-8)))
+    (process-send-string
+     process (concat (format "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\n" method path)
+                     (mapconcat (pcase-lambda (`(,name . ,value)) (format "%s: %s\r\n" name value))
+                                headers "")
+                     (format "Content-Length: %d\r\n\r\n" (length bytes))
+                     bytes))
+    (lispm-test--wait (lambda () (not (process-live-p process))))
+    (delete-process process)
+    (let ((end (string-search "\r\n\r\n" response)))
+      (list (string-to-number (cadr (split-string response " ")))
+            (lispm-local-http-headers (substring response 0 end))
+            (decode-coding-string (substring response (+ end 4)) 'utf-8)))))
+
+(defun lispm-test--rpc (port headers method &optional params id)
+  "POST the MCP METHOD with PARAMS, a request ID or a notification, to /mcp
+of the local server on PORT, with HEADERS.  Return (STATUS HEADERS
+MESSAGE), MESSAGE the response parsed, or nil.  A call answered later
+is waited for."
+  (pcase-let ((`(,status ,response-headers ,body)
+               (lispm-test--http port "POST" "/mcp" (cons '("Content-Type" . "application/json") headers)
+                                 (json-serialize `((jsonrpc . "2.0") ,@(when id `((id . ,id)))
+                                                   (method . ,method)
+                                                   ,@(when params `((params . ,params))))))))
+    (list status response-headers
+          (and (not (string-empty-p body))
+               (json-parse-string body :object-type 'alist :null-object nil :false-object nil)))))
+
+(defun lispm-test--rpc-text (message)
+  "The text of the result of the tool call MESSAGE answers, or of its
+error, and whether it failed: (TEXT . ERRORP)."
+  (if-let* ((result (alist-get 'result message)))
+      (cons (alist-get 'text (aref (alist-get 'content result) 0)) (alist-get 'isError result))
+    (cons (alist-get 'message (alist-get 'error message)) t)))
+
+(defconst lispm-test--initialize
+  '((protocolVersion . "2025-06-18") (capabilities . ())
+    (clientInfo . ((name . "claude-code") (title . "Claude Code") (version . "2.0.0"))))
+  "The params of an MCP client's request to initialize.")
+
+(defmacro lispm-test-with-mcp-server (&rest body)
+  "Run BODY in `lispm-test-env' with the server for agents outside LispM
+running, named in a file of the test's own; `port' and `token' are its."
+  (declare (indent 0))
+  `(lispm-test-env
+     (let ((lispm-mcp-server-file (expand-file-name "mcp-server" tmp))
+           (lispm-mcp-server--sessions (make-hash-table :test #'equal))
+           (lispm-mcp-server--process nil)
+           (lispm-mcp-server--token nil)
+           (lispm-mcp-server-mode nil))
+       (lispm-mcp-server-mode 1)
+       (unwind-protect
+           (let ((port (process-contact lispm-mcp-server--process :service))
+                 (token lispm-mcp-server--token))
+             (ignore port token)
+             ,@body)
+         (lispm-mcp-server-mode -1)))))
+
+(ert-deftest lispm-test-mcp-server ()
+  "An agent outside LispM connects to its standing server, named in a file
+only the user reads, with the token there: its session works in the
+directory it names, where it has the read tools and LispM's tools under
+LispM's policy, reading at once and evaluating once the user allows it,
+but none of those talking with the agents."
+  (lispm-test-with-mcp-server
+    (let* ((asked nil)
+           (allow nil)
+           (lispm-agents-confirm-function (lambda (question detail action)
+                                            (push (list question detail action) asked)
+                                            allow))
+           (auth `(("Authorization" . ,(concat "Bearer " token)) ("X-LispM-Directory" . ,project)))
+           (session nil)
+           (call (lambda (name arguments)
+                   (lispm-test--rpc-text
+                    (nth 2 (lispm-test--rpc port (cons (cons "Mcp-Session-Id" session) auth) "tools/call"
+                                            `((name . ,name) (arguments . ,arguments)) 3))))))
+      (should (= (file-modes lispm-mcp-server-file) #o600))
+      (should (equal (lispm-mcp-server--read-file)
+                     (list (format "http://127.0.0.1:%d" port) token (number-to-string (emacs-pid)))))
+      ;; Without the token, or from a web page, nothing.
+      (should (= (car (lispm-test--rpc port '(("Authorization" . "Bearer nope")) "initialize"
+                                       lispm-test--initialize 1))
+                 401))
+      (should (= (car (lispm-test--rpc port (cons '("Origin" . "http://example.com") auth) "initialize"
+                                       lispm-test--initialize 1))
+                 401))
+      ;; Initializing opens a session.
+      (pcase-let ((`(,status ,headers ,message) (lispm-test--rpc port auth "initialize" lispm-test--initialize 1)))
+        (should (= status 200))
+        (setq session (cdr (assoc "mcp-session-id" headers)))
+        (should session)
+        (should (string-search (format "as claude-code, working in %s." (abbreviate-file-name
+                                                                        (directory-file-name project)))
+                               (alist-get 'instructions (alist-get 'result message)))))
+      (should (= (car (lispm-test--rpc port (cons (cons "Mcp-Session-Id" session) auth)
+                                       "notifications/initialized"))
+                 202))
+      ;; Asked without a session, or in one it no longer has, it says so.
+      (pcase-let ((`(,status ,_ ,message) (lispm-test--rpc port auth "tools/list" nil 2)))
+        (should (= status 400))
+        (should (equal (alist-get 'id message) 2)))
+      (should (= (car (lispm-test--rpc port (cons '("Mcp-Session-Id" . "gone") auth) "tools/list" nil 2)) 404))
+      (should (= (car (lispm-test--http port "GET" "/mcp" auth)) 405))
+      (let ((names (mapcar (lambda (tool) (alist-get 'name tool))
+                           (alist-get 'tools (alist-get 'result
+                                                        (nth 2 (lispm-test--rpc
+                                                                port (cons (cons "Mcp-Session-Id" session) auth)
+                                                                "tools/list" nil 2)))))))
+        (dolist (name '("getOpenEditors" "getCurrentSelection" "read_buffer" "list_buffers" "eval_elisp"
+                        "run_shell" "search_tools" "skill" "call_tool"))
+          (should (member name names)))
+        (dolist (name '("list_agents" "send_message" "ask_agent" "reply" "remember" "run_lisp"))
+          (should-not (member name names)))
+        (should (equal names (delete-dups (copy-sequence names)))))
+      ;; Reading runs at once.
+      (with-current-buffer (get-buffer-create "*lispm-test-outside*")
+        (insert "Hello from Emacs, λ."))
+      (unwind-protect
+          (should (string-search "1\tHello from Emacs, λ."
+                                 (car (funcall call "read_buffer" '((buffer . "*lispm-test-outside*"))))))
+        (kill-buffer "*lispm-test-outside*"))
+      ;; Evaluating waits for the user, who may refuse it.
+      (should (equal (funcall call "eval_elisp" '((code . "(+ 1 2)") (why . "To add.")))
+                     '("Denied: the user did not approve this call." . t)))
+      (should (equal (car (car asked)) "Claude Code (outside LispM) wants to run eval_elisp"))
+      (should (string-search "To add." (nth 1 (car asked))))
+      (setq allow t)
+      (should (equal (car (funcall call "eval_elisp" '((code . "(+ 1 2)") (why . "To add.")))) "=> 3"))
+      ;; The agents' messages are none of its own, nor of call_tool's.
+      (should (equal (funcall call "call_tool" '((name . "send_message")))
+                     '("send_message is not called with call_tool" . t)))
+      (should (equal (car (funcall call "call_tool" '((name . "describe_symbol")
+                                                      (input . ((name . "lispm-mcp-server-mode"))))))
+                     (car (lispm-test--call (lispm-agents-bridge-server-agent
+                                             (gethash session lispm-mcp-server--sessions))
+                                            "describe_symbol" '((name . "lispm-mcp-server-mode"))))))
+      ;; It acts as an agent in its directory, none of LispM's running ones.
+      (let ((agent (lispm-agents-bridge-server-agent (gethash session lispm-mcp-server--sessions))))
+        (should (equal (lispm-agent-root agent) project))
+        (should (eq (lispm-agent-name agent) 'claude-code)))
+      (should-not (lispm-agents))
+      ;; Ended, it is gone.
+      (should (= (car (lispm-test--http port "DELETE" "/mcp" (cons (cons "Mcp-Session-Id" session) auth))) 200))
+      (should-not (gethash session lispm-mcp-server--sessions))
+      ;; The sessions used least lately end first, past those kept.
+      (let ((lispm-mcp-server-max-sessions 2)
+            (sessions (mapcar (lambda (_)
+                                (cdr (assoc "mcp-session-id"
+                                            (nth 1 (lispm-test--rpc port auth "initialize"
+                                                                    lispm-test--initialize 1)))))
+                              '(1 2))))
+        (lispm-test--rpc port (cons (cons "Mcp-Session-Id" (car sessions)) auth) "ping" nil 4)
+        (lispm-test--rpc port auth "initialize" lispm-test--initialize 1)
+        (should (gethash (car sessions) lispm-mcp-server--sessions))
+        (should-not (gethash (cadr sessions) lispm-mcp-server--sessions))))
+    ;; Stopped, it names itself no more.
+    (lispm-mcp-server-mode -1)
+    (should-not (file-exists-p lispm-mcp-server-file))
+    (should-not lispm-mcp-server--process)))
+
+(ert-deftest lispm-test-mcp-server-first-emacs-keeps ()
+  "The first Emacs to serve agents outside LispM keeps the file naming its
+server while it runs; one coming after serves none, a batch Emacs none
+of its own accord, and an Emacs stopping leaves a file another wrote."
+  (lispm-test-env
+    (let ((lispm-mcp-server-file (expand-file-name "mcp-server" tmp))
+          (lispm-mcp-server--sessions (make-hash-table :test #'equal))
+          (lispm-mcp-server--process nil)
+          (lispm-mcp-server--token nil)
+          (lispm-mcp-server-mode nil)
+          (write (lambda (text) (with-temp-file lispm-mcp-server-file (insert text)))))
+      (unwind-protect
+          (progn
+            ;; An Emacs is told from another program by its process.
+            (should (lispm-mcp-server--emacs-p (emacs-pid)))
+            (let ((sleep (make-process :name "lispm-test-sleep" :command '("sleep" "30") :noquery t)))
+              (unwind-protect
+                  (should-not (lispm-mcp-server--emacs-p (process-id sleep)))
+                (delete-process sleep)))
+            (funcall write "http://127.0.0.1:1\nother\n99999\n")
+            (cl-letf (((symbol-function 'lispm-mcp-server--emacs-p) (lambda (pid) (= pid 99999))))
+              (lispm-mcp-server-mode 1)
+              (should-not lispm-mcp-server-mode)
+              (should-not lispm-mcp-server--process)
+              (should (equal (nth 1 (lispm-mcp-server--read-file)) "other")))
+            ;; Once that Emacs is gone, its process id another program's, this
+            ;; one serves.
+            (cl-letf (((symbol-function 'lispm-mcp-server--emacs-p) #'ignore))
+              (lispm-mcp-server-mode 1))
+            (should lispm-mcp-server-mode)
+            (should (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token))
+            (should (= (file-modes lispm-mcp-server-file) #o600))
+            (funcall write "http://127.0.0.1:2\nnewer\n12345\n")
+            (lispm-mcp-server-mode -1)
+            (should (equal (nth 1 (lispm-mcp-server--read-file)) "newer"))
+            (lispm-mcp-server-maybe-start)
+            (should-not lispm-mcp-server-mode))
+        (lispm-mcp-server-mode -1)))))
+
+(ert-deftest lispm-test-lispm-mcp ()
+  "Any MCP client reaches LispM with bin/lispm-mcp, over stdio: it passes
+each message to the server the file names, in a session of the
+directory it runs in, writes each answer on a line, connects anew when
+LispM has started again, and ends its session when the client is done.
+bin/lispm-tool calls the same tools with no server of its own."
+  (skip-unless (and (executable-find "curl") (file-executable-p lispm-mcp-server-program)))
+  (lispm-test-with-mcp-server
+    (let* ((output "")
+           (lines (lambda () (split-string output "\n" t)))
+           (environment (list (concat "LISPM_MCP_SERVER=" lispm-mcp-server-file)))
+           (process-environment (append environment process-environment))
+           (default-directory project)
+           (errors (generate-new-buffer " *lispm-mcp errors*"))
+           (process (make-process :name "lispm-mcp" :noquery t :connection-type 'pipe
+                                  :command (list lispm-mcp-server-program)
+                                  :stderr errors
+                                  :filter (lambda (_process text) (setq output (concat output text)))
+                                  :sentinel #'ignore))
+           (send (lambda (id method &optional params)
+                   (process-send-string
+                    process (concat (json-serialize `((jsonrpc . "2.0") ,@(when id `((id . ,id)))
+                                                      (method . ,method)
+                                                      ,@(when params `((params . ,params)))))
+                                    "\n"))))
+           (answer (lambda (n)
+                     (lispm-test--wait (lambda () (>= (length (funcall lines)) n)) 20)
+                     (json-parse-string (nth (1- n) (funcall lines)) :object-type 'alist
+                                        :null-object nil :false-object nil))))
+      (unwind-protect
+          (progn
+            (funcall send 1 "initialize" lispm-test--initialize)
+            (should (string-search "as claude-code, working in"
+                                   (alist-get 'instructions (alist-get 'result (funcall answer 1)))))
+            (funcall send nil "notifications/initialized")
+            (funcall send 2 "tools/list")
+            (should (seq-find (lambda (tool) (equal (alist-get 'name tool) "eval_elisp"))
+                              (alist-get 'tools (alist-get 'result (funcall answer 2)))))
+            (let ((session (car (hash-table-keys lispm-mcp-server--sessions))))
+              (should (equal (file-truename (lispm-mcp-server-session-directory
+                                             (gethash session lispm-mcp-server--sessions)))
+                             (file-truename project))))
+            ;; LispM starts again: the next message goes to a new session.
+            (lispm-mcp-server-mode -1)
+            (lispm-mcp-server-mode 1)
+            (should (= (hash-table-count lispm-mcp-server--sessions) 0))
+            (funcall send 3 "tools/call" '((name . "describe_symbol")
+                                           (arguments . ((name . "lispm-mcp-server-mode")))))
+            (let ((message (funcall answer 3)))
+              (should (equal (alist-get 'id message) 3))
+              (should (string-search "Serve this Emacs over MCP" (car (lispm-test--rpc-text message)))))
+            (should (= (hash-table-count lispm-mcp-server--sessions) 1))
+            ;; The client done, the session ends.
+            (process-send-eof process)
+            (lispm-test--wait (lambda () (not (process-live-p process))) 20)
+            (should (= (process-exit-status process) 0))
+            (should (= (hash-table-count lispm-mcp-server--sessions) 0))
+            (should-not (string-search "lispm-mcp:" (with-current-buffer errors (buffer-string)))))
+        (delete-process process)
+        (kill-buffer errors))
+      ;; bin/lispm-tool finds the same server, its calls those of the
+      ;; commands of its directory.
+      (pcase-let ((`(,status . ,text) (lispm-test--lispm-tool environment nil)))
+        (should (= status 0))
+        (should (string-search "you reach it from outside, as lispm-tool" text))
+        (should (string-search "\n- eval_elisp: " text)))
+      (should (string-search "Serve this Emacs over MCP"
+                             (cdr (lispm-test--lispm-tool environment nil "describe_symbol"
+                                                          "{\"name\": \"lispm-mcp-server-mode\"}"))))
+      ;; Once LispM stops, there is none to reach.
+      (lispm-mcp-server-mode -1)
+      (should (= (car (lispm-test--lispm-tool environment nil)) 2))
+      (let ((process (make-process :name "lispm-mcp" :noquery t :connection-type 'pipe
+                                   :command (list lispm-mcp-server-program) :buffer nil
+                                   :stderr (get-buffer-create " *lispm-mcp errors*")
+                                   :sentinel #'ignore)))
+        (process-send-string process "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+        (lispm-test--wait (lambda () (not (process-live-p process))) 20)
+        (should (= (process-exit-status process) 2))
+        (should (string-search "no LispM serves agents outside it"
+                               (with-current-buffer " *lispm-mcp errors*" (buffer-string))))
+        (kill-buffer " *lispm-mcp errors*")))))
 
 ;;;; The LispM bar
 

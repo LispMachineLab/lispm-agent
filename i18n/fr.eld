@@ -271,6 +271,8 @@
   ("Approve these calls for %s: %s? " . "Approuver ces appels pour %s : %s ? ")
   ("No call awaits approval" . "Aucun appel n'attend d'approbation")
   ("%s wants to run %s" . "%s veut exécuter %s")
+  ("%s (outside LispM)" . "%s (hors de LispM)")
+  ("LispM: Emacs %d serves agents outside LispM; this one serves none" . "LispM : Emacs %d sert les agents hors de LispM ; celui-ci n'en sert aucun")
   (("answer" . "yes") . "oui")
   ("Run this call" . "Exécuter cet appel")
   (("answer" . "no") . "non")

@@ -271,6 +271,8 @@
   ("Approve these calls for %s: %s? " . "核准 %s 的這些呼叫：%s？ ")
   ("No call awaits approval" . "沒有等候核准的呼叫")
   ("%s wants to run %s" . "%s 想執行 %s")
+  ("%s (outside LispM)" . "%s（LispM 之外）")
+  ("LispM: Emacs %d serves agents outside LispM; this one serves none" . "LispM：Emacs %d 已在為 LispM 之外的代理服務；本 Emacs 不提供服務")
   (("answer" . "yes") . "是")
   ("Run this call" . "執行此呼叫")
   (("answer" . "no") . "否")

@@ -401,6 +401,30 @@ This is one of `lispm-agents-context-release-functions'."
   "Return the peer SERVER's agent is."
   (lispm-agents-bridge--peer (lispm-agents-bridge--terminal server)))
 
+(cl-defgeneric lispm-agents-bridge-server-agent (server)
+  "Return the LispM agent SERVER's agent acts as, whose role and policy
+its calls of LispM's tools go by.")
+
+(cl-defmethod lispm-agents-bridge-server-agent ((server lispm-agents-mcp))
+  "The LispM agent of the agent of SERVER's terminal."
+  (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+
+(cl-defgeneric lispm-agents-bridge-server-kind (server)
+  "Return what SERVER's agent is, as \"Claude Code\", for the user asked
+about its calls.")
+
+(cl-defmethod lispm-agents-bridge-server-kind ((server lispm-agents-mcp))
+  "What the agent of SERVER's terminal is."
+  (lispm-agents-bridge--kind (lispm-agents-bridge--terminal server)))
+
+(cl-defgeneric lispm-agents-bridge-server-live-p (server)
+  "Whether SERVER still accepts the execution of a tool call."
+  (:method ((_server lispm-agents-mcp)) t))
+
+(cl-defgeneric lispm-agents-bridge-server-answer (server answer)
+  "Return ANSWER tied to SERVER's lifetime, when it owns pending calls."
+  (:method ((_server lispm-agents-mcp) answer) answer))
+
 (defun lispm-agents-bridge--string (arguments key)
   "Return the string ARGUMENTS hold under KEY; an error if they hold none."
   (let ((value (alist-get key arguments)))
@@ -454,38 +478,41 @@ This is one of `lispm-agents-context-release-functions'."
 
 (defun lispm-agents-bridge--tool-search (server arguments _id)
   "Find LispM's skills and tools as ARGUMENTS say, for SERVER's agent."
-  (let* ((agent (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+  (unless (lispm-agents-bridge-server-live-p server)
+    (error "The session has ended; connect again"))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (query (lispm-agents-bridge--string arguments 'query))
          (limit (alist-get 'max_results arguments))
-         (answer lispm-agents-context-answer))
+         (answer (lispm-agents-bridge-server-answer server lispm-agents-context-answer)))
     (lispm-tools--prepare
      (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools--sources))
      (lambda (problems)
-       (condition-case err
-           (pcase-let ((`(,found . ,others)
-                        (lispm-tools--discover agent query
-                                               (if (integerp limit) limit lispm-tool-search-results)
-                                               #'lispm-agents-bridge--served-p)))
-             (let ((help (lispm-tools--selection-help
-                          agent query found others #'lispm-agents-bridge--served-p)))
-               (funcall answer
-                        (list (concat
-                               (if (or found others)
-                                   (string-join
-                                    (delq nil
-                                          (list (and others
-                                                     (concat "Skills, which you load with skill:\n"
-                                                             (mapconcat (lambda (other) (plist-get other :line))
-                                                                        others "\n")))
-                                                (and found
-                                                     (concat "Tools, which you call with call_tool:\n"
-                                                             (mapconcat #'lispm-agents-bridge--tool-line
-                                                                        found "\n")))))
-                                    "\n")
-                                 (format "Nothing matches %S." query))
-                               (when help (concat "\n" help))
-                               (if problems (concat "\n" (string-join problems "\n")) ""))))))
-         (error (funcall answer (list (error-message-string err)) t)))))
+       (when (lispm-agents-bridge-server-live-p server)
+         (condition-case err
+             (pcase-let ((`(,found . ,others)
+                          (lispm-tools--discover agent query
+						 (if (integerp limit) limit lispm-tool-search-results)
+						 #'lispm-agents-bridge--served-p)))
+               (let ((help (lispm-tools--selection-help
+                            agent query found others #'lispm-agents-bridge--served-p)))
+		 (funcall answer
+                          (list (concat
+				 (if (or found others)
+                                     (string-join
+                                      (delq nil
+                                            (list (and others
+                                                       (concat "Skills, which you load with skill:\n"
+                                                               (mapconcat (lambda (other) (plist-get other :line))
+                                                                          others "\n")))
+                                                  (and found
+                                                       (concat "Tools, which you call with call_tool:\n"
+                                                               (mapconcat #'lispm-agents-bridge--tool-line
+                                                                          found "\n")))))
+                                      "\n")
+                                   (format "Nothing matches %S." query))
+				 (when help (concat "\n" help))
+				 (if problems (concat "\n" (string-join problems "\n")) ""))))))
+           (error (funcall answer (list (error-message-string err)) t))))))
     'deferred))
 
 (defun lispm-agents-bridge--skill-tools (skill defined)
@@ -501,7 +528,7 @@ defined, and those its file names, as are registered."
 Its tools follow, with their inputs' schemas.  The code of a skill of a
 project runs only while the user trusts it, as for LispM's agents; else
 the agent gets the text alone."
-  (let* ((agent (lispm-agents-bridge-agent (lispm-agents-bridge--terminal server)))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (name (lispm-agents-bridge--string arguments 'name))
          (skill (lispm-skills--find name agent)))
     (unless skill
@@ -539,16 +566,19 @@ An agent may give it as an object, or as the text of one."
           ((listp input) input)
           (t (error "The input is a JSON object")))))
 
-(defun lispm-agents-bridge--run (agent tool input answer)
-  "Run AGENT's call of TOOL on INPUT; give ANSWER the result."
-  (let ((lispm-current-agent agent)
-        (lispm-current-call nil)
-        (default-directory (lispm-agent-root agent)))
-    (lispm-tool-invoke tool input
-                       (lambda (text errorp &optional images)
-                         (funcall answer
-                                  (cons text (mapcar (lambda (file) (format "Image: %s" file)) images))
-                                  errorp)))))
+(defun lispm-agents-bridge--run (agent tool input answer &optional server)
+  "Run AGENT's call of TOOL on INPUT; give ANSWER the result.
+When SERVER is given, do not execute a call after its session ends."
+  (if (and server (not (lispm-agents-bridge-server-live-p server)))
+      (funcall answer '("Cancelled: the session has ended.") t)
+    (let ((lispm-current-agent agent)
+          (lispm-current-call nil)
+          (default-directory (lispm-agent-root agent)))
+      (lispm-tool-invoke tool input
+			 (lambda (text errorp &optional images)
+                           (funcall answer
+                                    (cons text (mapcar (lambda (file) (format "Image: %s" file)) images))
+                                    errorp))))))
 
 (defun lispm-agents-bridge--detail (agent tool input reasons)
   "What the user is shown of AGENT's call of TOOL on INPUT, held for REASONS."
@@ -564,26 +594,35 @@ An agent may give it as an object, or as the text of one."
                                   "\n")
                      2000)))
 
-(defun lispm-agents-bridge--ask (terminal agent tool input reasons answer)
-  "Ask the user about AGENT's call of TOOL on INPUT, for TERMINAL's agent.
+(defun lispm-agents-bridge--ask (kind agent tool input reasons answer &optional server)
+  "Ask the user about AGENT's call of TOOL on INPUT, for an agent of KIND.
 REASONS say why it is asked.  Run it if they approve; else, or should
-asking fail, give ANSWER the denial."
-  (if (condition-case nil
-          (funcall lispm-agents-confirm-function
-                   (lispm-tr "%s wants to run %s" (lispm-agents-bridge--kind terminal)
-                             (lispm-tool-name tool))
-                   (lispm-agents-bridge--detail agent tool input reasons)
-                   (lispm-tr-in "permission" "Allow"))
-        ((error quit) nil))
-      (lispm-agents-bridge--run agent tool input answer)
-    (funcall answer (list "Denied: the user did not approve this call.") t)))
+asking fail, give ANSWER the denial.  SERVER, when given, must still
+be live both before asking and after the user answers."
+  (let ((live (lambda () (or (null server) (lispm-agents-bridge-server-live-p server)))))
+    (if (not (funcall live))
+        (funcall answer '("Cancelled: the session has ended.") t)
+      (let ((allowed
+             (condition-case nil
+                 (let ((detail (lispm-agents-bridge--detail agent tool input reasons)))
+                   ;; A preview or the confirmation can itself yield to DELETE.
+                   (and (funcall live)
+                        (funcall lispm-agents-confirm-function
+                                 (lispm-tr "%s wants to run %s" kind (lispm-tool-name tool))
+                                 detail (lispm-tr-in "permission" "Allow"))))
+               ((error quit) nil))))
+        (cond ((not (funcall live))
+               (funcall answer '("Cancelled: the session has ended.") t))
+              (allowed (lispm-agents-bridge--run agent tool input answer server))
+              (t (funcall answer (list "Denied: the user did not approve this call.") t)))))))
 
 (defun lispm-agents-bridge--tool-call (server arguments _id)
   "Run the LispM tool ARGUMENTS name, on their input, for SERVER's agent.
 It runs at once, waits for the user's approval or is refused, as the
 policy of the agent acting in LispM decides."
-  (let* ((terminal (lispm-agents-bridge--terminal server))
-         (agent (lispm-agents-bridge-agent terminal))
+  (unless (lispm-agents-bridge-server-live-p server)
+    (error "The session has ended; connect again"))
+  (let* ((agent (lispm-agents-bridge-server-agent server))
          (name (lispm-agents-bridge--string arguments 'name))
          (tool (lispm-get-tool name))
          (input (lispm-agents-bridge--input arguments))
@@ -592,7 +631,7 @@ policy of the agent acting in LispM decides."
            (error "There is no LispM tool named %s; search_tools finds them" name))
           ((member name lispm-agents-bridge-unserved-tools)
            (error "%s is not called with call_tool%s" name
-                  (if (member name '("list_agents" "send_message" "ask_agent" "search_tools" "skill"))
+                  (if (assoc name (lispm-agents-mcp-served-tools server))
                       ": it is a tool of your own"
                     "")))
           ((not (lispm-agents-bridge--served-p tool))
@@ -600,10 +639,12 @@ policy of the agent acting in LispM decides."
           ((not (lispm-tools-allowed-p agent name))
            (error "The role you have in LispM does not give you %s" name)))
     (pcase-let ((`(,action . ,reasons) (lispm-tool-decision agent tool input)))
+      (setq answer (lispm-agents-bridge-server-answer server answer))
       (pcase action
         ('deny (funcall answer (list (lispm-tools-denial agent tool reasons)) t))
-        ('ask (run-at-time 0 nil #'lispm-agents-bridge--ask terminal agent tool input reasons answer))
-        (_ (lispm-agents-bridge--run agent tool input answer))))
+        ('ask (run-at-time 0 nil #'lispm-agents-bridge--ask (lispm-agents-bridge-server-kind server)
+                           agent tool input reasons answer server))
+        (_ (lispm-agents-bridge--run agent tool input answer server))))
     'deferred))
 
 ;;;; Serving them

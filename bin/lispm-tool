@@ -13,11 +13,15 @@
 # default: LispM (lispm-agents-mcp.el) writes there, to a file named
 # VARIABLE=VALUE, the address and token of the server of the agent whose
 # commands have VARIABLE set to VALUE.  $LISPM_TOOL_SERVER names such a
-# file directly.  The result is printed; the exit status is 1 when the
-# tool failed, 2 when no server answered.
+# file directly.  An agent LispM did not start has no such file: it
+# reaches the server LispM runs for agents outside it
+# (lispm-mcp-server.el), which the file $LISPM_MCP_SERVER,
+# ~/.lispm/mcp-server by default, names.  The result is printed; the
+# exit status is 1 when the tool failed, 2 when no server answered.
 
 set -u
 peers=${LISPM_PEERS:-$HOME/.lispm/peers}
+outside=${LISPM_MCP_SERVER:-$HOME/.lispm/mcp-server}
 nl='
 '
 
@@ -45,6 +49,10 @@ server_file() {
       return 0
     fi
   done
+  if [ -f "$outside" ]; then
+    printf '%s\n' "$outside"
+    return 0
+  fi
   return 1
 }
 
@@ -53,7 +61,7 @@ case ${1-} in
 esac
 
 file=$(server_file) || {
-  echo "lispm-tool: LispM serves this agent nothing: it runs outside LispM, or LispM has stopped" >&2
+  echo "lispm-tool: LispM serves this agent nothing: LispM has stopped" >&2
   exit 2
 }
 { read -r url && read -r token; } < "$file" || {
@@ -62,9 +70,11 @@ file=$(server_file) || {
 }
 
 # The token goes in a header read from a file descriptor, not in argv.
+# The server for agents outside LispM takes the directory they work in.
 if [ $# -eq 0 ]; then
   curl -sS --noproxy '*' -H @/dev/fd/3 "$url/tools" 3<<EOF || exit 2
 Authorization: Bearer $token
+X-LispM-Directory: $PWD
 EOF
   exit 0
 fi
@@ -85,6 +95,7 @@ response=$(printf '%s' "$input" |
   curl -sS --noproxy '*' -H @/dev/fd/3 -H 'Content-Type: application/json' \
        --data-binary @- -w '\n%{http_code}' "$url/call/$name" 3<<EOF
 Authorization: Bearer $token
+X-LispM-Directory: $PWD
 EOF
 ) || exit 2
 status=${response##*"$nl"}

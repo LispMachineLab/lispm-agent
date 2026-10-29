@@ -518,6 +518,15 @@ Allowing a tool for good does not silence a check: what the user allowed is aske
 check asks, and approving one call for good approves no other waiting call a check still asks
 about. MCP servers' tools have a check of their own when they are registered (section 10).
 
+*An agent outside LispM is an agent, never a backdoor* ([[file:lisp/lispm-mcp-server.el][lispm-mcp-server.el]]). Before, a program
+LispM did not start could reach Emacs only through =emacsclient --eval=: everything at once,
+no tools to discover, nothing asked. The standing MCP server gives such a program, Claude
+Code in another terminal, Codex, a script, a session that is a LispM agent of a role in the
+directory it runs in, and every call it makes goes through ~lispm-tool-decision~ and
+~lispm-agents-confirm-function~ as the editor's agents' calls do, its shell commands into the
+sandbox. Its token, in a file only the user can read, admits the user's own programs, the
+trust an IDE's lock file asks; what the server adds is that their calls are asked about.
+
 *Unrestricted code is outside the permission model.* ~eval_elisp~ (~exec~) reaches all of
 Emacs, and ~run_shell~ (~shell~) all of the system, Emacs included, while the agent's root is on
 this machine: what they run can change the policy of the agent running it, lift a helper's
