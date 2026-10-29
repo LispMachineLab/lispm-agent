@@ -56,9 +56,10 @@ only once the session reader records a completed turn after delivery."
   (lispm-test-with-peers
     (let* ((boss (lispm-defagent boss :root project))
            (terminal (lispm-test--peer 'codex project))
+           (ended nil)
            (lispm-agents-session-lookup-functions
             (list (lambda (_kind _id)
-                    (list :time (+ (float-time) 10) :turn-ended t)))))
+                    (list :time (+ (float-time) 10) :turn-ended ended)))))
       (with-current-buffer terminal (setq lispm-agents-buffer-session-id "s"))
       (push terminal lispm-test--busy)
       (lispm-collab-send boss "codex" "Hello.")
@@ -71,7 +72,50 @@ only once the session reader records a completed turn after delivery."
       (lispm-agents-bridge-flush)
       (should (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling))
       (lispm-agents-bridge--sessions-arrived)
+      (should (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling))
+      (setq ended t)
+      (lispm-agents-bridge--sessions-arrived)
       (should-not (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling)))))
+
+(ert-deftest lispm-test-roster-bridge-background-settlement-needs-turn-evidence ()
+  "A newer metadata write must not settle a newly delivered message.
+Only fresh, explicit work or a post-delivery turn time proves its turn;
+background settlement reads cached metadata even without observers."
+  (lispm-test-with-peers
+    (let* ((terminal (lispm-test--peer 'codex project))
+           (lispm-agents-roster-change-functions nil)
+           session
+           (lispm-agents-session-lookup-functions (list (lambda (_kind _id) session))))
+      (with-current-buffer terminal (setq lispm-agents-buffer-session-id "s"))
+      (lispm-agents-bridge-deliver terminal "New message")
+      (let ((delivered (plist-get (buffer-local-value 'lispm-agents-bridge--handling terminal) :delivered)))
+        (cl-letf (((symbol-function 'lispm-agents-read-json-tail)
+                   (lambda (&rest _) (ert-fail "Background settlement read a transcript")))
+                  ((symbol-function 'lispm-agents-bridge-observe)
+                   (lambda (&rest _) (ert-fail "Background settlement requested lazy work"))))
+          ;; A token-count or metadata append after delivery leaves the old
+          ;; completed turn as the reader's latest turn.
+          (setq session (list :time (1+ delivered) :turn-time (1- delivered) :turn-ended t))
+          (lispm-agents-bridge--sessions-arrived)
+          (should (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling))
+          ;; An unknown turn state and a stale working row prove no work.
+          (setq session (list :time (1+ delivered)))
+          (lispm-agents-bridge--sessions-arrived)
+          (setq session (list :time (1- delivered) :turn-ended nil))
+          (lispm-agents-bridge--sessions-arrived)
+          (should (buffer-local-value 'lispm-agents-bridge--given terminal))
+          (setq session (list :time (1+ delivered) :turn-ended t))
+          (lispm-agents-bridge--sessions-arrived)
+          (should (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling))
+          ;; Explicit fresh work followed by completion can settle even when
+          ;; the reader does not know the turn's own timestamp.
+          (setq session (list :time (1+ delivered) :turn-ended nil))
+          (lispm-agents-bridge--sessions-arrived)
+          (should-not (buffer-local-value 'lispm-agents-bridge--given terminal))
+          (should (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling))
+          (setq session (list :time (+ delivered 2) :turn-ended t))
+          (lispm-agents-bridge--sessions-arrived)
+          (should-not (plist-get (lispm-agents-bridge-mailbox-summary terminal) :handling)))))))
 
 (ert-deftest lispm-test-roster-bridge-observes-completed-work ()
   "A completion settles handling without a reader, but an older turn cannot.

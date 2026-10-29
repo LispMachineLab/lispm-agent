@@ -227,7 +227,10 @@ terminal is ready.  A :deliver program owns its mailbox, which is unknown."
 
 (defun lispm-agents-bridge--settle (terminal)
   "Forget TERMINAL's handling entry when its reader knows its turn ended.
-A transcript older than delivery cannot say that the message was handled."
+A fresh working row establishes that work followed delivery.  A completed
+row alone cannot: its timestamp may reflect a metadata write after an old
+turn.  Use the same completion evidence as lazy work inspection, without
+reading a transcript here."
   (when-let* ((entry (buffer-local-value 'lispm-agents-bridge--handling terminal))
               (kind (buffer-local-value 'lispm-agents-buffer-agent terminal))
               (id (buffer-local-value 'lispm-agents-buffer-session-id terminal))
@@ -236,11 +239,11 @@ A transcript older than delivery cannot say that the message was handled."
               ((numberp time))
               (delivered (plist-get entry :delivered))
               ((numberp delivered))
-              ((> time delivered))
-              ((plist-get session :turn-ended)))
-    (with-current-buffer terminal
-      (setq lispm-agents-bridge--handling nil))
-    (lispm-agents-roster-notify terminal '(mailbox))))
+              ((> time delivered)))
+    (when (and (plist-member session :turn-ended)
+               (not (plist-get session :turn-ended)))
+      (with-current-buffer terminal (setq lispm-agents-bridge--given nil)))
+    (lispm-agents-bridge-observe-work terminal session)))
 
 (defun lispm-agents-bridge-observe-work (terminal work)
   "Settle TERMINAL's handling message when WORK records its completed turn.
