@@ -317,6 +317,21 @@ In the desktop sidebar, right-click a stopped Claude or Codex session and choose
 directory, passing ~--model~ to the CLI.  Other CLI agents can offer this action
 by providing ~:model-arguments~ in ~lispm-agents-define~.
 
+** Live agent data
+
+~lispm-agents-roster~ returns alive, unarchived conversations as plists with stable
+~(KIND SESSION-ID)~ keys, identity, status, character, mailbox counts, wait edges and actions.
+It reads no transcripts or diaries; unknown data is nil, including an unclaimed terminal key.
+
+~lispm-agents-roster-details KEY~ lazily reads one agent's work and full mailbox, with pending
+calls, at most twenty recent calls and this turn's journal files.  Claude Code and Codex use
+bounded, cached transcript tails; their files and permission decisions stay nil.
+
+~lispm-agents-roster-change-functions~ receives ~(KEYS FIELDS EVENT)~, coalesced per event.
+~EVENT~ holds ordered ~:events~ with sequence, message id, from/to and request id when known.
+~lispm-approve-all-for AGENT~ approves only that agent's pending permissions of this turn;
+~M-x lispm-approve-all~ lists them before asking.  New calls and later turns are excluded.
+
 * Backends
 
 LispM speaks OpenAI Chat Completions, which almost every model server implements, and Anthropic

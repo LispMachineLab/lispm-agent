@@ -12,7 +12,7 @@ ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-we
       lispm-core.el lispm-sandbox.el lispm-services.el lispm-roles.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
       lispm-api.el lispm-tools.el lispm-elisp-worker.el lispm-elisp.el \
       lispm-edits.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-characters.el lispm-agents-bridge.el lispm-ground.el lispm-inspect.el lispm-hyperbole.el lispm-settings.el \
-      lispm-runtime-tools.el lispm-session-tools.el lispm-process-tools.el \
+      lispm-agents-roster.el lispm-runtime-tools.el lispm-session-tools.el lispm-process-tools.el \
       lispm-chat.el lispm-bar.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))" \

@@ -268,6 +268,7 @@
   ("%s is idle" . "%s 閒置中")
   ("λ %s wants to run %s: answer in %s" . "λ %s 想執行 %s：請在 %s 中回答")
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %s 想執行 %s：請在 %s 中用 C-c C-y 審閱")
+  ("Approve these calls for %s: %s? " . "核准 %s 的這些呼叫：%s？ ")
   ("No call awaits approval" . "沒有等候核准的呼叫")
   ("%s wants to run %s" . "%s 想執行 %s")
   (("answer" . "yes") . "是")

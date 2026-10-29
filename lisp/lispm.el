@@ -109,6 +109,7 @@
 (require 'lispm-develop)
 (require 'lispm-skills)
 (require 'lispm-inspect)
+(require 'lispm-agents-roster)
 (require 'lispm-runtime-tools)
 (require 'lispm-session-tools)
 (require 'lispm-process-tools)

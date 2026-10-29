@@ -268,6 +268,7 @@
   ("%s is idle" . "%s ist inaktiv")
   ("λ %s wants to run %s: answer in %s" . "λ %s möchte %s ausführen: Antworten Sie in %s")
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %s möchte %s ausführen: Prüfen Sie es mit C-c C-y in %s")
+  ("Approve these calls for %s: %s? " . "Diese Aufrufe für %s genehmigen: %s? ")
   ("No call awaits approval" . "Kein Aufruf wartet auf Freigabe")
   ("%s wants to run %s" . "%s möchte %s ausführen")
   (("answer" . "yes") . "ja")
