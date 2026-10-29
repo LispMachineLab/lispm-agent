@@ -198,8 +198,9 @@ through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest ans
 [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
 
 Shell comments and a ~cd~ before a read-only command do not make it ask.  Remembered exact
-calls ignore top-level argument order and ~why~; ~run_shell~ also ignores ~timeout~, while its command
-text must still match.  Native tool requests, decisions and resumed approvals are timestamped
+calls ignore top-level argument order and ~why~; ~run_shell~ and ~run_program~ also ignore ~timeout~.
+Command text, executable, arguments and working directory still match exactly.
+Native tool requests, decisions and resumed approvals are timestamped
 in ~Approval~ subsections of the Org transcript, with decision scope and extra check reasons.
 They are saved with the session and are not sent to the model.
 
@@ -347,7 +348,21 @@ every option.
 - Common tools are always offered.  The rest (MCP tools, Lisp development tools, tools agents
   define, seldom needed ones such as ~read_info~ and ~write_skill~) are deferred: the model
   finds them with ~search_tools~ when needed, so they cost no context until then.  The search
-  is fuzzy: a word may be part of a longer one, or misspelt.
+  is fuzzy: a word may be part of a longer one, or misspelt. It also finds core and already
+  loaded tools, using their full descriptions and optional ~:keywords~ lists of search terms.
+  ~select:NAME~ keeps exact names; unknown names get suggestions without loading them.
+- ~session_search~ and ~session_read~ find and read native LispM, Claude Code and Codex history,
+  including archived sessions, by provider and session ID. They inspect at most 200 recent
+  transcript files and each file's last 256 KiB; results report limits and incomplete scans.
+  Native open transcripts include unsaved changes. These tools do not resume or modify sessions.
+- ~run_program~ runs a local executable with an argument array and optional working directory,
+  returning bounded JSON with exit status, stdout and stderr. It uses the ~shell~ policy and
+  configured sandbox; timeout, turn abort and session closure stop it. Compose calls with
+  ~run_lisp~; ~run_shell~ remains available for shell syntax and remote commands.
+- ~runtime_status~ reports the Emacs version and loaded versus available library paths without
+  loading libraries. ~describe_symbol~ adds loaded source files and an optional ~buffer~ for
+  buffer-local values. ~read_buffer~ accepts ~tail~ and literal ~query~ for log inspection.
+  ~inspect_agent~ reports LispM's approval policy, allowances and pending calls.
 - ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
   the agent's tools are functions, each call going through the policy as if the model made it.
 - ~run_elisp~ asks [[https://github.com/LispMachineLab/lispm-kernel][LispM Kernel]] to start a fresh batch Emacs for standalone file,
