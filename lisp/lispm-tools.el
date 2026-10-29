@@ -97,11 +97,12 @@ a tool defined with `lispm-deftool' was loaded from, if any.  A tool
 with FOR, a function of an agent, is only that of agents it holds for.
 CLASS, a function of a call's arguments, says which class the call
 belongs to when it does less than the tool can (see
-`lispm-tool-call-permission')."
+`lispm-tool-call-permission').  KEYWORDS are explicit search terms,
+a list of strings; they do not change the tool's name or schema."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff for class)
+  diff for class keywords)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -162,12 +163,14 @@ BODY may start with keyword options:
                      command that only reads does, or nil for the tool's
                      own; it changes nothing (see
                      `lispm-tool-call-permission')
+  :keywords LIST     explicit search terms, a list of strings; these
+                     aid discovery without adding callable aliases
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed; or a `lispm-tool-result', text with image or video files
 the model sees too.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview diff changes targets deferred always-ask for class
+  (let ((permission 'read) async preview diff changes targets deferred always-ask for class keywords
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -180,7 +183,8 @@ the model sees too.  Signal an error to report a failure to the model."
         (:deferred (setq deferred (pop body)))
         (:always-ask (setq always-ask (pop body)))
         (:for (setq for (pop body)))
-        (:class (setq class (pop body)))))
+        (:class (setq class (pop body)))
+        (:keywords (setq keywords (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -196,6 +200,7 @@ the model sees too.  Signal an error to report a failure to the model."
        :always-ask ,always-ask
        :for ,for
        :class ,class
+       :keywords ,keywords
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
@@ -467,7 +472,8 @@ valid call of TOOL."
 ;; which loads the tools it finds, and from its next step on, they are
 ;; offered to it like the others, for the rest of the session.  A
 ;; resumed session has them again: the transcript records which tools
-;; it searched for and called.
+;; it searched for and called.  The search also finds tools already
+;; offered, so an agent can look up an existing capability again.
 ;;
 ;; The search is fuzzy (`lispm-tools-search-score'): a word may be
 ;; part of one it finds, or misspelt.  It finds what
@@ -518,12 +524,18 @@ one per thing it can find:
              lispm-tools--registry)
     (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
 
+(defun lispm-tools--registered ()
+  "The registered tools, sorted by name."
+  (let (tools)
+    (maphash (lambda (_name tool) (push tool tools)) lispm-tools--registry)
+    (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
+
 (defun lispm-tools--searchable-p ()
-  "Non-nil if there are deferred tools, sources of them, or more to find."
+  "Non-nil if there are tools, sources of them, or more to find."
   (or (lispm-tools--sources)
       lispm-tool-search-functions
       (catch 'found
-        (maphash (lambda (_name tool) (when (lispm-tool-deferred tool) (throw 'found t)))
+        (maphash (lambda (name _tool) (unless (equal name "search_tools") (throw 'found t)))
                  lispm-tools--registry)
         nil)))
 
@@ -539,10 +551,11 @@ one per thing it can find:
                    (when (zerop (cl-decf waiting))
                      (funcall callback (nreverse problems)))))))))
 
-(defun lispm-tools--description (tool)
-  "The first line of TOOL's description."
+(defun lispm-tools--description (tool &optional full)
+  "The first line of TOOL's description, or all of it if FULL."
   (let ((description (lispm-tool-description tool)))
-    (car (split-string (if (functionp description) (funcall description) description) "\n"))))
+    (setq description (if (functionp description) (funcall description) description))
+    (if full description (car (split-string description "\n")))))
 
 ;;;;; Fuzzy search
 
@@ -616,7 +629,11 @@ may be nil."
 
 (defun lispm-tools--fields (tool)
   "What a search finds TOOL by, as `lispm-tools-search-score' takes it."
-  `((3 . ,(lispm-tool-name tool)) (1.5 . ,(lispm-tools--description tool))))
+  `((3 . ,(lispm-tool-name tool))
+    ;; Older compiled tool definitions construct records without this slot.
+    (3 . ,(string-join (condition-case nil (lispm-tool-keywords tool)
+                         (args-out-of-range nil)) " "))
+    (1.5 . ,(lispm-tools--description tool t))))
 
 (defconst lispm-tools--search-cutoff 0.3
   "The least share of the best score a thing a search finds must score.
@@ -675,7 +692,11 @@ tools are found."
 
 (defun lispm-tools-load (agent names)
   "Offer AGENT the deferred tools NAMES from its next request on."
-  (let ((new (seq-remove (lambda (name) (member name (lispm-agent-loaded-tools agent))) names)))
+  (let ((new (seq-filter (lambda (name)
+                           (and (not (member name (lispm-agent-loaded-tools agent)))
+                                (when-let* ((tool (lispm-get-tool name)))
+                                  (lispm-tool-deferred tool))))
+                         (seq-uniq names))))
     (when new
       (setf (lispm-agent-loaded-tools agent) (append (lispm-agent-loaded-tools agent) new))
       (run-hook-with-args 'lispm-tools-changed-functions agent))))
@@ -707,30 +728,37 @@ request on.  Return their names, sorted."
     names))
 
 (defconst lispm-tools--loaded-prefix "Tools now available: "
-  "How a search_tools result starts the list of the tools it loaded.")
+  "How a search_tools result starts its list of available tool names.")
 
-(defun lispm-tools--discover (agent query limit)
+(defun lispm-tools--discover (agent query limit &optional predicate)
   "What AGENT's search QUERY finds, at most LIMIT things: (TOOLS . OTHERS).
-TOOLS are deferred tools AGENT's role gives it and it has not loaded,
-to load; OTHERS are plists of `lispm-tool-search-functions', such as
-skills.  A tool one of those holds is not among TOOLS: it comes with
-what holds it, found in its stead.  \"select:A,B\" finds the tools A
+TOOLS are registered tools AGENT's role gives it, including those
+already available; OTHERS are plists of `lispm-tool-search-functions',
+such as skills.  A deferred tool one of those holds is not among TOOLS
+until AGENT has loaded it: what holds it is found in its stead.
+\"select:A,B\" finds the tools A
 and B, or what holds them; a word naming a source of tools (see
-`lispm-tool-sources') keeps that source's tools only."
+`lispm-tool-sources') keeps that source's tools only.  When PREDICATE
+is non-nil, only tools it accepts are considered, before ranking."
   (let* ((others (let ((lispm-current-agent agent))
                    (mapcan (lambda (function) (copy-sequence (funcall function agent)))
                            lispm-tool-search-functions)))
          (held (mapcan (lambda (other) (copy-sequence (plist-get other :tools))) others))
          (tools (seq-remove (lambda (tool)
                               (let ((name (lispm-tool-name tool)))
-                                (or (member name (lispm-agent-loaded-tools agent))
-                                    (member name held)
-                                    (not (lispm-tools-allowed-p agent name)))))
-                            (lispm-tools--deferred))))
+                                (or (and (equal name "search_tools")
+                                         (not (string-prefix-p "select:" query)))
+                                    (and (lispm-tool-deferred tool)
+                                         (not (member name (lispm-agent-loaded-tools agent)))
+                                         (member name held))
+                                    (not (lispm-tools-allowed-p agent name))
+                                    (and predicate (not (funcall predicate tool))))))
+                            (lispm-tools--registered))))
     (if (string-prefix-p "select:" query)
-        (let ((names (split-string (substring query 7) "[, ]+" t)))
-          (cons (lispm-tools--find query tools limit)
-                (seq-filter (lambda (other) (seq-intersection names (plist-get other :tools))) others)))
+        (let* ((found (lispm-tools--find query tools limit))
+               (names (seq-difference (split-string (substring query 7) "[, ]+" t)
+                                      (mapcar #'lispm-tool-name found))))
+          (cons found (seq-filter (lambda (other) (seq-intersection names (plist-get other :tools))) others)))
       (pcase-let ((`(,named . ,words) (lispm-tools--named-sources query (lispm-tools--sources))))
         (if named
             (cons (lispm-tools--rank words (lispm-tools--of-sources tools named) limit #'lispm-tools--fields)
@@ -746,13 +774,34 @@ and B, or what holds them; a word naming a source of tools (see
             (cons (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'tool)) found))
                   (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'other)) found)))))))))
 
+(defun lispm-tools--selection-help (agent query found others &optional predicate)
+  "Explain unknown names in AGENT's selection QUERY after FOUND and OTHERS.
+Suggestions are canonical tool names, never implicit selections.
+PREDICATE restricts suggested tools as in `lispm-tools--discover'."
+  (when (string-prefix-p "select:" query)
+    (when-let* ((missing (seq-difference
+                         (split-string (substring query 7) "[, ]+" t)
+                         (append (mapcar #'lispm-tool-name found)
+                                 (mapcan (lambda (other) (copy-sequence (plist-get other :tools))) others)))))
+      (let ((suggestions
+             (seq-uniq
+              (mapcan (lambda (name)
+                        (mapcar #'lispm-tool-name
+                                (car (lispm-tools--discover
+                                      agent (replace-regexp-in-string "[_-]+" " " name) 3 predicate))))
+                      missing))))
+        (concat "No accessible tool named " (string-join missing ", ") "."
+                (when suggestions
+                  (concat " Similar tools: " (string-join suggestions ", ")
+                          "; use select: with a canonical name to select one.")))))))
+
 (lispm-register-tool
  (lispm-tool--create
   :name "search_tools"
   :description
   (lambda ()
-    (concat "Find what you can do that you do not have yet: the skills of this system and its "
-            "apps, their manuals, each with its tools, which you load with skill; and tools. "
+    (concat "Find tools and skills, including tools already available to you. The skills of this system and its "
+            "apps are manuals, each with its tools, which you load with skill. "
             "Search whenever a request needs something you lack, and before you say you cannot "
             "do something. Search by keywords (\"play music\", \"screenshot click\"): a word may "
             "be part of a longer one, or misspelt. Tools found are yours from your next step on, "
@@ -799,10 +848,13 @@ and B, or what holds them; a word naming a source of tools (see
                                                   (mapconcat (lambda (other) (plist-get other :line))
                                                              others "\n"))))
                                  "\n")
-                              (format "Nothing matches %S; you have loaded: %s." query
-                                      (if (lispm-agent-loaded-tools agent)
-                                          (string-join (lispm-agent-loaded-tools agent) ", ")
-                                        "none")))
+                              (let ((loaded (seq-filter
+                                             (lambda (name) (lispm-tools-allowed-p agent name))
+                                             (lispm-agent-loaded-tools agent))))
+                                (format "Nothing matches %S; you have loaded: %s." query
+                                        (if loaded (string-join loaded ", ") "none"))))
+                            (when-let* ((help (lispm-tools--selection-help agent query found others)))
+                              (concat "\n" help))
                             (if problems (concat "\n" (string-join problems "\n")) ""))))))))))
 
 (defvar lispm-session-mode)
@@ -889,18 +941,35 @@ the agent's policy, so the user may allow every later one at once."
           (lispm-tools-elsewhere-p root)
         (lispm-sandbox-confines-p)))))
 
-(defun lispm-tools--call-key (input)
-  "INPUT as an approval for this exact call remembers it: without `why'."
-  (if (listp input)
-      (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input)
-    input))
+(defun lispm-tools--call-key (input &optional tool)
+  "INPUT as an exact-call approval for TOOL remembers it, without `why'.
+Distinct top-level parameter names are sorted: their order does not
+change the call.  Duplicate names, malformed objects and nested values
+are kept as given.  For run_shell and run_program, `timeout' only limits the
+execution time; the command, not that limit, is what was approved."
+  (if (not (proper-list-p input))
+      input
+    (let ((key (seq-remove (lambda (entry) (eq (car-safe entry) 'why)) input))
+          names)
+      (if (not (seq-every-p (lambda (entry)
+                             (and (consp entry) (symbolp (car entry))
+                                  (not (memq (car entry) names))
+                                  (push (car entry) names)))
+                           key))
+          key
+        (when (and tool (member (lispm-tool-name tool) '("run_shell" "run_program"))
+                   (eq (lispm-tool-permission tool) 'shell)
+                   (let ((timeout (alist-get 'timeout key)))
+                     (or (integerp timeout) (memq timeout '(nil :null)))))
+          (setq key (assq-delete-all 'timeout key)))
+        (sort key (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))))))
 
 (defun lispm-tools-allowance (tool input &optional agent)
   "What approving AGENT's call of TOOL on INPUT for good adds to its allowed.
 The tool's name: every later call of it runs at once.  For a tool of
 class `exec', which reaches all of Emacs, this exact call: (NAME .
-INPUT), INPUT without `why'.  Allowing every later call would put the
-agent past its policy, which such a call can change.  So for a tool of
+KEY), KEY from `lispm-tools--call-key'.  Allowing every later call would
+put the agent past its policy, which such a call can change.  So for a tool of
 class `shell', since a shell command reaches Emacs too, unless AGENT's
 commands are kept apart from Emacs (see `lispm-tools-apart-p'): on
 another machine, or in the sandbox, they cannot change the policy, and
@@ -910,7 +979,7 @@ never approving the next."
           (pcase (lispm-tool-permission tool)
             ('exec t)
             ('shell (not (lispm-tools-apart-p agent)))))
-      (cons (lispm-tool-name tool) (lispm-tools--call-key input))
+      (cons (lispm-tool-name tool) (lispm-tools--call-key input tool))
     (lispm-tool-name tool)))
 
 (defun lispm-tools--allowed-p (agent tool input)
@@ -920,11 +989,17 @@ commands could not reach Emacs (see `lispm-tools-allowance'), and
 holds only while that is so: with the sandbox off again, each command
 asks, as it did before."
   (let ((allowed (lispm-agent-allowed agent))
-        (name (lispm-tool-name tool)))
+        (name (lispm-tool-name tool))
+        (key (lispm-tools--call-key input tool)))
     (or (and (member name allowed)
              (or (not (eq (lispm-tool-permission tool) 'shell))
                  (lispm-tools-apart-p agent)))
-        (member (cons name (lispm-tools--call-key input)) allowed))))
+        ;; Earlier approvals kept parameter order and shell timeouts.
+        ;; Compare their keys too, without changing the stored entries.
+        (seq-some (lambda (entry)
+                    (and (consp entry) (equal (car entry) name)
+                         (equal (lispm-tools--call-key (cdr entry) tool) key)))
+                  allowed))))
 
 (defun lispm-tools--targets (agent tool input)
   "Files AGENT's call of TOOL with INPUT changes, as far as can be told before.
@@ -1721,38 +1796,95 @@ Buffers are the user's workspace; this shows what they are working on."
 (lispm-deftool read_buffer
     ((buffer string "Buffer name, as listed by list_buffers.")
      (offset integer "First line to return, 1-based." :optional t)
-     (limit integer "Maximum number of lines (default 2000)." :optional t))
+     (limit integer "Maximum lines to return, 1 to 2000 (default 2000)." :optional t)
+     (tail integer "Search or read only the last N lines, 1 to 2000; excludes offset." :optional t)
+     (query string "Literal, case-insensitive text to find; returns matching lines only." :optional t))
   "Read an Emacs buffer, e.g. *compilation*, *Messages* or a REPL.
-Lines come prefixed with their numbers."
+Lines come prefixed with their original numbers. Use tail for recent process
+logs and query to search buffer text without writing Elisp. A query searches
+from offset to the end, or within the tail window; limit caps returned lines.
+Reading preserves point, narrowing and unsaved edits. Output is bounded."
   :permission read
-  (let ((b (lispm-tools--buffer buffer)))
-    (concat (with-current-buffer b
-              (format "[%s, point at line %d]\n" major-mode (line-number-at-pos)))
-            (lispm-tools--number-lines (lispm-tools--buffer-text b) offset limit))))
+  (let ((b (lispm-tools--buffer buffer))
+        (limit (or limit 2000)))
+    (unless (and (integerp limit) (<= 1 limit 2000))
+      (error "limit must be from 1 to 2000"))
+    (when (and offset (< offset 1)) (error "offset must be positive"))
+    (when (and tail (not (<= 1 tail 2000))) (error "tail must be from 1 to 2000"))
+    (when (and tail offset) (error "Use tail or offset, not both"))
+    (when (and query (string-empty-p query)) (error "query must not be empty"))
+    (with-current-buffer b
+      (save-excursion
+        (save-restriction
+          (widen)
+          (let ((header (format "[%s, point at line %d]\n" major-mode (line-number-at-pos)))
+                (room (max 0 (- lispm-tool-output-limit 200)))
+                (count 0) lines truncated)
+            (if tail
+                (progn
+                  (goto-char (point-max))
+                  (when (and (bolp) (not (bobp))) (backward-char))
+                  (forward-line (- 1 tail)))
+              (goto-char (point-min))
+              (forward-line (1- (or offset 1))))
+            (let ((line (line-number-at-pos))
+                  (case-fold-search t))
+              (while (and (not (eobp)) (< count limit) (not truncated))
+                (when (or (null query)
+                          (save-excursion (search-forward query (line-end-position) t)))
+                  (let* ((prefix (format "%6d\t" line))
+                         (available (max 0 (- room (length prefix) 1)))
+                         (end (min (line-end-position) (+ (point) available)))
+                         (text (concat prefix (buffer-substring-no-properties (point) end))))
+                    (setq truncated (< end (line-end-position)))
+                    (push text lines)
+                    (cl-incf count)
+                    (cl-decf room (1+ (length text)))
+                    (when (<= room 0) (setq truncated t))))
+                (forward-line 1)
+                (cl-incf line)))
+            (concat header (string-join (nreverse lines) "\n")
+                    (cond (truncated "\n[Buffer output truncated]")
+                          ((and query (zerop count)) "[No matching lines in this range]")
+                          ((and (= count limit) (not (eobp))) "\n[Line limit reached]")))))))))
 
 (lispm-deftool describe_symbol
-    ((name string "Name of an Emacs Lisp function, variable or face."))
+    ((name string "Name of an Emacs Lisp function, variable or face.")
+     (buffer string "Inspect the variable's binding in this live buffer; otherwise its default value."
+             :optional t))
   "Describe an Emacs Lisp symbol: function signature and documentation,
-or a variable's documentation and current value.  Use it to learn
-how this Emacs works before writing code for it."
+variable value and binding status, and the files its definitions were loaded
+from. Pass buffer for buffer-local values. Use xref_definitions for source
+locations, or runtime_status for loaded library paths and capabilities.
+Nothing is loaded or evaluated; use this before writing live-editor Elisp."
   :permission read
-  (let ((sym (intern-soft name)) parts)
+  (let ((sym (intern-soft name))
+        (context (and buffer (lispm-tools--buffer buffer))) parts)
     (unless sym (error "No symbol named %s" name))
     (when (fboundp sym)
       (push (format "Function %s %s\n%s" name
                     (or (help-function-arglist sym t) "()")
                     (or (ignore-errors (documentation sym t)) "Undocumented."))
             parts))
-    (when (boundp sym)
-      (push (format "Variable %s\nValue: %s\n%s" name
+    (when (if context (with-current-buffer context (boundp sym)) (default-boundp sym))
+      (push (format "Variable %s\nBinding: %s\nValue: %s\n%s" name
+                    (if context
+                        (format "%s in %s" (if (local-variable-p sym context) "buffer-local" "default")
+                                (buffer-name context))
+                      "default")
                     (lispm--truncate (let ((print-length 50) (print-level 5))
-                                       (prin1-to-string (symbol-value sym)))
+                                       (prin1-to-string (if context
+                                                            (buffer-local-value sym context)
+                                                          (default-value sym))))
                                      2000)
                     (or (documentation-property sym 'variable-documentation t)
                         "Undocumented."))
             parts))
     (when (facep sym)
       (push (format "Face %s\n%s" name (or (face-documentation sym) "")) parts))
+    (dolist (kind '(defun defvar defface))
+      (when-let* ((file (symbol-file sym kind)))
+        (push (format "Loaded %s from: %s" kind file) parts)))
     (if parts
         (string-join (nreverse parts) "\n\n")
       (error "%s is neither a function, a variable nor a face" name))))
@@ -1890,6 +2022,7 @@ For files use edit_file."
 (defcustom lispm-shell-read-only-programs
   '(("ls" . t) ("dir" . t) ("tree" . t) ("pwd" . t) ("file" . t) ("stat" . t)
     ("du" . t) ("df" . t) ("cat" . t) ("head" . t) ("tail" . t) ("wc" . t)
+    ("zcat" . t) ("gzcat" . t) ("zgrep" . t) ("sed" . lispm-shell--sed-reads-p)
     ("grep" . t) ("egrep" . t) ("fgrep" . t) ("rg" . t) ("ag" . t)
     ("find" . lispm-shell--find-reads-p) ("fd" . lispm-shell--fd-reads-p)
     ("echo" . t) ("printf" . t) ("true" . t) ("false" . t) ("test" . t) ("[" . t)
@@ -1902,6 +2035,7 @@ For files use edit_file."
     ("date" . t) ("cal" . t) ("uname" . t) ("hostname" . t) ("whoami" . t) ("id" . t)
     ("uptime" . t) ("printenv" . t) ("locale" . t) ("ps" . t) ("pgrep" . t) ("lsof" . t)
     ("sw_vers" . t) ("arch" . t) ("nproc" . t)
+    ("cd" . lispm-shell--cd-reads-p)
     ("env" . lispm-shell--env-reads-p)
     ("git" . lispm-shell--git-reads-p)
     ("gh" . lispm-shell--gh-reads-p))
@@ -1914,7 +2048,8 @@ A command made only of such calls, such as `git status', is of class
 unasked under the default policy, where other commands ask.  Programs
 that run what they are given, such as sh, xargs, env with a command or
 sudo, must not be here, nor any that writes: a reader of files that
-can also write them, such as sed with -i, needs a function.  A program
+can also write them, as sed does with -i or its w command, needs a
+function.  A program
 is named without a directory: a command naming one by its path asks."
   :type '(alist :key-type (string :tag "Program")
                 :value-type (choice (const :tag "Always" t) (function :tag "When")))
@@ -1923,12 +2058,13 @@ is named without a directory: a command naming one by its path asks."
 (defun lispm-shell--words (command)
   "COMMAND's simple commands, each a list of words, or `unsure'.
 Words are split as the shell splits them, quotes and backslashes
-undone, at spaces, newlines, |, ||, && and ;.  Anything that would
-have the shell do more than run programs on words is `unsure': a
+undone, at spaces, newlines, |, ||, && and ;.  Comments end at the
+next newline; escaped newlines elsewhere join lines.  Anything that
+would have the shell do more than run programs on words is `unsure': a
 redirection other than to /dev/null, from a file or of one descriptor
 to another; a command or process substitution, backquotes included; a
 subshell, group or function; a job put in the background; a here
-document; an environment assignment before a program; a comment.  So
+document; an environment assignment before a program.  So
 is an empty command."
   (let ((length (length command))
         (i 0)
@@ -1951,6 +2087,13 @@ is an empty command."
                         (while (and (char) (not (memq (char) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
                           (cl-incf i))
                         (let ((target (substring command target-start i)))
+                          ;; Only literal targets: quoting or expansion can
+                          ;; hide a word boundary, including a later #.
+                          (when (seq-some (lambda (c)
+                                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~
+                                                      ?\( ?\) ?{ ?} ?\[ ?\])))
+                                          target)
+                            (unsure))
                           (pcase op
                             ((or ">" ">>" "&>")
                              (unless (equal target "/dev/null") (unsure)))
@@ -1969,7 +2112,11 @@ is an empty command."
               (cond ((eq c ?\") (setq quote nil) (cl-incf i))
                     ((eq c ?\\)
                      (cl-incf i)
-                     (when (char) (add (char)) (cl-incf i)))
+                     (when (char)
+                       (unless (eq (char) ?\n)
+                         (unless (memq (char) '(?$ ?` ?\" ?\\)) (add ?\\))
+                         (add (char)))
+                       (cl-incf i)))
                     ((eq c ?`) (unsure))
                     ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
                      (unsure))
@@ -1979,7 +2126,9 @@ is an empty command."
               (cl-incf i))
              ((eq c ?\\)
               (cl-incf i)
-              (when (char) (add (char)) (cl-incf i)))
+              (when (char)
+                (unless (eq (char) ?\n) (add (char)))
+                (cl-incf i)))
              ((memq c '(?\s ?\t))
               (end-word)
               (cl-incf i))
@@ -2007,7 +2156,7 @@ is an empty command."
              ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
               (unsure))
              ((and (eq c ?#) (not in-word))
-              (unsure))
+              (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))
              ((and (memq c '(?{ ?})) (not in-word)
                    (let ((next (and (< (1+ i) length) (aref command (1+ i)))))
                      (or (null next) (memq next '(?\s ?\t ?\n ?\;)))))
@@ -2051,6 +2200,16 @@ this cannot read is one that may write."
                              options))
                  args)))
 
+(defun lispm-shell--cd-reads-p (args)
+  "Non-nil for cd's ordinary directory change, with at most one operand.
+Only -L, -P and -- are recognized; other shell-specific forms ask."
+  (while (member (car args) '("-L" "-P")) (setq args (cdr args)))
+  (let ((end-options (equal (car args) "--")))
+    (when end-options (setq args (cdr args)))
+    (and (<= (length args) 1)
+         (or (null args) end-options (equal (car args) "-")
+             (not (string-prefix-p "-" (car args)))))))
+
 (defun lispm-shell--find-reads-p (args)
   "Non-nil if find with ARGS only reads: it neither deletes nor runs nor writes."
   (lispm-shell--none-of args '("-delete" "-exec" "-execdir" "-ok" "-okdir"
@@ -2063,6 +2222,113 @@ this cannot read is one that may write."
 (defun lispm-shell--env-reads-p (args)
   "Non-nil if env with ARGS only prints the environment: it runs nothing."
   (seq-every-p (lambda (arg) (member arg '("-0" "--null"))) args))
+
+(defun lispm-shell--sed-reads-p (args)
+  "Non-nil if sed with ARGS only reads: it edits no file in place, and its
+scripts only print, delete, substitute and the like, never write a file
+or run a command (see `lispm-shell--sed-script-reads-p')."
+  (catch 'lispm-shell-unsure
+    (let (scripts positionals (options t))
+      (while args
+        (let ((arg (pop args)))
+          (cond ((or (not options) (equal arg "-") (not (string-prefix-p "-" arg)))
+                 (push arg positionals))
+                ((equal arg "--") (setq options nil))
+                ((string-prefix-p "--" arg)
+                 (cond ((string-prefix-p "--expression=" arg)
+                        (push (substring arg (length "--expression=")) scripts))
+                       ((equal arg "--expression") (push (pop args) scripts))
+                       ((equal arg "--line-length") (pop args))
+                       ((not (member arg '("--quiet" "--silent" "--regexp-extended" "--null-data"
+                                           "--separate" "--unbuffered" "--debug" "--sandbox" "--posix"
+                                           "--help" "--version")))
+                        ;; --in-place, --file, or something unknown.
+                        (throw 'lispm-shell-unsure nil))))
+                (t
+                 ;; Letters, each an option: -ne SCRIPT, -E, -i.
+                 (let ((letters (string-to-list (substring arg 1))))
+                   (while letters
+                     (let ((letter (pop letters)))
+                       (cond ((memq letter '(?n ?E ?r ?s ?u ?z ?a))) ; a: BSD's append mode
+                             ((memq letter '(?e ?l))
+                              ;; Takes a value: the rest of the word, or the next argument.
+                              (let ((value (if letters (apply #'string letters) (pop args))))
+                                (setq letters nil)
+                                (when (eq letter ?e) (push value scripts))))
+                             (t (throw 'lispm-shell-unsure nil))))))))))
+      (when (and (null scripts) positionals)
+        (push (car (last positionals)) scripts))
+      (and scripts (seq-every-p #'lispm-shell--sed-script-reads-p scripts)))))
+
+(defun lispm-shell--sed-script-reads-p (script)
+  "Non-nil if the sed SCRIPT only reads: no w or W command, no e command, no
+w or e flag on s.  Addresses, p, d, s, y, q, =, n, N, and the other
+commands that touch only the stream are read; what this cannot parse
+is not."
+  (let ((length (length script)) (i 0)
+        (digits '(?0 ?1 ?2 ?3 ?4 ?5 ?6 ?7 ?8 ?9)))
+    (cl-labels ((char () (and (< i length) (aref script i)))
+                (skip (chars) (while (and (char) (memq (char) chars)) (cl-incf i)))
+                (to-eol () (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))
+                (delimited (delim)
+                  ;; Past the text up to and including the unescaped DELIM.
+                  (let (done)
+                    (while (and (char) (not done))
+                      (cond ((eq (char) ?\\) (cl-incf i 2))
+                            ((eq (char) delim) (cl-incf i) (setq done t))
+                            (t (cl-incf i))))
+                    (unless done (throw 'lispm-shell-unsure nil))))
+                (address ()
+                  (cond ((null (char)) nil)
+                        ((memq (char) digits) (skip digits) t)
+                        ((eq (char) ?$) (cl-incf i) t)
+                        ((eq (char) ?/) (cl-incf i) (delimited ?/) t)
+                        ((eq (char) ?\\) (cl-incf i)
+                         (let ((delim (char))) (cl-incf i) (delimited delim)) t))))
+      (catch 'lispm-shell-unsure
+        (while (< i length)
+          (skip '(?\s ?\t ?\n ?\;))
+          (when (char)
+            ;; Addresses: one, or two apart by a comma, each maybe with ~N or +N.
+            (when (address)
+              (when (memq (char) '(?~ ?+)) (cl-incf i) (skip digits))
+              (when (eq (char) ?,)
+                (cl-incf i)
+                (skip '(?\s))
+                (unless (or (address) (and (memq (char) '(?~ ?+)) (progn (cl-incf i) t)))
+                  (throw 'lispm-shell-unsure nil))
+                (skip digits)))
+            (skip '(?\s))
+            (when (eq (char) ?!) (cl-incf i) (skip '(?\s)))
+            (let ((command (char)))
+              (unless command (throw 'lispm-shell-unsure nil))
+              (cl-incf i)
+              (pcase command
+                ((or ?p ?P ?d ?D ?= ?n ?N ?h ?H ?g ?G ?x ?z ?F ?{ ?}))
+                ((or ?q ?Q ?l) (skip (cons ?\s digits)))
+                (?s (let ((delim (char)))
+                      (unless delim (throw 'lispm-shell-unsure nil))
+                      (cl-incf i)
+                      (delimited delim)
+                      (delimited delim)
+                      ;; Flags: g, p, I, i, m, M, a number; never w or e.
+                      (while (and (char) (not (memq (char) '(?\; ?\n ?} ?\s))))
+                        (unless (or (memq (char) '(?g ?p ?I ?i ?m ?M)) (memq (char) digits))
+                          (throw 'lispm-shell-unsure nil))
+                        (cl-incf i))))
+                (?y (let ((delim (char)))
+                      (unless delim (throw 'lispm-shell-unsure nil))
+                      (cl-incf i)
+                      (delimited delim)
+                      (delimited delim)))
+                ;; Text to the end of the line: appended, inserted or read in,
+                ;; a label, a comment.
+                ((or ?a ?i ?c ?r ?R ?: ?#) (to-eol))
+                ((or ?b ?t ?T) (while (and (char) (not (memq (char) '(?\; ?\n ?})))) (cl-incf i)))
+                ;; w, W and e write a file or run a command; anything else is
+                ;; not known to read.
+                (_ (throw 'lispm-shell-unsure nil))))))
+        t))))
 
 (defun lispm-shell--positionals (args consuming)
   "The ARGS that are not options; CONSUMING are options that take the next ARG."
@@ -2141,7 +2407,7 @@ reflog, worktree, submodule and notes read while their arguments only ask."
   '(("pr" "view" "list" "checks" "diff" "status")
     ("issue" "view" "list" "status")
     ("run" "list" "view")
-    ("repo" "view")
+    ("repo" "view" "list")
     ("release" "list" "view")
     ("auth" "status")
     ("label" "list")
@@ -2175,8 +2441,11 @@ nothing to send."
 (lispm-deftool run_shell
     ((command string "Shell command, run in your root directory.")
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
-  "Run a shell command and return its output and exit status.  The
-output also streams into a buffer the user can watch.  If your root is
+  "Run a shell command and return its output and exit status.  Use this
+for external CLIs, builds, tests, project runtimes and commands that
+must run remotely.  For standalone local file, JSON/JSONL or text processing,
+prefer LispM's dedicated tools or run_elisp, whose worker LispM Kernel starts.
+The output also streams into a buffer the user can watch.  If your root is
 remote, the command runs on its machine.  The user may have the
 command run in a sandbox: its result then says what the sandbox
 allows."
@@ -2260,6 +2529,112 @@ allows."
           (while t (push (read (current-buffer)) forms))
         (end-of-file nil))
       (nreverse forms))))
+
+(defcustom lispm-tools-file-writers
+  '(save-buffer save-some-buffers write-file write-region append-to-file
+    with-temp-file delete-file rename-file copy-file make-directory
+    delete-directory make-symbolic-link set-file-modes)
+  "Functions that change files on disk.
+Code naming one of them changes files: see `lispm-tools-code-writes-p'."
+  :type '(repeat symbol)
+  :group 'lispm)
+
+(defcustom lispm-tools-buffer-writers
+  '(insert insert-before-markers delete-region erase-buffer delete-char
+    kill-region kill-line kill-buffer replace-regexp replace-string
+    replace-regexp-in-region replace-string-in-region indent-region
+    comment-region uncomment-region upcase-region downcase-region
+    set-buffer-modified-p)
+  "Functions that change the text of a buffer.
+Code naming one of them changes buffers, unless it names it inside a
+`with-temp-buffer' form, whose buffer is gone once it ends: see
+`lispm-tools-code-writes-p'."
+  :type '(repeat symbol)
+  :group 'lispm)
+
+(defun lispm-tools--walk-writes (form temporary writers strings seen)
+  "Collect what FORM names into WRITERS and STRINGS, two cons cells.
+TEMPORARY non-nil while inside a `with-temp-buffer' form, where only
+`lispm-tools-file-writers' count; WRITERS and STRINGS hold the symbols
+and strings found, newest first, in their cdr.  SEEN, a hash table, holds
+the conses and vectors walked: a form read with circular syntax, such as
+#1=(insert . #1#), is walked once and the walk ends."
+  (cond ((symbolp form)
+         (when (and form
+                    (or (memq form lispm-tools-file-writers)
+                        (and (not temporary) (memq form lispm-tools-buffer-writers)))
+                    (not (memq form (cdr writers))))
+           (push form (cdr writers))))
+        ((stringp form)
+         (unless (member form (cdr strings)) (push form (cdr strings))))
+        ((gethash form seen))
+        ((vectorp form)
+         (puthash form t seen)
+         (mapc (lambda (f) (lispm-tools--walk-writes f temporary writers strings seen)) form))
+        ((consp form)
+         (let ((temporary (or temporary (eq (car-safe form) 'with-temp-buffer))))
+           ;; A dotted tail ends the list; a cons seen before, a circle.
+           (while (and (consp form) (not (gethash form seen)))
+             (puthash form t seen)
+             (lispm-tools--walk-writes (pop form) temporary writers strings seen))
+           (when (and form (not (consp form)))
+             (lispm-tools--walk-writes form temporary writers strings seen))))))
+
+(defun lispm-tools--code-writes (code)
+  "What the Lisp CODE, a string, names: (WRITERS . STRINGS), in order.
+WRITERS are the symbols of `lispm-tools-file-writers' and
+`lispm-tools-buffer-writers' it names (see `lispm-tools-code-writes-p'),
+STRINGS its strings.  Where CODE stops reading, the rest is searched for
+the writers' names as words, and gives no strings."
+  (let ((writers (list nil)) (strings (list nil)) (seen (make-hash-table :test #'eq))
+        (at 0) (end (length code)))
+    (while (< at end)
+      (condition-case nil
+          (pcase-let ((`(,form . ,next) (read-from-string code at)))
+            (lispm-tools--walk-writes form nil writers strings seen)
+            (setq at next))
+        ;; The rest does not read: whitespace, or an unbalanced form.
+        (error
+         (dolist (name (append lispm-tools-file-writers lispm-tools-buffer-writers))
+           (when (and (not (memq name (cdr writers)))
+                      (string-match-p (concat "\\_<" (regexp-quote (symbol-name name)) "\\_>")
+                                      (substring code at)))
+             (push name (cdr writers))))
+         (setq at end))))
+    (cons (nreverse (cdr writers)) (nreverse (cdr strings)))))
+
+(defun lispm-tools-code-writes-p (code)
+  "The functions changing buffers or files that the Lisp CODE names, or nil.
+CODE is a string of forms.  Those of `lispm-tools-file-writers' count
+wherever they appear; those of `lispm-tools-buffer-writers' outside a
+`with-temp-buffer' form.  A quoted name counts as much as a call, so
+\(mapc #\\='delete-file files) does.  Code that does not read is searched
+for the names as words."
+  (car (lispm-tools--code-writes code)))
+
+(defun lispm-tools-code-files (code)
+  "The strings in the Lisp CODE that look like file names, in order.
+A string with no whitespace, naming a directory (a slash, not of a
+URL) or ending in a file extension."
+  (seq-filter (lambda (s)
+                (and (> (length s) 1)
+                     (not (string-match-p "[[:space:]\\\\]\\|://" s))
+                     (or (string-search "/" s)
+                         (string-match-p "\\`[^.]+\\.[A-Za-z0-9]\\{1,5\\}\\'" s))))
+              (cdr (lispm-tools--code-writes code))))
+
+(defun lispm-tools-code-writes-note (code)
+  "What the user is told of the Lisp CODE if it changes buffers or files.
+Nil if it names none of `lispm-tools-file-writers' and
+`lispm-tools-buffer-writers' (see `lispm-tools-code-writes-p'); else
+that it does, that no diff shows it, and the files it names (see
+`lispm-tools-code-files')."
+  (when (lispm-tools-code-writes-p code)
+    (let ((files (lispm-tools-code-files code)))
+      (concat (lispm-tr "This code changes buffers or files; it shows no diff, as the edit tools would.")
+              (if files
+                  (concat " " (lispm-tr "It names %s." (string-join files ", ")))
+                "")))))
 
 (defcustom lispm-eval-timeout 120
   "Seconds eval_elisp waits for a value promised with `lispm-async'."
@@ -2369,10 +2744,13 @@ Past `lispm-tools--backtrace-frames' of them, \"...\" stands for the rest."
     ((code string "One or more Emacs Lisp forms, evaluated in order with lexical binding."))
   "Evaluate Emacs Lisp in the running Emacs and return the last value,
 plus anything printed.  This reaches all of Emacs: buffers, windows,
-processes, the network, org, magit, any installed package.  Find
-functions with apropos, and the skills of this system's parts and apps
-with search_tools; learn functions with describe_symbol, and from the
-manuals with read_info, which search_tools finds.
+processes, the network, org, magit, any installed package.  Use this when
+you need the live editor; keep its work short because it can block the UI.
+Use run_elisp for standalone file/JSON processing or heavy computation in
+a separate process launched by LispM Kernel. A timer or lispm-async does
+not offload computation. Find functions with apropos, and the skills of this
+system's parts and apps with search_tools; learn functions with
+describe_symbol, and from the manuals with read_info, which search_tools finds.
 To wait for something asynchronous (a process, a page loading, a
 timer), end with (lispm-async (lambda (resolve) ...)) and call
 \(funcall resolve VALUE) once the value is there.  An error comes back
@@ -2380,9 +2758,14 @@ with the backtrace of the code, innermost call first.  A tool you
 define here with lispm-deftool is yours from your next step on, and
 other agents can find it with search_tools; it lasts until Emacs
 exits, unless you keep it in a skill with write_skill, which
-search_tools finds."
+search_tools finds.
+Files and buffers are changed with the edit tools (edit_file,
+write_file, edit_buffer, edit_definition), which show the user a diff
+to approve and can be undone as one step.  Lisp that saves or rewrites
+a file gets no such review: it is for what the edit tools cannot do."
   :permission exec
   :async t
+  :preview #'lispm-tools-code-writes-note
   (let* ((agent lispm-current-agent)
          (output (generate-new-buffer " *lispm-eval*" t))
          (standard-output output)

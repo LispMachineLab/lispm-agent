@@ -382,20 +382,34 @@ the reply defines.  PLAIN presents no code, for a reply still streaming
 in: it is presented once it is complete."
   (let ((line (if (string-match "\\`#+ +\\(.*\\)\\'" line)
                   (propertize (match-string 1 line) 'face 'bold)
-                line)))
-    (setq line (replace-regexp-in-string
-                "\\*\\*\\([^*\n]+\\)\\*\\*"
-                (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
-    (lispm-chat--italics
-     (replace-regexp-in-string
-      "`\\([^`\n]+\\)`"
-      ;; The match data say what of the match to replace: presenting
-      ;; the code must leave them as they are.
-      (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
-                    (if plain
-                        code
-                      (save-match-data (lispm-present-code code (lispm-chat--root) defined)))))
-      line t t))))
+                line))
+        (start 0) parts)
+    ;; Org links name literal objects: the stars in *scratch*, for
+    ;; example, are part of the buffer's name, not Markdown emphasis.
+    (while (string-match lispm-present--link-re line start)
+      (let ((beg (match-beginning 0)) (end (match-end 0)))
+        (push (lispm-chat--inline-markdown (substring line start beg) defined plain) parts)
+        (push (substring line beg end) parts)
+        (setq start end)))
+    (push (lispm-chat--inline-markdown (substring line start) defined plain) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun lispm-chat--inline-markdown (line &optional defined plain)
+  "Show Markdown emphasis and code in LINE, which contains no Org links.
+DEFINED and PLAIN are as in `lispm-chat--inline'."
+  (setq line (replace-regexp-in-string
+              "\\*\\*\\([^*\n]+\\)\\*\\*"
+              (lambda (m) (propertize (match-string 1 m) 'face 'bold)) line t t))
+  (lispm-chat--italics
+   (replace-regexp-in-string
+    "`\\([^`\n]+\\)`"
+    ;; The match data say what of the match to replace: presenting
+    ;; the code must leave them as they are.
+    (lambda (m) (let ((code (propertize (match-string 1 m) 'face 'lispm-chat-code 'lispm-chat-code t)))
+                  (if plain
+                      code
+                    (save-match-data (lispm-present-code code (lispm-chat--root) defined)))))
+    line t t)))
 
 (defun lispm-chat--italics (line)
   "LINE with its Markdown emphasis, *TEXT* or _TEXT_, in italics.
@@ -513,7 +527,10 @@ drawn whole, a long reply took longer at every step."
      :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact command"))
     ("eval_elisp" :shown "Eval" :ask code :title ,(lispm-tr-noop "Evaluate Emacs Lisp")
      :question ,(lispm-tr-noop "Do you want to evaluate this?")
-     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code"))
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code")
+     ;; Code that writes shows no diff, as the edit tools would: say so.
+     :note ,(lambda (input _preview)
+              (lispm-tools-code-writes-note (or (alist-get 'code input) ""))))
     ("run_lisp" :shown "Lisp" :ask code :title ,(lispm-tr-noop "Run a Lisp program")
      :question ,(lispm-tr-noop "Do you want to run this?"))
     ("search_files" :shown ,(lispm-tr-noop "Search" "tool") :result search)

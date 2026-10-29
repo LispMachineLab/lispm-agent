@@ -183,19 +183,26 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
 | ~read~ ~memory~ ~comm~ ~lisp~ | auto    | reading, memory and tasks, other agents, ~run_lisp~ |
 | ~write~                      | ask     | changing files and buffers (always asks outside the root) |
 | ~shell~                      | ask     | ~run_shell~ (a command that only reads, such as ~ls~ or ~git status~, is ~read~) |
-| ~exec~                       | ask     | ~eval_elisp~, ~write_skill~                |
+| ~exec~                       | ask     | ~eval_elisp~, ~run_elisp~, ~write_skill~   |
 | ~web~ ~mcp~                  | ask     | ~web_search~, ~web_fetch~, MCP tools      |
 
 ~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  A shell
 command made only of programs that read (~lispm-shell-read-only-programs~: ~ls~, ~grep~, ~git log~,
-~gh pr view~ and the like, piped or chained, writing nowhere but =/dev/null=) is decided as
-reading is; one the shell would expand or run anything through asks.  Approving a call "for
-good" allows every later call of its tool for the rest of the Emacs session; for ~eval_elisp~,
+~gh pr view~, ~gh repo list~ and the like, piped or chained, writing nowhere but =/dev/null=)
+is decided as reading is; one the shell would expand or run anything through asks.  Approving
+a call "for good" allows every later call of its tool for the rest of the Emacs session; for ~eval_elisp~,
 and for a shell command that could reach Emacs, only that exact call again.  A command cannot
 reach Emacs on another machine, or in the sandbox (below): there, approving one for good allows
 every later command, for as long as the sandbox is on.  Other packages can hold calls back
 through ~lispm-tool-action-functions~ (answer ~ask~ or ~deny~; the strictest answer wins), as
 [[https://github.com/LispMachineLab/lispm-security][LispM Security]] does.
+
+Shell comments and a ~cd~ before a read-only command do not make it ask.  Remembered exact
+calls ignore top-level argument order and ~why~; ~run_shell~ and ~run_program~ also ignore ~timeout~.
+Command text, executable, arguments and working directory still match exactly.
+Native tool requests, decisions and resumed approvals are timestamped
+in ~Approval~ subsections of the Org transcript, with decision scope and extra check reasons.
+They are saved with the session and are not sent to the model.
 
 * Standing agents
 
@@ -305,6 +312,11 @@ around them, as LispM Desktop does, sets ~lispm-agents-terminal-make-function~,
 ~lispm-agents-show-function~ and the other variables of =lisp/lispm-agents.el='s Interface
 section; the agents know nothing of it.  Another agent is one call of ~lispm-agents-define~.
 
+In the desktop sidebar, right-click a stopped Claude or Codex session and choose
+*Resume with…* to enter a model name.  It resumes the same session in its original
+directory, passing ~--model~ to the CLI.  Other CLI agents can offer this action
+by providing ~:model-arguments~ in ~lispm-agents-define~.
+
 ** Live agent data
 
 ~lispm-agents-roster~ returns alive, unarchived conversations as plists with stable
@@ -351,9 +363,36 @@ every option.
 - Common tools are always offered.  The rest (MCP tools, Lisp development tools, tools agents
   define, seldom needed ones such as ~read_info~ and ~write_skill~) are deferred: the model
   finds them with ~search_tools~ when needed, so they cost no context until then.  The search
-  is fuzzy: a word may be part of a longer one, or misspelt.
+  is fuzzy: a word may be part of a longer one, or misspelt. It also finds core and already
+  loaded tools, using their full descriptions and optional ~:keywords~ lists of search terms.
+  ~select:NAME~ keeps exact names; unknown names get suggestions without loading them.
+- ~session_search~ and ~session_read~ find and read native LispM, Claude Code and Codex history,
+  including archived sessions, by provider and session ID. They inspect at most 200 recent
+  transcript files and each file's last 256 KiB; results report limits and incomplete scans.
+  Native open transcripts include unsaved changes. These tools do not resume or modify sessions.
+- ~run_program~ runs a local executable with an argument array and optional working directory,
+  returning bounded JSON with exit status, stdout and stderr. It uses the ~shell~ policy and
+  configured sandbox; timeout, turn abort and session closure stop it. Compose calls with
+  ~run_lisp~; ~run_shell~ remains available for shell syntax and remote commands.
+- ~runtime_status~ reports the Emacs version and loaded versus available library paths without
+  loading libraries. ~describe_symbol~ adds loaded source files and an optional ~buffer~ for
+  buffer-local values. ~read_buffer~ accepts ~tail~ and literal ~query~ for log inspection.
+  ~inspect_agent~ reports LispM's approval policy, allowances and pending calls.
 - ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
   the agent's tools are functions, each call going through the policy as if the model made it.
+- ~run_elisp~ asks [[https://github.com/LispMachineLab/lispm-kernel][LispM Kernel]] to start a fresh batch Emacs for standalone file,
+  JSON/JSONL and text processing or computation.  The worker returns printed output and its
+  last value; it has no live editor buffers or agent tools.  Kernel stops it on timeout or
+  when its turn is aborted or session closed.  Enable Kernel in LispM Desktop, or load
+  ~lispm-kernel-exec~ and configure ~lispm-kernel-exec-runtime-function~ to return a running
+  kernel with the ~exec~ job.  Without it, the call fails; there is no local fallback.
+  This is process isolation, not a filesystem sandbox, and calls use the ~exec~ policy.
+- Agents prefer dedicated tools and ~run_elisp~ for standalone processing.  ~run_lisp~ and
+  ~eval_elisp~ still execute in the user's Emacs and should do short work on live state.
+  Shell commands serve external CLIs, builds, tests, project runtimes and remote work;
+  an explicit choice of language or tool takes precedence.
+  New sessions and handovers take the current instructions and tool descriptions; existing
+  sessions keep the system prompt they started with.
 - Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
   ~xref_definitions~, ~xref_references~ and ~flymake_diagnostics~ for any language Emacs supports.
 - ~apropos~, ~describe_symbol~ and ~read_info~ let agents learn Emacs itself.

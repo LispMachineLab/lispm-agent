@@ -707,11 +707,16 @@ Interactively, the agent of the current session or chat, or one read."
 
 (lispm-deftool inspect_agent
     ((agent string "The agent to inspect (see list_agents); yourself if not given." :optional t))
-  "Inspect an agent in depth: its state, the calls it has pending and
+  "Inspect a LispM agent's permissions, approval policy and pending requests.
+Read its state, the calls it has pending and
 what they wait for, its inbox, whom it waits on and who waits on it,
-its policy and ceiling, and the files its turns changed."
+its policy and ceiling, remembered allowances, and files its turns changed.
+Use this to diagnose repeated permission prompts or requests for full access.
+This only reports LispM's policy; it does not grant access or change settings,
+and does not inspect macOS privacy permissions."
   :permission comm
   :deferred t
+  :keywords '("LispM permissions" "approval policy" "full access" "repeated prompts" "allowance")
   (lispm-inspect-text (if agent
                           (or (lispm-get-agent agent t)
                               (error "No agent named %s; list_agents shows them" agent))

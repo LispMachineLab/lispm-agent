@@ -215,8 +215,8 @@ See `lispm-session-tools'.")
    " work on the live buffer, so you see what the user sees; every edit you make is"
    " one undo step for them.\n"
    "- What this system and its apps can do is written in skills, their manuals, each"
-   " with tools to do it; search_tools finds them, and the tools you are not offered"
-   " yet. When a request needs something you do not have, search before you say you"
+   " with tools to do it; search_tools finds them, including tools already available."
+   " When a request needs something you do not have, search before you say you"
    " cannot do it.\n"
    "- Input beginning with \"[Message from agent X]\" comes from another agent, and"
    " \"[Event: ...]\" from a hook or timer the user set up. Treat them as requests"
@@ -228,6 +228,18 @@ See `lispm-session-tools'.")
    " to do. End the turn with a short summary: what you did, what you found, and"
    " anything the user needs to do.\n"
    "- Read before you edit; prefer small, verifiable steps.\n"
+   "- Prefer LispM's dedicated tools. For standalone file discovery, JSON/JSONL"
+   " parsing, text filtering and computation, use run_elisp: LispM Kernel starts"
+   " a fresh Emacs process and returns its output. The worker has no live editor"
+   " state or agent tools. A missing kernel is an error, not a reason to move"
+   " heavy work into this Emacs. Follow the user's explicit choice of language.\n"
+   "- Use run_lisp for short compositions of agent tools and eval_elisp when you"
+   " need the live editor's buffers, variables or loaded packages. Both run here"
+   " and can block the UI; timers and promises do not offload computation. Find"
+   " existing functions with apropos and describe_symbol. Keep file and buffer"
+   " changes in the edit tools.\n"
+   "- Use run_shell for external CLIs, builds, tests, project runtimes or work that"
+   " must run on a remote host. Follow the user's explicit choice of language or tool.\n"
    "- Keep durable knowledge (user preferences, project conventions, lessons) in"
    " your long-term memory, and work that spans sessions in your task list."))
 
@@ -1640,15 +1652,47 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
               (concat " Their reason: " reason)
             " Do not repeat it unchanged; adapt, or ask the user.")))
 
-(defun lispm-resolve (agent id decision &optional reason)
+(defun lispm--approval-event (agent id event &optional reason source)
+  "Record and save an approval EVENT for AGENT's call ID.
+EVENT is `requested', `resumed', `approve', `allow' or `deny'.
+REASON is a denial's explanation; SOURCE names who settled the call,
+`user' by default or `allowance' when an earlier allowance settles it.
+The call's input is already in its heading or its Asks subsection."
+  (when-let* ((call (gethash id (lispm-agent-pending agent)))
+              (marker (plist-get call :marker))
+              ((eq (marker-buffer marker) (lispm-agent-buffer agent))))
+    (let* ((asked (lispm-asked call))
+           (scope (and (eq event 'allow) (lispm-call-allowance agent id)))
+           (record `((time . ,(format-time-string "%FT%TZ" nil t))
+                     (event . ,(symbol-name event))
+                     (call_id . ,id)
+                     (tool . ,(plist-get asked :name))
+                     ,@(when (memq event '(requested resumed))
+                         `((reasons . ,(vconcat (plist-get asked :reasons)))))
+                     ,@(when (memq event '(approve allow deny))
+                         `((source . ,(symbol-name (or source 'user)))))
+                     ,@(when (eq event 'approve) '((scope . "once")))
+                     ,@(when scope
+                         (if (consp scope)
+                             `((scope . "custom") (allowance . ,(cdr scope)))
+                           `((scope . ,(symbol-name scope)))))
+                     ,@(when reason `((reason . ,reason))))))
+      (lispm--in-session agent
+        (goto-char (lispm-transcript-subtree-end marker 2))
+        (insert (lispm-transcript-approval record)))
+      (lispm--save-session agent))))
+
+(defun lispm-resolve (agent id decision &optional reason source)
   "Settle AGENT's call ID awaiting approval: DECISION is `approve' or `deny'.
 REASON, for a denial, is passed on to the model.  For a call that
 awaits approval of a call it makes (see `lispm-call-ask'), that call
 is approved or denied, and the call that made it goes on.  DECISION
 may also be `allow', from `lispm-allow': approved for good, which the
-call that made such a call learns."
+call that made such a call learns.  SOURCE is `allowance' when another
+call's remembered approval settles this one; otherwise it is `user'."
   (let ((call (gethash id (lispm-agent-pending agent))))
     (when (and call (eq (plist-get call :status) 'ask))
+      (lispm--approval-event agent id decision reason source)
       (if-let* ((asking (plist-get call :asking)))
           (progn
             (plist-put call :asking nil)
@@ -1724,7 +1768,7 @@ is told, and nothing more is allowed."
                    (lispm-tools--allowed-p agent (plist-get asked :tool) (plist-get asked :input))
                    (eq (lispm-tool-action agent (plist-get asked :tool) (plist-get asked :input))
                        'auto))
-          (lispm-resolve agent other 'approve))))))
+          (lispm-resolve agent other 'approve nil 'allowance))))))
 
 (defconst lispm--interrupted-result
   "The call was interrupted: Emacs stopped before it finished, so whether it took effect is unknown.  Check before repeating it."
@@ -1830,13 +1874,16 @@ condition it waits at, if any; see `lispm--resume-calls'."
         (dolist (call calls)
           (let ((id (plist-get call :id)))
             (pcase (plist-get call :state)
-              ("WAITING")
+              ("WAITING"
+               (when (eq (plist-get (gethash id (lispm-agent-pending agent)) :status) 'ask)
+                 (lispm--approval-event agent id 'resumed)))
               ;; Approved, but never run: ask again rather than run it
               ;; while the session is being opened.
               ("APPROVED"
                (lispm--in-session agent
                  (lispm-transcript-set-state
-                  (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING")))
+                  (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING"))
+               (lispm--approval-event agent id 'resumed))
               (_ (unless (run-hook-with-args-until-success 'lispm-resume-call-functions agent call)
                    (lispm--tool-done agent id lispm--interrupted-result t))))))
       (setf (lispm-agent-dispatching agent) nil))
@@ -1881,6 +1928,7 @@ awaits the same approval by then."
                                 (eq (plist-get call :status) 'ask)
                                 (eq (plist-get call :asking) asking))
                        (lispm--announce-approval agent call asked preview)))))
+    (lispm--approval-event agent id 'requested)
     (if (plist-get asked :tool)
         (let ((lispm-current-agent agent)
               (default-directory (lispm-agent-root agent)))
