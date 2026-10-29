@@ -224,11 +224,15 @@ and timers can wake them:
 (lispm-every 'coder 3600 "Look at your open tasks and move one forward.")
 #+end_src
 
-Agents work together with ~send_message~ and ~ask_agent~, which delegates and waits; given a role,
+Agents work together with ~send_message~ and ~ask_agent~, which returns a request id immediately
+and delivers the final reply as a new message, leaving the caller free to answer you.  Given a role,
 it starts a subagent that may do no more than its caller.  ~start_agent~ starts one that works on
 its own instead, in the caller's project or another, and stays once it has replied; outside the
 caller's project, only once you approve.  The ~worktree~ skill gives each helper a git worktree
 of its own.
+
+Nested requests keep their upstream reply route in the existing inbox until all their replies
+have been handled; ending a turn while they run does not finish the upstream request.
 
 * Characters
 

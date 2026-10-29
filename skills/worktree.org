@@ -18,8 +18,8 @@ Plain ~ask_agent~ is better for small changes you will keep, and for work that o
 
 ~worktree_ask~ ROLE REQUEST [NAME] [BASE] makes a worktree in ~lispm-worktree-directory~
 (~~/.lispm/worktrees/PROJECT/NAME/~), on the new branch ~lispm/NAME~ made from your ~HEAD~ or
-from BASE, starts a helper of ROLE there, hands it REQUEST and waits for its final reply, as
-~ask_agent~ does with a role.  The helper may do no more than you, and retires once it has
+from BASE, starts a helper of ROLE there, hands it REQUEST and waits for its final reply.
+The helper may do no more than you, and retires once it has
 replied.  It is told to commit its work on its branch.
 
 Several ~worktree_ask~ calls in one step run side by side.  Give each a NAME that says what
