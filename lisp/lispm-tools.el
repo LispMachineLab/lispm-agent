@@ -730,7 +730,7 @@ request on.  Return their names, sorted."
 (defconst lispm-tools--loaded-prefix "Tools now available: "
   "How a search_tools result starts its list of available tool names.")
 
-(defun lispm-tools--discover (agent query limit)
+(defun lispm-tools--discover (agent query limit &optional predicate)
   "What AGENT's search QUERY finds, at most LIMIT things: (TOOLS . OTHERS).
 TOOLS are registered tools AGENT's role gives it, including those
 already available; OTHERS are plists of `lispm-tool-search-functions',
@@ -738,7 +738,8 @@ such as skills.  A deferred tool one of those holds is not among TOOLS
 until AGENT has loaded it: what holds it is found in its stead.
 \"select:A,B\" finds the tools A
 and B, or what holds them; a word naming a source of tools (see
-`lispm-tool-sources') keeps that source's tools only."
+`lispm-tool-sources') keeps that source's tools only.  When PREDICATE
+is non-nil, only tools it accepts are considered, before ranking."
   (let* ((others (let ((lispm-current-agent agent))
                    (mapcan (lambda (function) (copy-sequence (funcall function agent)))
                            lispm-tool-search-functions)))
@@ -750,7 +751,8 @@ and B, or what holds them; a word naming a source of tools (see
                                     (and (lispm-tool-deferred tool)
                                          (not (member name (lispm-agent-loaded-tools agent)))
                                          (member name held))
-                                    (not (lispm-tools-allowed-p agent name)))))
+                                    (not (lispm-tools-allowed-p agent name))
+                                    (and predicate (not (funcall predicate tool))))))
                             (lispm-tools--registered))))
     (if (string-prefix-p "select:" query)
         (let* ((found (lispm-tools--find query tools limit))
@@ -772,9 +774,10 @@ and B, or what holds them; a word naming a source of tools (see
             (cons (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'tool)) found))
                   (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'other)) found)))))))))
 
-(defun lispm-tools--selection-help (agent query found others)
+(defun lispm-tools--selection-help (agent query found others &optional predicate)
   "Explain unknown names in AGENT's selection QUERY after FOUND and OTHERS.
-Suggestions are canonical tool names, never implicit selections."
+Suggestions are canonical tool names, never implicit selections.
+PREDICATE restricts suggested tools as in `lispm-tools--discover'."
   (when (string-prefix-p "select:" query)
     (when-let* ((missing (seq-difference
                          (split-string (substring query 7) "[, ]+" t)
@@ -785,7 +788,7 @@ Suggestions are canonical tool names, never implicit selections."
               (mapcan (lambda (name)
                         (mapcar #'lispm-tool-name
                                 (car (lispm-tools--discover
-                                      agent (replace-regexp-in-string "[_-]+" " " name) 3))))
+                                      agent (replace-regexp-in-string "[_-]+" " " name) 3 predicate))))
                       missing))))
         (concat "No accessible tool named " (string-join missing ", ") "."
                 (when suggestions

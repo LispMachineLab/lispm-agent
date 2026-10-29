@@ -120,6 +120,30 @@
       (should (cdr (lispm-session-tools-test--call "session_search" '((limit . 0)) t)))
       (should (cdr (lispm-session-tools-test--call "session_search" '((since . "yesterday")) t))))))
 
+(ert-deftest lispm-session-tools-test-codex-metadata-identity ()
+  (lispm-session-tools-test-env
+    (let* ((old (lispm-session-tools-test--codex "shared-id" project))
+           (new (expand-file-name "2026/10/29/rollout-different-filename.jsonl"
+                                   lispm-agents-codex-sessions-directory)))
+      (lispm-session-tools-test--jsonl
+       new (list `(:type "session_meta" :payload (:id "shared-id" :cwd ,project))
+                 '(:type "event_msg" :payload (:type "user_message" :message "Newest fork content"))))
+      (set-file-times old (encode-time 0 0 0 1 10 2026 t))
+      (set-file-times new (encode-time 0 0 0 29 10 2026 t))
+      (let* ((search (lispm-session-tools-test--call "session_search" '((provider . "codex"))))
+             (session (car (alist-get 'sessions search)))
+             (read (lispm-session-tools-test--call
+                    "session_read" `((provider . ,(alist-get 'provider session))
+                                     (id . ,(alist-get 'id session))))))
+        (should (= (length (alist-get 'sessions search)) 1))
+        (should (equal (alist-get 'id session) "shared-id"))
+        (should (equal (alist-get 'snippet session) "Newest fork content"))
+        (should (equal (alist-get 'text (car (alist-get 'messages (car (alist-get 'sessions read)))))
+                       "Newest fork content")))
+      (delete-file old)
+      (let ((read (lispm-session-tools-test--call "session_read" '((provider . "codex") (id . "shared-id")))))
+        (should (equal (alist-get 'id (car (alist-get 'sessions read))) "shared-id"))))))
+
 (ert-deftest lispm-session-tools-test-native-live-and-hidden-blocks ()
   (lispm-session-tools-test-env
     (let* ((file (lispm-session-tools-test--native "native" project "User text"))

@@ -171,5 +171,41 @@
                                 (car (lispm-tools--discover agent "test status" 5)))
                          '("mcp__test__status"))))))))
 
+(ert-deftest lispm-tool-search-test-bridge-filters-before-ranking ()
+  "Unserved core tools cannot consume the bridge's result limit."
+  (lispm-test-with-peers
+    (lispm-tool-search-test--registry
+      (lispm-deftool memory_status () "Read status." :permission memory "status")
+      (lispm-deftool available_read () "Read status." :deferred t "status")
+      (let* ((terminal (lispm-test--peer 'codex project))
+             (agent (lispm-agents-bridge-agent terminal))
+             (tool (lispm-get-tool "available_read")))
+        ;; Native search still ranks the best match, regardless of bridge rules.
+        (should (equal (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "status" 1)))
+                       '("memory_status")))
+        (dolist (state '(unloaded loaded core))
+          (when (eq state 'loaded) (lispm-tools-load agent '("available_read")))
+          (when (eq state 'core) (setf (lispm-tool-deferred tool) nil))
+          (let ((result (lispm-test--peer-call terminal "search_tools"
+                                             '((query . "status") (max_results . 1)))))
+            (should-not (cdr result))
+            (should (string-search "- available_read:" (car result)))
+            (should-not (string-search "memory_status" (car result)))))))))
+
+(ert-deftest lispm-tool-search-test-bridge-selector-suggestions ()
+  "Bridge suggestions include only tools call_tool actually serves."
+  (lispm-test-with-peers
+    (lispm-tool-search-test--registry
+      (lispm-deftool describe_definition_memory () "Describe a definition."
+        :permission memory "private")
+      (lispm-deftool describe_symbol () "Describe a symbol and its definition." "definition")
+      (let* ((terminal (lispm-test--peer 'codex project))
+             (result (lispm-test--peer-call terminal "search_tools"
+                                            '((query . "select:describe_definition")))))
+        (should-not (cdr result))
+        (should (string-search "Similar tools: describe_symbol" (car result)))
+        (should-not (string-search "describe_definition_memory" (car result)))
+        (should-not (string-search "Tools, which you call" (car result)))))))
+
 (provide 'lispm-tool-search-test)
 ;;; lispm-tool-search-test.el ends here

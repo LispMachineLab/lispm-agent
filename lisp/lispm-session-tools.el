@@ -43,10 +43,12 @@
                      (if (= (length since) 10) (concat since "T00:00:00Z") since)))
       (error (error "Since must be an ISO date or timestamp")))))
 
-(defun lispm-session-tools--files (provider &optional id)
-  "Known transcript files for PROVIDER, optionally narrowed by opaque ID.
+(defun lispm-session-tools--files (provider)
+  "Known transcript files for PROVIDER in newest-first order.
 Return (FILES . ERRORS); FILES contain (PROVIDER FILE MTIME ARCHIVED).
-Discovery reads directory names and attributes, not transcript bodies."
+Discovery reads directory names and attributes, not transcript bodies.
+Metadata, rather than a filename, determines a session's identity: a
+Codex fork can record the same id under a different rollout filename."
   (let (files errors)
     (dolist (kind (if provider (list (intern provider)) '(lispm claude codex)))
       (condition-case err
@@ -67,8 +69,7 @@ Discovery reads directory names and attributes, not transcript bodies."
           (delq nil
                 (mapcar (lambda (entry)
                           (let ((file (nth 1 entry)))
-                            (when (and (not (file-remote-p file))
-                                       (or (not id) (string-search id (file-name-nondirectory file))))
+                            (when (not (file-remote-p file))
                               (when-let* ((attrs (file-attributes file))
                                           ((null (file-attribute-type attrs))))
                                 (setf (nth 2 entry) (float-time (file-attribute-modification-time attrs)))
@@ -309,7 +310,7 @@ time.  ID selects one session; without it this is a bounded search."
          (project (and project (directory-file-name (expand-file-name project))))
          (query (and query (not (string-empty-p query)) query))
          (archive (lispm-session-tools--archived))
-         (discovery (lispm-session-tools--files provider id))
+         (discovery (lispm-session-tools--files provider))
          (all (car discovery))
          (files (seq-take all lispm-session-tools-scan-limit))
          (scan-truncated (> (length all) lispm-session-tools-scan-limit))
