@@ -853,7 +853,40 @@ an endpoint.  Ordinary messages without a request id need no scan."
 An agent returns one with return_value: data, decoded from JSON."
   (and (stringp reply) (> (length reply) 0) (get-text-property 0 'lispm-value reply)))
 
-(cl-defun lispm-tell (agent text &key from event callback reply-to request-id)
+(defun lispm--entry-received-p (agent id)
+  "Non-nil if AGENT has already received the inbox entry ID.
+Queued and running inputs are checked first, then receipt properties
+in its live transcript and earlier continuation files.  Only callers
+supplying a stable input id need this history lookup."
+  (or (equal id (plist-get (lispm-agent-entry agent) :id))
+      (seq-some (lambda (entry) (equal id (plist-get entry :id)))
+                (lispm-agent-inbox agent))
+      (let ((buffer (lispm-agent-buffer agent)))
+        (cl-labels ((received ()
+                     (save-restriction
+                       (widen)
+                       (seq-some
+                        (lambda (section)
+                          (and (memq (plist-get section :kind) '(user message event))
+                               (equal id (cdr (assoc "ENTRY"
+                                                    (lispm-transcript-properties
+                                                     (plist-get section :body)
+                                                     (plist-get section :end)))))))
+                        (lispm-transcript-sections)))))
+          (or (and (buffer-live-p buffer)
+                   (with-current-buffer buffer (received)))
+              (seq-some
+               (lambda (file)
+                 (let ((visiting (find-buffer-visiting file)))
+                   (unless (eq visiting buffer)
+                     (if visiting
+                         (with-current-buffer visiting (received))
+                       (with-temp-buffer
+                         (insert-file-contents file)
+                         (received))))))
+               (lispm-session-files (lispm-agent-id agent))))))))
+
+(cl-defun lispm-tell (agent text &key from event callback reply-to request-id id)
   "Give AGENT the input TEXT; it starts working as soon as it is idle.
 FROM names the agent sending it; EVENT describes the hook or timer
 that produced it (pending events with the same description are
@@ -863,18 +896,24 @@ with it, if any (see `lispm-reply-value').  REPLY-TO, a string, says who
 waits for that reply in a way that outlives Emacs: the input is kept
 in the project's inbox file until its turn ends, and if Emacs stops
 before, `lispm-inbox-callback-function' makes a callback of it again.
-REQUEST-ID identifies an in-memory peer request for data observers;
-it is separate from the durable routing information in REPLY-TO."
+REQUEST-ID identifies the request for data observers and is kept in
+the inbox; it is separate from the routing information in REPLY-TO.
+ID, when supplied, is a stable inbox entry id: repeated delivery is
+ignored, including after the input was handled or the session was
+continued.  Such inputs keep a receipt and do not coalesce by EVENT."
   (let* ((agent (lispm-get-agent agent))
          (same nil)
          entry)
     ;; Opening the session first takes back what was queued for it.
     (lispm-session-buffer agent)
-    (setq same (and event (seq-find (lambda (e) (equal (plist-get e :event) event))
+    (when (and id (lispm--entry-received-p agent id))
+      (cl-return-from lispm-tell agent))
+    (setq same (and (not id) event (seq-find (lambda (e) (equal (plist-get e :event) event))
                                     (lispm-agent-inbox agent))))
     (if same
         (setq entry (plist-put same :text text))
-      (setq entry (list :id (lispm-inbox-new-id) :text text :from from :event event
+      (setq entry (list :id (or id (lispm-inbox-new-id)) :receipt (and id t)
+                        :text text :from from :event event
                         :callback callback :reply-to reply-to :request-id request-id
                         :queued (format-time-string "[%Y-%m-%d %a %H:%M]")))
       (setf (lispm-agent-inbox agent)
@@ -953,7 +992,12 @@ is given up: the session goes on."
         (when input (delete-region input (point-max))))
       (lispm--newline)
       (setcdr lispm--turn-start (copy-marker (point)))
-      (insert (lispm-transcript-section (lispm-transcript-input-title entry) (plist-get entry :text)))))
+      (insert (lispm-transcript-section (lispm-transcript-input-title entry) (plist-get entry :text)))
+      (when (plist-get entry :receipt)
+        (save-excursion
+          (goto-char (cdr lispm--turn-start))
+          (forward-line 1)
+          (insert (format ":PROPERTIES:\n:ENTRY: %s\n:END:\n" (plist-get entry :id)))))))
   (unless entry
     (lispm--in-session agent
       (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
@@ -1839,6 +1883,7 @@ condition it waits at, if any; see `lispm--resume-calls'."
   (setf (lispm-agent-steps agent) 0
         (lispm-agent-auto-restarts agent) nil
         (lispm-agent-entry agent) entry
+        (lispm-agent-value agent) (lispm--recorded-turn-value entry)
         (lispm-agent-turn-callbacks agent) (delq nil (list (plist-get entry :callback)))
         ;; Whoever started it, the user is the one reopening it, unless
         ;; another agent or an event did: then someone waits for it.
@@ -1902,6 +1947,43 @@ they are recorded as interrupted.")))
     (lispm-signal agent 'interrupted
                   "Emacs stopped in the middle of this turn, while the model was answering."))))
 
+(defun lispm--recorded-turn-value (entry)
+  "The value successfully returned in the turn handling ENTRY so far.
+Read recorded tool inputs and results, never execute them.  A receipt
+identifies the input when available; older sessions use the last
+nonempty user or agent message, or the event that started the turn."
+  (let* ((sections (lispm-transcript-sections))
+         (id (plist-get entry :id))
+         (input
+          (or (and id
+                   (seq-find
+                    (lambda (section)
+                      (and (memq (plist-get section :kind) '(user message event))
+                           (equal id (cdr (assoc "ENTRY"
+                                                (lispm-transcript-properties
+                                                 (plist-get section :body)
+                                                 (plist-get section :end)))))))
+                    (reverse sections)))
+              (seq-find
+               (lambda (section)
+                 (and (or (memq (plist-get section :kind) '(user message))
+                          (and (eq (plist-get section :kind) 'event)
+                               (equal (plist-get section :arg) (plist-get entry :event))))
+                      (not (string-empty-p (lispm-transcript-section-text section)))))
+               (reverse sections))))
+         value)
+    (when input
+      (dolist (section (cdr (memq input sections)))
+        (when (and (eq (plist-get section :kind) 'assistant)
+                   (not (plist-get section :ignore)))
+          (dolist (part (lispm-transcript-parts section))
+            (when (and (eq (plist-get part :kind) 'tool)
+                       (equal (plist-get part :name) "return_value")
+                       (plist-member part :result)
+                       (not (plist-get part :error)))
+              (setq value (alist-get 'value (plist-get part :input))))))))
+    value))
+
 (defun lispm--resume-ended-turn (agent entry parsed)
   "Finish with ENTRY, the input of AGENT's turn that ended as Emacs stopped.
 The turn's reply, the text of the last response in PARSED, the
@@ -1910,9 +1992,13 @@ if it has one; the inbox file then no longer holds ENTRY."
   (when-let* ((callback (plist-get entry :callback)))
     (let* ((last (seq-find (lambda (m) (equal (alist-get 'role m) "assistant"))
                            (reverse (plist-get parsed :messages))))
-           (reply (string-trim (lispm--reply-text (append (alist-get 'content last) nil)))))
+           (text (string-trim (lispm--reply-text (append (alist-get 'content last) nil))))
+           (reply (if (string-empty-p text) "(no reply)" text))
+           (value (lispm--recorded-turn-value entry)))
+      (when value
+        (setq reply (propertize reply 'lispm-value value)))
       (with-demoted-errors "lispm turn callback: %S"
-        (funcall callback (if (string-empty-p reply) "(no reply)" reply)))))
+        (funcall callback reply))))
   (lispm-inbox-save agent))
 
 (defun lispm--ask-approval (agent id)

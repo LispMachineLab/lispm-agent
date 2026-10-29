@@ -79,11 +79,13 @@ A running entry's text is in the session already, and is left out."
   (concat "* " (upcase (symbol-name state)) " " (lispm-transcript-input-title entry) "\n"
           ":PROPERTIES:\n"
           ":ENTRY:    " (plist-get entry :id) "\n"
+          (if (plist-get entry :receipt) ":RECEIPT:  t\n" "")
           ":AGENT:    " (symbol-name (lispm-agent-name agent)) "\n"
           ":SESSION:  " (lispm-agent-id agent) "\n"
           (if (plist-get entry :from) (format ":FROM:     %s\n" (plist-get entry :from)) "")
           (if (plist-get entry :event) (format ":EVENT:    %s\n" (plist-get entry :event)) "")
           (if (plist-get entry :reply-to) (format ":REPLY_TO: %s\n" (plist-get entry :reply-to)) "")
+          (if (plist-get entry :request-id) (format ":REQUEST_ID: %s\n" (plist-get entry :request-id)) "")
           ":QUEUED:   " (or (plist-get entry :queued) (format-time-string "[%Y-%m-%d %a %H:%M]")) "\n"
           ":END:\n"
           (if (and (eq state 'queued) (plist-get entry :text))
@@ -92,8 +94,9 @@ A running entry's text is in the session already, and is left out."
 
 (defun lispm-inbox--parse ()
   "The entries of the inbox file in the current buffer, as plists.
-Each has :state (`queued' or `running'), :id, :agent, :session, :from,
-:event, :reply-to, :queued, :text and :beg and :end, its bounds."
+Each has :state (`queued' or `running'), :id, :receipt, :agent, :session,
+:from, :event, :reply-to, :request-id, :queued, :text and :beg and :end,
+its bounds."
   (save-excursion
     (save-restriction
       (widen)
@@ -111,11 +114,13 @@ Each has :state (`queued' or `running'), :id, :agent, :session, :from,
                               (and value (not (string-empty-p value)) value)))))
                 (push (list :state state
                             :id (funcall get "ENTRY")
+                            :receipt (equal (funcall get "RECEIPT") "t")
                             :agent (funcall get "AGENT")
                             :session (funcall get "SESSION")
                             :from (funcall get "FROM")
                             :event (funcall get "EVENT")
                             :reply-to (funcall get "REPLY_TO")
+                            :request-id (funcall get "REQUEST_ID")
                             :queued (funcall get "QUEUED")
                             :text (lispm-transcript-text-after-drawer body end)
                             :beg (plist-get section :start) :end end)
@@ -210,10 +215,12 @@ on working."
 (defun lispm-inbox--entry (entry)
   "The inbox entry, as the runtime holds it, that the persisted ENTRY records."
   (list :id (plist-get entry :id)
+        :receipt (plist-get entry :receipt)
         :text (plist-get entry :text)
         :from (plist-get entry :from)
         :event (plist-get entry :event)
         :reply-to (plist-get entry :reply-to)
+        :request-id (plist-get entry :request-id)
         :queued (plist-get entry :queued)))
 
 (defun lispm-inbox-take (agent)

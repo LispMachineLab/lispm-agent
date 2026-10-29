@@ -145,6 +145,22 @@ BODY can use `project', a scratch directory for agents to work in."
                        (lambda (text errorp) (setq result (cons text errorp))))
     result))
 
+(defmacro lispm-test-with-blocking-delegation (&rest body)
+  "Run BODY with a tool exercising the legacy blocking delegation API."
+  (declare (indent 0))
+  `(let ((lispm-tools--registry (copy-hash-table lispm-tools--registry)))
+     (lispm-deftool lispm_test_delegate
+         ((agent string "The agent or role.") (request string "The request."))
+       "Delegate and keep this call pending until the answer arrives."
+       :permission comm
+       :async t
+       (lispm-delegate lispm-current-agent agent request
+                       (lambda (target reply)
+                         (funcall done (lispm-collab--replied target reply)))
+                       :call lispm-current-call)
+       nil)
+     ,@body))
+
 (defun lispm-test--file (project name)
   "Contents of the file NAME in PROJECT."
   (lispm--file-text (expand-file-name name project)))
@@ -4379,41 +4395,42 @@ stopped never reaches the file."
 Opening the caller's session opens the helper's again, which goes on
 with the request, bounded still by its caller."
   (lispm-test-env
-    (lispm-defrole reviewer "Reviews changes." :policy '((write . auto)))
-    (let* ((default-directory project)
-           (boss (lispm-start))
-           (boss-file (buffer-file-name (lispm-agent-buffer boss))))
-      (setf (lispm-agent-policy boss) '((write . ask)))
-      (setq lispm-test--scripts
-            `((assistant@project ,(lispm-test--msg "tool_use"
-                                                   (lispm-test--tool "t1" "ask_agent"
-                                                                     '((agent . "reviewer")
-                                                                       (request . "Looks good?")))))
-              (reviewer@project hang)))
-      (lispm-tell boss "get a review")
-      (should (lispm-test--wait (lambda () (and (lispm-get-agent "reviewer@project" t)
-                                                (eq (lispm-agent-state (lispm-get-agent "reviewer@project"))
-                                                    'requesting)))))
-      (let* ((helper (lispm-get-agent "reviewer@project"))
-             (helper-id (lispm-agent-id helper)))
-        ;; The call records whom it asked, the helper its caller's ceiling.
-        (should (string-match-p (concat ":ASKED: " (regexp-quote helper-id))
-                                (lispm-test--transcript boss)))
-        (should (string-match-p "^#\\+lispm_ceiling: .*(write \\. ask)" (lispm-test--transcript helper)))
-        (lispm-test--crash-all)
-        (setq lispm-test--requests nil
-              lispm-test--scripts
-              `((reviewer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Yes, ship it.")))
-                (assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Approved.")))))
-        (let ((revived (lispm-resume-file boss-file)))
-          (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p revived))
-                                                    (= (length lispm-test--requests) 2)))))
-          (should (string-match-p "reviewer@project replied:\nYes, ship it\\."
-                                  (format "%S" (alist-get 'messages (car lispm-test--requests)))))
-          ;; The helper, bounded as before, retired once it had replied.
-          (should (lispm-test--wait (lambda () (null (cdr (lispm-agents))))))
-          (let ((again (lispm-resume-session helper-id)))
-            (should (eq (lispm-policy-action again 'write) 'ask))))))))
+    (lispm-test-with-blocking-delegation
+      (lispm-defrole reviewer "Reviews changes." :policy '((write . auto)))
+      (let* ((default-directory project)
+             (boss (lispm-start))
+             (boss-file (buffer-file-name (lispm-agent-buffer boss))))
+        (setf (lispm-agent-policy boss) '((write . ask)))
+        (setq lispm-test--scripts
+              `((assistant@project ,(lispm-test--msg "tool_use"
+                                                     (lispm-test--tool "t1" "lispm_test_delegate"
+                                                                       '((agent . "reviewer")
+                                                                         (request . "Looks good?")))))
+                (reviewer@project hang)))
+        (lispm-tell boss "get a review")
+        (should (lispm-test--wait (lambda () (and (lispm-get-agent "reviewer@project" t)
+                                                  (eq (lispm-agent-state (lispm-get-agent "reviewer@project"))
+                                                      'requesting)))))
+        (let* ((helper (lispm-get-agent "reviewer@project"))
+               (helper-id (lispm-agent-id helper)))
+          ;; The call records whom it asked, the helper its caller's ceiling.
+          (should (string-match-p (concat ":ASKED: " (regexp-quote helper-id))
+                                  (lispm-test--transcript boss)))
+          (should (string-match-p "^#\\+lispm_ceiling: .*(write \\. ask)" (lispm-test--transcript helper)))
+          (lispm-test--crash-all)
+          (setq lispm-test--requests nil
+                lispm-test--scripts
+                `((reviewer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Yes, ship it.")))
+                  (assistant@project ,(lispm-test--msg "end_turn" (lispm-test--text "Approved.")))))
+          (let ((revived (lispm-resume-file boss-file)))
+            (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p revived))
+                                                      (= (length lispm-test--requests) 2)))))
+            (should (string-match-p "reviewer@project replied:\nYes, ship it\\."
+                                    (format "%S" (alist-get 'messages (car lispm-test--requests)))))
+            ;; The helper, bounded as before, retired once it had replied.
+            (should (lispm-test--wait (lambda () (null (cdr (lispm-agents))))))
+            (let ((again (lispm-resume-session helper-id)))
+              (should (eq (lispm-policy-action again 'write) 'ask)))))))))
 
 (ert-deftest lispm-test-standing-agent-takes-up ()
   "A standing agent declared again, as Emacs starts, handles what was queued for it.
@@ -4716,6 +4733,7 @@ whatever their names, and leaves out larger ones and symbolic links."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Review requested."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "No review.")))
               (reviewer@project ,(lispm-test--failure 529 "overloaded_error" "Overloaded")
                                 ,(lispm-test--failure 529 "overloaded_error" "Overloaded"))))
@@ -5310,6 +5328,7 @@ BODY can use `agent'."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Review requested."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "No review.")))
               (reviewer@project ,(lispm-test--failure 500 "api_error" "Boom")
                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Fine by me.")))))
@@ -5427,7 +5446,7 @@ BODY can use `agent'."
                               (lispm-test--transcript agent))))))
 
 (ert-deftest lispm-test-condition-helper ()
-  "A helper's condition waits for the user; its caller waits for the helper."
+  "A helper's condition waits for the user while its caller remains available."
   (lispm-test-with-conditions
     (lispm-defrole reviewer "Reviews changes.")
     (let ((boss (lispm-defagent boss :root project)))
@@ -5435,13 +5454,15 @@ BODY can use `agent'."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Review requested."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "No review.")))
               (reviewer@project ,(lispm-test--failure 500 "api_error" "Boom"))))
       (lispm-tell boss "get a review")
       (should (lispm-test--wait (lambda () (lispm-get-agent 'reviewer@project t))))
       (let ((helper (lispm-get-agent 'reviewer@project)))
         (lispm-test--condition-id helper)
-        (should (eq (lispm-agent-state boss) 'acting))
+        (should (lispm-test--wait (lispm-test--idle-p boss)))
+        (should-not (lispm-agent-waiting-on boss))
         (lispm-restart helper "c1" 'abort))
       (should (lispm-test--wait (lispm-test--idle-p boss)))
       (should (string-match-p "reviewer@project replied:\nThe request failed (HTTP 500): api_error: Boom"
@@ -5522,17 +5543,16 @@ BODY can use `agent'."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "reviewer") (request . "Looks good?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Review requested."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "Approved.")))
               (reviewer@project ,(lispm-test--msg "end_turn" (lispm-test--text "Yes, ship it.")))))
       (lispm-tell boss "get a review")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
-                                                (= (length lispm-test--requests) 3)
+                                                (= (length lispm-test--requests) 4)
                                                 (null (cdr (lispm-agents)))))))
       (should (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss)))
-      (should (equal (alist-get 'content (aref (alist-get 'content
-                                                          (aref (alist-get 'messages (car lispm-test--requests)) 2))
-                                               0))
-                     "reviewer@project replied:\nYes, ship it."))
+      (should (string-match-p "reviewer@project replied:\nYes, ship it\\."
+                              (lispm-test--transcript boss)))
       ;; The helper's session stays on record, under its caller's.
       (let ((session (seq-find (lambda (s) (equal (plist-get s :agent) "reviewer@project"))
                                (lispm-sessions))))
@@ -5549,6 +5569,7 @@ Its policy is the stricter of its role's and its caller's."
             `((reviewer ,(lispm-test--msg "tool_use"
                                           (lispm-test--tool "t1" "ask_agent"
                                                             '((agent . "coder") (request . "Write x.txt"))))
+                        ,(lispm-test--msg "end_turn" (lispm-test--text "Request sent."))
                         ,(lispm-test--msg "end_turn" (lispm-test--text "Asked.")))
               (coder@project ,(lispm-test--msg "tool_use"
                                                (lispm-test--tool "c1" "write_file"
@@ -5557,7 +5578,7 @@ Its policy is the stricter of its role's and its caller's."
                              ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
       (lispm-tell reviewer "Get x.txt written")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p reviewer))
-                                                (= (length lispm-test--requests) 4)
+                                                (= (length lispm-test--requests) 5)
                                                 (null (cdr (lispm-agents)))))))
       (should-not (file-exists-p (expand-file-name "x.txt" project)))
       (let* ((helper-request (seq-find (lambda (body)
@@ -6387,24 +6408,27 @@ handed over once nothing more can be."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "helper") (request . "2+2?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Arithmetic requested."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "It is 4.")))
               (helper ,(lispm-test--msg "end_turn" (lispm-test--text "4")))))
       (lispm-tell boss "ask helper")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
                                                 (funcall (lispm-test--idle-p helper))
-                                                (= (length lispm-test--requests) 3)))))
+                                                (= (length lispm-test--requests) 4)))))
       (should (string-match-p "\\* Message from boss\n2\\+2\\?" (lispm-test--transcript helper)))
-      (let ((messages (alist-get 'messages (car lispm-test--requests))))
-        (should (equal (alist-get 'content (aref (alist-get 'content (aref messages 2)) 0))
-                       "helper replied:\n4")))
+      (let* ((requests (seq-filter (lambda (body) (eq (lispm-test--agent-name body) 'boss))
+                                  (reverse lispm-test--requests)))
+             (result (cdr (assoc "t1" (lispm-test--results (nth 1 requests))))))
+        (should (string-match-p "Request q[^ ]+ accepted by helper" result))
+        (should-not (string-match-p "helper replied" result)))
+      (should (string-match-p "helper replied:\n4" (lispm-test--transcript boss)))
       (should-not (lispm-agent-waiting-on boss))
       ;; Each agent's system prompt introduces the other.
       (should (string-match-p "- helper: Does arithmetic." (alist-get 'system (car (last lispm-test--requests)))))
-      ;; A request that would make two agents wait on each other is refused.
+      ;; The legacy API still protects callers that explicitly wait.
       (setf (lispm-agent-waiting-on helper) (list boss))
-      (let ((result (lispm-test--call boss "ask_agent" '((agent . "helper") (request . "?")))))
-        (should (cdr result))
-        (should (string-match-p "deadlock" (car result))))
+      (should-error (lispm-delegate boss helper "?" #'ignore))
+      (should (cdr (lispm-test--call boss "ask_agent" '((agent . "boss") (request . "?")))))
       (should (cdr (lispm-test--call boss "send_message" '((to . "boss") (text . "hi"))))))))
 
 ;;;; Characters
@@ -6705,6 +6729,7 @@ not with LispM's welcome; its replies are marked as its."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "@Ada") (request . "Look at a.el"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Asked Ada."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "Ada says it is fine.")))
               (Ada ,(lispm-test--msg "end_turn" (lispm-test--text "It is fine.")))))
       ;; Its colleagues are told who it is and how to reach it.
@@ -6719,14 +6744,13 @@ not with LispM's welcome; its replies are marked as its."
                                     (setq ada (lispm-get-agent 'ada@project t))
                                     (and ada (funcall (lispm-test--idle-p boss))
                                          (funcall (lispm-test--idle-p ada))
-                                         (= (length lispm-test--requests) 3)))))
+                                         (= (length lispm-test--requests) 4)))))
         ;; It took the request up in the asker's project, in a conversation of its own.
         (should (equal (lispm-agent-root ada) (file-name-as-directory project)))
         (should (eq (lispm-agent-character ada) 'ada))
         (should (string-match-p "\\* Message from boss\nLook at a\\.el" (lispm-test--transcript ada)))
-        (let ((messages (alist-get 'messages (car lispm-test--requests))))
-          (should (equal (alist-get 'content (aref (alist-get 'content (aref messages 2)) 0))
-                         "ada@project replied:\nIt is fine.")))
+        (should (string-match-p "ada@project replied:\nIt is fine\\."
+                                (lispm-test--transcript boss)))
         ;; Its diary has the turn, which its conversations elsewhere start with.
         (let ((days (directory-files (expand-file-name "characters/ada/episodes/" lispm-directory)
                                      nil "\\.org\\'")))
@@ -6779,6 +6803,7 @@ not with LispM's welcome; its replies are marked as its."
                   `((boss ,(lispm-test--msg "tool_use"
                                             (lispm-test--tool "t1" "ask_agent"
                                                               '((agent . "@Notes") (request . "Note λ"))))
+                          ,(lispm-test--msg "end_turn" (lispm-test--text "Asked Notes."))
                           ,(lispm-test--msg "end_turn" (lispm-test--text "Noted.")))
                     (Notes ,(lispm-test--msg "end_turn" (lispm-test--text "Kept.")))))
             ;; Others are told of apps apart, and of their two faces.
@@ -6790,7 +6815,7 @@ not with LispM's welcome; its replies are marked as its."
             (lispm-tell boss "note it")
             (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
                                                       (funcall (lispm-test--idle-p agent))
-                                                      (= (length lispm-test--requests) 3)))))
+                                                      (= (length lispm-test--requests) 4)))))
             (should (string-match-p "\\* Message from boss\nNote λ" (lispm-test--transcript agent)))
             (should-not (lispm-get-agent 'notes@project t))
             ;; What the user chooses for it goes into its file, and comes first.
@@ -6814,7 +6839,7 @@ not with LispM's welcome; its replies are marked as its."
         (remhash "note_add" lispm-tools--registry)))))
 
 (ert-deftest lispm-test-ask-agents-in-parallel ()
-  "An agent that asks several at once waits on each until it replies."
+  "Parallel requests return as messages, including a request back to the caller."
   (lispm-test-env
     (let ((boss (lispm-defagent boss :root project))
           (adder (lispm-defagent adder :root project))
@@ -6825,19 +6850,24 @@ not with LispM's welcome; its replies are marked as its."
                                                         '((agent . "adder") (request . "2+2?")))
                                       (lispm-test--tool "t2" "ask_agent"
                                                         '((agent . "doubler") (request . "2*3?"))))
-                    ,(lispm-test--msg "end_turn" (lispm-test--text "4 and 6.")))
-              ;; Asking back the agent that waits on it would deadlock,
-              ;; though that agent asked someone else after it.
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Asked both."))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Received."))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Received."))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Received.")))
+              ;; Asking back is safe: neither request holds its caller's turn.
               (adder ,(lispm-test--msg "tool_use"
                                        (lispm-test--tool "a1" "ask_agent"
                                                          '((agent . "boss") (request . "Why?"))))
-                     ,(lispm-test--msg "end_turn" (lispm-test--text "4")))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "4"))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "Understood.")))
               (doubler ,(lispm-test--msg "end_turn" (lispm-test--text "6")))))
       (lispm-tell boss "ask both")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
                                                 (funcall (lispm-test--idle-p adder))
-                                                (funcall (lispm-test--idle-p doubler))))))
-      (should (string-match-p "deadlock" (lispm-test--transcript adder)))
+                                                (funcall (lispm-test--idle-p doubler))
+                                                (= (length lispm-test--requests) 9)))))
+      (should-not (string-match-p "deadlock" (lispm-test--transcript adder)))
+      (should (string-match-p "boss replied:\nReceived\\." (lispm-test--transcript adder)))
       (should (string-match-p "adder replied:\n4" (lispm-test--transcript boss)))
       (should (string-match-p "doubler replied:\n6" (lispm-test--transcript boss)))
       (should-not (lispm-agent-waiting-on boss)))))
@@ -8017,42 +8047,43 @@ not what the reply defines itself."
 (ert-deftest lispm-test-inspector ()
   "The inspector shows an agent whole, for the user and for agents."
   (lispm-test-env
-    (lispm-defrole reviewer "Reviews changes.")
-    (let* ((default-directory project)
-           (boss (lispm-start)))
-      (setq lispm-test--scripts
-            `((assistant@project ,(lispm-test--msg "tool_use"
-                                                   (lispm-test--tool "t1" "ask_agent"
-                                                                     '((agent . "reviewer")
-                                                                       (request . "Looks good?")))))
-              (reviewer@project hang)))
-      (lispm-tell boss "get a review")
-      (should (lispm-test--wait (lambda () (lispm-get-agent "reviewer@project" t))))
-      (let ((reviewer (lispm-get-agent "reviewer@project")))
-        (should (lispm-test--wait (lambda () (eq (lispm-agent-state reviewer) 'requesting))))
-        (let ((text (lispm-inspect-text boss)))
-          (should (string-match-p "^# Pending calls\nask_agent reviewer  run$" text))
-          (should (string-match-p "^waits on +reviewer@project$" text))
-          (should (string-match-p "^policy +read auto, " text)))
-        ;; Agents inspect each other with a tool.
-        (let ((result (lispm-test--call boss "inspect_agent" '((agent . "reviewer@project")))))
-          (should-not (cdr result))
-          (should (string-match-p "^waited on by +assistant@project$" (car result)))
-          (should (string-match-p "^ceiling +read auto" (car result)))
-          (should (string-match-p "^handling +\\[from assistant@project\\] Looks good\\?$" (car result))))
-        ;; In the inspector, the agents named are objects too.
-        (with-current-buffer (lispm-inspect boss)
-          (goto-char (point-min))
-          (search-forward "waits on")
-          (search-forward "reviewer@project")
-          (should (equal (lispm-object-at (1- (point))) '(agent "reviewer@project")))
-          (goto-char (1- (point)))
-          (lispm-act-at-point)
-          (should (equal (buffer-name) "*lispm inspect reviewer@project*")))
-        (lispm-abort boss)))))
+    (lispm-test-with-blocking-delegation
+      (lispm-defrole reviewer "Reviews changes.")
+      (let* ((default-directory project)
+             (boss (lispm-start)))
+        (setq lispm-test--scripts
+              `((assistant@project ,(lispm-test--msg "tool_use"
+                                                     (lispm-test--tool "t1" "lispm_test_delegate"
+                                                                       '((agent . "reviewer")
+                                                                         (request . "Looks good?")))))
+                (reviewer@project hang)))
+        (lispm-tell boss "get a review")
+        (should (lispm-test--wait (lambda () (lispm-get-agent "reviewer@project" t))))
+        (let ((reviewer (lispm-get-agent "reviewer@project")))
+          (should (lispm-test--wait (lambda () (eq (lispm-agent-state reviewer) 'requesting))))
+          (let ((text (lispm-inspect-text boss)))
+            (should (string-match-p "^# Pending calls\nlispm_test_delegate reviewer  run$" text))
+            (should (string-match-p "^waits on +reviewer@project$" text))
+            (should (string-match-p "^policy +read auto, " text)))
+          ;; Agents inspect each other with a tool.
+          (let ((result (lispm-test--call boss "inspect_agent" '((agent . "reviewer@project")))))
+            (should-not (cdr result))
+            (should (string-match-p "^waited on by +assistant@project$" (car result)))
+            (should (string-match-p "^ceiling +read auto" (car result)))
+            (should (string-match-p "^handling +\\[from assistant@project\\] Looks good\\?$" (car result))))
+          ;; In the inspector, the agents named are objects too.
+          (with-current-buffer (lispm-inspect boss)
+            (goto-char (point-min))
+            (search-forward "waits on")
+            (search-forward "reviewer@project")
+            (should (equal (lispm-object-at (1- (point))) '(agent "reviewer@project")))
+            (goto-char (1- (point)))
+            (lispm-act-at-point)
+            (should (equal (buffer-name) "*lispm inspect reviewer@project*")))
+          (lispm-abort boss))))))
 
 (ert-deftest lispm-test-return-value ()
-  "A helper returns a value with its reply; ask_agent gives it as JSON."
+  "A helper returns a value with its asynchronous reply, serialized as JSON."
   (lispm-test-env
     (lispm-defrole reviewer "Reviews changes.")
     (let* ((default-directory project)
@@ -8062,6 +8093,7 @@ not what the reply defines itself."
                                                    (lispm-test--tool "t1" "ask_agent"
                                                                      '((agent . "reviewer")
                                                                        (request . "Where is b?"))))
+                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Review requested."))
                                  ,(lispm-test--msg "end_turn" (lispm-test--text "Thanks.")))
               (reviewer@project ,(lispm-test--msg "tool_use"
                                                   (lispm-test--tool "r1" "return_value"
@@ -8069,9 +8101,9 @@ not what the reply defines itself."
                                 ,(lispm-test--msg "end_turn" (lispm-test--text "Found one.")))))
       (lispm-tell boss "find b")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
-                                                (= (length lispm-test--requests) 4)))))
+                                                (= (length lispm-test--requests) 5)))))
       (should (string-match-p (regexp-quote "reviewer@project replied:\nFound one.\n\nValue:\n[\"[[file:a.el::3]]\"]")
-                              (format "%s" (alist-get 'content (aref (alist-get 'content (car (last (append (alist-get 'messages (car lispm-test--requests)) nil)))) 0)))))
+                              (lispm-test--transcript boss)))
       ;; Nobody waits for the reply of a turn the user started.
       (should (string-match-p "Nobody waits"
                               (car (lispm-test--call boss "return_value" '((value . 1)))))))))
@@ -10600,9 +10632,8 @@ reader has newer sessions, which may tell that it is free."
       (should (string-prefix-p "[Message from boss]\nOne." (car (lispm-test--sent codex 1)))))))
 
 (ert-deftest lispm-test-peers-ask ()
-  "Agents of every kind ask each other: a LispM agent's call waits for an
-editor's agent's reply; an editor's agent gets its reply as a message;
-a request asked of one that ends is settled."
+  "Agents of every kind receive replies as messages without holding a call open.
+A request asked of an editor's agent that ends is settled too."
   (lispm-test-with-peers
     (let ((boss (lispm-defagent boss :root project))
           (helper (lispm-defagent helper :root project))
@@ -10612,33 +10643,39 @@ a request asked of one that ends is settled."
             `((boss ,(lispm-test--msg "tool_use"
                                       (lispm-test--tool "t1" "ask_agent"
                                                         '((agent . "codex") (request . "2+2?"))))
+                    ,(lispm-test--msg "end_turn" (lispm-test--text "Asked Codex."))
                     ,(lispm-test--msg "end_turn" (lispm-test--text "It is 4.")))
               (helper ,(lispm-test--msg "end_turn" (lispm-test--text "6")))))
       ;; A LispM agent asks an editor's agent, which replies.
       (lispm-tell boss "ask codex")
-      (should (equal (car (lispm-test--sent codex 1))
-                     "[Request R1 from boss]\n2+2?\n\n(boss waits for your answer: give it with your reply tool, request R1.)⏎"))
-      (should (cdr (lispm-test--peer-call hermes "reply" '((request . "R1") (text . "5")))))
-      (should (equal (lispm-test--peer-call codex "reply" '((request . "R1") (text . "4")))
-                     '("Your reply to request R1 is delivered." . nil)))
+      (let* ((text (car (lispm-test--sent codex 1)))
+             (id (progn (should (string-match "^\\[Request \\([^ ]+\\) from boss\\]" text))
+                        (match-string 1 text))))
+        (should (string-prefix-p "q" id))
+        (should (string-search "2+2?" text))
+        (should (lispm-test--wait (lispm-test--idle-p boss)))
+        (should-not (lispm-agent-waiting-on boss))
+        (should (cdr (lispm-test--peer-call hermes "reply" `((request . ,id) (text . "5")))))
+        (should (equal (lispm-test--peer-call codex "reply" `((request . ,id) (text . "4")))
+                       (cons (format "Your reply to request %s is delivered." id) nil))))
       (should (lispm-test--wait (lambda () (funcall (lispm-test--idle-p boss)))))
       (should (string-match-p "codex replied:\n4" (lispm-test--transcript boss)))
       ;; An editor's agent asks a LispM agent; the reply comes as a message.
-      (should (string-prefix-p "Asked helper (request R2)."
+      (should (string-prefix-p "Asked helper (request R1)."
                                (car (lispm-test--peer-call codex "ask_agent"
                                                            '((agent . "helper") (request . "2*3?"))))))
-      (should (equal (cadr (lispm-test--sent codex 2)) "[Reply from helper to request R2]\n6⏎"))
+      (should (equal (cadr (lispm-test--sent codex 2)) "[Reply from helper to request R1]\n6⏎"))
       (should (string-match-p "\\* Message from codex\n2\\*3\\?" (lispm-test--transcript helper)))
       ;; An editor's agent asks another.
       (lispm-test--peer-call codex "ask_agent" '((agent . "hermes") (request . "Ready?")))
-      (should (string-prefix-p "[Request R3 from codex]\nReady?" (car (lispm-test--sent hermes 1))))
-      (lispm-test--peer-call hermes "reply" '((request . "R3") (text . "Yes.")))
-      (should (equal (nth 2 (lispm-test--sent codex 3)) "[Reply from hermes to request R3]\nYes.⏎"))
+      (should (string-prefix-p "[Request R2 from codex]\nReady?" (car (lispm-test--sent hermes 1))))
+      (lispm-test--peer-call hermes "reply" '((request . "R2") (text . "Yes.")))
+      (should (equal (nth 2 (lispm-test--sent codex 3)) "[Reply from hermes to request R2]\nYes.⏎"))
       ;; One that ends leaves no request waiting.
       (lispm-test--peer-call codex "ask_agent" '((agent . "hermes") (request . "Still there?")))
       (kill-buffer hermes)
       (should (equal (nth 3 (lispm-test--sent codex 4))
-                     "[Reply from hermes to request R4]\nhermes ended without replying.⏎"))
+                     "[Reply from hermes to request R3]\nhermes ended without replying.⏎"))
       (should-not lispm-collab--requests))))
 
 (ert-deftest lispm-test-peers-skills-and-tools ()
@@ -10754,24 +10791,28 @@ reply to a request answers it, and its end settles what it was asked."
         (should (cdr (lispm-test--peer-call codex "send_message" '((to . "nobody") (text . "?")))))
         (lispm-test--call boss "send_message" '((to . "remote") (text . "Hi.")))
         (should (equal (car delivered) (cons remote "[Message from boss]\nHi.")))
-        ;; A LispM agent asks it: its final reply is the result of the call.
+        ;; A LispM agent asks it and becomes idle before the final reply.
         (setq lispm-test--scripts
               `((boss ,(lispm-test--msg "tool_use"
                                         (lispm-test--tool "t1" "ask_agent"
                                                           '((agent . "remote") (request . "2+2?"))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Asked Remote."))
                       ,(lispm-test--msg "end_turn" (lispm-test--text "It is 4.")))))
         (lispm-tell boss "ask remote")
         (should (lispm-test--wait (lambda () answers)))
         (pcase-let ((`(,terminal ,text ,callback) (car answers)))
           (should (eq terminal remote))
-          (should (equal text "[Request R1 from boss]\n2+2?\n\n(boss waits for your answer: your reply to this message is it.)"))
+          (should (string-match-p "^\\[Request q[^ ]+ from boss\\]\n2\\+2\\?" text))
+          (should (string-suffix-p "your reply to this message is it.)" text))
+          (should (lispm-test--wait (lispm-test--idle-p boss)))
+          (should-not (lispm-agent-waiting-on boss))
           (funcall callback "4"))
         (should (lispm-test--wait (lambda () (funcall (lispm-test--idle-p boss)))))
         (should (string-match-p "remote replied:\n4" (lispm-test--transcript boss)))
         ;; An editor's agent asks it: the reply comes as a message.
         (lispm-test--peer-call codex "ask_agent" '((agent . "remote") (request . "Ready?")))
         (funcall (nth 2 (car answers)) "Yes.")
-        (should (equal (car (lispm-test--sent codex 1)) "[Reply from remote to request R2]\nYes.⏎"))
+        (should (equal (car (lispm-test--sent codex 1)) "[Reply from remote to request R1]\nYes.⏎"))
         ;; A reply coming after the request was settled is dropped.
         (funcall (nth 2 (car answers)) "Yes, again.")
         (should (= (length (lispm-test--given codex)) 1))
@@ -10779,7 +10820,7 @@ reply to a request answers it, and its end settles what it was asked."
         (lispm-test--peer-call codex "ask_agent" '((agent . "remote") (request . "Still there?")))
         (kill-buffer remote)
         (should (equal (cadr (lispm-test--sent codex 2))
-                       "[Reply from remote to request R3]\nremote ended without replying.⏎"))
+                       "[Reply from remote to request R2]\nremote ended without replying.⏎"))
         (should-not lispm-collab--requests)
         (should (equal (mapcar #'lispm-peer-name (lispm-peers)) '("codex")))))))
 
@@ -11658,6 +11699,7 @@ was asked takes its place."
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
+(require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-roster-details-test)
 (require 'lispm-roster-bridge-test)

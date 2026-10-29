@@ -298,7 +298,7 @@ Each is called with the character's name and `defined' or `removed'.")
   snapshots                  ; alist TURN -> snapshots of its project (lispm-journal.el)
   allowed                    ; tool names approved for this Emacs session
   loaded-tools               ; deferred tools loaded for it, by name
-  waiting-on                 ; agents this one awaits (ask_agent)
+  waiting-on                 ; agents this one awaits (lispm-delegate)
   condition                  ; condition its turn stopped at, awaiting a restart
   auto-restarts              ; alist TYPE or (TYPE . CALL) -> restarts chosen by handlers this turn
   attended                   ; non-nil if the user started the current turn
