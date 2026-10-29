@@ -229,6 +229,9 @@ its own instead, in the caller's project or another, and stays once it has repli
 caller's project, only once you approve.  The ~worktree~ skill gives each helper a git worktree
 of its own.
 
+Nested requests keep their upstream reply route in the existing inbox until all their replies
+have been handled; ending a turn while they run does not finish the upstream request.
+
 * Characters
 
 An agent is one conversation; a character is someone.  It has a name, a soul and a picture, a

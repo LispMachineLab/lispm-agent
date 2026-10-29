@@ -90,6 +90,7 @@
 (require 'lispm-core)
 (require 'lispm-tools)
 (require 'lispm-runtime)
+(require 'org-id)
 
 (declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
 
@@ -393,7 +394,7 @@ between delivering the answer and finishing the recipient's turn."
   (let ((caller (or (lispm-resume-session caller-id)
                     (error "Cannot deliver request %s: session %s is unavailable" id caller-id))))
     (lispm-tell caller (format "[Reply to request %s]\n%s" id text)
-                :from from :request-id id :id (concat "reply-" id))))
+                :from from :request-id id :answer-to id :id (concat "reply-" id))))
 
 (defun lispm-collab-request (caller agent request &optional call)
   "Ask AGENT REQUEST for CALLER in the background; return an acceptance.
@@ -405,7 +406,7 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
   ;; A standing caller may take up an older session when first opened;
   ;; capture that session's identity for the durable reply route.
   (lispm-session-buffer caller)
-  (let ((id (concat "q" (lispm--new-id)))
+  (let ((id (concat "q" (org-id-uuid)))
         (caller-id (lispm-agent-id caller)))
     (if-let* ((peer (and (not (lispm-get-agent agent t))
                          (not (lispm-get-character agent t))
@@ -418,12 +419,14 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
               caller-id id (lispm-peer-name peer)
               (if ended reply (format "%s replied:\n%s" (lispm-peer-name peer) reply))))
            :id id)
+          (lispm--await-reply caller id (lispm-peer-name peer))
           (lispm-collab--accepted id (lispm-peer-name peer)))
       (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent))
                    (route (concat caller-id " " id " inbox" (if helper-p " retire" ""))))
         (lispm-tell target request :from (lispm-agent-name caller)
                     :request-id id :reply-to route
                     :callback (lispm-collab--callback target route))
+        (lispm--await-reply caller id)
         (when call
           (lispm-collab--record-asked caller call target))
         (lispm-collab--accepted id (lispm-agent-name target) (lispm-agent-id target))))))
@@ -519,7 +522,8 @@ background request to a new message; old routes settle a pending call."
     (seq-some (lambda (entry)
                 (when-let* ((reply-to (plist-get entry :reply-to)))
                   (or (equal reply-to prefix) (string-prefix-p (concat prefix " ") reply-to))))
-              (cons (lispm-agent-entry agent) (lispm-agent-inbox agent)))))
+              (cons (lispm-agent-entry agent)
+                    (append (lispm-agent-inbox agent) (lispm-agent-suspended agent))))))
 
 (defun lispm-collab--follow (caller call id)
   "Have CALLER's CALL, which asked the session ID, wait for its reply again.
@@ -550,7 +554,8 @@ once they have taken the request up again, settles it."
 Follow-up input from the user or another agent keeps it alive, as
 does a new turn that started before this retirement timer ran."
   (when (and (not (lispm-agent-busy-p helper))
-             (null (lispm-agent-inbox helper)))
+             (null (lispm-agent-inbox helper))
+             (null (lispm-agent-suspended helper)))
     (lispm-retire helper)))
 
 (defun lispm-collab--characters (&optional self apps)
@@ -691,6 +696,10 @@ more than you."
       (unless (lispm-agent-turn-callbacks agent)
         (error "Nobody waits for your reply in this turn; just reply"))
       (setf (lispm-agent-value agent) (alist-get 'value input))
+      (when-let* ((entry (lispm-agent-entry agent)))
+        (setf (lispm-agent-entry agent)
+              (plist-put entry :value (lispm-agent-value agent)))
+        (lispm-inbox-save agent))
       "The value will go with your reply."))))
 
 (provide 'lispm-collab)

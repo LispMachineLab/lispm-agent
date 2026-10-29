@@ -286,6 +286,7 @@ Each is called with the character's name and `defined' or `removed'.")
   view                       ; chat buffer showing the session, if any
   process                    ; request in flight
   inbox                      ; FIFO of pending inputs (plists)
+  suspended                  ; requests yielded while their replies are pending
   entry                      ; the input the turn under way handles
   value                      ; a value the turn returns with its reply (return_value)
   (pending (make-hash-table :test #'equal)) ; tool-use id -> call plist

@@ -154,7 +154,8 @@ invented for it.  This never asks a session reader to scan files."
           (lispm-agents-roster--add-wait index (gethash target agents) :waited-on-by
                                         (lispm-agents-roster-key buffer)))
         (when (buffer-local-value 'lispm-session-agent buffer)
-          (dolist (entry (cons (lispm-agent-entry agent) (lispm-agent-inbox agent)))
+          (dolist (entry (cons (lispm-agent-entry agent)
+                              (append (lispm-agent-inbox agent) (lispm-agent-suspended agent))))
             (when-let* ((id (or (plist-get entry :request-id) (plist-get entry :reply-to))))
               (lispm-agents-roster--add-wait index buffer :request-ids id)
               (lispm-agents-roster--add-wait

@@ -26,7 +26,7 @@ The regular crash fixture restores files after killing buffers; an
 async reply during that cleanup could also reopen its caller's buffer."
   (dolist (agent (lispm-agents))
     (setf (lispm-agent-turn-callbacks agent) nil)
-    (dolist (entry (lispm-agent-inbox agent))
+    (dolist (entry (append (lispm-agent-inbox agent) (lispm-agent-suspended agent)))
       (plist-put entry :callback nil)))
   (lispm-test--crash-all))
 
@@ -292,6 +292,243 @@ async reply during that cleanup could also reopen its caller's buffer."
                                  (equal (lispm-agent-last-reply boss) "Second received.")))))
         (should (string-search "First review done." (lispm-test--transcript boss)))
         (should (string-search "Second review done." (lispm-test--transcript boss)))))))
+
+(defun lispm-test-async--nested (restart)
+  "Exercise nested requests, optionally restoring them after RESTART."
+  (lispm-test-env
+    (lispm-defrole middle "Combines delegated answers.")
+    (let* ((boss (lispm-defagent boss :root project))
+           (first (lispm-defagent first :root project))
+           (second (lispm-defagent second :root project)))
+      (lispm-session-buffer boss)
+      (let ((boss-id (lispm-agent-id boss)))
+        (setq lispm-test--scripts
+              `((boss ,(lispm-test--msg "tool_use"
+                                       (lispm-test--tool "ask" "ask_agent"
+                                                         '((agent . "middle") (request . "Combine both answers."))))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Requested."))
+                      ,(lispm-test--msg "end_turn" (lispm-test--text "Combined result received.")))
+                (middle@project
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "one" "ask_agent" '((agent . "first") (request . "First value")))
+                                   (lispm-test--tool "two" "ask_agent" '((agent . "second") (request . "Second value"))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Both workers requested."))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Still working; I can answer you."))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "One worker remains."))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Combined final answer: 40.")))
+                (first hang) (second hang)))
+        ;; This helper runs twice; the fake API consumes scripts by
+        ;; mutating their tails, including backquote's constant tail.
+        (setq lispm-test--scripts (copy-tree lispm-test--scripts))
+        (lispm-tell boss "Delegate the calculation")
+        (should (lispm-test--wait
+                 (lambda ()
+                   (when-let* ((middle (lispm-get-agent "middle@project" t)))
+                     (and (funcall (lispm-test--idle-p boss))
+                          (funcall (lispm-test--idle-p middle))
+                          (= (length (lispm-agent-suspended middle)) 1)
+                          (eq (lispm-agent-state first) 'requesting)
+                          (eq (lispm-agent-state second) 'requesting))))))
+        (let* ((middle (lispm-get-agent "middle@project"))
+               (middle-id (lispm-agent-id middle))
+               (first-id (lispm-agent-id first))
+               (second-id (lispm-agent-id second)))
+          ;; A status question must not consume the suspended request's
+          ;; callback.  The helper's retirement check must keep it alive.
+          (lispm-tell middle "Status?")
+          (should (lispm-test--wait (lispm-test--idle-p middle)))
+          (should (equal (lispm-agent-last-reply middle) "Still working; I can answer you."))
+          (should (equal (lispm-agent-last-reply boss) "Requested."))
+          (lispm-collab--retire middle)
+          (should (memq middle (lispm-agents)))
+          (when restart
+            (lispm-test-async--crash-all)
+            (setq lispm-test--scripts
+                  `((boss ,(lispm-test--msg "end_turn" (lispm-test--text "Combined result received.")))
+                    (middle@project
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "One worker remains."))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "Combined final answer: 40.")))
+                    (first hang) (second hang)))
+            (setq lispm-test--scripts (copy-tree lispm-test--scripts))
+            (lispm-resume-agents)
+            (setq boss (lispm-resume-session boss-id)
+                  middle (lispm-get-agent middle-id)
+                  first (lispm-get-agent first-id)
+                  second (lispm-get-agent second-id))
+            (should (lispm-test--wait
+                     (lambda () (and (eq (lispm-agent-state first) 'requesting)
+                                     (eq (lispm-agent-state second) 'requesting))))))
+          ;; Replies deliberately arrive out of order.  The first reply
+          ;; yields again; only the second completes the upstream request.
+          (lispm-test-async--reply second "23")
+          (should (lispm-test--wait
+                   (lambda () (and (funcall (lispm-test--idle-p middle))
+                                   (equal (lispm-agent-last-reply middle) "One worker remains.")))))
+          (should (= (length (lispm-agent-suspended middle)) 1))
+          (should (equal (lispm-agent-last-reply boss) (unless restart "Requested.")))
+          (lispm-test-async--reply first "17")
+          (should (lispm-test--wait
+                   (lambda ()
+                     (and (funcall (lispm-test--idle-p boss))
+                          (equal (lispm-agent-last-reply boss) "Combined result received.")
+                          (not (lispm-get-agent middle-id t))))))
+          (should (string-search "Combined final answer: 40." (lispm-test--transcript boss)))
+          (should-not (string-search "Both workers requested." (lispm-test--transcript boss)))
+          (should-not (string-search "One worker remains." (lispm-test--transcript boss))))))))
+
+(ert-deftest lispm-test-async-nested-requests-deliver-final-answer ()
+  "Nested requests yield without completing their upstream request early."
+  (lispm-test-async--nested nil))
+
+(ert-deftest lispm-test-async-nested-requests-survive-restart ()
+  "A suspended upstream route and its dependencies survive Emacs."
+  (lispm-test-async--nested t))
+
+(ert-deftest lispm-test-async-request-ids-ignore-session-id-collisions ()
+  "Session and inbox id collisions cannot alias two independent requests."
+  (lispm-test-env
+    (let ((boss (lispm-defagent boss :root project))
+          (first (lispm-defagent first :root project))
+          (second (lispm-defagent second :root project)))
+      (dolist (agent (list boss first second)) (lispm-session-buffer agent))
+      (setq lispm-test--scripts '((first hang) (second hang)))
+      (cl-letf (((symbol-function 'lispm--new-id) (lambda () "20261029-222247-d3cd")))
+        (lispm-test--call boss "ask_agent" '((agent . "first") (request . "First")))
+        (lispm-test--call boss "ask_agent" '((agent . "second") (request . "Second"))))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state first) 'requesting)
+                                              (eq (lispm-agent-state second) 'requesting)))))
+      (should-not (equal (lispm-test-async--request-id first) (lispm-test-async--request-id second)))
+      (setf (lispm-agent-state boss) 'requesting)
+      (lispm-test-async--reply first "First result")
+      (lispm-test-async--reply second "Second result")
+      (should (= (length (lispm-agent-inbox boss)) 2)))))
+
+(ert-deftest lispm-test-async-nested-return-value-survives-restart ()
+  "A value set through run_lisp replaces an earlier direct value after restart."
+  (lispm-test-env
+    (let ((boss (lispm-defagent boss :root project))
+          (helper (lispm-defagent helper :root project)))
+      (setf (lispm-agent-policy helper) '((comm . auto) (lisp . auto)))
+      (setq lispm-test--scripts
+            `((helper ,(lispm-test--msg "tool_use"
+                                       (lispm-test--tool "first" "return_value" '((value . [1]))))
+                      ,(lispm-test--msg "tool_use"
+                                       (lispm-test--tool "nested" "run_lisp"
+                                                         '((code . "(return_value :value [2])"))))
+                      hang)))
+      (lispm-test--call boss "ask_agent" '((agent . "helper") (request . "Return the final value")))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state helper) 'requesting)
+                                              (equal (lispm-agent-value helper) [2])))))
+      (let ((file (buffer-file-name (lispm-agent-buffer helper)))
+            (boss-id (lispm-agent-id boss)))
+        (lispm-test-async--crash-all)
+        (setq lispm-test--scripts
+              `((helper hang)
+                (boss ,(lispm-test--msg "end_turn" (lispm-test--text "Restored value received.")))))
+        (let ((revived (lispm-resume-file file)))
+          (should (equal (lispm-agent-value revived) [2]))
+          (should (lispm-test--wait (lambda () (eq (lispm-agent-state revived) 'requesting))))
+          (lispm-test-async--reply revived "Final value."))
+        (should (lispm-test--wait
+                 (lambda () (when-let* ((revived-boss (lispm-get-agent boss-id t)))
+                              (equal (lispm-agent-last-reply revived-boss) "Restored value received.")))))
+        (should (string-search "Value:\n[2]" (lispm-test--transcript (lispm-get-agent boss-id))))))))
+
+(ert-deftest lispm-test-async-compacted-return-value-survives-restart ()
+  "A value survives restart even when its tool call is in an old continuation."
+  (lispm-test-env
+    (let ((boss (lispm-defagent boss :root project))
+          (helper (lispm-defagent helper :root project))
+          (lispm-compact-save-memory nil))
+      (setq lispm-test--scripts
+            `((helper ,(lispm-test--msg "tool_use"
+                                       (lispm-test--tool "value" "return_value" '((value . [4]))))
+                      hang hang)))
+      (lispm-test--call boss "ask_agent" '((agent . "helper") (request . "Return the final value")))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state helper) 'requesting)
+                                              (equal (lispm-agent-value helper) [4])))))
+      (setf (lispm-agent-compacting helper) t)
+      (lispm--continue helper "The calculation is almost finished." t)
+      (let ((file (buffer-file-name (lispm-agent-buffer helper)))
+            (boss-id (lispm-agent-id boss)))
+        (lispm-test-async--crash-all)
+        (setq lispm-test--scripts
+              `((helper hang)
+                (boss ,(lispm-test--msg "end_turn" (lispm-test--text "Restored value received.")))))
+        (let ((revived (lispm-resume-file file)))
+          (should (equal (lispm-agent-value revived) [4]))
+          (should (lispm-test--wait (lambda () (eq (lispm-agent-state revived) 'requesting))))
+          (lispm-test-async--reply revived "Final value."))
+        (should (lispm-test--wait
+                 (lambda () (when-let* ((revived-boss (lispm-get-agent boss-id t)))
+                              (equal (lispm-agent-last-reply revived-boss) "Restored value received.")))))
+        (should (string-search "Value:\n[4]" (lispm-test--transcript (lispm-get-agent boss-id))))))))
+
+(ert-deftest lispm-test-async-interleaved-upstream-requests-stay-separate ()
+  "Two suspended requests in one agent keep their own upstream recipients."
+  (lispm-test-env
+    (let ((one (lispm-defagent one :root project))
+          (two (lispm-defagent two :root project))
+          (middle (lispm-defagent middle :root project))
+          (first (lispm-defagent first :root project))
+          (second (lispm-defagent second :root project)))
+      (setq lispm-test--scripts
+            `((one ,(lispm-test--msg "end_turn" (lispm-test--text "First final received.")))
+              (two ,(lispm-test--msg "end_turn" (lispm-test--text "Second final received.")))
+              (middle
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "first" "ask_agent" '((agent . "first") (request . "Value one"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "First task yielded."))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "second" "ask_agent" '((agent . "second") (request . "Value two"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Second task yielded."))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Second final result."))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "First final result.")))
+              (first hang) (second hang)))
+      (lispm-test--call one "ask_agent" '((agent . "middle") (request . "First task")))
+      (lispm-test--call two "ask_agent" '((agent . "middle") (request . "Second task")))
+      (should (lispm-test--wait
+               (lambda () (and (funcall (lispm-test--idle-p middle))
+                               (= (length (lispm-agent-suspended middle)) 2)))))
+      (lispm-test-async--reply second "Value two")
+      (should (lispm-test--wait
+               (lambda () (equal (lispm-agent-last-reply two) "Second final received."))))
+      (should-not (lispm-agent-last-reply one))
+      (lispm-test-async--reply first "Value one")
+      (should (lispm-test--wait
+               (lambda () (equal (lispm-agent-last-reply one) "First final received."))))
+      (should-not (lispm-agent-suspended middle))
+      (should-not (string-search "Second final result." (lispm-test--transcript one)))
+      (should-not (string-search "First final result." (lispm-test--transcript two))))))
+
+(ert-deftest lispm-test-async-suspended-peer-request-fails-after-restart ()
+  "Losing a peer request at restart still completes its upstream request."
+  (lispm-test-with-peers
+    (lispm-defrole middle "Delegates to a peer.")
+    (let* ((boss (lispm-defagent boss :root project))
+           (peer (lispm-test--peer 'codex project)))
+      (should (buffer-live-p peer))
+      (setq lispm-test--scripts
+            `((middle@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "peer" "ask_agent" '((agent . "codex") (request . "Compute"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Peer requested.")))))
+      (lispm-test--call boss "ask_agent" '((agent . "middle") (request . "Compute through peer")))
+      (should (lispm-test--wait
+               (lambda () (when-let* ((middle (lispm-get-agent "middle@project" t)))
+                            (and (funcall (lispm-test--idle-p middle))
+                                 (lispm-agent-suspended middle))))))
+      (let ((boss-id (lispm-agent-id boss)))
+        (lispm-test-async--crash-all)
+        (setq lispm-collab--requests nil
+              lispm-test--scripts
+              `((middle@project ,(lispm-test--msg "end_turn" (lispm-test--text "Peer request was lost on restart.")))
+                (boss ,(lispm-test--msg "end_turn" (lispm-test--text "Failure received.")))))
+        (lispm-resume-agents)
+        (should (lispm-test--wait
+                 (lambda () (when-let* ((revived (lispm-get-agent boss-id t)))
+                              (equal (lispm-agent-last-reply revived) "Failure received.")))))
+        (should-not (lispm-get-agent "middle@project" t))))))
 
 (provide 'lispm-collab-async-test)
 ;;; lispm-collab-async-test.el ends here

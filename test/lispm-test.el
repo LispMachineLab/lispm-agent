@@ -6858,8 +6858,8 @@ not with LispM's welcome; its replies are marked as its."
               (adder ,(lispm-test--msg "tool_use"
                                        (lispm-test--tool "a1" "ask_agent"
                                                          '((agent . "boss") (request . "Why?"))))
-                     ,(lispm-test--msg "end_turn" (lispm-test--text "4"))
-                     ,(lispm-test--msg "end_turn" (lispm-test--text "Understood.")))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "Waiting for the explanation."))
+                     ,(lispm-test--msg "end_turn" (lispm-test--text "4")))
               (doubler ,(lispm-test--msg "end_turn" (lispm-test--text "6")))))
       (lispm-tell boss "ask both")
       (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
