@@ -434,6 +434,7 @@
   ("%s sessions unavailable: %s" . "%s 会话不可用：%s")
   ("%-m/%-d/%y" . "%Y/%-m/%-d")
   ("Working directory no longer exists: %s" . "工作目录已不存在：%s")
+  ("This session is archived with its parent; unarchive the parent first" . "此会话随父会话归档；请先取消父会话的归档")
   ("Unknown agent session: %s" . "未知的智能体会话：%s")
   ("Model must not be empty" . "模型不能为空")
   ("This session cannot be resumed with a different model" . "此会话无法使用其他模型继续")

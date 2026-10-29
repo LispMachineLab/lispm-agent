@@ -434,6 +434,7 @@
   ("%s sessions unavailable: %s" . "%sのセッションを利用できません：%s")
   ("%-m/%-d/%y" . "%y/%-m/%-d")
   ("Working directory no longer exists: %s" . "作業ディレクトリが存在しなくなりました：%s")
+  ("This session is archived with its parent; unarchive the parent first" . "このセッションは親とともにアーカイブされています。先に親のアーカイブを解除してください")
   ("Unknown agent session: %s" . "不明なエージェントセッション：%s")
   ("Model must not be empty" . "モデルを空にすることはできません")
   ("This session cannot be resumed with a different model" . "このセッションは別のモデルで再開できません")

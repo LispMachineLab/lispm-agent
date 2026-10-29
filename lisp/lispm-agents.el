@@ -752,6 +752,7 @@ sessions learn theirs from them, see `lispm-agents-refresh-buffer-titles'."
                    (mapcan (pcase-lambda (`(,agent . ,props))
                              (lispm-agents--agent-sessions agent props nil recent))
                            (lispm-agents-available)))))
+    (lispm-agents--index-session-parents sessions)
     (lispm-agents-refresh-buffer-titles sessions)
     (lispm-agents--sort-sessions sessions)))
 
@@ -870,6 +871,7 @@ draws this."
                            (progn (push agent pending) nil)
                          sessions)))
                    (lispm-agents-available)))))
+    (lispm-agents--index-session-parents sessions)
     (lispm-agents-refresh-buffer-titles sessions)
     (cons (lispm-agents--sort-sessions sessions) (nreverse pending))))
 
@@ -1398,7 +1400,15 @@ The text is pasted into the agent's composer without submitting it."
 Archiving hides a session in Emacs only; it never alters agent data.")
 
 (defvar lispm-agents--archived 'unloaded
-  "Keys of archived sessions, or `unloaded' before the state file is read.")
+  "Keys of explicitly archived sessions, or `unloaded' before reading state.")
+
+(defvar lispm-agents--session-parents nil
+  "Parent index as (STATE-FILE . HASH-TABLE), built before filtering sessions.
+Keys include the provider, just as the persisted archive keys do.")
+
+(defvar lispm-agents--effective-archive nil
+  "Cached inherited archive state as (STATE-FILE KEYS PARENTS HASH-TABLE).
+KEYS and PARENTS are the explicit archive list and parent index used.")
 
 (defvar lispm-agents--opened-times nil
   "Cached opening times as (STATE-FILE . HASH-TABLE), keyed by session.")
@@ -1406,6 +1416,53 @@ Archiving hides a session in Emacs only; it never alters agent data.")
 (defun lispm-agents--session-key (session)
   "Return the key identifying SESSION across agents, \"AGENT:ID\"."
   (format "%s:%s" (plist-get session :agent) (plist-get session :id)))
+
+(defun lispm-agents--index-session-parents (sessions &optional merge)
+  "Index parent links from unfiltered SESSIONS, including absent parents.
+Archive inheritance is independent of project directories and of whether
+the parent transcript itself can still be read.  Each new reading replaces
+the index, so changed parent metadata cannot leave stale relationships.
+With MERGE, copy the known graph and update only supplied rows, for callers
+with partial records.  Binding the index and effective cache lets a caller
+use such a graph locally without replacing a complete session reading."
+  (let ((parents (if (and merge (equal (car lispm-agents--session-parents) lispm-agents-state-file))
+                     (copy-hash-table (cdr lispm-agents--session-parents))
+                   (make-hash-table :test #'equal))))
+    (dolist (session sessions)
+      (let ((key (lispm-agents--session-key session)))
+        (if-let* ((parent (plist-get session :parent)))
+            (puthash key (lispm-agents--session-key (list :agent (plist-get session :agent) :id parent))
+                     parents)
+          (remhash key parents))))
+    (setq lispm-agents--session-parents (cons lispm-agents-state-file parents))))
+
+(defun lispm-agents--effective-archive ()
+  "Return a hash of explicit archive keys and all their known descendants.
+Build it once per reading or archive change, in linear time.  Missing
+parents still convey their archive state; cycles terminate at visited keys."
+  (let* ((keys (lispm-agents--archived-keys))
+         (parents (and (equal (car lispm-agents--session-parents) lispm-agents-state-file)
+                       (cdr lispm-agents--session-parents)))
+         (cached lispm-agents--effective-archive))
+    (unless (and (equal (car cached) lispm-agents-state-file)
+                 (eq (nth 1 cached) keys)
+                 (eq (nth 2 cached) parents))
+      (let ((children (make-hash-table :test #'equal))
+            (archived (make-hash-table :test #'equal))
+            (pending (copy-sequence keys)))
+        (when parents
+          (maphash (lambda (child parent)
+                     (puthash parent (cons child (gethash parent children)) children))
+                   parents))
+        (while pending
+          (let ((key (pop pending)))
+            (unless (gethash key archived)
+              (puthash key t archived)
+              (dolist (child (gethash key children))
+                (push child pending)))))
+        (setq lispm-agents--effective-archive
+              (list lispm-agents-state-file keys parents archived))))
+    (nth 3 lispm-agents--effective-archive)))
 
 (defun lispm-agents--read-state ()
   "Return the plist the state file holds, or nil without one.
@@ -1474,18 +1531,52 @@ not call this.  The ordering survives closing Emacs and archiving."
                   (cons (cons key time) (assoc-delete-all key (plist-get state :opened))))))))
 
 (defun lispm-agents-archived-p (session)
-  "Return non-nil when SESSION is archived."
-  (member (lispm-agents--session-key session) (lispm-agents--archived-keys)))
+  "Return non-nil when SESSION or one of its ancestors is archived.
+Session lists index every parent link before callers filter their rows.
+Only explicit archive choices are persisted; descendants inherit them."
+  (let ((archived (lispm-agents--effective-archive)))
+    (or (gethash (lispm-agents--session-key session) archived)
+        (when-let* ((parent (plist-get session :parent)))
+          (gethash (lispm-agents--session-key (list :agent (plist-get session :agent) :id parent))
+                   archived)))))
 
 (defun lispm-agents--set-archived (session archived)
-  "Mark SESSION ARCHIVED or not and persist the archived set."
+  "Mark SESSION explicitly ARCHIVED or not and persist the archive choices.
+Inherited descendants are not written individually, so restoring a parent
+restores them without changing any independently archived child."
   (let ((key (lispm-agents--session-key session))
         (keys (lispm-agents--archived-keys)))
-    (setq lispm-agents--archived (if archived
-                                     (cons key (delete key keys))
-                                  (delete key keys)))
-    (lispm-agents--write-state
-     (plist-put (lispm-agents--read-state) :archived lispm-agents--archived))))
+    (lispm-agents--save-archived (if archived
+                                   (cons key (remove key keys))
+                                 (remove key keys)))))
+
+(defun lispm-agents--save-archived (keys)
+  "Persist the explicit archive KEYS and invalidate inherited state."
+  (setq lispm-agents--archived keys
+        lispm-agents--effective-archive nil)
+  (lispm-agents--write-state
+   (plist-put (lispm-agents--read-state) :archived keys)))
+
+(defun lispm-agents--archived-ancestors (session)
+  "Return the explicitly archived keys of SESSION and its known ancestors.
+The same-provider parent index is walked only for this user action, never
+once per row.  A cycle visits each key at most once."
+  (let ((parents (and (equal (car lispm-agents--session-parents) lispm-agents-state-file)
+                      (cdr lispm-agents--session-parents)))
+        (explicit (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'equal))
+        (key (lispm-agents--session-key session))
+        (parent (when-let* ((id (plist-get session :parent)))
+                  (lispm-agents--session-key (list :agent (plist-get session :agent) :id id))))
+        result)
+    (dolist (archived (lispm-agents--archived-keys))
+      (puthash archived t explicit))
+    (while (and key (not (gethash key seen)))
+      (puthash key t seen)
+      (when (gethash key explicit) (push key result))
+      (setq key (or parent (and parents (gethash key parents)))
+            parent nil))
+    result))
 
 (defun lispm-agents--rename (session title)
   "Rename SESSION to TITLE the way its own agent records names, see the
@@ -1523,18 +1614,26 @@ running or idle, see `lispm-agents-session-buffer'."
     (run-hooks 'lispm-agents-sessions-changed-hook)))
 
 (defun lispm-agents-toggle-archive-session (session)
-  "Archive SESSION, or unarchive it when it is archived."
-  (lispm-agents--set-archived session (not (lispm-agents-archived-p session)))
+  "Archive SESSION's subtree, or undo its own explicit archive choice.
+A session inheriting its archive state must be restored through its parent."
+  (let* ((key (lispm-agents--session-key session))
+         (explicit (member key (lispm-agents--archived-keys))))
+    (when (remove key (lispm-agents--archived-ancestors session))
+      (user-error (lispm-tr "This session is archived with its parent; unarchive the parent first")))
+    (lispm-agents--set-archived session (not explicit)))
   (run-hooks 'lispm-agents-sessions-changed-hook))
 
 (defun lispm-agents-user-wrote (agent id)
   "Say the user wrote to the session ID of AGENT.
 A session the user writes to again is in use, so an archived one leaves
-the archive and lists of the sessions show it again; one merely looked
-at stays archived.  Return non-nil when the session left the archive."
+the archive along with any archived ancestors hiding it.  Independently
+archived siblings stay archived.  One merely looked at stays archived.
+Return non-nil when archive choices changed."
   (let ((session (list :agent agent :id id)))
-    (when (and id (lispm-agents-archived-p session))
-      (lispm-agents--set-archived session nil)
+    (when-let* ((id)
+                (keys (lispm-agents--archived-ancestors session)))
+      (lispm-agents--save-archived
+       (seq-difference (lispm-agents--archived-keys) keys #'equal))
       (run-hooks 'lispm-agents-sessions-changed-hook)
       t)))
 

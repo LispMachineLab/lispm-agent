@@ -120,6 +120,42 @@
       (should (cdr (lispm-session-tools-test--call "session_search" '((limit . 0)) t)))
       (should (cdr (lispm-session-tools-test--call "session_search" '((since . "yesterday")) t))))))
 
+(ert-deftest lispm-session-tools-test-inherited-archives-before-filters ()
+  "Search and direct read inherit archives from older, filtered ancestors."
+  (lispm-session-tools-test-env
+    (let ((lispm-agents--session-parents nil)
+          (lispm-agents--effective-archive nil)
+          (lispm-agents--archived '("lispm:parent")))
+      (let ((parent (lispm-session-tools-test--native "parent" (expand-file-name "other" tmp) "Unmatched"))
+            (child (lispm-session-tools-test--native "child" project "Unmatched"))
+            (grandchild (lispm-session-tools-test--native "grandchild" project "Unique descendant")))
+        (dolist (entry `((,child . "parent") (,grandchild . "child")))
+          (with-temp-buffer
+            (insert (format "#+lispm_parent: %s\n" (cdr entry)))
+            (insert-file-contents (car entry))
+            (write-region (point-min) (point-max) (car entry) nil 'silent)))
+        (set-file-times parent (seconds-to-time 100))
+        (set-file-times child (seconds-to-time 200))
+        (set-file-times grandchild (seconds-to-time 300))
+        (let* ((result (lispm-session-tools-test--call
+                        "session_search" `((provider . "lispm") (query . "Unique descendant")
+                                           (project . ,project) (limit . 1))))
+               (rows (alist-get 'sessions result)))
+          (should (= (length rows) 1))
+          (should (equal (alist-get 'id (car rows)) "grandchild"))
+          (should (eq (alist-get 'archived (car rows)) t)))
+        (let* ((result (lispm-session-tools-test--call
+                        "session_read" '((provider . "lispm") (id . "grandchild"))))
+               (row (car (alist-get 'sessions result))))
+          (should (eq (alist-get 'archived row) t)))
+        (let* ((lispm-session-tools-scan-limit 1)
+               (result (lispm-session-tools-test--call
+                        "session_read" '((provider . "lispm") (id . "grandchild")))))
+          (should (= (alist-get 'scanned_files result) 1))
+          (should (eq (alist-get 'scan_truncated result) t)))
+        (should-not lispm-agents--session-parents)
+        (should-not (file-exists-p lispm-agents-state-file))))))
+
 (ert-deftest lispm-session-tools-test-codex-metadata-identity ()
   (lispm-session-tools-test-env
     (let* ((old (lispm-session-tools-test--codex "shared-id" project))

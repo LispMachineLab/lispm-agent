@@ -323,6 +323,20 @@ time.  ID selects one session; without it this is a bounded search."
          (scanned 0) (skipped 0) (matched 0) (tail-only 0) (invalid 0) results found)
     (cl-labels
         ((finish ()
+           ;; Resolve ancestry from every scanned record, before query and
+           ;; result limits.  Keep this read-only even for corrupt state files.
+           (let ((lispm-agents--archived (car archive))
+                 (lispm-agents--session-parents lispm-agents--session-parents)
+                 (lispm-agents--effective-archive nil))
+             (lispm-agents--index-session-parents (hash-table-values seen) t)
+             (dolist (public results)
+               (let ((record (gethash (format "%s:%s" (alist-get 'provider public)
+                                              (alist-get 'id public)) seen)))
+                 (setf (alist-get 'archived public)
+                       (cond ((plist-get record :archived-file) t)
+                             ((not (cdr archive)) :null)
+                             ((lispm-agents-archived-p record) t)
+                             (t :false))))))
            (if (and id (not found))
                (funcall done (format "No readable %s session with id %s in the bounded scan (%d files; %d errors)."
                                      provider id scanned (length errors)) t)
@@ -347,7 +361,7 @@ time.  ID selects one session; without it this is a bounded search."
            (cond
             ((and call (or (not (eq call (gethash call-id (lispm-agent-pending agent))))
                            (and buffer (not (buffer-live-p buffer))))) nil)
-            ((or (null files) (and id found)) (finish))
+            ((null files) (finish))
             (t
              (let ((entry (pop files)))
                (cl-incf scanned)
@@ -356,7 +370,7 @@ time.  ID selects one session; without it this is a bounded search."
                                           (progn (cl-incf skipped) nil)))
                                (key (lispm-agents--session-key record))
                                ((not (gethash key seen))))
-                     (puthash key t seen)
+                     (puthash key record seen)
                      (when (and (or (not id) (equal id (plist-get record :id)))
                                 (or (not since) (>= (plist-get record :time) since))
                                 (or (not project)

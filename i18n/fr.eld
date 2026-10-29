@@ -434,6 +434,7 @@
   ("%s sessions unavailable: %s" . "Sessions %s indisponibles : %s")
   ("%-m/%-d/%y" . "%d/%m/%y")
   ("Working directory no longer exists: %s" . "Le répertoire de travail n'existe plus : %s")
+  ("This session is archived with its parent; unarchive the parent first" . "Cette session est archivée avec sa session parente ; désarchivez d’abord la session parente")
   ("Unknown agent session: %s" . "Session d'agent inconnue : %s")
   ("Model must not be empty" . "Le modèle ne peut pas être vide")
   ("This session cannot be resumed with a different model" . "Cette session ne peut pas être reprise avec un autre modèle")

@@ -434,6 +434,7 @@
   ("%s sessions unavailable: %s" . "無法取得 %s 工作階段：%s")
   ("%-m/%-d/%y" . "%Y/%-m/%-d")
   ("Working directory no longer exists: %s" . "工作目錄已不存在：%s")
+  ("This session is archived with its parent; unarchive the parent first" . "此工作階段隨父工作階段封存；請先取消父工作階段的封存")
   ("Unknown agent session: %s" . "未知的代理工作階段：%s")
   ("Model must not be empty" . "模型不可為空白")
   ("This session cannot be resumed with a different model" . "此工作階段無法使用其他模型繼續")

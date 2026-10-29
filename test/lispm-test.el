@@ -11710,6 +11710,7 @@ was asked takes its place."
 (require 'lispm-roster-event-test)
 (require 'lispm-agents-session-metadata-test)
 (require 'lispm-agents-session-order-test)
+(require 'lispm-agents-archive-tree-test)
 (require 'lispm-native-session-order-test)
 (require 'lispm-terminal-session-order-test)
 
