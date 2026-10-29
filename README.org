@@ -183,7 +183,7 @@ terminal its own way, as in a frame of its own, sets ~lispm-terminal-enter-funct
 | ~read~ ~memory~ ~comm~ ~lisp~ | auto    | reading, memory and tasks, other agents, ~run_lisp~ |
 | ~write~                      | ask     | changing files and buffers (always asks outside the root) |
 | ~shell~                      | ask     | ~run_shell~ (a command that only reads, such as ~ls~ or ~git status~, is ~read~) |
-| ~exec~                       | ask     | ~eval_elisp~, ~write_skill~                |
+| ~exec~                       | ask     | ~eval_elisp~, ~run_elisp~, ~write_skill~   |
 | ~web~ ~mcp~                  | ask     | ~web_search~, ~web_fetch~, MCP tools      |
 
 ~lispm-default-policy~ holds the defaults; a role's or agent's ~:policy~ overrides them.  A shell
@@ -350,6 +350,19 @@ every option.
   is fuzzy: a word may be part of a longer one, or misspelt.
 - ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
   the agent's tools are functions, each call going through the policy as if the model made it.
+- ~run_elisp~ asks [[https://github.com/LispMachineLab/lispm-kernel][LispM Kernel]] to start a fresh batch Emacs for standalone file,
+  JSON/JSONL and text processing or computation.  The worker returns printed output and its
+  last value; it has no live editor buffers or agent tools.  Kernel stops it on timeout or
+  when its turn is aborted or session closed.  Enable Kernel in LispM Desktop, or load
+  ~lispm-kernel-exec~ and configure ~lispm-kernel-exec-runtime-function~ to return a running
+  kernel with the ~exec~ job.  Without it, the call fails; there is no local fallback.
+  This is process isolation, not a filesystem sandbox, and calls use the ~exec~ policy.
+- Agents prefer dedicated tools and ~run_elisp~ for standalone processing.  ~run_lisp~ and
+  ~eval_elisp~ still execute in the user's Emacs and should do short work on live state.
+  Shell commands serve external CLIs, builds, tests, project runtimes and remote work;
+  an explicit choice of language or tool takes precedence.
+  New sessions and handovers take the current instructions and tool descriptions; existing
+  sessions keep the system prompt they started with.
 - Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
   ~xref_definitions~, ~xref_references~ and ~flymake_diagnostics~ for any language Emacs supports.
 - ~apropos~, ~describe_symbol~ and ~read_info~ let agents learn Emacs itself.

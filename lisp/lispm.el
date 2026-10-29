@@ -93,6 +93,7 @@
 (require 'lispm-transcript)
 (require 'lispm-api)
 (require 'lispm-tools)
+(require 'lispm-elisp)
 (require 'lispm-edits)
 (require 'lispm-memory)
 (require 'lispm-inbox)

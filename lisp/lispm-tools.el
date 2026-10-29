@@ -2332,8 +2332,11 @@ nothing to send."
 (lispm-deftool run_shell
     ((command string "Shell command, run in your root directory.")
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
-  "Run a shell command and return its output and exit status.  The
-output also streams into a buffer the user can watch.  If your root is
+  "Run a shell command and return its output and exit status.  Use this
+for external CLIs, builds, tests, project runtimes and commands that
+must run remotely.  For standalone local file, JSON/JSONL or text processing,
+prefer LispM's dedicated tools or run_elisp, whose worker LispM Kernel starts.
+The output also streams into a buffer the user can watch.  If your root is
 remote, the command runs on its machine.  The user may have the
 command run in a sandbox: its result then says what the sandbox
 allows."
@@ -2632,10 +2635,13 @@ Past `lispm-tools--backtrace-frames' of them, \"...\" stands for the rest."
     ((code string "One or more Emacs Lisp forms, evaluated in order with lexical binding."))
   "Evaluate Emacs Lisp in the running Emacs and return the last value,
 plus anything printed.  This reaches all of Emacs: buffers, windows,
-processes, the network, org, magit, any installed package.  Find
-functions with apropos, and the skills of this system's parts and apps
-with search_tools; learn functions with describe_symbol, and from the
-manuals with read_info, which search_tools finds.
+processes, the network, org, magit, any installed package.  Use this when
+you need the live editor; keep its work short because it can block the UI.
+Use run_elisp for standalone file/JSON processing or heavy computation in
+a separate process launched by LispM Kernel. A timer or lispm-async does
+not offload computation. Find functions with apropos, and the skills of this
+system's parts and apps with search_tools; learn functions with
+describe_symbol, and from the manuals with read_info, which search_tools finds.
 To wait for something asynchronous (a process, a page loading, a
 timer), end with (lispm-async (lambda (resolve) ...)) and call
 \(funcall resolve VALUE) once the value is there.  An error comes back

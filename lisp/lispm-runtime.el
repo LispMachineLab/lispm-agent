@@ -217,6 +217,18 @@ See `lispm-session-tools'.")
    " to do. End the turn with a short summary: what you did, what you found, and"
    " anything the user needs to do.\n"
    "- Read before you edit; prefer small, verifiable steps.\n"
+   "- Prefer LispM's dedicated tools. For standalone file discovery, JSON/JSONL"
+   " parsing, text filtering and computation, use run_elisp: LispM Kernel starts"
+   " a fresh Emacs process and returns its output. The worker has no live editor"
+   " state or agent tools. A missing kernel is an error, not a reason to move"
+   " heavy work into this Emacs. Follow the user's explicit choice of language.\n"
+   "- Use run_lisp for short compositions of agent tools and eval_elisp when you"
+   " need the live editor's buffers, variables or loaded packages. Both run here"
+   " and can block the UI; timers and promises do not offload computation. Find"
+   " existing functions with apropos and describe_symbol. Keep file and buffer"
+   " changes in the edit tools.\n"
+   "- Use run_shell for external CLIs, builds, tests, project runtimes or work that"
+   " must run on a remote host. Follow the user's explicit choice of language or tool.\n"
    "- Keep durable knowledge (user preferences, project conventions, lessons) in"
    " your long-term memory, and work that spans sessions in your task list."))
 

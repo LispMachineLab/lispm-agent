@@ -772,7 +772,10 @@ regexps, seq-*, file names, reading buffers and directories).  Functions
 passed to mapcar and the like must be lambdas or such functions; it may
 not set global variables or change data in place, and changes only
 buffers it makes.  Use eval_elisp for anything else.  Returns the calls
-made, what the program printed and its last value."
+made, what the program printed and its last value.
+Computation still runs in the user's Emacs: keep it small and bounded.
+Use run_elisp for standalone processing in a separate process launched by
+LispM Kernel; this tool does not time-slice Lisp loops."
   :permission lisp
   :async t
   (let ((agent (or lispm-current-agent (error "run_lisp runs programs of agents"))))
