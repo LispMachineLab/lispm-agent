@@ -31,6 +31,8 @@
   ("Do you want to evaluate this code from %s?" . "Voulez-vous évaluer ce code de %s ?")
   ("Do you want to evaluate this code?" . "Voulez-vous évaluer ce code ?")
   ("It may load the files beside it: %s." . "Ce code peut charger les fichiers situés à côté : %s.")
+  ("This code changes buffers or files; it shows no diff, as the edit tools would." . "Ce code modifie des tampons ou des fichiers ; il ne montre aucun diff, comme le feraient les outils d'édition.")
+  ("It names %s." . "Il nomme %s.")
   ("Bash command" . "Commande Bash")
   ("Yes, and don't ask again for this exact command" . "Oui, et ne plus demander pour cette commande précise")
   ("Evaluate Emacs Lisp" . "Évaluer de l'Emacs Lisp")

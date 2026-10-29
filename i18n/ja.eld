@@ -31,6 +31,8 @@
   ("Do you want to evaluate this code from %s?" . "%sにあるこのコードを評価しますか？")
   ("Do you want to evaluate this code?" . "このコードを評価しますか？")
   ("It may load the files beside it: %s." . "同じ場所にあるファイルを読み込むことがあります：%s。")
+  ("This code changes buffers or files; it shows no diff, as the edit tools would." . "このコードはバッファやファイルを変更します。編集ツールなら表示する差分を、このコードは表示しません。")
+  ("It names %s." . "%sに言及しています。")
   ("Bash command" . "Bashコマンド")
   ("Yes, and don't ask again for this exact command" . "はい、今後まったく同じコマンドは確認しない")
   ("Evaluate Emacs Lisp" . "Emacs Lispの評価")

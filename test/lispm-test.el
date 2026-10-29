@@ -1311,6 +1311,43 @@ not one, has every tool ask."
 
 ;;;; Emacs itself, and skills
 
+(ert-deftest lispm-test-code-writes ()
+  "Code that names a function changing buffers or files is seen to write,
+with the files it names; a temporary buffer's text does not count, and
+code that does not read is searched for the names."
+  (lispm-test-env
+    (should-not (lispm-tools-code-writes-p "(+ 1 2)"))
+    (should-not (lispm-tools-code-writes-p "(with-temp-buffer (insert \"a\") (buffer-string))"))
+    (should-not (lispm-tools-code-writes-p "(with-temp-buffer (insert-file-contents \"a.txt\") (buffer-string))"))
+    (should-not (lispm-tools-code-writes-note "(+ 1 2)"))
+    ;; The live case: a file rewritten in its buffer and saved.
+    (let ((code (concat "(with-current-buffer (find-file-noselect \"lisp/x.el\")\n"
+                        "  (goto-char (point-min)) (delete-region (point) (+ (point) 80))\n"
+                        "  (insert \"new\") (save-buffer))")))
+      (should (equal (lispm-tools-code-writes-p code) '(delete-region insert save-buffer)))
+      (should (equal (lispm-tools-code-files code) '("lisp/x.el")))
+      (should (equal (lispm-tools-code-writes-note code)
+                     "This code changes buffers or files; it shows no diff, as the edit tools would. It names lisp/x.el.")))
+    ;; Saving from a temporary buffer writes a file; a name passed as a
+    ;; function writes as a call does.
+    (should (equal (lispm-tools-code-writes-p "(with-temp-buffer (insert \"a\") (write-region nil nil \"~/o.txt\"))")
+                   '(write-region)))
+    (should (equal (lispm-tools-code-writes-p "(mapc #'delete-file (directory-files \"/tmp/x\" t \"\\\\.log$\"))")
+                   '(delete-file)))
+    ;; Strings that are not file names: with spaces, URLs, regexps.
+    (should-not (lispm-tools-code-files "(message \"hello world\" \"http://x/y\" \"\\\\.el$\")"))
+    (should (equal (lispm-tools-code-files "(list \"a.b\" \"~/.emacs.d\")") '("a.b" "~/.emacs.d")))
+    ;; Circular syntax reads as a circle: walked once, the writer found once.
+    (should (equal (lispm-tools-code-writes-p "'#1=(insert . #1#)") '(insert)))
+    (should (equal (lispm-tools-code-writes-p "(progn #1=(save-buffer \"a.el\" . #1#) (insert \"x\"))")
+                   '(save-buffer insert)))
+    (should (equal (lispm-tools-code-files "'(delete-file #1=(\"a/b\" . #1#))") '("a/b")))
+    (should (equal (lispm-tools-code-writes-p "'#1=[delete-region #1#]") '(delete-region)))
+    ;; Unbalanced code: the names as words.
+    (should (equal (lispm-tools-code-writes-p "(progn (save-buffer") '(save-buffer)))
+    (should (equal (lispm-tools-code-writes-note "(progn (save-buffer")
+                   "This code changes buffers or files; it shows no diff, as the edit tools would."))))
+
 (ert-deftest lispm-test-eval-async ()
   "eval_elisp waits for a value promised with lispm-async."
   (lispm-test-env
@@ -7936,6 +7973,42 @@ not what the reply defines itself."
       ;; A standing agent outlives its chat.
       (kill-buffer chat)
       (should (lispm-get-agent 'tester t)))))
+
+(ert-deftest lispm-test-chat-eval-writes-note ()
+  "An eval_elisp call whose code changes buffers or files says so in its
+approval box and in the transcript's preview; one that computes does not."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (chat (lispm-chat agent))
+           (code (concat "(with-current-buffer (find-file-noselect \"lisp/x.el\")\n"
+                         "  (erase-buffer) (insert \"new\") (save-buffer))")))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "eval_elisp" `((why . "w") (code . ,code))))
+               ,(lispm-test--msg "tool_use" (lispm-test--tool "t2" "eval_elisp" '((why . "w") (code . "(+ 1 2)"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "ok")))))
+      (lispm-test--chat-type chat "go")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "│ Evaluate Emacs Lisp +│\n│ +│\n│   (with-current-buffer" text))
+        (should (string-match-p "This code changes buffers or files" text))
+        (should (string-match-p "Do you want to evaluate this\\?" text)))
+      (should (string-match-p "\\*\\*\\* Preview\n#\\+begin_src diff\nThis code changes buffers or files; it shows no diff, as the edit tools would\\. It names lisp/x\\.el\\."
+                              (lispm-test--transcript agent)))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "use edit_file")))
+        (lispm-test--chat-key chat "3"))
+      (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state agent) 'waiting)
+                                                (equal (car (lispm-waiting-calls agent)) "t2")))))
+      (let ((text (lispm-test--chat-text chat)))
+        (should (string-match-p "│   (\\+ 1 2)" text))
+        (should-not (string-match-p "This code changes buffers or files\\|\\*\\*\\* Preview" text)))
+      (should-not (string-match-p "\\*\\*\\* Preview\n#\\+begin_src diff\n#\\+end_src" (lispm-test--transcript agent)))
+      (lispm-test--chat-key chat "1")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (file-exists-p (expand-file-name "lisp/x.el" project)))
+      (should (string-match-p "⏺ Eval(.*)\n  ⎿  The user denied this call\\. Their reason: use edit_file"
+                              (lispm-test--chat-text chat)))
+      (should (string-match-p "=> 3" (lispm-test--chat-text chat))))))
 
 (ert-deftest lispm-test-chat-busy ()
   "While the agent works the chat shows it, queues what you send, and interrupts."

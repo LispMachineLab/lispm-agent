@@ -513,7 +513,10 @@ drawn whole, a long reply took longer at every step."
      :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact command"))
     ("eval_elisp" :shown "Eval" :ask code :title ,(lispm-tr-noop "Evaluate Emacs Lisp")
      :question ,(lispm-tr-noop "Do you want to evaluate this?")
-     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code"))
+     :exact ,(lispm-tr-noop "Yes, and don't ask again for this exact code")
+     ;; Code that writes shows no diff, as the edit tools would: say so.
+     :note ,(lambda (input _preview)
+              (lispm-tools-code-writes-note (or (alist-get 'code input) ""))))
     ("run_lisp" :shown "Lisp" :ask code :title ,(lispm-tr-noop "Run a Lisp program")
      :question ,(lispm-tr-noop "Do you want to run this?"))
     ("search_files" :shown ,(lispm-tr-noop "Search" "tool") :result search)
