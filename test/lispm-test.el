@@ -2571,7 +2571,7 @@ The command stays exact, and stricter checks still ask."
 
 (ert-deftest lispm-test-allowance-call-key-conservative ()
   "Exact approvals preserve duplicate arguments, nested values and code.
-Only run_shell treats timeout as an execution limit rather than input."
+Only program-running tools treat timeout as an execution limit rather than input."
   (lispm-test-env
     (let* ((agent (lispm-make-agent 'assistant project))
            (tool (lispm-tool--create :name "custom_exec" :permission 'exec))

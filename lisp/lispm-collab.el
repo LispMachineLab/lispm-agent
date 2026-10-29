@@ -551,7 +551,7 @@ reply (return_value), which follows it as JSON."
     ((role string "The role to start the agent from (list_agents, which search_tools finds, shows the roles).")
      (request string "Its first task, self-contained: it cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]].")
      (project string "Directory of the project it works in, yours or another; default: yours." :optional t))
-  "Start an agent of a role that works on its own, in your project or
+  "Start a native LispM agent of a role that works on its own, in your project or
 another, and hand it a first request.  Nobody waits for its reply, and
 it stays once it has replied, for the user and the other agents to
 talk to: for work that goes on apart from yours.  If you need to hear
