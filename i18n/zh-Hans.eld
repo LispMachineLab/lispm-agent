@@ -268,6 +268,7 @@
   ("%s is idle" . "%s 处于空闲状态")
   ("λ %s wants to run %s: answer in %s" . "λ %s 想要运行 %s：请在 %s 中回答")
   ("λ %s wants to run %s: review it with C-c C-y in %s" . "λ %s 想要运行 %s：请在 %s 中用 C-c C-y 审阅")
+  ("Approve these calls for %s: %s? " . "批准 %s 的这些调用：%s？ ")
   ("No call awaits approval" . "没有等待批准的调用")
   ("%s wants to run %s" . "%s 想要运行 %s")
   ("%s (outside LispM)" . "%s（LispM 之外）")

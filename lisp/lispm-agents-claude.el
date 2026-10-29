@@ -43,6 +43,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'parse-time)
 (require 'lispm-agents)
 (require 'lispm-agents-ide)
 (require 'lispm-agents-mcp)
@@ -247,6 +248,55 @@ else its transcript's end is read."
       (_ (when-let* ((file (lispm-agents-claude--transcript terminal)))
            (lispm-agents-claude-turn-ended-p (lispm-agents-read-json-tail file)))))))
 
+(defun lispm-agents-claude--work (objects)
+  "Return work recorded in the latest turn of Claude tail OBJECTS.
+Only calls whose turn's user message is in the bounded tail are known.
+The :turn-ended flag also serves mailbox settlement.  Calls
+have :id, :name, :input-summary and :status: `running' until a result
+is recorded, then `done' or `error'.  This does not infer permission
+state or files changed from tool names or arguments."
+  (let (turn turn-time seen calls)
+    (dolist (object objects)
+      (let* ((type (plist-get object :type))
+             (message (plist-get object :message))
+             (content (plist-get message :content)))
+        (when (and (equal type "user") (not (plist-get object :isMeta))
+                   (lispm-agents-human-text-p (lispm-agents-content-text content)))
+          (setq turn (plist-get object :uuid)
+                turn-time (when-let* ((stamp (plist-get object :timestamp)))
+                            (ignore-errors (float-time (parse-iso8601-time-string stamp))))
+                seen t calls nil))
+        (when (and seen (listp content))
+          (dolist (part content)
+            (pcase (plist-get part :type)
+              ("tool_use"
+               (when (equal type "assistant")
+                 (push (list :id (plist-get part :id) :name (plist-get part :name)
+                             :input-summary (lispm-agents-work-input-summary (plist-get part :input))
+                             :status 'running)
+                       calls)))
+              ("tool_result"
+               (when-let* ((call (seq-find (lambda (call)
+                                            (equal (plist-get call :id)
+                                                   (plist-get part :tool_use_id)))
+                                          calls)))
+                 (setf (plist-get call :status) (if (plist-get part :is_error) 'error 'done)))))))))
+    (list :turn turn :turn-time turn-time
+          :turn-ended (and (lispm-agents-claude-turn-ended-p objects) t)
+          :pending-calls (seq-filter (lambda (call) (eq (plist-get call :status) 'running)) calls)
+          :recent-calls (seq-take (seq-remove (lambda (call)
+                                              (eq (plist-get call :status) 'running))
+                                            calls)
+                                  20)
+          :files nil)))
+
+(defun lispm-agents-claude--work-details (terminal)
+  "Return the work known from the bounded transcript tail of TERMINAL.
+The tail is cached by file size and modification time.  A turn boundary
+outside it, permission state and files touched are unknown."
+  (when-let* ((file (lispm-agents-claude--transcript terminal)))
+    (lispm-agents-cached-work file #'lispm-agents-claude--work)))
+
 ;;;; LispM's tools, over MCP
 
 (cl-defstruct (lispm-agents-claude-mcp (:include lispm-agents-mcp)
@@ -360,7 +410,8 @@ the id it is given, so its terminal knows its session from the start."
    :model-arguments (lambda (model) (list "--model" model))
    :arguments #'lispm-agents-claude--arguments
    :context #'lispm-agents-claude--context
-   :ready #'lispm-agents-claude--ready-p))
+   :ready #'lispm-agents-claude--ready-p
+   :work-details #'lispm-agents-claude--work-details))
 
 (provide 'lispm-agents-claude)
 ;;; lispm-agents-claude.el ends here

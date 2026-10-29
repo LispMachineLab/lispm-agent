@@ -90,6 +90,8 @@
 (require 'lispm-tools)
 (require 'lispm-runtime)
 
+(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
+
 ;;;; Peers: agents of other programs
 
 (cl-defstruct (lispm-peer (:constructor lispm-peer-create)
@@ -120,9 +122,15 @@ whose names are those of no agent of LispM's.")
     (seq-find (lambda (peer) (equal (lispm-peer-name peer) name)) (lispm-peers))))
 
 (defvar lispm-collab--requests nil
-  "Requests asked of peers, awaiting their reply: (ID PEER CALLBACK).
+  "Requests asked of peers, awaiting their reply: (ID PEER CALLBACK METADATA).
 PEER is the name of the peer asked; CALLBACK takes its reply and, when
-it ended without one, non-nil.")
+it ended without one, non-nil.  METADATA holds :from, :to and :queued.")
+
+(defvar lispm-collab-delivery-metadata nil
+  "The message being given to a peer, as a plist, or nil.
+Bound around a peer's delivery function, without changing its calling
+convention.  It holds :id, :from, :to, :queued, :text and, for a request
+or reply, :reply-to and :request-id.  A delivery queue may retain it.")
 
 (defvar lispm-collab--request-count 0
   "Requests asked by or of peers since Emacs started.")
@@ -134,20 +142,31 @@ it ended without one, non-nil.")
 (defun lispm-tell-peer (peer text from)
   "Give PEER the message TEXT from FROM, the name of an agent or a peer.
 Return non-nil if PEER was given it at once, rather than once free."
-  (funcall (lispm-peer-deliver peer)
+  (let ((lispm-collab-delivery-metadata
+         (list :id (lispm-inbox-new-id) :from from :to (lispm-peer-name peer)
+               :queued (float-time) :text text)))
+    (funcall (lispm-peer-deliver peer)
            (if (lispm-peer-answer peer)
                (format "[Message from %s]\n%s" from text)
              (format "[Message from %s]\n%s\n\n(Answer, if need be, with your send_message tool, to %s.)"
-                     from text from))))
+                     from text from)))))
 
 (cl-defun lispm-ask-peer (peer request from callback &key id)
   "Ask PEER REQUEST on behalf of FROM, a name; return the request's id.
 CALLBACK is called with PEER's reply, or with a text saying it ended
 without one and non-nil.  ID is the request's id, a new one by default.
 A peer with no tools to reply with answers with its final reply."
-  (let ((id (or id (lispm-collab-new-request-id)))
-        (answer (lispm-peer-answer peer)))
-    (push (list id (lispm-peer-name peer) callback) lispm-collab--requests)
+  (let* ((id (or id (lispm-collab-new-request-id)))
+         (answer (lispm-peer-answer peer))
+         (lispm-collab-delivery-metadata
+          (list :id (lispm-inbox-new-id) :from from :to (lispm-peer-name peer)
+                :reply-to id :request-id id :queued (float-time) :text request)))
+    (push (list id (lispm-peer-name peer) callback
+                (list :from from :to (lispm-peer-name peer)
+                      :queued (plist-get lispm-collab-delivery-metadata :queued)))
+          lispm-collab--requests)
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify nil '(waits)))
     (condition-case err
         (if answer
             (funcall answer
@@ -160,6 +179,8 @@ A peer with no tools to reply with answers with its final reply."
                    (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: give it with your reply tool, request %s.)"
                            id from request from id)))
       (error (setq lispm-collab--requests (cl-remove id lispm-collab--requests :key #'car :test #'equal))
+             (when (fboundp 'lispm-agents-roster-notify)
+               (lispm-agents-roster-notify nil '(waits)))
              (signal (car err) (cdr err))))
     id))
 
@@ -170,12 +191,20 @@ An error if no request ID awaits PEER's reply."
     (unless (and entry (equal (nth 1 entry) (lispm-peer-name peer)))
       (error "No request %s awaits your reply" id))
     (setq lispm-collab--requests (delq entry lispm-collab--requests))
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify
+       nil '(waits) (list :type 'request-settled :request-id id
+                         :from (lispm-peer-name peer) :to (plist-get (nth 3 entry) :from))))
     (funcall (nth 2 entry) text)))
 
 (defun lispm-collab-peer-ended (name)
   "Settle the requests asked of the peer NAME, which ended without replying."
   (dolist (entry (seq-filter (lambda (entry) (equal (nth 1 entry) name)) lispm-collab--requests))
     (setq lispm-collab--requests (delq entry lispm-collab--requests))
+    (when (fboundp 'lispm-agents-roster-notify)
+      (lispm-agents-roster-notify
+       nil '(waits) (list :type 'request-settled :request-id (car entry)
+                         :from name :to (plist-get (nth 3 entry) :from) :ended t)))
     (with-demoted-errors "lispm request callback: %S"
       (funcall (nth 2 entry) (format "%s ended without replying." name) t))))
 
@@ -223,8 +252,11 @@ TARGET is an agent, a role or a peer, by name.  The reply comes to PEER
 as a message: [Reply from X to request ID]."
   (let* ((id (lispm-collab-new-request-id))
          (answer (lambda (from reply)
-                   (funcall (lispm-peer-deliver peer)
-                            (format "[Reply from %s to request %s]\n%s" from id reply)))))
+                   (let ((lispm-collab-delivery-metadata
+                          (list :id (lispm-inbox-new-id) :from from :to (lispm-peer-name peer)
+                                :reply-to id :request-id id :queued (float-time) :text reply)))
+                     (funcall (lispm-peer-deliver peer)
+                              (format "[Reply from %s to request %s]\n%s" from id reply))))))
     (cond
      ((equal (format "%s" target) (lispm-peer-name peer)) (error "That is you"))
      ((and (not (lispm-get-agent target t)) (lispm-get-peer target))
@@ -233,7 +265,8 @@ as a message: [Reply from X to request ID]."
                       :id id))
      (t (lispm-delegate caller target request
                         (lambda (agent reply)
-                          (funcall answer (symbol-name (lispm-agent-name agent)) reply)))))
+                          (funcall answer (symbol-name (lispm-agent-name agent)) reply))
+                        :request-id id)))
     id))
 
 (defun lispm-collab--peer-lines (&optional self)
@@ -287,7 +320,15 @@ conversation where CALLER works it then designates."
                         (seq-some #'reaches (lispm-agent-waiting-on agent))))))
       (reaches to))))
 
-(cl-defun lispm-delegate (caller agent request callback &key root call)
+(defun lispm-collab--wait-changed (caller target &optional event)
+  "Report the wait between CALLER and TARGET changing, with optional EVENT.
+Both endpoints have data to refresh: CALLER's outgoing wait and
+TARGET's reverse wait, as well as their request ids."
+  (when (fboundp 'lispm-agents-roster-notify)
+    (lispm-agents-roster-notify caller '(waits-on request-ids) event)
+    (lispm-agents-roster-notify target '(waited-on-by request-ids))))
+
+(cl-defun lispm-delegate (caller agent request callback &key root call request-id)
   "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
 AGENT is a running agent or its name, or a role or the name of one no
 running agent has: a helper of that role then starts in ROOT (default:
@@ -296,6 +337,8 @@ replied.  CALLBACK gets the agent that replied and its final reply.
 CALL, the id of CALLER's call whose result the reply is, if it is the
 reply as `lispm-collab--replied' words it, makes the delegation outlive
 Emacs: should Emacs stop before the reply, it still settles the call.
+REQUEST-ID identifies a peer's request for mailbox and wait observers;
+it does not replace CALL or change the durable reply-to route.
 Return the agent asked."
   (let* ((role (cond ((lispm-role-p agent) agent)
                      ((and (stringp agent) (not (lispm-get-agent agent t))
@@ -310,14 +353,22 @@ Return the agent asked."
       (lispm-set-ceiling helper (lispm-policy caller))
       (lispm-set-parent helper (lispm-agent-id caller)))
     (push target (lispm-agent-waiting-on caller))
+    (lispm-collab--wait-changed caller target)
     (when call
       (lispm-collab--record-asked caller call target))
     (lispm-tell target request
                 :from (lispm-agent-name caller)
+                :request-id request-id
                 :reply-to (and call (concat (lispm-agent-id caller) " " call (if helper " retire" "")))
                 :callback (lambda (reply)
                             (setf (lispm-agent-waiting-on caller)
                                   (cl-remove target (lispm-agent-waiting-on caller) :count 1))
+                            (lispm-collab--wait-changed
+                             caller target
+                             (when request-id
+                               (list :type 'request-settled :request-id request-id
+                                     :from (lispm-agent-name target)
+                                     :to (lispm-agent-name caller))))
                             (when helper
                               (run-at-time 0 nil #'lispm-collab--retire helper))
                             (funcall callback target reply)))
@@ -387,6 +438,7 @@ since it asked, and AGENT took the request up again."
   (when-let* ((caller (lispm-resume-session caller-id)))
     (setf (lispm-agent-waiting-on caller)
           (cl-remove agent (lispm-agent-waiting-on caller) :count 1))
+    (lispm-collab--wait-changed caller agent)
     (when (eq (plist-get (gethash call (lispm-agent-pending caller)) :status) 'run)
       (lispm--call-finished caller call (lispm-collab--replied agent reply) nil nil))))
 
@@ -419,7 +471,9 @@ Emacs, and the call is recorded as interrupted."
   (when (eq (plist-get (gethash call (lispm-agent-pending caller)) :status) 'run)
     (let ((target (lispm-resume-session id)))
       (if (and target (lispm-collab--answering-p target caller call))
-          (push target (lispm-agent-waiting-on caller))
+          (progn
+            (push target (lispm-agent-waiting-on caller))
+            (lispm-collab--wait-changed caller target))
         (lispm--call-finished caller call lispm--interrupted-result t nil)))))
 
 (defun lispm-collab--take-up (caller call)

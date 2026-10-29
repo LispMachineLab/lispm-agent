@@ -11658,5 +11658,11 @@ was asked takes its place."
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
+(require 'lispm-roster-test)
+(require 'lispm-roster-details-test)
+(require 'lispm-roster-bridge-test)
+(require 'lispm-roster-runtime-test)
+(require 'lispm-roster-event-test)
+
 (provide 'lispm-test)
 ;;; lispm-test.el ends here

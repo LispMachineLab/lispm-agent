@@ -75,6 +75,7 @@
 (declare-function eat-make "eat" (name program &optional startfile &rest switches))
 (declare-function eat-term-send-string-as-yank "eat" (terminal args))
 (declare-function eat-term-send-string "eat" (terminal string))
+(declare-function lispm-agents-roster--collect "lispm-agents-roster" (subject fields event))
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
 (defvar lispm-agents--root-cache)
@@ -256,6 +257,10 @@ and these when they apply:
   :chats      directories whose sessions are chats, not project work
   :short-id    function of a session's id returning the short form that
                tells it from others; by default its first eight characters
+  :work-details function of a live buffer returning a lazy work plist
+                (:turn :pending-calls :recent-calls :files); calls have
+                :id, :name, :input-summary and :status.  Unknown fields
+                are nil.  Never called by `lispm-agents-roster'
 
 An agent run as a CLI in a terminal has these:
 
@@ -335,6 +340,28 @@ agent does.  A list of the agents shows them anew once Emacs is idle.")
   "Hook run once a session was shown, renamed, archived or deleted.
 A list of the sessions reads them anew and shows them at once, see
 `lispm-agents-reread-sessions-hook'.")
+
+(defvar lispm-agents-roster-change-functions nil
+  "Abnormal hook run with (KEYS FIELDS EVENT) after roster changes.
+KEYS are stable (KIND SESSION-ID) keys, including departed agents;
+FIELDS name changed record fields or lazy work, such as `calls' and
+`turn'.  EVENT is nil or a plist with :events,
+the ordered events collected together, each with a unique :sequence.
+Message events carry :id, :from, :to and :request-id when known.
+Changes in one command, timer or process output are collected by a
+single zero-delay timer, never an idle or repeating timer.  Observers
+read `lispm-agents-roster' again, or its lazy details for an inspector.")
+
+(defun lispm-agents-roster-notify (subject fields &optional event)
+  "Report changes to SUBJECT's FIELDS, with optional one-shot EVENT.
+SUBJECT is an agent, buffer, stable (KIND SESSION-ID) key, or nil when
+the affected agents must be found by comparing snapshots.  FIELDS is
+a list of symbols naming record fields; nil asks only for comparison.
+EVENT is a plist, as `lispm-agents-roster-change-functions' describes.
+This does nothing until the roster library and an observer are loaded."
+  (when (and lispm-agents-roster-change-functions
+             (fboundp 'lispm-agents-roster--collect))
+    (lispm-agents-roster--collect subject fields event)))
 
 (defun lispm-agents--changed ()
   "Forget what was worked out from the agents, and tell who shows them."
@@ -448,11 +475,16 @@ built in first, then the others in the order they were defined."
     props))
 
 (defun lispm-agents-emacs-buffer-agent (buffer)
-  "Return the in-Emacs agent whose session BUFFER holds, or nil."
-  (car (seq-find (lambda (entry)
-                   (when-let* ((buffer-p (plist-get (cdr entry) :buffer-p)))
-                     (funcall buffer-p buffer)))
-                 lispm-agents-defined)))
+  "Return the in-Emacs agent kind whose session BUFFER holds, or nil.
+LispM's own session buffers are recognised even without a host having
+registered session-list commands for the `lispm' kind."
+  (or (car (seq-find (lambda (entry)
+                      (when-let* ((buffer-p (plist-get (cdr entry) :buffer-p)))
+                        (funcall buffer-p buffer)))
+                    lispm-agents-defined))
+      (and (boundp 'lispm-session-agent)
+           (buffer-local-value 'lispm-session-agent buffer)
+           'lispm)))
 
 (defconst lispm-agents-transcript-head-bytes 65536
   "Bytes read from the start of a transcript to find its metadata and first prompt.")
@@ -561,6 +593,38 @@ nil; the session's :time is FILE's modification time."
                        (plist-put parsed :time time))))
         (puthash file (cons time session) lispm-agents--session-cache)
         session))))
+
+(defvar lispm-agents--work-cache (make-hash-table :test #'equal)
+  "Work details keyed by transcript file and parser, stamped by size and time.")
+
+(defun lispm-agents-cached-work (file parse)
+  "Return FILE's bounded work details, parsed by PARSE only when changed.
+PARSE takes `lispm-agents-read-json-tail' objects.  Both file size and
+modification time invalidate the cache.  This is for lazy inspectors,
+never for a roster redraw; an unreadable file has no known details.
+The cached source must not be changed; public snapshots copy it."
+  (when-let* ((attributes (ignore-errors (file-attributes file))))
+    (let* ((stamp (list (file-attribute-size attributes)
+                        (file-attribute-modification-time attributes)))
+           (key (list file parse))
+           (cached (gethash key lispm-agents--work-cache)))
+      (if (equal (car cached) stamp)
+          (cdr cached)
+        (let ((work (when-let* ((parsed (condition-case nil
+                                           (funcall parse (lispm-agents-read-json-tail file))
+                                         (error nil))))
+                      (plist-put parsed :time (float-time (file-attribute-modification-time attributes))))))
+          (puthash key (cons stamp work) lispm-agents--work-cache)
+          work)))))
+
+(defun lispm-agents-work-input-summary (input)
+  "Return a bounded, single-line summary of a call's INPUT, or nil."
+  (when input
+    (lispm-agents-one-line
+     (if (stringp input) input
+       (condition-case nil (json-serialize input)
+         (error (let ((print-length 20) (print-level 4)) (prin1-to-string input)))))
+     160)))
 
 (defun lispm-agents-file-sessions (files parse &optional finish)
   "Return the sessions recorded in transcript FILES, as PARSE finds them.
@@ -897,6 +961,10 @@ agent is alive, see `lispm-agents-alive-p', not running."
   "Id of the session this agent terminal runs, when known.")
 (put 'lispm-agents-buffer-session-id 'permanent-local t)
 
+(defvar-local lispm-agents-buffer-session nil
+  "Metadata last read for this terminal's session, without rereading files.")
+(put 'lispm-agents-buffer-session 'permanent-local t)
+
 (defvar-local lispm-agents-buffer-launched nil
   "Time, float seconds, this agent terminal was started.")
 (put 'lispm-agents-buffer-launched 'permanent-local t)
@@ -959,6 +1027,7 @@ same NAME is returned instead of restarted."
       ;; loses nothing a resume cannot restore: kill it without asking.
       (when-let* ((process (get-buffer-process buffer)))
         (set-process-query-on-exit-flag process nil))
+      (lispm-agents-roster-notify buffer '(agents))
       buffer)))
 
 (defun lispm-agents-buffer-label (buffer)
@@ -1007,7 +1076,9 @@ directory take the sessions in the order they began."
                                        (expand-file-name (plist-get session :cwd)))
                                       directory)))
                         candidates)))
-            (setq lispm-agents-buffer-session-id (plist-get session :id))
+            (setq lispm-agents-buffer-session-id (plist-get session :id)
+                  lispm-agents-buffer-session session)
+            (lispm-agents-roster-notify buffer '(agents key parent root))
             (push (plist-get session :id) claimed)))))))
 
 (defvar-local lispm-agents--claimed-at nil
@@ -1045,14 +1116,19 @@ Terminals first claim their sessions, see
 `lispm-agents-claim-sessions'.  A new session gains its real title
 once its first prompt is recorded, and a renamed session follows its new name."
   (lispm-agents-claim-sessions sessions)
-  (let ((titles (make-hash-table :test #'equal)))
+  (let ((known (make-hash-table :test #'equal)))
     (dolist (session sessions)
-      (puthash (plist-get session :id) (plist-get session :title) titles))
+      (puthash (list (plist-get session :agent) (plist-get session :id)) session known))
     (dolist (buffer (lispm-agents-live-buffers))
       (with-current-buffer buffer
-        (when-let* ((title (and lispm-agents-buffer-session-id
-                                (gethash lispm-agents-buffer-session-id titles))))
-          (setq lispm-agents-buffer-title title))))))
+        (when-let* ((session (and lispm-agents-buffer-session-id
+                                  (gethash (list (lispm-agents-of-buffer buffer)
+                                                 lispm-agents-buffer-session-id) known))))
+          (unless (equal session lispm-agents-buffer-session)
+            (setq lispm-agents-buffer-session session)
+            (lispm-agents-roster-notify buffer '(name parent root)))
+          (when-let* ((title (plist-get session :title)))
+            (setq lispm-agents-buffer-title title)))))))
 
 (defun lispm-agents-show (buffer)
   "Show the agent's BUFFER and select it, as `lispm-agents-show-function'
