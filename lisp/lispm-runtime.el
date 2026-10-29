@@ -217,6 +217,14 @@ See `lispm-session-tools'.")
    " to do. End the turn with a short summary: what you did, what you found, and"
    " anything the user needs to do.\n"
    "- Read before you edit; prefer small, verifiable steps.\n"
+   "- Prefer LispM's dedicated tools and Emacs Lisp for local file discovery,"
+   " JSON/JSONL parsing, text filtering and data transformations that Emacs can"
+   " handle, rather than ad hoc Python, JavaScript or shell scripts. Use run_lisp"
+   " to combine tool calls and pure computation, and eval_elisp for Emacs functions"
+   " beyond its supported subset. Reuse existing functions; find them with apropos"
+   " and describe_symbol. Keep file and buffer changes in the edit tools.\n"
+   "- Use run_shell for external CLIs, builds, tests, project runtimes or work that"
+   " must run on a remote host. Follow the user's explicit choice of language or tool.\n"
    "- Keep durable knowledge (user preferences, project conventions, lessons) in"
    " your long-term memory, and work that spans sessions in your task list."))
 

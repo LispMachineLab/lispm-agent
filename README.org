@@ -344,6 +344,11 @@ every option.
   is fuzzy: a word may be part of a longer one, or misspelt.
 - ~eval_elisp~ can do anything Emacs can, so it asks every time.  ~run_lisp~ runs Lisp in which
   the agent's tools are functions, each call going through the policy as if the model made it.
+- Agents are instructed to prefer LispM's tools and Emacs Lisp for local file, JSON/JSONL and
+  text processing.  Shell commands serve external CLIs, builds, tests, project runtimes and
+  work that must run remotely; an explicit choice of language or tool takes precedence.
+  New sessions and handovers take the current instructions and tool descriptions; existing
+  sessions keep the system prompt they started with.
 - Lisp is developed in the running image: ~edit_definition~, ~eval_definition~ and ~ert_run~, with
   ~xref_definitions~, ~xref_references~ and ~flymake_diagnostics~ for any language Emacs supports.
 - ~apropos~, ~describe_symbol~ and ~read_info~ let agents learn Emacs itself.
