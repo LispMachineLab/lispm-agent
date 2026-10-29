@@ -26,10 +26,10 @@
 ;;                 roles helpers can be started from;
 ;;   send_message  fire and forget: the text lands in the other agent's
 ;;                 inbox and becomes a "* Message from X" turn;
-;;   ask_agent     delegation: the caller's call stays pending (other
-;;                 agents and the user keep working) until the other
-;;                 agent's turn ends; its final reply is the result,
-;;                 with a value it returned (return_value), if any.
+;;   ask_agent     delegation: returns a request id immediately.  The
+;;                 other agent's final reply arrives as a new message,
+;;                 with a value it returned (return_value), if any;
+;;                 the caller can keep working and answer new input.
 ;;                 Asking a role rather than an agent starts a helper
 ;;                 of that role in the caller's project, which retires
 ;;                 once it has replied: a subagent.  A helper may do no
@@ -62,17 +62,18 @@
 ;; A delegation outlives Emacs.  The caller's call records whom it
 ;; asked (:ASKED:, their session), and the request, in the inbox file
 ;; until its turn ends, whom to reply to (its reply-to).  So when
-;; Emacs stops before the reply, opening either session again takes
-;; the delegation up: the one asked goes on with the request, or gets
-;; it, and its reply settles the call; a helper stays bounded by its
-;; caller, whose ceiling its session records.
+;; Emacs stops before the reply, resuming agents with pending inbox
+;; entries takes the delegation up: the one asked goes on with the request, or gets
+;; it, and its reply reaches the caller's inbox.  Older delegations
+;; and tools using `lispm-delegate' still settle the waiting call.
+;; A helper stays bounded by its caller, whose ceiling its session records.
 ;;
 ;; Shared state needs no locks: the event loop is single-threaded, and
 ;; edits are exact-text replacements, which fail instead of clobbering
 ;; when someone else changed the text first (optimistic concurrency).
-;; What does need care is waiting: ask_agent refuses a request that
-;; would make agents wait on each other in a cycle.  An agent that asks
-;; several in one response waits on all of them at once.
+;; Tools using `lispm-delegate' to wait refuse cycles.  Background
+;; requests do not create wait edges: either agent remains free to
+;; answer the other while its own request is outstanding.
 ;;
 ;; Agents of other programs work in the same Emacs too, as Claude Code
 ;; and Codex do in their terminals (lispm-agents-bridge.el): peers.  The
@@ -89,6 +90,7 @@
 (require 'lispm-core)
 (require 'lispm-tools)
 (require 'lispm-runtime)
+(require 'org-id)
 
 (declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
 
@@ -328,6 +330,21 @@ TARGET's reverse wait, as well as their request ids."
     (lispm-agents-roster-notify caller '(waits-on request-ids) event)
     (lispm-agents-roster-notify target '(waited-on-by request-ids))))
 
+(defun lispm-collab--recipient (caller agent &optional root)
+  "Resolve AGENT for CALLER; return (TARGET . HELPER-P).
+A role starts a helper in ROOT or CALLER's root, bounded by CALLER.
+An existing agent or character keeps its own conversation."
+  (let* ((role (cond ((lispm-role-p agent) agent)
+                     ((and (stringp agent) (not (lispm-get-agent agent t))
+                           (not (lispm-get-character agent t)))
+                      (lispm-get-role agent t))))
+         (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
+         (target (or helper (lispm-collab--target agent caller))))
+    (when helper
+      (lispm-set-ceiling helper (lispm-policy caller))
+      (lispm-set-parent helper (lispm-agent-id caller)))
+    (cons target (and helper t))))
+
 (cl-defun lispm-delegate (caller agent request callback &key root call request-id)
   "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
 AGENT is a running agent or its name, or a role or the name of one no
@@ -340,18 +357,9 @@ Emacs: should Emacs stop before the reply, it still settles the call.
 REQUEST-ID identifies a peer's request for mailbox and wait observers;
 it does not replace CALL or change the durable reply-to route.
 Return the agent asked."
-  (let* ((role (cond ((lispm-role-p agent) agent)
-                     ((and (stringp agent) (not (lispm-get-agent agent t))
-                           (not (lispm-get-character agent t)))
-                      (lispm-get-role agent t))))
-         (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
-         (target (or helper (lispm-collab--target agent caller))))
+  (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root)))
     (when (lispm-collab--cycle-p caller target)
       (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-agent-name target)))
-    ;; Delegating must not widen what the caller may do.
-    (when helper
-      (lispm-set-ceiling helper (lispm-policy caller))
-      (lispm-set-parent helper (lispm-agent-id caller)))
     (push target (lispm-agent-waiting-on caller))
     (lispm-collab--wait-changed caller target)
     (when call
@@ -359,7 +367,7 @@ Return the agent asked."
     (lispm-tell target request
                 :from (lispm-agent-name caller)
                 :request-id request-id
-                :reply-to (and call (concat (lispm-agent-id caller) " " call (if helper " retire" "")))
+                :reply-to (and call (concat (lispm-agent-id caller) " " call (if helper-p " retire" "")))
                 :callback (lambda (reply)
                             (setf (lispm-agent-waiting-on caller)
                                   (cl-remove target (lispm-agent-waiting-on caller) :count 1))
@@ -369,13 +377,62 @@ Return the agent asked."
                                (list :type 'request-settled :request-id request-id
                                      :from (lispm-agent-name target)
                                      :to (lispm-agent-name caller))))
-                            (when helper
-                              (run-at-time 0 nil #'lispm-collab--retire helper))
+                            (when helper-p
+                              (run-at-time 0 nil #'lispm-collab--retire target))
                             (funcall callback target reply)))
     target))
 
+(defun lispm-collab--accepted (id name &optional session)
+  "Receipt for the request ID accepted by NAME, optionally SESSION."
+  (format "Request %s accepted by %s%s. Its final reply will arrive as a message. Continue other work, or end this turn if you have nothing else to do; do not poll for the reply."
+          id name (if session (format " (%s)" session) "")))
+
+(defun lispm-collab--reply-message (caller-id id from text)
+  "Deliver request ID's reply TEXT from FROM to session CALLER-ID once.
+Its stable inbox id also identifies a reply replayed after Emacs stops
+between delivering the answer and finishing the recipient's turn."
+  (let ((caller (or (lispm-resume-session caller-id)
+                    (error "Cannot deliver request %s: session %s is unavailable" id caller-id))))
+    (lispm-tell caller (format "[Reply to request %s]\n%s" id text)
+                :from from :request-id id :answer-to id :id (concat "reply-" id))))
+
+(defun lispm-collab-request (caller agent request &optional call)
+  "Ask AGENT REQUEST for CALLER in the background; return an acceptance.
+AGENT is a native agent, character, role or peer.  The final reply is
+a new input to CALLER, never a pending tool result.  CALL, when given,
+records a native recipient on the originating tool call for inspection.
+Native requests and replies survive Emacs through the inbox; peer
+requests, as with `lispm-ask-peer', last only while Emacs runs."
+  ;; A standing caller may take up an older session when first opened;
+  ;; capture that session's identity for the durable reply route.
+  (lispm-session-buffer caller)
+  (let ((id (concat "q" (org-id-uuid)))
+        (caller-id (lispm-agent-id caller)))
+    (if-let* ((peer (and (not (lispm-get-agent agent t))
+                         (not (lispm-get-character agent t))
+                         (lispm-get-peer agent))))
+        (progn
+          (lispm-ask-peer
+           peer request (symbol-name (lispm-agent-name caller))
+           (lambda (reply &optional ended)
+             (lispm-collab--reply-message
+              caller-id id (lispm-peer-name peer)
+              (if ended reply (format "%s replied:\n%s" (lispm-peer-name peer) reply))))
+           :id id)
+          (lispm--await-reply caller id (lispm-peer-name peer))
+          (lispm-collab--accepted id (lispm-peer-name peer)))
+      (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent))
+                   (route (concat caller-id " " id " inbox" (if helper-p " retire" ""))))
+        (lispm-tell target request :from (lispm-agent-name caller)
+                    :request-id id :reply-to route
+                    :callback (lispm-collab--callback target route))
+        (lispm--await-reply caller id)
+        (when call
+          (lispm-collab--record-asked caller call target))
+        (lispm-collab--accepted id (lispm-agent-name target) (lispm-agent-id target))))))
+
 (defun lispm-collab--replied (agent reply)
-  "What ask_agent returns when AGENT replied REPLY.
+  "The text delivered when AGENT replied REPLY.
 A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
   (concat (format "%s replied:\n%s" (lispm-agent-name agent) (substring-no-properties reply))
           (if-let* ((value (lispm-reply-value reply)))
@@ -444,12 +501,16 @@ since it asked, and AGENT took the request up again."
 
 (defun lispm-collab--callback (agent reply-to)
   "The callback of AGENT's input asked for by REPLY-TO, after Emacs restarted.
-REPLY-TO, as `lispm-delegate' wrote it, names the caller's session and
-call, and whether AGENT is a helper, to retire once it has replied."
+REPLY-TO names the caller's session, request or call, and whether AGENT
+is a helper, to retire once it has replied.  An `inbox' flag routes a
+background request to a new message; old routes settle a pending call."
   (pcase (split-string reply-to)
     (`(,caller-id ,call . ,flags)
      (lambda (reply)
-       (lispm-collab--deliver caller-id call agent reply)
+       (if (member "inbox" flags)
+           (lispm-collab--reply-message caller-id call (lispm-agent-name agent)
+                                       (lispm-collab--replied agent reply))
+         (lispm-collab--deliver caller-id call agent reply))
        (when (member "retire" flags)
          (run-at-time 0 nil #'lispm-collab--retire agent))))))
 
@@ -461,7 +522,8 @@ call, and whether AGENT is a helper, to retire once it has replied."
     (seq-some (lambda (entry)
                 (when-let* ((reply-to (plist-get entry :reply-to)))
                   (or (equal reply-to prefix) (string-prefix-p (concat prefix " ") reply-to))))
-              (cons (lispm-agent-entry agent) (lispm-agent-inbox agent)))))
+              (cons (lispm-agent-entry agent)
+                    (append (lispm-agent-inbox agent) (lispm-agent-suspended agent))))))
 
 (defun lispm-collab--follow (caller call id)
   "Have CALLER's CALL, which asked the session ID, wait for its reply again.
@@ -488,10 +550,12 @@ once they have taken the request up again, settles it."
 (add-hook 'lispm-resume-call-functions #'lispm-collab--take-up)
 
 (defun lispm-collab--retire (helper)
-  "Retire HELPER, which has replied, unless the user has since written to it.
-Then it stays, to answer them, as an agent of its own."
-  (unless (seq-some (lambda (entry) (not (or (plist-get entry :from) (plist-get entry :event))))
-                    (lispm-agent-inbox helper))
+  "Retire HELPER after its reply, unless it has more work.
+Follow-up input from the user or another agent keeps it alive, as
+does a new turn that started before this retirement timer ran."
+  (when (and (not (lispm-agent-busy-p helper))
+             (null (lispm-agent-inbox helper))
+             (null (lispm-agent-suspended helper)))
     (lispm-retire helper)))
 
 (defun lispm-collab--characters (&optional self apps)
@@ -528,7 +592,9 @@ says how many there are."
   (let ((others (remq agent (lispm-agents))))
     (concat "# Other agents\n"
             "ask_agent delegates to a running agent, or to a helper it starts from a"
-            " role; send_message notifies a running agent; start_agent, which"
+            " role, returning a request id immediately; its final reply arrives as a new message."
+            " Continue other work, or end your turn to await it; do not poll."
+            " send_message notifies a running agent; start_agent, which"
             " search_tools finds, starts an agent of a role that works on its own and stays.\n"
             (if others
                 (concat "Running:\n"
@@ -573,33 +639,24 @@ helpers can be started from."
      (text string "The message, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
   "Send a message to another agent without waiting for an answer.  It
 reaches them as a new turn as soon as they are free.  Use ask_agent
-when you need the answer to continue."
+when you need a final reply delivered back automatically."
   :permission comm
   (lispm-collab-send lispm-current-agent to text))
 
 (lispm-deftool ask_agent
     ((agent string "A running agent, a character (by its name, as Ada), or a role to start a helper from (list_agents, which search_tools finds, shows them).")
      (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
-  "Delegate a request and wait for the final reply, which becomes the
-result of this call.  Ask a running agent better placed for it, or
+  "Delegate a request in the background and immediately receive its
+request id.  The final reply arrives as a new message with that id;
+you remain free to work and answer the user.  Continue other work, or
+end your turn if none remains; do not poll for the reply.
+Ask a running agent better placed for it, or
 name a role to start a helper of that role in your project; the
 helper retires once it has replied.  When you need data back, such
 as a list of places, ask for it: they can return a value with their
 reply (return_value), which follows it as JSON."
   :permission comm
-  :async t
-  (if-let* ((peer (and (not (lispm-get-agent agent t)) (not (lispm-get-character agent t))
-                       (lispm-get-peer agent))))
-      (lispm-ask-peer peer request (symbol-name (lispm-agent-name lispm-current-agent))
-                      (lambda (reply &optional ended)
-                        (funcall done (if ended reply (format "%s replied:\n%s" agent reply))
-                                 ended)))
-    (lispm-delegate lispm-current-agent agent request
-                    (lambda (target reply)
-                      (funcall done (lispm-collab--replied target reply)))
-                    ;; A call the model made, not one a Lisp program does.
-                    :call lispm-current-call))
-  nil)
+  (lispm-collab-request lispm-current-agent agent request lispm-current-call))
 
 (lispm-deftool start_agent
     ((role string "The role to start the agent from (list_agents, which search_tools finds, shows the roles).")
@@ -609,8 +666,8 @@ reply (return_value), which follows it as JSON."
 another, and hand it a first request.  Nobody waits for its reply, and
 it stays once it has replied, for the user and the other agents to
 talk to: for work that goes on apart from yours.  If you need to hear
-back, ask it in the request to send_message you; to wait for its reply
-instead, use ask_agent.  The result names the agent, which
+back, ask it in the request to send_message you; for an automatic final
+reply to your inbox, use ask_agent.  The result names the agent, which
 send_message, ask_agent and inspect_agent then reach.  It may do no
 more than you."
   :permission comm
@@ -639,6 +696,10 @@ more than you."
       (unless (lispm-agent-turn-callbacks agent)
         (error "Nobody waits for your reply in this turn; just reply"))
       (setf (lispm-agent-value agent) (alist-get 'value input))
+      (when-let* ((entry (lispm-agent-entry agent)))
+        (setf (lispm-agent-entry agent)
+              (plist-put entry :value (lispm-agent-value agent)))
+        (lispm-inbox-save agent))
       "The value will go with your reply."))))
 
 (provide 'lispm-collab)

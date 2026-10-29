@@ -910,9 +910,19 @@ heading and its body start and where it ends."
                          :start start :body body :end end)))
 
 (defun lispm-transcript-section-text (section)
-  "The text of SECTION's body, as it was written, trimmed."
-  (string-trim (org-unescape-code-in-string
-                (buffer-substring-no-properties (plist-get section :body) (plist-get section :end)))))
+  "The text of SECTION's body, as it was written, trimmed.
+An input's leading property drawer records delivery receipts, not
+message text."
+  (let ((beg (plist-get section :body))
+        (end (plist-get section :end)))
+    (when (and (memq (plist-get section :kind) '(user message event))
+               (save-excursion
+                 (goto-char beg)
+                 (looking-at "[ \t]*:PROPERTIES:[ \t]*$"))
+               (assoc "ENTRY" (lispm-transcript-properties beg end)))
+      (setq beg (lispm-transcript--after-drawer beg end)))
+    (string-trim (org-unescape-code-in-string
+                  (buffer-substring-no-properties beg end)))))
 
 (defun lispm-transcript-section-input (section)
   "The text requests carry for SECTION, a user's input: its text after its
