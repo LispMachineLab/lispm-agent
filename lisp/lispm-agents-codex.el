@@ -116,23 +116,39 @@ metadata."
              :file file)
        (and parent (list :parent parent))))))
 
+(defun lispm-agents-codex--spawn-field (payload field)
+  "Return the nonblank string FIELD in PAYLOAD's subagent metadata.
+Codex records these fields at the top level or under
+source.subagent.thread_spawn.  Its source is a string for other sessions."
+  (or (when-let* ((value (plist-get payload field))
+                  ((stringp value))
+                  ((not (string-blank-p value))))
+        value)
+      (when-let* ((source (plist-get payload :source))
+                  ((listp source))
+                  (subagent (plist-get source :subagent))
+                  ((listp subagent))
+                  (spawn (plist-get subagent :thread_spawn))
+                  ((listp spawn))
+                  (value (plist-get spawn field))
+                  ((stringp value))
+                  ((not (string-blank-p value))))
+        value)))
+
 (defun lispm-agents-codex--parent (payload)
   "Return the id of the thread that started the one whose session
 metadata is PAYLOAD, or nil for a thread of the user's own.  Codex runs
 a subagent as a thread of its own, naming in its metadata the thread
 that spawned it."
-  (when-let* ((parent (plist-get payload :parent_thread_id))
-              ((stringp parent))
-              ((not (string-blank-p parent))))
-    parent))
+  (lispm-agents-codex--spawn-field payload :parent_thread_id))
 
 (defun lispm-agents-codex--subagent-title (payload)
   "Return the title of a Codex subagent whose session metadata is PAYLOAD:
 the name of its task, the last part of its agent path, with the
 nickname Codex gave it; nil when PAYLOAD names neither.  Its prompts
 are what its parent told it, headed by project guidance, no title."
-  (let ((path (plist-get payload :agent_path))
-        (nickname (plist-get payload :agent_nickname)))
+  (let ((path (lispm-agents-codex--spawn-field payload :agent_path))
+        (nickname (lispm-agents-codex--spawn-field payload :agent_nickname)))
     (cond ((and (stringp path) (not (string-blank-p (file-name-nondirectory path)))
                 (stringp nickname) (not (string-blank-p nickname)))
            (format "%s (%s)" (file-name-nondirectory path) nickname))
