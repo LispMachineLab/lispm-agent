@@ -2536,6 +2536,67 @@ Emacs wherever the root is, is allowed call by call."
         (should (equal (lispm-tools-allowance (lispm-get-tool "eval_elisp") '((code . "1")) agent)
                        '("eval_elisp" (code . "1"))))))))
 
+(ert-deftest lispm-test-shell-allowance-call-key ()
+  "Remembering a command does not depend on argument order or its timeout.
+The command stays exact, and stricter checks still ask."
+  (lispm-test-env
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (shell (lispm-get-tool "run_shell"))
+           (lispm-sandbox-level 'none)
+           (input '((timeout . 30) (why . "Build") (command . "make")))
+           (original (copy-tree input)))
+      (should (eq (lispm-tool-action agent shell input) 'ask))
+      (push (lispm-tools-allowance shell input agent) (lispm-agent-allowed agent))
+      (should (equal input original))
+      (dolist (again '(((command . "make") (timeout . 30) (why . "Build again"))
+                       ((timeout . 60) (command . "make"))
+                       ((command . "make"))
+                       ((command . "make") (timeout . :null))))
+        (should (eq (lispm-tool-action agent shell again) 'auto)))
+      (dolist (other '(((command . "make test") (timeout . 30))
+                       ((command . "make ") (timeout . 30))
+                       ((command . "make") (directory . "/tmp"))
+                       ((command . "make") (timeout . "invalid"))))
+        (should (eq (lispm-tool-action agent shell other) 'ask)))
+      (let ((lispm-tool-action-functions (list (lambda (&rest _) '(ask . "Check again.")))))
+        (should (equal (lispm-tool-decision agent shell '((command . "make") (timeout . 60)))
+                       '(ask "Check again."))))
+      ;; An allowance made before keys were normalized survives a code
+      ;; reload in this Emacs; its data is neither rewritten nor widened.
+      (setf (lispm-agent-allowed agent) '(("run_shell" (timeout . 30) (command . "make"))))
+      (should (eq (lispm-tool-action agent shell '((command . "make"))) 'auto))
+      (should (eq (lispm-tool-action agent shell '((command . "make test"))) 'ask))
+      (should (equal (lispm-agent-allowed agent)
+                     '(("run_shell" (timeout . 30) (command . "make"))))))))
+
+(ert-deftest lispm-test-allowance-call-key-conservative ()
+  "Exact approvals preserve duplicate arguments, nested values and code.
+Only run_shell treats timeout as an execution limit rather than input."
+  (lispm-test-env
+    (let* ((agent (lispm-make-agent 'assistant project))
+           (tool (lispm-tool--create :name "custom_exec" :permission 'exec))
+           (input '((payload (a . 1) (b . 2)) (timeout . 30) (code . "(+ 1 2)")))
+           (original (copy-tree input)))
+      (push (lispm-tools-allowance tool input agent) (lispm-agent-allowed agent))
+      (should (equal input original))
+      (should (eq (lispm-tool-action agent tool
+                                    '((code . "(+ 1 2)") (why . "Again")
+                                      (timeout . 30) (payload (a . 1) (b . 2))))
+                  'auto))
+      (dolist (other '(((payload (b . 2) (a . 1)) (timeout . 30) (code . "(+ 1 2)"))
+                       ((payload (a . 1) (b . 2)) (timeout . 60) (code . "(+ 1 2)"))
+                       ((payload (a . 1) (b . 2)) (timeout . 30) (code . "(+ 1  2)"))))
+        (should (eq (lispm-tool-action agent tool other) 'ask)))
+      (let ((shell (lispm-get-tool "run_shell"))
+            (lispm-sandbox-level 'none)
+            (duplicate '((command . "make") (timeout . 30) (timeout . 60))))
+        (push (lispm-tools-allowance shell duplicate agent) (lispm-agent-allowed agent))
+        (should (eq (lispm-tool-action agent shell duplicate) 'auto))
+        (should (eq (lispm-tool-action agent shell '((command . "make") (timeout . 30))) 'ask))
+        (should (eq (lispm-tool-action agent shell
+                                      '((command . "make") (timeout . 60) (timeout . 30)))
+                    'ask))))))
+
 (ert-deftest lispm-test-shell-allowance-sandboxed ()
   "Approving a sandboxed shell command for good allows the tool, as it does
 on another machine: a confined command cannot reach Emacs.  The allowance
@@ -2632,7 +2693,7 @@ default, where a command that may write asks.  Any doubt asks."
                          "git tag v1" "git config user.name x" "git stash pop" "git worktree add x"
                          "git remote add x y" "git -c core.pager=x log" "ls; rm x" "ls &" "ls > out"
                          "ls >> out" "cat `x`" "ls $(x)" "echo \"$(x)\"" "cat <(ls)" "(ls)" "{ ls; }"
-                         "FOO=1 ls" "/bin/ls" "ls # comment" "ls \"unterminated" "" "   "
+                         "FOO=1 ls" "/bin/ls" "ls \"unterminated" "" "   "
                          "find . -delete" "find . -exec rm {} \;" "fd -x rm" "env rm x" "xargs rm"
                          "sh -c ls" "sudo ls" "sed -i s/a/b/ f" "sed -i '' s/a/b/ f" "sed -ni p f"
                          "sed --in-place=.bak s/a/b/ f" "sed 's/a/b/w out' f" "sed -n '/x/w out' f"
@@ -2659,6 +2720,41 @@ default, where a command that may write asks.  Any doubt asks."
       (setf (lispm-agent-policy agent) '((read . ask)))
       (should (eq (lispm-tool-action agent shell '((command . "ls"))) 'ask))
       (should (equal (lispm-tools-allowance shell '((command . "ls")) agent) '("run_shell" (command . "ls")))))))
+
+(ert-deftest lispm-test-shell-read-only-chains ()
+  "Directory changes and comments leave every actual command under policy."
+  (lispm-test-env
+    (let ((agent (lispm-make-agent 'assistant project))
+          (shell (lispm-get-tool "run_shell")))
+      (dolist (command '("gh repo list LispMachineLab --limit 100 --json name; ls"
+                         "cd /tmp && git status" "cd 'a b'; rg needle ."
+                         "cd -P -- ../src && git diff" "cd -L .\npwd"
+                         "cd -- -directory && ls" "cd - && ls" "cd && pwd"
+                         "git status # inspect" "# inspect\ngit status"
+                         "ls # $(unknown) ; rm ignored\ngit status"
+                         "cd /tmp && # inspect\ngit status"
+                         "git status \\\n# inspect\ngit diff"
+                         "git sta\\\ntus" "git \"sta\\\ntus\""
+                         "printf '%s' '# literal' a#b \\#literal"))
+        (should (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'auto)))
+      (dolist (command '("gh repo create x" "gh repo clone o/r" "gh repo list --web"
+                         "cd /tmp && rm x" "cd /tmp; git push"
+                         "cd /tmp\nrm x" "cd /tmp && ls > out"
+                         "cd --help" "cd -q /tmp" "cd old new"
+                         "\"c\\d\" /tmp && ls" "git \"sta\\tus\""
+                         "cd $(unknown) && ls" "cd `unknown` && ls"
+                         "ls # inspect\nrm x" "ls # inspect \\\nrm x"
+                         "ls \\\n# inspect\nrm x" "ls # inspect\nr\\\nm x"
+                         "cat < /nonexistent\\ #not-comment; unknown-command"
+                         "cat < '/nonexistent #not-comment'; unknown-command"
+                         "cat < \"/nonexistent #not-comment\"; unknown-command"
+                         "cat < $file" "cat <$(unknown-command)" "cat < /tmp/*"
+                         "# no command" "cd /tmp && python3 -c 'print(1)'"
+                         "cd /tmp && for x in a; do ls; done"
+                         "cd /tmp && env ls" "cd /tmp && /bin/ls"))
+        (should-not (lispm-shell-read-only-p command))
+        (should (eq (lispm-tool-action agent shell `((command . ,command))) 'ask))))))
 
 ;;;; The sandbox
 
@@ -3676,6 +3772,109 @@ are not saved: saving it would ask."
 
 ;;;; The loop
 
+(defun lispm-test--approval-events (agent)
+  "Approval event alists in AGENT's transcript, in transcript order."
+  (with-current-buffer (lispm-agent-buffer agent)
+    (save-excursion
+      (goto-char (point-min))
+      (let (events)
+        (while (re-search-forward "^\\*\\*\\* Approval$" nil t)
+          (push (lispm--json-decode
+                 (lispm-transcript--block
+                  (point) (lispm-transcript-subtree-end (line-beginning-position) 3)))
+                events))
+        (nreverse events)))))
+
+(ert-deftest lispm-test-approval-events ()
+  "Calls without previews keep requests and decisions, outside model context."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project)))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "a1" "eval_elisp" '((code . "(+ 1 2)")))
+                                 (lispm-test--tool "a2" "eval_elisp" '((code . "(+ 1 2)")))
+                                 (lispm-test--tool "a3" "eval_elisp" '((code . "(+ 2 3)"))))
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "a4" "eval_elisp" '((code . "(+ 1 2)"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Compute")
+      (should (lispm-test--wait (lambda () (eq (lispm-agent-state agent) 'waiting))))
+      (let ((events (lispm-test--approval-events agent)))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
+                       '("requested" "requested" "requested")))
+        (dolist (event events)
+          (should (equal (alist-get 'tool event) "eval_elisp"))
+          (should (string-match-p "\\`[0-9-]+T[0-9:]+Z\\'" (alist-get 'time event))))
+        (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
+        (should (equal (lispm-test--transcript agent)
+                       (lispm--file-text (buffer-file-name (lispm-agent-buffer agent))))))
+      (lispm-allow agent "a1")
+      (lispm-resolve agent "a3" 'deny "Use the earlier answer.")
+      ;; A repeated answer has no effect and must not fabricate an event.
+      (lispm-resolve agent "a3" 'deny "Again")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let* ((events (lispm-test--approval-events agent))
+             (decisions (seq-remove (lambda (e) (equal (alist-get 'event e) "requested")) events)))
+        (should (= (length events) 6))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) decisions)
+                       '("allow" "approve" "deny")))
+        (should (equal (alist-get 'scope (nth 0 decisions)) "exact"))
+        (should (equal (alist-get 'source (nth 0 decisions)) "user"))
+        (should (equal (alist-get 'source (nth 1 decisions)) "allowance"))
+        (should (equal (alist-get 'reason (nth 2 decisions)) "Use the earlier answer."))
+        (should-not (seq-find (lambda (e) (equal (alist-get 'call_id e) "a4")) events)))
+      (should (equal (lispm-test--transcript agent)
+                     (lispm--file-text (buffer-file-name (lispm-agent-buffer agent)))))
+      ;; The model sees exactly the same messages with the audit removed.
+      (let ((text (lispm-test--transcript agent))
+            (messages (with-current-buffer (lispm-agent-buffer agent)
+                        (plist-get (lispm-transcript-parse) :messages))))
+        (with-temp-buffer
+          (insert text)
+          (goto-char (point-min))
+          (while (re-search-forward "^\\*\\*\\* Approval$" nil t)
+            (let ((start (line-beginning-position)))
+              (delete-region start (lispm-transcript-subtree-end start 3))
+              (goto-char start)))
+          (should (equal messages (plist-get (lispm-transcript-parse) :messages))))))))
+
+(ert-deftest lispm-test-approval-events-nested ()
+  "Successive nested calls retain their requests and separate decisions."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (lispm-tool-action-functions
+           (list (lambda (_agent tool _input)
+                   (when (equal (lispm-tool-name tool) "write_file")
+                     '(ask . "This file needs review."))))))
+      (setq lispm-test--scripts
+            `((tester
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "p1" "run_lisp"
+                                                   '((code . "(progn (write_file :path \"a.txt\" :content \"a\" :why \"test\") (write_file :path \"b.txt\" :content \"b\" :why \"test\"))"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+      (lispm-tell agent "Write a file")
+      (should (lispm-test--wait (lispm-test--previewed agent)))
+      (let ((request (car (lispm-test--approval-events agent))))
+        (should (equal (alist-get 'tool request) "write_file"))
+        (should (equal (alist-get 'call_id request) "p1"))
+        (should (equal (append (alist-get 'reasons request) nil) '("This file needs review."))))
+      (lispm-resolve agent "p1" 'approve)
+      (should (lispm-test--wait (lispm-test--previewed agent 2)))
+      (lispm-resolve agent "p1" 'deny "Keep only a.txt.")
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (let ((events (lispm-test--approval-events agent)))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e)) events)
+                       '("requested" "approve" "requested" "deny")))
+        (dolist (event events)
+          (should (equal (alist-get 'call_id event) "p1"))
+          (should (equal (alist-get 'tool event) "write_file"))))
+      (let ((decision (cadr (lispm-test--approval-events agent))))
+        (should (equal (alist-get 'tool decision) "write_file"))
+        (should (equal (alist-get 'scope decision) "once")))
+      (should (equal (lispm-test--file project "a.txt") "a\n"))
+      (should-not (file-exists-p (expand-file-name "b.txt" project))))))
+
 (ert-deftest lispm-test-turn-with-approval ()
   "A turn: an automatic read, an edit approved through org, a reply, a revert."
   (lispm-test-env
@@ -3794,6 +3993,9 @@ nothing."
       (should (equal (lispm-waiting-calls agent) '("t1" "t2")))
       (should (= (length held) 2))
       (should-not announced)
+      (should (equal (mapcar (lambda (e) (alist-get 'event e))
+                            (lispm-test--approval-events agent))
+                     '("requested" "requested")))
       (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
       ;; t2 is denied before its diff is made.
       (lispm-resolve agent "t2" 'deny)
@@ -3810,6 +4012,7 @@ nothing."
       (lispm-resolve agent "t1" 'approve)
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (equal (lispm-test--file project "a.txt") "hello lisp\n"))
+      (should (= (length (lispm-test--approval-events agent)) 4))
       (should-not (file-exists-p (expand-file-name "b.txt" project))))))
 
 (defun lispm-test--input-heading-p (agent)
@@ -4008,6 +4211,9 @@ process died with Emacs, is recorded as interrupted."
                         (lispm-resume-file file))))
         ;; The call awaiting approval is known again ...
         (should (equal (lispm-waiting-calls revived) '("t2")))
+        (should (equal (mapcar (lambda (e) (alist-get 'event e))
+                              (lispm-test--approval-events revived))
+                       '("requested" "resumed")))
         (should (eq (lispm-agent-state revived) 'waiting))
         ;; ... the one that was running is not left without a result ...
         (should (string-match-p "^\\*\\* FAILED run_shell" (lispm-test--transcript revived)))
