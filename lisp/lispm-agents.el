@@ -69,6 +69,9 @@
 (require 'lispm-i18n)
 (require 'lispm-ui-ask)
 
+(autoload 'lispm-agents-open-project "lispm-agents-work"
+  "Show already active agents belonging to DIRECTORY's project." t)
+
 (declare-function project-root "project" (project))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
