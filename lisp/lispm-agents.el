@@ -1011,15 +1011,21 @@ Tab labels show it instead of the terminal's machine-oriented buffer name.")
   (concat "\\`\\(CLAUDECODE\\|CLAUDE_PID\\|CLAUDE_EFFORT"
           "\\|CLAUDE_CODE_[A-Z0-9_]*\\|CLAUDE_AGENT_SDK_[A-Z0-9_]*"
           "\\|CLAUDE_PREVIEW_[A-Z0-9_]*\\)=")
-  "Environment entries that tie a process to an enclosing Claude Code session.
+  "Environment prefixes associated with an enclosing Claude Code session.
 An Emacs started from inside Claude Code inherits them; a Claude launched with
 them believes it is that session's child, disables its own transcript and
-reuses the parent's session id and messaging socket.")
+reuses the parent's session id and messaging socket.  The context-window
+configuration exception is in `lispm-agents-independent-environment'.")
 
 (defun lispm-agents-independent-environment (environment)
   "Return ENVIRONMENT without enclosing Claude Code session markers.
-Agents and shells started from Emacs are independent top-level sessions."
-  (seq-remove (lambda (entry) (string-match-p lispm-agents-session-marker-regexp entry))
+Agents and shells started from Emacs are independent top-level sessions.
+Keep CLAUDE_CODE_MAX_CONTEXT_TOKENS: it configures a custom model's context
+window rather than tying the child to its parent's session.  ENVIRONMENT
+is not modified."
+  (seq-remove (lambda (entry)
+                (and (string-match-p lispm-agents-session-marker-regexp entry)
+                     (not (string-prefix-p "CLAUDE_CODE_MAX_CONTEXT_TOKENS=" entry))))
               environment))
 
 (defun lispm-agents--launch (agent directory name args &optional id title)

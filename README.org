@@ -284,6 +284,12 @@ resume in the directory they ran in.  Each terminal gets a server showing its ag
 Emacs knows, the selection, the files open and unsaved, Flymake's diagnostics: Claude's IDE
 protocol for Claude Code, MCP for the others.
 
+Launched agents start independent sessions: LispM removes inherited Claude session and
+transport markers without changing Emacs's environment.  It preserves an explicit
+~CLAUDE_CODE_MAX_CONTEXT_TOKENS~ override for a custom model's context window; set this in
+Emacs's environment using the model provider's supported limit, as described in
+[[https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id][Claude Code's model configuration]].  LispM does not choose a model or infer its context size.
+
 #+begin_src emacs-lisp
 (require 'lispm-agents-claude)
 (require 'lispm-agents-codex)

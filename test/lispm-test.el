@@ -9964,6 +9964,45 @@ program says other ways, which are followed."
         (lispm-agents-delete-session session)
         (should (equal deleted '("0200")))))))
 
+(ert-deftest lispm-test-agents-launch-keeps-context-window-configuration ()
+  "A child gets the configured context window, without its parent's session.
+The terminal adapter starts a real batch child that reports only the
+variables under test.  Launching must leave Emacs's environment unchanged."
+  (let* ((variables '("CLAUDE_CODE_MAX_CONTEXT_TOKENS" "ANTHROPIC_MODEL"
+                      "CLAUDECODE" "CLAUDE_PID" "CLAUDE_EFFORT"
+                      "CLAUDE_CODE_SESSION_ID" "CLAUDE_CODE_SSE_PORT"
+                      "CLAUDE_AGENT_SDK_SESSION_ID" "CLAUDE_PREVIEW_HOST"))
+         (process-environment
+          (append '("CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000"
+                    "ANTHROPIC_MODEL=gateway-custom-model"
+                    "CLAUDECODE=1" "CLAUDE_PID=123" "CLAUDE_EFFORT=low"
+                    "CLAUDE_CODE_SESSION_ID=parent-session" "CLAUDE_CODE_SSE_PORT=12345"
+                    "CLAUDE_AGENT_SDK_SESSION_ID=parent-sdk" "CLAUDE_PREVIEW_HOST=parent-preview")
+                  process-environment))
+         (parent-environment (copy-sequence process-environment))
+         (child-environment nil)
+         (terminal (generate-new-buffer " *lispm-test-launch-environment*"))
+         (program (expand-file-name invocation-name invocation-directory))
+         (lispm-agents-sessions-changed-hook nil)
+         (lispm-agents-terminal-live-p-function #'ignore)
+         (lispm-agents-terminal-make-function
+          (lambda (_name child-program &rest args)
+            (with-temp-buffer
+              (should (= 0 (apply #'call-process child-program nil '(t nil) nil args)))
+              (goto-char (point-min))
+              (setq child-environment (read (current-buffer))))
+            terminal)))
+    (unwind-protect
+        (lispm-test--with-agents `((tool :name "Tool" :program ,program))
+          (lispm-agents--launch
+           'tool temporary-file-directory "lispm-test-launch-environment"
+           (list "-Q" "--batch" "--eval"
+                 (prin1-to-string `(prin1 (mapcar #'getenv ',variables)))))
+          (should (equal child-environment
+                         '("400000" "gateway-custom-model" nil nil nil nil nil nil nil)))
+          (should (equal process-environment parent-environment)))
+      (kill-buffer terminal))))
+
 (ert-deftest lispm-test-agents-resume-with-model-cli ()
   "Claude and Codex resume the same session with an optional model argv.
 A live session is reused normally, but never silently ignores a model."
