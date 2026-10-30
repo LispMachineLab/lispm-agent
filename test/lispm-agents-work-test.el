@@ -33,7 +33,9 @@
 
 (ert-deftest lispm-test-work-project-and-exact-directory ()
   "Project scope shares the sidebar's real Git and worktree roots."
-  (let* ((base (make-temp-file "lispm-work-" t))
+  ;; Emacs abbreviates roots under HOME.  CI's temporary directory is
+  ;; there too: both ordinary and linked checkout roots must stay absolute.
+  (let* ((base (make-temp-file (expand-file-name ".lispm-work-test-" "~") t))
          (main (expand-file-name "project" base))
          (sub (expand-file-name "src" main))
          (worktree (expand-file-name "worktree" base))
@@ -173,6 +175,72 @@
           (should-not lispm-agents-roster-change-functions)
           (should-not window-state-change-hook)
           (kill-buffer two))))))
+
+(ert-deftest lispm-test-work-default-reuses-plain-window ()
+  "The default native view replaces the selected buffer without a new pane."
+  (lispm-test--work-views
+    (let ((lispm-agents-work-display-function #'pop-to-buffer-same-window))
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((window (selected-window))
+               (view (lispm-agents-open-project temporary-file-directory)))
+          (should (eq (window-buffer window) view))
+          (should (= (length (window-list)) 1)))))))
+
+(ert-deftest lispm-test-work-focus-listener-and-session-sidebar ()
+  "Focus keeps one listener when opening a project or its live conversation."
+  (lispm-test--work-views
+    (let ((lispm-agents-work-display-function #'pop-to-buffer-same-window)
+          (lispm-agents-show-function #'pop-to-buffer))
+      (lispm-test-with-terminal
+        (let* ((listener (lispm-terminal--listener-window))
+               (sessions (get-buffer-window lispm-terminal--sessions-name))
+               (session-buffer (window-buffer sessions))
+               (windows (length (window-list)))
+               (view (lispm-agents-open-project project)))
+          (should (eq (selected-window) listener))
+          (should (eq (window-buffer listener) view))
+          (should (= (length (window-list)) windows))
+          (with-current-buffer view
+            (goto-char (point-min))
+            (let ((conversation (tabulated-list-get-id)))
+              (should (buffer-live-p conversation))
+              (lispm-agents-work-open)
+              (should (eq (window-buffer listener) conversation))))
+          (should (= (length (window-list)) windows))
+          (select-window sessions)
+          (should (eq (lispm-agents-open-project project) view))
+          (should (eq (selected-window) listener))
+          (should (eq (window-buffer listener) view))
+          (should (eq (window-buffer sessions) session-buffer))
+          (should (window-dedicated-p sessions))
+          (should (= (length (window-list)) windows))
+          (should (buffer-local-value 'lispm-terminal-keys-mode view)))))))
+
+(ert-deftest lispm-test-work-focus-preserves-custom-callbacks ()
+  "Focus adapts only its frame and restores the configured display callbacks."
+  (lispm-test--work-views
+    (let* ((calls nil)
+           (callback (lambda (buffer)
+                       (push (list buffer (selected-window)) calls) 'custom-result))
+           (lispm-agents-work-display-function callback)
+           (lispm-agents-show-function callback))
+      (lispm-test-with-terminal
+        (let ((listener (lispm-terminal--listener-window))
+              (sessions (get-buffer-window lispm-terminal--sessions-name))
+              (buffer (current-buffer)))
+          (select-window sessions)
+          (should (eq (funcall lispm-agents-work-display-function buffer) 'custom-result))
+          (should (eq (cadar calls) listener))
+          ;; A different frame is outside the terminal; neither selection nor
+          ;; the configured callback is changed there.
+          (select-window sessions)
+          (let ((lispm-terminal--frame nil))
+            (should (eq (funcall lispm-agents-show-function buffer) 'custom-result))
+            (should (eq (cadar calls) sessions)))
+          (should (= (length calls) 2))))
+      (should (eq lispm-agents-work-display-function callback))
+      (should (eq lispm-agents-show-function callback)))))
 
 (ert-deftest lispm-test-work-open-rechecks-membership-and-keeps-selection ()
   "Changing row order retains selection; stale rows cannot revive an archived agent."

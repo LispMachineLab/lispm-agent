@@ -373,9 +373,12 @@ shown, and closing the last list removes its observers.
 An optional renderer adds a function to ~lispm-agents-open-project-functions~.  It receives
 one absolute directory string and returns non-nil when it handled the request.  The first
 success wins; without one the native list remains available.  Hosts choose the native list's
-window through ~lispm-agents-work-display-function~ (default ~pop-to-buffer~) and can recognize
+window through ~lispm-agents-work-display-function~ (default ~pop-to-buffer-same-window~) and can recognize
 ~lispm-agents-work-mode~ and its ~lispm-agents-work-directory~ / ~lispm-agents-work-scope~
 buffer-local metadata.  Actual conversations still use ~lispm-agents-show-function~.
+Focus routes both callbacks through its existing listener, including requests from its
+Sessions pane.  It preserves the configured callbacks and restores them on exit; other
+frames retain their own display behavior.
 
 ~lispm-agents-work-snapshot DIRECTORY &optional SCOPE~ returns the scoped live roster.
 Renderers that already received a roster use ~lispm-agents-work-filter RECORDS DIRECTORY

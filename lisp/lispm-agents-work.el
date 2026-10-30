@@ -23,9 +23,9 @@ handled the request.  The first success wins; otherwise
 `lispm-agents-open-project' displays the native live list.  A renderer
 uses `lispm-agents-work-filter' to share project membership semantics.")
 
-(defvar lispm-agents-work-display-function #'pop-to-buffer
+(defvar lispm-agents-work-display-function #'pop-to-buffer-same-window
   "Function displaying a native work view, called with its BUFFER.
-The default works in any Emacs.  A host may choose its own window here;
+The default reuses the selected window.  A host may choose its own window here;
 opening an actual conversation uses `lispm-agents-show-function'.")
 
 (defvar-local lispm-agents-work-directory nil

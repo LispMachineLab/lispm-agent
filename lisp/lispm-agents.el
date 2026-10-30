@@ -1744,7 +1744,8 @@ as that agent's :worktree says, see `lispm-agents-define'; else nil."
 (defun lispm-agents--git-main-root (directory)
   "Return the main checkout root of the git repository containing DIRECTORY.
 A linked worktree's `.git' is a file naming MAIN/.git/worktrees/NAME; follow
-it to MAIN.  Return nil when DIRECTORY is missing or outside any repository."
+it to MAIN.  Roots are absolute, including when Emacs abbreviates a path
+under the home directory.  Return nil outside any existing repository."
   (when-let* (((file-directory-p directory))
               (root (locate-dominating-file directory ".git")))
     (let ((dotgit (expand-file-name ".git" root)))
@@ -1753,7 +1754,7 @@ it to MAIN.  Return nil when DIRECTORY is missing or outside any repository."
                  (insert-file-contents dotgit)
                  (when (re-search-forward "^gitdir: \\(.+?\\)/\\.git/worktrees/" nil t)
                    (match-string 1))))
-          root))))
+          (expand-file-name root)))))
 
 (defvar lispm-agents--root-cache (make-hash-table :test #'equal)
   "Memoized project roots keyed by working directory.")
