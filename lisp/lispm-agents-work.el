@@ -16,6 +16,9 @@
 (require 'lispm-kit-commands)
 (require 'lispm-agents-roster)
 
+(declare-function lispm-chat "lispm-chat" (agent))
+(defvar lispm-chat-agent)
+
 (defvar lispm-agents-open-project-functions nil
   "Functions optionally displaying the live agents of a project.
 Each receives an absolute DIRECTORY string and returns non-nil when it
@@ -174,6 +177,20 @@ already hold a roster snapshot should filter that snapshot directly."
   (interactive)
   (lispm-agents-work--render (lispm-agents-roster)))
 
+(defun lispm-agents-work--conversation-buffer (buffer)
+  "Return the user-facing conversation for live roster BUFFER.
+A native agent's canonical roster buffer can be its transcript.  Reuse
+that agent's chat view, creating only the view if necessary.  Other
+agent kinds keep their existing buffer, including unclaimed terminals."
+  (if (eq (lispm-agents-emacs-buffer-agent buffer) 'lispm)
+      (progn
+        (require 'lispm-chat)
+        (if-let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
+                            (buffer-local-value 'lispm-chat-agent buffer))))
+            (lispm-chat agent)
+          buffer))
+    buffer))
+
 (defun lispm-agents-work-open ()
   "Show the selected agent's existing conversation, if it is still active.
 Recheck live membership before displaying a buffer; an archived or ended
@@ -184,7 +201,7 @@ session is never resumed by a stale row."
                                               lispm-agents-work-scope)))
     (if (and (buffer-live-p buffer)
              (seq-some (lambda (record) (eq buffer (plist-get record :buffer))) records))
-        (lispm-agents-show buffer)
+        (lispm-agents-show (lispm-agents-work--conversation-buffer buffer))
       (lispm-agents-work-refresh)
       (user-error "%s" (lispm-tr "No session here")))))
 
