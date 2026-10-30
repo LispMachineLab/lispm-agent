@@ -68,6 +68,7 @@
 
 (require 'lispm)
 (require 'lispm-agents)
+(require 'lispm-agents-work)
 
 (defgroup lispm-terminal nil
   "LispM as a terminal: the sessions, a listener and a who line."
@@ -202,6 +203,28 @@ Return the chat."
       (select-window window))
     (lispm-terminal--schedule)
     chat))
+
+(defun lispm-terminal--show-in-listener (show buffer)
+  "Call display callback SHOW for BUFFER in this terminal's listener.
+Only the selected terminal frame is adapted; callbacks in other frames
+are unchanged.  The configured callback still runs, with its return value
+preserved.  Emacs display actions use the existing listener, including
+when a project is opened from the dedicated Sessions pane."
+  (if (not (lispm-terminal-p))
+      (funcall show buffer)
+    (let* ((window (lispm-terminal--listener-window))
+           (display-buffer-overriding-action
+            (list (list (lambda (target alist)
+                          (window--display-buffer target window 'reuse alist))))))
+      (select-window window)
+      (prog1 (funcall show buffer)
+        (when (eq (window-buffer window) buffer)
+          (with-current-buffer buffer
+            (lispm-terminal-keys-mode 1)
+            ;; Work has no chat agent of its own; remember the conversation
+            ;; shown here so its who line and session navigation keep it.
+            (when lispm-chat-agent
+              (setq lispm-terminal--agent lispm-chat-agent))))))))
 
 (defun lispm-terminal--alive ()
   "The agents alive, in the same tree order as the sessions list."
@@ -768,6 +791,10 @@ change to the listener on such a line wrote a space over it."
 gives the frame back as it was."
   :global t
   :group 'lispm-terminal
+  (dolist (variable '(lispm-agents-work-display-function lispm-agents-show-function))
+    (if lispm-terminal-mode
+        (add-function :around (symbol-value variable) #'lispm-terminal--show-in-listener)
+      (remove-function (symbol-value variable) #'lispm-terminal--show-in-listener)))
   (pcase-dolist (`(,hook . ,function) lispm-terminal--hooks)
     (if lispm-terminal-mode
         (add-hook hook function)

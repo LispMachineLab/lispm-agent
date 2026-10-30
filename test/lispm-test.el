@@ -11704,6 +11704,7 @@ was asked takes its place."
 
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
+(require 'lispm-agents-work-test)
 (require 'lispm-roster-details-test)
 (require 'lispm-roster-bridge-test)
 (require 'lispm-roster-runtime-test)
