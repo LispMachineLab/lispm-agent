@@ -237,6 +237,30 @@
           (should (= (length (window-list)) windows))
           (should (buffer-local-value 'lispm-terminal-keys-mode view)))))))
 
+(ert-deftest lispm-test-work-focus-retains-last-conversation ()
+  "Work retains a different chat opened from its list for status and navigation."
+  (lispm-test--work-views
+    (let ((lispm-agents-work-display-function #'pop-to-buffer-same-window)
+          (lispm-agents-show-function #'pop-to-buffer))
+      (lispm-test-with-terminal
+        (let* ((original (lispm-terminal-agent))
+               (other (lispm-start 'assistant project))
+               (view (lispm-agents-open-project project)))
+          (with-current-buffer view
+            (goto-char (point-min))
+            (while (and (not (eobp))
+                        (not (eq (tabulated-list-get-id) (lispm-agent-buffer other))))
+              (forward-line))
+            (should-not (eobp))
+            (lispm-agents-work-open))
+          (should (eq (lispm-terminal-agent) other))
+          (lispm-agents-open-project project)
+          (should (eq (lispm-terminal-agent) other))
+          (should (string-search (symbol-name (lispm-agent-name other))
+                                 (lispm-terminal--who-line)))
+          (lispm-terminal-next)
+          (should (eq (lispm-terminal-agent) original)))))))
+
 (ert-deftest lispm-test-work-focus-preserves-custom-callbacks ()
   "Focus adapts only its frame and restores the configured display callbacks."
   (lispm-test--work-views

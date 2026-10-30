@@ -219,7 +219,12 @@ when a project is opened from the dedicated Sessions pane."
       (select-window window)
       (prog1 (funcall show buffer)
         (when (eq (window-buffer window) buffer)
-          (with-current-buffer buffer (lispm-terminal-keys-mode 1)))))))
+          (with-current-buffer buffer
+            (lispm-terminal-keys-mode 1)
+            ;; Work has no chat agent of its own; remember the conversation
+            ;; shown here so its who line and session navigation keep it.
+            (when lispm-chat-agent
+              (setq lispm-terminal--agent lispm-chat-agent))))))))
 
 (defun lispm-terminal--alive ()
   "The agents alive, in the same tree order as the sessions list."
