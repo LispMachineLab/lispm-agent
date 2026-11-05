@@ -171,9 +171,9 @@ names, those of `lispm-model-choices-functions', and the one chosen."
 
 (defun lispm-set-model (backend model &optional save)
   "Have agents that name no model use MODEL of BACKEND, and SAVE it.
-BACKEND is a key of `lispm-backends', nil for the first whose key is in
-the environment (see `lispm-backend').  MODEL nil, or the backend's own,
-follows the backend's own.  Running agents take it from their next
+BACKEND is a key of `lispm-backends', nil for the first whose key is at
+hand (see `lispm-backend').  MODEL nil, or the backend's own, follows
+the backend's own.  Running agents take it from their next
 request on, unless their role names a model or they switched to one."
   (when (and backend (not (assq backend lispm-backends)))
     (user-error "%s" (lispm-tr "Unknown backend %s (see `lispm-backends')" backend)))
@@ -191,6 +191,105 @@ EFFORT is a level of `lispm-efforts'."
                                effort (mapconcat #'car lispm-efforts ", "))))
   (lispm-settings-set 'lispm-effort effort save))
 
+;;;; Backends
+
+(defconst lispm-backend-apis
+  '((anthropic . "Anthropic-compatible")
+    (openai . "OpenAI-compatible"))
+  "The APIs a backend may speak, and what to call each.")
+
+(defun lispm-backend-api-name (api)
+  "API, a key of `lispm-backend-apis', named in the language spoken."
+  (lispm-tr (or (cdr (assq api lispm-backend-apis)) (format "%s" api))))
+
+(defun lispm-backend-secret-id (name)
+  "The ID of backend NAME's key in the secret store.
+The store keeps the key, never `lispm-backends' itself."
+  (intern (format "lispm-backend-%s" name)))
+
+(defun lispm-backend-get (name)
+  "The plist of backend NAME, or nil; a copy, safe to change."
+  (when-let* ((entry (assq name lispm-backends)))
+    (copy-tree (cdr entry))))
+
+(defun lispm-backend--check-name (name)
+  "Signal an error unless NAME can name a backend."
+  (unless (and (symbolp name) name
+               (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" (symbol-name name)))
+    (user-error "%s" (lispm-tr "A backend needs a name of letters, digits, `-', `_' or `.'")))
+  name)
+
+(defun lispm-backend--normalize (backend)
+  "BACKEND, a plist, with its address and model trimmed for keeping."
+  (let ((backend (copy-tree backend)))
+    (when (stringp (plist-get backend :url))
+      (plist-put backend :url
+                 (string-remove-suffix "/" (string-trim (plist-get backend :url)))))
+    (when (stringp (plist-get backend :model))
+      (plist-put backend :model (string-trim (plist-get backend :model))))
+    backend))
+
+(defun lispm-backend--check (backend)
+  "Signal an error unless BACKEND, a plist, is one LispM can ask."
+  (let ((api (plist-get backend :api))
+        (url (plist-get backend :url))
+        (model (plist-get backend :model)))
+    (unless (assq api lispm-backend-apis)
+      (user-error "%s" (lispm-tr "Unknown API shape %s (see `lispm-backend-apis')" api)))
+    (unless (and (stringp url)
+                 (string-match-p "\\`https?://[^/[:space:]]+" url))
+      (user-error "%s" (lispm-tr "A backend's address starts with http:// or https://")))
+    (unless (and (stringp model) (not (string-empty-p model)))
+      (user-error "%s" (lispm-tr "A backend needs a model")))
+    backend))
+
+(defun lispm-backend-add (name backend &optional save)
+  "Add BACKEND, a plist, as NAME, a symbol; SAVE it for later starts.
+Signal an error when NAME is taken, or BACKEND is not one LispM can ask."
+  (lispm-backend--check-name name)
+  (when (assq name lispm-backends)
+    (user-error "%s" (lispm-tr "There is already a backend %s" name)))
+  (setq backend (lispm-backend--normalize backend))
+  (lispm-backend--check backend)
+  (lispm-settings-set 'lispm-backends
+                      (append (copy-tree lispm-backends) (list (cons name backend)))
+                      save))
+
+(defun lispm-backend-change (name backend &optional save)
+  "Make BACKEND, a plist, the one NAME names; SAVE it for later starts."
+  (lispm-backend--check-name name)
+  (unless (assq name lispm-backends)
+    (user-error "%s" (lispm-tr "There is no backend %s" name)))
+  (setq backend (lispm-backend--normalize backend))
+  (lispm-backend--check backend)
+  (lispm-settings-set 'lispm-backends
+                      (mapcar (lambda (entry)
+                                (if (eq (car entry) name)
+                                    (cons name backend)
+                                  entry))
+                              lispm-backends)
+                      save))
+
+(defun lispm-backend-remove (name &optional save)
+  "Remove backend NAME; SAVE the rest for later starts.
+Its key is removed from the secret store once no other backend uses it."
+  (let ((entry (assq name lispm-backends)))
+    (unless entry
+      (user-error "%s" (lispm-tr "There is no backend %s" name)))
+    (let ((key (plist-get (cdr entry) :key)))
+      (when (and (consp key) (eq (car key) 'secret)
+                 (not (seq-some (lambda (other)
+                                  (and (not (eq (car other) name))
+                                       (equal (plist-get (cdr other) :key) key)))
+                                lispm-backends)))
+        (ignore-errors (lispm-secret-delete (cdr key)))))
+    (when (eq lispm-backend name)
+      (lispm-settings-set 'lispm-backend nil save)
+      (lispm-settings-set 'lispm-model nil save))
+    (lispm-settings-set 'lispm-backends
+                        (assq-delete-all name (copy-tree lispm-backends))
+                        save)))
+
 (defun lispm-settings--backend-status (name backend)
   "How the backend NAME, of plist BACKEND, stands as far as LispM can tell
 without asking anyone for its key: a plist of :state and :message, see
@@ -204,7 +303,7 @@ without asking anyone for its key: a plist of :state and :message, see
         ((`(,state ,message)
           (cond
            ((null name)
-            (list 'none (lispm-tr "No backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY, or add a backend of your own.")))
+            (list 'none (lispm-tr "No backend: add one in LispM's settings (`lispm-backends').")))
            ((null backend)
             (list 'unknown (lispm-tr "Unknown backend %s (see `lispm-backends')" name)))
            ((and value (not (string-empty-p value)))
@@ -212,6 +311,13 @@ without asking anyone for its key: a plist of :state and :message, see
            ((plist-get backend :key-env)
             (list 'no-key (lispm-tr "No key: set %s." variable)))
            ((null key) (list 'ready (lispm-tr "Ready; it needs no key.")))
+           ((and (consp key) (eq (car key) 'secret))
+            (let ((secret (condition-case nil
+                              (lispm-secret-get (cdr key) t)
+                            (error nil))))
+              (if (and secret (not (string-empty-p secret)))
+                  (list 'ready (lispm-tr "Ready; its key is stored encrypted."))
+                (list 'no-key (lispm-tr "No key: set it in LispM's settings.")))))
            ((stringp key) (list 'ready (lispm-tr "Ready; its key is set.")))
            ((or (assq key lispm-key-sources) (eq key 'auth-source))
             (list 'unchecked
@@ -231,8 +337,8 @@ without asking anyone for its key: a plist of :state and :message, see
   :state    `ready' when its key is at hand or it needs none;
             `unchecked' when its key is looked up as a request is
             made, in auth-source or by a function; `no-key' when it has
-            none; `none' when no backend is chosen and no key is in the
-            environment; `unknown' when `lispm-backend' names none of
+            none; `none' when no backend is chosen and none has a key at
+            hand; `unknown' when `lispm-backend' names none of
             `lispm-backends'; or a state of a program's own
   :message  the state, said in the language spoken
 The first of `lispm-backend-status-functions' answering tells the

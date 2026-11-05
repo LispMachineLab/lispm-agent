@@ -521,13 +521,84 @@ section's parts, a cleared result read back whole."
       (let ((agent (lispm-defagent tester "Test agent." :root project)))
         (lispm-tell agent "hello")
         (should (lispm-test--wait (lambda () (lispm-agent-condition agent))))
-        (should (string-match-p "No model backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY"
+        (should (string-match-p "No model backend: add one to .lispm-backends."
                                 (plist-get (lispm-agent-condition agent) :message)))
         (lispm-restart agent (plist-get (lispm-agent-condition agent) :id) 'abort)
         (should (lispm-test--wait (lispm-test--idle-p agent)))
-        (should (string-match-p "^\\* Note\nNo model backend: set OPENAI_API_KEY"
+        (should (string-match-p "^\\* Note\nNo model backend: add one to .lispm-backends."
                                 (lispm-test--transcript agent)))
         (should-not lispm-test--requests)))))
+
+(ert-deftest lispm-test-secret-store ()
+  "LispM depends on LispM Auth for secrets, connected through the hooks."
+  (should (featurep 'lispm-auth))
+  (should (memq #'lispm-auth--secret-get lispm-secret-get-functions))
+  (should (memq #'lispm-auth--secret-set lispm-secret-set-functions))
+  (should (memq #'lispm-auth--secret-delete lispm-secret-delete-functions))
+  (should (memq #'lispm-auth--secret-available lispm-secret-available-functions))
+  (let (lispm-secret-available-functions
+        lispm-secret-get-functions
+        lispm-secret-set-functions
+        lispm-secret-delete-functions)
+    (should-not (lispm-secret-available-p))
+    (should-not (lispm-secret-get 'nowhere))
+    (should-error (lispm-secret-set 'nowhere "k") :type 'user-error)
+    (should-not (lispm-secret-delete 'nowhere)))
+  (let ((store nil)
+        (asked nil))
+    (let ((lispm-secret-available-functions (list (lambda () t)))
+          (lispm-secret-get-functions
+           (list (lambda (id &optional no-prompt)
+                   (push (list id no-prompt) asked)
+                   (cdr (assq id store)))))
+          (lispm-secret-set-functions
+           (list (lambda (id secret)
+                   (setf (alist-get id store) secret)
+                   t)))
+          (lispm-secret-delete-functions
+           (list (lambda (id)
+                   (prog1 (and (assq id store) t)
+                     (setq store (assq-delete-all id store)))))))
+      (should (lispm-secret-available-p))
+      (lispm-secret-set 'gateway "sk-1")
+      (should (equal (lispm-secret-get 'gateway t) "sk-1"))
+      (should (equal (lispm-secret-get 'gateway) "sk-1"))
+      ;; Told when it may ask for the password, and when not.
+      (should (equal asked '((gateway nil) (gateway t))))
+      (should (lispm-secret-delete 'gateway))
+      (should-not (lispm-secret-get 'gateway t))
+      (should-not (lispm-secret-delete 'gateway)))))
+
+(ert-deftest lispm-test-backend-key-secret ()
+  "A backend's key may be kept in the secret store, asked for only as it
+needs one."
+  (let ((backend '(:api openai :url "https://gateway.example/v1" :model "m"
+                    :key (secret . lispm-backend-gateway))))
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'lispm-secret-get)
+                 (lambda (id &optional no-prompt)
+                   (push (list id no-prompt) asked)
+                   "sk-1")))
+        (should (equal (lispm-api--key backend) "sk-1"))
+        ;; A request may have the store ask for the password.
+        (should (equal asked '((lispm-backend-gateway nil))))))
+    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) nil)))
+      (should-error (lispm-api--key backend) :type 'user-error))))
+
+(ert-deftest lispm-test-default-backend-secret ()
+  "A backend whose key the secret store has is one whose key is at hand."
+  (let ((lispm-backends '((gateway :api openai :url "https://gateway.example/v1" :model "m"
+                                   :key (secret . lispm-backend-gateway))))
+        (lispm-backend nil)
+        (asked nil))
+    (cl-letf (((symbol-function 'lispm-secret-get)
+               (lambda (id &optional no-prompt)
+                 (push (list id no-prompt) asked)
+                 nil)))
+      (should-not (lispm-backend-name)))
+    (should (equal asked '((lispm-backend-gateway t))))
+    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) "sk-1")))
+      (should (eq (lispm-backend-name) 'gateway)))))
 
 (ert-deftest lispm-test-request-features ()
   "First-party extensions are only sent to backends that support them."
@@ -6570,6 +6641,12 @@ not with LispM's welcome; its replies are marked as its."
         (forward-char 1)))
     (nreverse buttons)))
 
+(defun lispm-test--form-problem ()
+  "The message the form in this buffer will not submit with, or nil."
+  (condition-case err
+      (progn (lispm-ui-form-submit) nil)
+    (user-error (error-message-string err))))
+
 (ert-deftest lispm-test-character-form ()
   "A character is made and changed in its form; an app's chooses its model alone."
   (lispm-test-env
@@ -6626,6 +6703,107 @@ not with LispM's welcome; its replies are marked as its."
         (should (equal (lispm--file-text (expand-file-name "characters/notes/character.org"
                                                            lispm-directory))
                        "#+model: small-model\n"))))))
+
+(ert-deftest lispm-test-backend-form ()
+  "A backend is added and changed in its form: the API it speaks, where
+it is, its models, and where its key comes from."
+  (lispm-test--with-settings
+    (let* ((store nil)
+           (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-get-functions
+            (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
+           (lispm-secret-set-functions
+            (list (lambda (id secret) (setf (alist-get id store) secret) t)))
+           (lispm-secret-delete-functions
+            (list (lambda (id)
+                    (prog1 (and (assq id store) t)
+                      (setq store (assq-delete-all id store)))))))
+      (with-current-buffer (lispm-backend-form)
+        (should (equal (lispm-ui-form-title) (lispm-tr "Add Backend")))
+        ;; An OpenAI-compatible server, its key kept encrypted, is what
+        ;; a new backend is at first.
+        (should (eq (lispm-ui-form-value 'api) 'openai))
+        (should (eq (lispm-ui-form-value 'key-source) 'secret))
+        (should (assq 'key (lispm-ui-form-values)))
+        (should-not (assq 'key-env (lispm-ui-form-values)))
+        (should-not (lispm-ui-form-value 'use))
+        (should (lispm-test--form-problem))
+        ;; A name it may be known by, and not one there is.
+        (lispm-ui-form-set 'name "test")
+        (should (string-match-p "already a backend test" (lispm-test--form-problem)))
+        (lispm-ui-form-set 'name "my gateway")
+        (should (string-match-p "letters, digits" (lispm-test--form-problem)))
+        ;; An address LispM can append its path to; a model.
+        (lispm-ui-form-set 'name "my-gateway" 'url "127.0.0.1:11434/v1")
+        (should (string-match-p "Starts with http" (lispm-test--form-problem)))
+        (lispm-ui-form-set 'url "http://127.0.0.1:11434/v1/"
+                           'model "qwen3-coder"
+                           'models "qwen3-coder\nsmall\n\nsmall")
+        (lispm-ui-form-set 'api 'anthropic)
+        (lispm-test--form-type 'key "sk-1")
+        (lispm-ui-form-submit))
+      (let ((backend (lispm-backend-get 'my-gateway)))
+        (should (eq (plist-get backend :api) 'anthropic))
+        (should (equal (plist-get backend :url) "http://127.0.0.1:11434/v1"))
+        (should (equal (plist-get backend :model) "qwen3-coder"))
+        (should (equal (plist-get backend :models) '("small")))
+        (should (equal (plist-get backend :features) '(streaming)))
+        (should (equal (plist-get backend :key) '(secret . lispm-backend-my-gateway))))
+      (should (equal (cdr (assq 'lispm-backend-my-gateway store)) "sk-1"))
+      (should (memq 'lispm-backends saved))
+      ;; Changed: its values as they are, its key never shown, kept when
+      ;; left empty.
+      (with-current-buffer (lispm-backend-form 'my-gateway)
+        (should (equal (lispm-ui-form-title) (lispm-tr "Backend %s" 'my-gateway)))
+        (should (eq (lispm-ui-form-value 'api) 'anthropic))
+        (should (equal (lispm-ui-form-value 'url) "http://127.0.0.1:11434/v1"))
+        (should (equal (lispm-ui-form-value 'models) "small"))
+        (should (eq (lispm-ui-form-value 'key-source) 'secret))
+        (should-not (lispm-ui-form-value 'key))
+        (lispm-ui-form-set 'url "https://gateway.example/v1")
+        (lispm-ui-form-submit))
+      (should (equal (plist-get (lispm-backend-get 'my-gateway) :url)
+                     "https://gateway.example/v1"))
+      (should (equal (cdr (assq 'lispm-backend-my-gateway store)) "sk-1"))
+      ;; A key typed replaces the one kept.
+      (with-current-buffer (lispm-backend-form 'my-gateway)
+        (lispm-test--form-type 'key "sk-2")
+        (lispm-ui-form-submit))
+      (should (equal (cdr (assq 'lispm-backend-my-gateway store)) "sk-2"))
+      ;; Its key may come from the environment instead.
+      (with-current-buffer (lispm-backend-form 'my-gateway)
+        (lispm-ui-form-set 'key-source 'env)
+        (should (assq 'key-env (lispm-ui-form-values)))
+        (should-not (assq 'key (lispm-ui-form-values)))
+        (should (string-match-p "fill this in" (lispm-test--form-problem)))
+        (lispm-test--form-type 'key-env "GATEWAY_KEY")
+        (lispm-ui-form-submit))
+      (let ((backend (lispm-backend-get 'my-gateway)))
+        (should (equal (plist-get backend :key-env) "GATEWAY_KEY"))
+        (should-not (plist-get backend :key)))
+      ;; Or not at all.
+      (with-current-buffer (lispm-backend-form 'my-gateway)
+        (lispm-ui-form-set 'key-source 'none)
+        (lispm-ui-form-submit))
+      (let ((backend (lispm-backend-get 'my-gateway)))
+        (should-not (plist-get backend :key))
+        (should-not (plist-get backend :key-env)))
+      ;; Made the one agents that name no model use.
+      (with-current-buffer (lispm-backend-form 'my-gateway)
+        (lispm-test--form-press 'use)
+        (lispm-ui-form-submit))
+      (should (eq lispm-backend 'my-gateway))
+      (should-not lispm-model)
+      ;; Without a secret store, a new backend's key is typed here, and
+      ;; there is no choice to keep it encrypted.
+      (let ((lispm-secret-available-functions nil))
+        (should-not (assq 'secret (lispm-backend-form--key-source-choices 'typed)))
+        (with-current-buffer (lispm-backend-form)
+          (should (eq (lispm-ui-form-value 'key-source) 'typed))
+          (lispm-ui-form-set 'name "local" 'url "http://localhost:11434/v1" 'model "m")
+          (lispm-test--form-type 'key "sk-local")
+          (lispm-ui-form-submit))
+        (should (equal (plist-get (lispm-backend-get 'local) :key) "sk-local"))))))
 
 (ert-deftest lispm-test-character-names ()
   (should (eq (lispm-character-name-for "Ada Lovelace") 'ada-lovelace))
@@ -9143,6 +9321,98 @@ program tells it; and what programs offer to do about it."
       (should (listp (lispm-model-choices)))
       (add-hook 'lispm-backend-status-functions (lambda (&rest _) '(:state starting)) -95)
       (should (equal (plist-get (lispm-model-status) :message) "starting")))))
+
+(ert-deftest lispm-test-settings-backends ()
+  "Backends are added, changed and removed, kept for later starts; their
+keys kept encrypted with them."
+  (lispm-test--with-settings
+    (let ((deleted nil))
+      (cl-letf (((symbol-function 'lispm-secret-delete)
+                 (lambda (id) (push id deleted) t)))
+        (lispm-backend-add 'gateway '(:api openai :url " https://gateway.example/v1/ "
+                                                :model " big-model " :features (streaming))
+                           t)
+        (let ((backend (lispm-backend-get 'gateway)))
+          (should (eq (plist-get backend :api) 'openai))
+          (should (equal (plist-get backend :url) "https://gateway.example/v1"))
+          (should (equal (plist-get backend :model) "big-model"))
+          (should (equal (plist-get backend :features) '(streaming))))
+        ;; What it gives is a copy.
+        (setf (plist-get (lispm-backend-get 'gateway) :url) "elsewhere")
+        (should (equal (plist-get (lispm-backend-get 'gateway) :url)
+                       "https://gateway.example/v1"))
+        (should (memq 'lispm-backends saved))
+        ;; Nor a name taken, one that cannot be, an API LispM does not
+        ;; speak, an address, or no model.
+        (should-error (lispm-backend-add 'gateway '(:api openai :url "https://x.example"
+                                                             :model "m"))
+                      :type 'user-error)
+        (should-error (lispm-backend-add (intern "bad name")
+                                         '(:api openai :url "https://x.example" :model "m"))
+                      :type 'user-error)
+        (should-error (lispm-backend-add 'gemini '(:api gemini :url "https://x.example"
+                                                             :model "m"))
+                      :type 'user-error)
+        (should-error (lispm-backend-add 'nowhere '(:api openai :url "x.example" :model "m"))
+                      :type 'user-error)
+        (should-error (lispm-backend-add 'bare '(:api openai :url "https://x.example"))
+                      :type 'user-error)
+        ;; Changed in its place.
+        (lispm-backend-change 'gateway '(:api anthropic :url "https://gateway.example/v2"
+                                                 :model "small"
+                                                 :key (secret . lispm-backend-gateway))
+                              t)
+        (should (eq (plist-get (lispm-backend-get 'gateway) :api) 'anthropic))
+        (should (equal (plist-get (lispm-backend-get 'gateway) :key)
+                       '(secret . lispm-backend-gateway)))
+        (should-error (lispm-backend-change 'nowhere '(:api openai :url "https://x.example"
+                                                                 :model "m"))
+                      :type 'user-error)
+        ;; Removed, its key with it once no other backend keeps it; and
+        ;; the one agents used, leaving them none.
+        (setq lispm-backend 'gateway
+              lispm-model "small")
+        (lispm-backend-remove 'gateway t)
+        (should-not (lispm-backend-get 'gateway))
+        (should-not lispm-backend)
+        (should-not lispm-model)
+        (should (equal deleted '(lispm-backend-gateway)))
+        (should-error (lispm-backend-remove 'gateway) :type 'user-error)
+        (lispm-backend-add 'a '(:api openai :url "https://a.example" :model "m"
+                                        :key (secret . shared))
+                           t)
+        (lispm-backend-add 'b '(:api openai :url "https://b.example" :model "m"
+                                        :key (secret . shared))
+                           t)
+        (lispm-backend-remove 'a t)
+        (should (equal deleted '(lispm-backend-gateway)))
+        (lispm-backend-remove 'b t)
+        (should (equal deleted '(shared lispm-backend-gateway)))))))
+
+(ert-deftest lispm-test-settings-backend-status-secret ()
+  "A backend whose key is kept encrypted is ready when the store has it,
+asked without asking anyone for the password."
+  (lispm-test--with-settings
+    (setf (alist-get 'gateway lispm-backends)
+          '(:api openai :url "https://gateway.example/v1" :model "m"
+            :key (secret . lispm-backend-gateway)))
+    (setq lispm-backend 'gateway)
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'lispm-secret-get)
+                 (lambda (id no-prompt) (push (list id no-prompt) asked) nil)))
+        (let ((status (lispm-model-status)))
+          (should (eq (plist-get status :state) 'no-key))
+          (should (equal (plist-get status :message)
+                         "No key: set it in LispM's settings."))
+          (should (equal asked '((lispm-backend-gateway t)))))))
+    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) "sk-1")))
+      (let ((status (lispm-model-status)))
+        (should (eq (plist-get status :state) 'ready))
+        (should (equal (plist-get status :message)
+                       "Ready; its key is stored encrypted."))))
+    ;; A store that locks is one with no key at hand.
+    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) (error "Locked"))))
+      (should (eq (plist-get (lispm-model-status) :state) 'no-key)))))
 
 (ert-deftest lispm-test-settings-change-hook ()
   "The change hook runs once a setting changed, once for changes made
