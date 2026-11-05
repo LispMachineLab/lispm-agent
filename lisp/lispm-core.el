@@ -96,11 +96,13 @@ either shape, local (Ollama, vLLM, LM Studio, llama.cpp) or hosted
 
 (defcustom lispm-backend nil
   "Backend for agents that do not name one; a key of `lispm-backends'.
-nil means the first of `lispm-backends' whose API key is set in the
-environment: OPENAI_API_KEY for `openai', ANTHROPIC_API_KEY for
-`anthropic', or the variable an entry names with :key-env.  A backend
-that needs no key, such as a server on this machine, must be named."
-  :type '(choice (const :tag "The first with an API key in the environment" nil)
+nil means the first of `lispm-backends' whose key is at hand: a literal
+one, one in the environment (OPENAI_API_KEY for `openai',
+ANTHROPIC_API_KEY for `anthropic', or the variable an entry names with
+:key-env), or one in the secret store (see `lispm-secret-get').  A
+backend that needs no key, such as a server on this machine, must be
+named."
+  :type '(choice (const :tag "The first with a key at hand" nil)
                  symbol))
 
 (defconst lispm-key-sources
@@ -109,6 +111,71 @@ that needs no key, such as a server on this machine, must be named."
   "The :key values standing for a first-party API's key: where to find it.
 Each entry is (KEY VARIABLE HOST): the environment VARIABLE, else the
 auth-source entry for HOST.")
+
+;;;; Secrets
+
+;; LispM keeps no secret itself: a program that does, LispM Auth, adds
+;; functions to these hooks.  A backend names a secret with
+;; `:key (secret . ID)', and LispM asks for it only as it needs one.
+
+(defvar lispm-secret-get-functions nil
+  "Functions reading a secret from a store, for `lispm-secret-get'.
+Each is called with ID and NO-PROMPT and returns the secret, a string;
+nil when it does not keep ID.  NO-PROMPT non-nil asks it never to ask
+the user for the password, answering nil while the store is locked.")
+
+(defvar lispm-secret-set-functions nil
+  "Functions storing a secret, for `lispm-secret-set'.
+Each is called with ID and SECRET, and returns non-nil when it stored
+it.  One may ask for the password if the store is locked.")
+
+(defvar lispm-secret-delete-functions nil
+  "Functions removing a secret, for `lispm-secret-delete'.
+Each is called with ID and returns non-nil when it removed it.")
+
+(defvar lispm-secret-available-functions nil
+  "Functions saying whether a secret store is here.
+Each is called with no argument and returns non-nil when it is, as
+`lispm-secret-available-p' answers.")
+
+(require 'lispm-auth)
+
+(defun lispm--ensure-auth-service ()
+  "Ensure LispM Auth's service is installed when running interactively."
+  (when (and (not noninteractive)
+             (not (bound-and-true-p ert--running-tests))
+             (fboundp 'lispm-auth--service-program)
+             (fboundp 'lispm-auth-install-service)
+             (null (bound-and-true-p lispm-auth-service-program)))
+    (condition-case nil
+        (lispm-auth--service-program)
+      (lispm-auth-unavailable
+       (ignore-errors (lispm-auth-install-service))))))
+
+(defun lispm-secret-available-p ()
+  "Return non-nil when a program keeps secrets for LispM."
+  (when (memq #'lispm-auth--secret-available lispm-secret-available-functions)
+    (lispm--ensure-auth-service))
+  (and (run-hook-with-args-until-success 'lispm-secret-available-functions) t))
+
+(defun lispm-secret-get (id &optional no-prompt)
+  "Return the secret ID keeps, or nil when there is none.
+NO-PROMPT non-nil asks the store not to ask the user for its password,
+as a window of settings does when it only says how a backend stands."
+  (run-hook-with-args-until-success 'lispm-secret-get-functions id no-prompt))
+
+(defun lispm-secret-set (id secret)
+  "Keep SECRET as ID in the secret store.
+The store may ask the user for its password.  Signal an error when
+there is no store: install LispM Auth for one."
+  (when (memq #'lispm-auth--secret-set lispm-secret-set-functions)
+    (lispm--ensure-auth-service))
+  (unless (run-hook-with-args-until-success 'lispm-secret-set-functions id secret)
+    (user-error "No secret store: install LispM Auth to keep keys encrypted")))
+
+(defun lispm-secret-delete (id)
+  "Remove the secret ID from the secret store; return non-nil if it did."
+  (run-hook-with-args-until-success 'lispm-secret-delete-functions id))
 
 (defcustom lispm-model nil
   "Default model for agents that do not name one.
@@ -650,15 +717,28 @@ conversation it had there, if any."
   (or (plist-get backend :key-env)
       (nth 1 (assq (plist-get backend :key) lispm-key-sources))))
 
+(defun lispm--backend-key-at-hand-p (backend)
+  "Non-nil when BACKEND has a key at hand, without asking anyone for it.
+A backend that needs no key does not count: it must be named."
+  (let ((key (plist-get backend :key))
+        (variable (lispm--key-variable backend)))
+    (cond
+     (variable (and (getenv variable) (not (string-empty-p (getenv variable)))))
+     ((null key) nil)
+     ((stringp key) (not (string-empty-p key)))
+     ((and (consp key) (eq (car key) 'secret))
+      (condition-case nil
+          (let ((secret (lispm-secret-get (cdr key) t)))
+            (and secret (not (string-empty-p secret))))
+        (error nil)))
+     (t nil))))
+
 (defun lispm-backend-name (&optional agent)
   "Name of the backend AGENT uses, or that agents use by default; or nil.
 See `lispm-backend'."
   (or (and agent (lispm-agent-backend agent))
       lispm-backend
-      (car (seq-find (lambda (entry)
-                       (when-let* ((variable (lispm--key-variable (cdr entry)))
-                                   (value (getenv variable)))
-                         (not (string-empty-p value))))
+      (car (seq-find (lambda (entry) (lispm--backend-key-at-hand-p (cdr entry)))
                      lispm-backends))))
 
 (defun lispm-backend (name)
@@ -675,9 +755,8 @@ An entry of `lispm-backends', or a character's own endpoint, named
   "Plist of the backend AGENT uses."
   (let ((name (lispm-backend-name agent)))
     (cond ((null name)
-           (user-error "No model backend: set OPENAI_API_KEY or ANTHROPIC_API_KEY, \
-or set `lispm-backend' to an entry of `lispm-backends', where a server \
-of your own can be added"))
+           (user-error "No model backend: add one to `lispm-backends', or set \
+`lispm-backend' to one of them"))
           ((lispm-backend name))
           (t (user-error "Unknown backend %s (see `lispm-backends')" name)))))
 

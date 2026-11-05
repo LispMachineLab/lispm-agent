@@ -5,7 +5,7 @@
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
 ;; Version: 0.16.0
-;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.1.0"))
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.1.0") (lispm-auth "0.2.5"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -117,16 +117,23 @@
 (require 'lispm-session-tools)
 (require 'lispm-process-tools)
 (require 'lispm-settings)
+(require 'lispm-backend-form)
 (require 'lispm-chat)
 (require 'lispm-bar)
 (require 'lispm-mcp-server)
 (require 'lispm-ui)
+(require 'lispm-auth)
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
 
 ;; LispM UI, which draws LispM's forms, speaks the language LispM does.
 (add-hook 'lispm-ui-language-functions #'lispm-current-language)
 (add-hook 'lispm-language-changed-hook #'lispm-ui-language-changed)
+
+;; LispM Auth translates its password page through LispM unless another
+;; host program, such as LispM Desktop, provides its own translator.
+(unless lispm-auth-translate-function
+  (setq lispm-auth-translate-function #'lispm-tr))
 
 ;;;; Roles
 

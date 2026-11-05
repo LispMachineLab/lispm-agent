@@ -113,6 +113,9 @@ Called with BACKEND, BODY, BETAS and the keyword callbacks :on-delta,
            (apply #'lispm-api--find-key (cdr (assq key lispm-key-sources))))
           ((eq key 'auth-source)
            (lispm-api--find-key nil (url-host (url-generic-parse-url (plist-get backend :url)))))
+          ((and (consp key) (eq (car key) 'secret))
+           (or (lispm-secret-get (cdr key))
+               (user-error "No API key: LispM's secret store has none for %s" (cdr key))))
           ((functionp key) (funcall key))
           (t (user-error "Bad :key in backend: %S" key)))))
 
