@@ -196,6 +196,7 @@ Return the chat."
       (setq-local left-margin-width 1
                   right-margin-width 1))
     (set-window-dedicated-p window nil)
+    (set-window-parameter window 'quit-restore nil)
     (set-window-buffer window chat)
     (set-window-point window (with-current-buffer chat (point-max)))
     (setq lispm-terminal--agent agent)
@@ -778,6 +779,7 @@ change to the listener on such a line wrote a space over it."
     (lispm-title-change-functions . lispm-terminal--changed)
     (lispm-agent-declared-functions . lispm-terminal--changed)
     (lispm-sandbox-change-hook . lispm-terminal--changed)
+    (lispm-settings-change-hook . lispm-terminal--changed)
     (lispm-language-changed-hook . lispm-terminal--changed)
     (lispm-session-mode-hook . lispm-terminal--session-opened)
     (window-buffer-change-functions . lispm-terminal--changed)
@@ -791,7 +793,9 @@ change to the listener on such a line wrote a space over it."
 gives the frame back as it was."
   :global t
   :group 'lispm-terminal
-  (dolist (variable '(lispm-agents-work-display-function lispm-agents-show-function))
+  (dolist (variable '(lispm-agents-work-display-function
+                      lispm-agents-show-function
+                      lispm-backend-form-show-function))
     (if lispm-terminal-mode
         (add-function :around (symbol-value variable) #'lispm-terminal--show-in-listener)
       (remove-function (symbol-value variable) #'lispm-terminal--show-in-listener)))
@@ -848,6 +852,7 @@ lispm-terminal starts Emacs so."
     ;; its startup screen in the listener next.
     (unless inhibit-startup-hooks
       (setq inhibit-startup-screen t))
+    (lispm-ensure-auth)
     (modify-frame-parameters frame lispm-terminal--bare)
     (let ((agent (or agent (lispm-terminal-agent) (lispm-system-agent)))
           (window (frame-selected-window frame)))
@@ -862,7 +867,8 @@ lispm-terminal starts Emacs so."
       (set-window-parameter window 'mode-line-format 'none)
       (lispm-terminal-mode 1)
       (lispm-terminal-show agent)
-      (lispm-terminal--panes))))
+      (lispm-terminal--panes)
+      (lispm-maybe-setup-model agent))))
 
 ;;;; Asked of an agent
 ;;

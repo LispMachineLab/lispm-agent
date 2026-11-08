@@ -2712,6 +2712,10 @@ If the restart needs a value, ask the user for it."
 (defun lispm--restart-use-model (agent _condition value)
   "Retry AGENT's request with the backend and model in VALUE, (BACKEND . MODEL)."
   (lispm-use-model agent (car value) (cdr value))
+  (when (buffer-live-p (lispm-agent-view agent))
+    (with-current-buffer (lispm-agent-view agent)
+      (when (fboundp 'lispm-chat--redraw)
+        (lispm-chat--redraw))))
   (lispm--request agent))
 
 (defun lispm-use-model (agent backend model)

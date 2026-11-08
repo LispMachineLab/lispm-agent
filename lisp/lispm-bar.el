@@ -63,6 +63,7 @@
 (require 'lispm-chat)
 
 (declare-function lispm-show "lispm" (agent))
+(declare-function lispm-setup-model "lispm-backend-form" ())
 
 (defgroup lispm-bar nil
   "The LispM bar: one field to find what is installed and to ask LispM."
@@ -249,16 +250,24 @@ asked once `lispm-bar-model-ready' is called.")
   "Non-nil if AGENT has a backend to ask, as far as can be told.
 Without asking it, that is: a backend of `lispm-backends' (see
 `lispm-backend'), whose key, when it reads one from an environment
-variable, is set there."
+variable or the secret store, is set there."
   (condition-case nil
-      (let ((variable (plist-get (lispm-agent-backend* agent) :key-env)))
-        (or (null variable) (not (string-empty-p (or (getenv variable) "")))))
+      (let* ((backend (lispm-agent-backend* agent))
+             (variable (plist-get backend :key-env))
+             (key (plist-get backend :key)))
+        (cond (variable (not (string-empty-p (or (getenv variable) ""))))
+              ((and (consp key) (eq (car key) 'secret))
+               (let ((secret (condition-case nil
+                                 (lispm-secret-get (cdr key) t)
+                               (error nil))))
+                 (and secret (not (string-empty-p secret)) t)))
+              (t t)))
     (error nil)))
 
 (defun lispm-bar-setup-model ()
-  "Show where LispM is given a model: the option `lispm-backend'."
-  (customize-option 'lispm-backend)
-  (message "%s" (lispm-tr "LispM has no model: set OPENAI_API_KEY or ANTHROPIC_API_KEY, or choose a backend here")))
+  "Open the form setting up a model backend for LispM."
+  (require 'lispm-backend-form)
+  (lispm-setup-model))
 
 (defvar lispm-bar--waiting nil
   "What the user asked while no model worked, to ask once one does.
@@ -275,6 +284,13 @@ when it opens next."
       (message "%s" (lispm-tr "LispM is answering “%s”: %s shows the reply"
                               (lispm--oneline (car waiting) 40)
                               (substitute-command-keys "\\[lispm-ai]"))))))
+
+(defun lispm-bar--settings-changed ()
+  "Ask what waited for a model once a setting change makes one ready."
+  (when (and lispm-bar--waiting (lispm-bar-ready-p))
+    (lispm-bar-model-ready)))
+
+(add-hook 'lispm-settings-change-hook #'lispm-bar--settings-changed)
 
 ;;;; Asking
 

@@ -4,8 +4,8 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
-;; Version: 0.17.0
-;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.1.0") (lispm-auth "0.2.6"))
+;; Version: 0.17.1
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.7.1") (lispm-auth "0.2.7"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -126,9 +126,13 @@
 
 (add-hook 'org-mode-hook #'lispm-session-maybe-enable)
 
-;; LispM UI, which draws LispM's forms, speaks the language LispM does.
+;; LispM UI, which draws LispM's forms, speaks the language LispM does,
+;; and derives its palette from the active theme unless a host program
+;; such as LispM Desktop manages the palette itself.
 (add-hook 'lispm-ui-language-functions #'lispm-current-language)
 (add-hook 'lispm-language-changed-hook #'lispm-ui-language-changed)
+(unless (or noninteractive lispm-ui-current-palette)
+  (lispm-ui-palette-follow-theme))
 
 ;; LispM Auth translates its password page through LispM unless another
 ;; host program, such as LispM Desktop, provides its own translator.
@@ -165,9 +169,15 @@ you write under its last heading and send with C-c RET."
 
 (defun lispm-show (agent)
   "Show AGENT, ready for your next message; return its buffer."
+  (unless inhibit-startup-hooks
+    (setq inhibit-startup-screen t))
   (let ((buffer (lispm-agent-display-buffer agent)))
-    (pop-to-buffer buffer)
+    (if inhibit-startup-hooks
+        (pop-to-buffer buffer)
+      (pop-to-buffer-same-window buffer))
     (goto-char (point-max))
+    (lispm-ensure-auth)
+    (lispm-maybe-setup-model agent)
     buffer))
 
 (defvar lispm--last-role nil "Name of the role last chosen.")

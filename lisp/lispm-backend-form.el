@@ -37,13 +37,66 @@
 (require 'lispm-settings)
 (require 'lispm-ui-form)
 
+(defconst lispm-backend-presets
+  `((custom :label ,(lispm-tr-noop "Custom"))
+    (openrouter :label "OpenRouter"
+                :api openai
+                :url "https://openrouter.ai/api/v1"
+                :model "anthropic/claude-sonnet-4.5"
+                :models ("openai/gpt-5.4" "google/gemini-2.5-pro" "deepseek/deepseek-v3.2"))
+    (deepseek :label "DeepSeek"
+              :api openai
+              :url "https://api.deepseek.com/v1"
+              :model "deepseek-chat"
+              :models ("deepseek-reasoner"))
+    (gemini :label "Google Gemini"
+            :api openai
+            :url "https://generativelanguage.googleapis.com/v1beta/openai"
+            :model "gemini-2.5-pro"
+            :models ("gemini-2.5-flash"))
+    (ollama :label ,(lispm-tr-noop "Ollama (local)")
+            :api openai
+            :url "http://localhost:11434/v1"
+            :model "qwen3-coder"
+            :key-source none)
+    (lm-studio :label ,(lispm-tr-noop "LM Studio (local)")
+               :api openai
+               :url "http://localhost:1234/v1"
+               :model "qwen3-coder"
+               :key-source none))
+  "Presets offered when adding a backend in `lispm-backend-form'.")
+
+(defun lispm-backend-form--preset-choices ()
+  "The preset choices offered when adding a backend."
+  (mapcar (pcase-lambda (`(,key . ,props))
+            (cons key (lispm-tr (plist-get props :label))))
+          lispm-backend-presets))
+
+(defun lispm-backend-form--apply-preset (preset)
+  "Fill the current backend form from PRESET, a key of `lispm-backend-presets'."
+  (when-let* ((props (cdr (assq preset lispm-backend-presets)))
+              ((not (eq preset 'custom))))
+    (let ((default-source (if (lispm-secret-available-p) 'secret 'typed)))
+      (lispm-ui-form-set
+       'name (if (assq preset lispm-backends) "" (symbol-name preset))
+       'api (or (plist-get props :api) 'openai)
+       'url (or (plist-get props :url) "")
+       'model (or (plist-get props :model) "")
+       'models (mapconcat #'identity (plist-get props :models) "\n")
+       'key-source (or (plist-get props :key-source) default-source)))))
+
 (defun lispm-backend-form--key-source (backend)
   "How BACKEND's key comes, as its form's key-source."
   (let ((key (plist-get backend :key)))
     (cond ((and (consp key) (eq (car key) 'secret)) 'secret)
           ((stringp key) 'typed)
           ((plist-get backend :key-env) 'env)
-          ((assq key lispm-key-sources) 'env)
+          ((assq key lispm-key-sources)
+           (let ((variable (nth 1 (assq key lispm-key-sources))))
+             (if (or (and variable (not (string-empty-p (or (getenv variable) ""))))
+                     (not (lispm-secret-available-p)))
+                 'env
+               'secret)))
           ((eq key 'auth-source) 'auth-source)
           (t 'none))))
 
@@ -150,7 +203,12 @@ says, once it is valid."
          (fields
           (append
            (unless name
-             `((name :type text :label ,(lispm-tr "Name") :required t
+             `((preset :type choice :label ,(lispm-tr "Preset")
+                       :choices ,(lispm-backend-form--preset-choices)
+                       :value custom
+                       :on-change ,#'lispm-backend-form--apply-preset
+                       :help ,(lispm-tr "Fill in the address and models of a known provider."))
+               (name :type text :label ,(lispm-tr "Name") :required t
                      :value ""
                      :validate ,(lambda (value)
                                   (when (stringp value)
@@ -212,15 +270,235 @@ says, once it is valid."
                                      (lispm-tr "A variable's name, as ANTHROPIC_API_KEY")))
                       :help ,(lispm-tr "The environment variable holding the key."))
              (use :type check :text ,(lispm-tr "Use this backend for agents that name no model")
-                  :value ,(and (null name) (null lispm-backend))
-                  :when ,(lambda (_values) use-p))))))
-    (lispm-ui-form
-     (if name (lispm-tr "Backend %s" name) (lispm-tr "Add Backend"))
-     fields
-     :intro (lispm-tr "A server that speaks the Anthropic or OpenAI API, with where its key comes from.")
-     :submit (lispm-tr "Save")
-     :cancel (lispm-tr "Cancel")
-     :on-submit (lambda (values) (lispm-backend-form--submit name values)))))
+                  :value ,(null lispm-backend)
+                  :when ,(lambda (_values) use-p)))))
+         (buffer
+          (lispm-ui-form
+           (if name (lispm-tr "Backend %s" name) (lispm-tr "Add Backend"))
+           fields
+           :intro (lispm-tr "A server that speaks the Anthropic or OpenAI API, with where its key comes from.")
+           :submit (lispm-tr "Save")
+           :cancel (lispm-tr "Cancel")
+           :on-submit (lambda (values) (lispm-backend-form--submit name values)))))
+    (when (and name backend (not (lispm--backend-key-at-hand-p backend)))
+      (with-current-buffer buffer
+        (when-let* ((widget (alist-get 'key (lispm-ui-form-widgets buffer))))
+          (goto-char (or (widget-field-start widget) (widget-get widget :from))))))
+    buffer))
+
+(defun lispm-backend-form-show (buffer)
+  "Show BUFFER, a backend form, and return it."
+  (pop-to-buffer-same-window buffer)
+  (when-let* ((window (get-buffer-window buffer)))
+    (set-window-start window (point-min)))
+  buffer)
+
+(defvar lispm-backend-form-show-function #'lispm-backend-form-show
+  "Function showing a backend form buffer, called with the buffer.")
+
+(defun lispm-model-setup-form--provider-choices ()
+  "The provider choices offered in `lispm-model-setup-form'."
+  (let ((existing
+         (mapcar (pcase-lambda (`(,name . ,_))
+                   (cons name (pcase name
+                                ('anthropic "Anthropic")
+                                ('openai "OpenAI")
+                                (_ (symbol-name name)))))
+                 lispm-backends))
+        (presets
+         (cl-loop for (key . props) in lispm-backend-presets
+                  unless (or (eq key 'custom) (assq key lispm-backends))
+                  collect (cons key (lispm-tr (plist-get props :label))))))
+    (append existing presets (list (cons 'custom (lispm-tr "Custom"))))))
+
+(defun lispm-model-setup-form--props (provider)
+  "The backend properties for PROVIDER in `lispm-model-setup-form'."
+  (or (lispm-backend-get provider)
+      (cdr (assq provider lispm-backend-presets))))
+
+(defun lispm-model-setup-form--select-provider (provider)
+  "Fill the model setup form for PROVIDER."
+  (if (eq provider 'custom)
+      (lispm-ui-form-set
+       'url ""
+       'model ""
+       'models "")
+    (when-let* ((props (lispm-model-setup-form--props provider)))
+      (lispm-ui-form-set
+       'api (or (plist-get props :api) 'openai)
+       'url (or (plist-get props :url) "")
+       'model (or (plist-get props :model) "")
+       'models (mapconcat #'identity (plist-get props :models) "\n")))))
+
+(defun lispm-model-setup-form--submit (values)
+  "Save the backend and model VALUES describe, and make it LispM's model."
+  (let* ((provider (alist-get 'provider values))
+         (props (lispm-model-setup-form--props provider))
+         (name (if (eq provider 'custom)
+                   (intern (string-trim (or (alist-get 'name values) "")))
+                 provider))
+         (old (lispm-backend-get name))
+         (backend (if old (copy-tree old) (list :features '(streaming))))
+         (api (or (alist-get 'api values) (plist-get props :api) 'openai))
+         (url (string-remove-suffix
+               "/" (string-trim (or (alist-get 'url values)
+                                    (plist-get props :url) ""))))
+         (model (string-trim (or (alist-get 'model values)
+                                 (plist-get props :model) "")))
+         (models (if (assq 'models values)
+                     (lispm-backend-form--models (alist-get 'models values) model)
+                   (delete model (copy-sequence (plist-get props :models)))))
+         (key (string-trim (or (alist-get 'key values) "")))
+         (source (cond ((alist-get 'key-source values))
+                       ((eq (plist-get props :key-source) 'none) 'none)
+                       ((and (string-empty-p key)
+                             old
+                             (lispm--backend-key-at-hand-p old))
+                        (lispm-backend-form--key-source old))
+                       ((and (eq provider 'custom) (string-empty-p key))
+                        'none)
+                       ((lispm-secret-available-p) 'secret)
+                       (t 'typed)))
+         (variable (or (and (stringp (alist-get 'key-env values))
+                            (string-trim (alist-get 'key-env values)))
+                       (and old (lispm--key-variable old)))))
+    (unless (and (symbolp name)
+                 (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" (symbol-name name)))
+      (user-error "%s" (lispm-tr "Use letters, digits, `-', `_' or `.'")))
+    (setq backend (plist-put backend :api api))
+    (setq backend (plist-put backend :url url))
+    (setq backend (plist-put backend :model model))
+    (if models
+        (setq backend (plist-put backend :models models))
+      (cl-remf backend :models))
+    (setq backend (lispm-backend-form--with-key backend name source key variable))
+    (if old
+        (lispm-backend-change name backend t)
+      (lispm-backend-add name backend t))
+    (lispm-set-model name model t)))
+
+(defun lispm-model-setup-form ()
+  "Make the form that sets up LispM's model and provider; return its buffer."
+  (let* ((choices (lispm-model-setup-form--provider-choices))
+         (provider (or (lispm-backend-name) (caar choices) 'custom))
+         (props (lispm-model-setup-form--props provider))
+         (active-model (or (and (eq provider (lispm-backend-name))
+                                (lispm-default-model))
+                           (plist-get props :model)
+                           ""))
+         (custom-p (lambda (values) (eq (alist-get 'provider values) 'custom)))
+         (address-p (lambda (values)
+                      (memq (alist-get 'provider values) '(custom ollama lm-studio))))
+         (key-p (lambda (values)
+                  (let* ((prov (alist-get 'provider values))
+                         (p (lispm-model-setup-form--props prov)))
+                    (not (or (memq prov '(ollama lm-studio))
+                             (eq (plist-get p :key-source) 'none)
+                             (and (assq prov lispm-backends)
+                                  (eq (lispm-backend-form--key-source p) 'none)))))))
+         (fields
+          `((model-group :type heading :label ,(lispm-tr "Model Provider"))
+            (provider :type choice :label ,(lispm-tr "Provider")
+                      :choices ,choices
+                      :value ,provider
+                      :on-change ,#'lispm-model-setup-form--select-provider
+                      :help ,(lispm-tr "Choose the provider or server LispM's agents ask."))
+            (name :type text :label ,(lispm-tr "Name") :required t
+                  :value ""
+                  :when ,custom-p
+                  :validate ,(lambda (value)
+                               (when (stringp value)
+                                 (let ((name (intern (string-trim value))))
+                                   (unless (string-match-p
+                                            "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
+                                            (symbol-name name))
+                                     (lispm-tr "Use letters, digits, `-', `_' or `.'")))))
+                  :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))
+            (api :type radio :label ,(lispm-tr "API")
+                 :choices ,(mapcar (lambda (api)
+                                     (cons (car api) (lispm-backend-api-name (car api))))
+                                   lispm-backend-apis)
+                 :value ,(or (plist-get props :api) 'openai)
+                 :when ,custom-p
+                 :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
+            (url :type text :label ,(lispm-tr "Address") :required t
+                 :value ,(or (plist-get props :url) "")
+                 :when ,address-p
+                 :validate ,(lambda (value)
+                              (unless (and (stringp value)
+                                           (string-match-p "\\`https?://[^/[:space:]]+" value))
+                                (lispm-tr "Starts with http:// or https://")))
+                 :help ,(lispm-tr "The server's base address, without the path LispM adds."))
+            (model :type text :label ,(lispm-tr "Model") :required t
+                   :value ,active-model
+                   :help ,(lispm-tr "The model agents use when they name none."))
+            (models :type text-area :label ,(lispm-tr "Other models") :lines 4
+                    :value ,(mapconcat #'identity (plist-get props :models) "\n")
+                    :help ,(lispm-tr "One on a line; they appear in the model menu."))
+            (key :type password :label ,(lispm-tr "The key")
+                 :value ""
+                 :when ,key-p
+                 :help ,(lambda (values)
+                          (let* ((prov (alist-get 'provider values))
+                                 (back (and prov (not (eq prov 'custom))
+                                            (lispm-backend-get prov))))
+                            (if (and back (lispm--backend-key-at-hand-p back))
+                                (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
+                              (lispm-tr "LispM Auth keeps it encrypted.")))))))
+         (buffer
+          (lispm-ui-form
+           (lispm-tr "Set Up a Model")
+           fields
+           :intro (lispm-tr "Choose a model provider and enter its API key, or choose a local server.")
+           :submit (lispm-tr "Use Model")
+           :cancel (lispm-tr "Cancel")
+           :setup (lambda ()
+                    (when lispm-ui-form-show-header
+                      (setq-local lispm-ui-form-width 28)))
+           :on-submit #'lispm-model-setup-form--submit)))
+    (with-current-buffer buffer
+      (let* ((need-key (and (funcall key-p (list (cons 'provider provider)))
+                            (not (and props (lispm--backend-key-at-hand-p props)))))
+             (target (if need-key 'key 'model)))
+        (when-let* ((widget (alist-get target (lispm-ui-form-widgets buffer))))
+          (goto-char (or (widget-field-start widget) (widget-get widget :from))))))
+    buffer))
+
+;;;###autoload
+(defun lispm-setup-model ()
+  "Open the form that sets up a model provider and API key for LispM."
+  (interactive)
+  (funcall lispm-backend-form-show-function (lispm-model-setup-form)))
+
+(defcustom lispm-setup-on-start t
+  "Non-nil to offer `lispm-setup-model' once when LispM starts with no model."
+  :type 'boolean
+  :group 'lispm)
+
+(defvar lispm--setup-offered nil
+  "Non-nil once `lispm-maybe-setup-model' has offered model setup in this session.")
+
+(defun lispm-maybe-setup-model (&optional agent)
+  "Offer `lispm-setup-model' once when AGENT has no model backend."
+  (when (and lispm-setup-on-start
+             (not noninteractive)
+             (not (bound-and-true-p ert--running-tests))
+             (not lispm--setup-offered))
+    (if (and (null (lispm-backend-name agent))
+             (not (seq-some (pcase-lambda (`(,_ . ,props))
+                              (let ((key (plist-get props :key)))
+                                (and (consp key) (eq (car key) 'secret))))
+                            lispm-backends)))
+        (progn
+          (setq lispm--setup-offered t)
+          (lispm-setup-model)
+          (unless noninteractive
+            (redisplay t))
+          (lispm-ensure-auth))
+      (lispm-ensure-auth)
+      (when (null (lispm-backend-name agent))
+        (setq lispm--setup-offered t)
+        (lispm-setup-model)))))
 
 (provide 'lispm-backend-form)
 ;;; lispm-backend-form.el ends here

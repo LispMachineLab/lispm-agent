@@ -4724,7 +4724,24 @@ whatever their names, and leaves out larger ones and symbolic links."
         (lispm-choose-restart-named agent 'use-model))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (eq (lispm-agent-backend agent) 'other))
-      (should (equal (alist-get 'model (car lispm-test--requests)) "other-model")))))
+      (should (equal (alist-get 'model (car lispm-test--requests)) "other-model"))
+      ;; A backend without a key asks for one when chosen interactively.
+      (let ((lispm-backends (cons '(keyless :api openai :url "http://fake.invalid"
+                                            :model "keyless-model" :key openai)
+                                  lispm-backends))
+            (process-environment (cons "OPENAI_API_KEY" process-environment))
+            (lispm-secret-available-functions nil)
+            (saved nil))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "keyless"))
+                  ((symbol-function 'read-string) (lambda (_prompt _initial _history default) default))
+                  ((symbol-function 'read-passwd) (lambda (_prompt) "sk-typed"))
+                  ((symbol-function 'customize-save-variable)
+                   (lambda (var val &rest _) (push var saved) (customize-set-variable var val))))
+          (pcase-let ((`(,backend . ,model) (lispm--read-model agent)))
+            (should (eq backend 'keyless))
+            (should (equal model "keyless-model"))))
+        (should (equal (plist-get (lispm-backend-get 'keyless) :key) "sk-typed"))
+        (should (memq 'lispm-backends saved))))))
 
 (ert-deftest lispm-test-condition-org-and-review ()
   "In org a condition is settled like a call: by its TODO state, or with C-c C-y."
@@ -6803,7 +6820,97 @@ it is, its models, and where its key comes from."
           (lispm-ui-form-set 'name "local" 'url "http://localhost:11434/v1" 'model "m")
           (lispm-test--form-type 'key "sk-local")
           (lispm-ui-form-submit))
-        (should (equal (plist-get (lispm-backend-get 'local) :key) "sk-local"))))))
+        (should (equal (plist-get (lispm-backend-get 'local) :key) "sk-local")))
+      ;; Presets fill in known providers, and built-in backends without
+      ;; an environment key open ready to store an encrypted key.
+      (let ((lispm-backend nil))
+        (with-current-buffer (lispm-backend-form 'openai)
+          (should (eq (lispm-ui-form-value 'key-source) 'secret))
+          (should (assq 'key (lispm-ui-form-values)))
+          (should (lispm-ui-form-value 'use))
+          (kill-buffer))
+        (with-current-buffer (lispm-backend-form)
+          (lispm-backend-form--apply-preset 'ollama)
+          (should (equal (lispm-ui-form-value 'name) "ollama"))
+          (should (equal (lispm-ui-form-value 'url) "http://localhost:11434/v1"))
+          (should (eq (lispm-ui-form-value 'key-source) 'none))
+          (kill-buffer))))))
+
+(ert-deftest lispm-test-model-setup-form ()
+  "The model setup form configures an existing provider, a preset, or a
+custom server and activates it; `lispm-maybe-setup-model' offers it once
+when LispM starts without a model."
+  (lispm-test--with-settings
+    (let* ((store nil)
+           (shown nil)
+           (lispm-backend nil)
+           (lispm-backends (cl-remove-if (lambda (b) (eq (car b) 'test))
+                                         (copy-tree lispm-backends)))
+           (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-get-functions
+            (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
+           (lispm-secret-set-functions
+            (list (lambda (id secret) (setf (alist-get id store) secret) t)))
+           (lispm-backend-form-show-function
+            (lambda (buffer) (push buffer shown) buffer)))
+      ;; Existing provider (OpenAI by default, first in `lispm-backends'):
+      ;; only provider, model, and key fields shown; backend made active.
+      (with-current-buffer (lispm-model-setup-form)
+        (should (equal (lispm-ui-form-title) (lispm-tr "Set Up a Model")))
+        (should (eq (lispm-ui-form-value 'provider) 'openai))
+        (should-not (assq 'name (lispm-ui-form-values)))
+        (should-not (assq 'api (lispm-ui-form-values)))
+        (should-not (assq 'url (lispm-ui-form-values)))
+        (should (assq 'models (lispm-ui-form-values)))
+        (should-not (assq 'key-source (lispm-ui-form-values)))
+        (lispm-test--form-type 'key "sk-openai-1")
+        (lispm-ui-form-submit))
+      (should (eq lispm-backend 'openai))
+      (should (equal (cdr (assq 'lispm-backend-openai store)) "sk-openai-1"))
+      (should (memq 'streaming (plist-get (lispm-backend-get 'openai) :features)))
+      ;; Switching to a preset (Ollama) shows address, adds the backend and activates it.
+      (with-current-buffer (lispm-model-setup-form)
+        (lispm-ui-form-set 'provider 'ollama)
+        (lispm-model-setup-form--select-provider 'ollama)
+        (should (assq 'url (lispm-ui-form-values)))
+        (should (equal (lispm-ui-form-value 'url) "http://localhost:11434/v1"))
+        (should-not (assq 'key (lispm-ui-form-values)))
+        (lispm-ui-form-submit))
+      (should (eq lispm-backend 'ollama))
+      (should (equal (plist-get (lispm-backend-get 'ollama) :url) "http://localhost:11434/v1"))
+      ;; Custom provider shows name, api, url, models, adds it, and activates it.
+      (with-current-buffer (lispm-model-setup-form)
+        (lispm-ui-form-set 'provider 'custom)
+        (lispm-model-setup-form--select-provider 'custom)
+        (should (assq 'name (lispm-ui-form-values)))
+        (should (assq 'api (lispm-ui-form-values)))
+        (should (assq 'url (lispm-ui-form-values)))
+        (should (assq 'models (lispm-ui-form-values)))
+        (lispm-ui-form-set 'name "my-gw"
+                           'url "https://gw.example/v1/"
+                           'model "gw-model")
+        (lispm-ui-form-submit))
+      (should (eq lispm-backend 'my-gw))
+      (should (equal (plist-get (lispm-backend-get 'my-gw) :url) "https://gw.example/v1"))
+      ;; `lispm-maybe-setup-model' offers setup once when no model is ready.
+      (setq lispm-backend nil
+            store nil
+            shown nil)
+      (let ((lispm-setup-on-start t)
+            (lispm--setup-offered nil)
+            (noninteractive nil)
+            (ert--running-tests nil))
+        (lispm-maybe-setup-model)
+        (should (= (length shown) 1))
+        (should lispm--setup-offered)
+        (lispm-maybe-setup-model)
+        (should (= (length shown) 1))
+        (mapc #'kill-buffer shown))
+      ;; `lispm-bar-setup-model' opens the setup form.
+      (setq shown nil)
+      (lispm-bar-setup-model)
+      (should (= (length shown) 1))
+      (mapc #'kill-buffer shown))))
 
 (ert-deftest lispm-test-character-names ()
   (should (eq (lispm-character-name-for "Ada Lovelace") 'ada-lovelace))
@@ -9303,7 +9410,10 @@ program tells it; and what programs offer to do about it."
     (setq lispm-backend nil)
     (let ((status (lispm-model-status)))
       (should (eq (plist-get status :state) 'none))
-      (should-not (plist-get status :model)))
+      (should-not (plist-get status :model))
+      (should (string-search "choose a model or set an API key" (plist-get status :message))))
+    (let ((lispm-backends nil))
+      (should (string-search "add one in LispM's settings" (plist-get (lispm-model-status) :message))))
     (add-hook 'lispm-backend-status-functions
               (lambda (name _backend) (and (null name) '(:state starting :message "Starting the gateway."))))
     (should (equal (plist-get (lispm-model-status) :message) "Starting the gateway."))
@@ -11776,7 +11886,18 @@ so, while it is closed a message names the key opening it."
             (process-environment (cons "LISPM_TEST_KEY" process-environment)))
         (should-not (lispm-bar-model-ready-p (lispm-system-agent)))
         (setenv "LISPM_TEST_KEY" "secret")
-        (should (lispm-bar-model-ready-p (lispm-system-agent)))))))
+        (should (lispm-bar-model-ready-p (lispm-system-agent))))
+      (let ((lispm-backends (cons '(sec :api openai :url "http://fake.invalid"
+                                        :key (secret . lispm-backend-sec))
+                                  lispm-backends))
+            (lispm-backend 'sec)
+            (secret nil))
+        (cl-letf (((symbol-function 'lispm-secret-get)
+                   (lambda (id &optional _no-prompt)
+                     (and (eq id 'lispm-backend-sec) secret))))
+          (should-not (lispm-bar-model-ready-p (lispm-system-agent)))
+          (setq secret "sk-secret")
+          (should (lispm-bar-model-ready-p (lispm-system-agent))))))))
 
 ;;;; The terminal
 

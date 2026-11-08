@@ -94,7 +94,9 @@ sets it; SAVE it for later starts too."
   (unless (memq variable lispm-settings-variables)
     (error "%s is none of LispM's settings" variable))
   (if save
-      (customize-save-variable variable value)
+      (let ((inhibit-message t)
+            (save-silently t))
+        (customize-save-variable variable value))
     (customize-set-variable variable value)))
 
 ;;;; Model
@@ -303,7 +305,10 @@ without asking anyone for its key: a plist of :state and :message, see
         ((`(,state ,message)
           (cond
            ((null name)
-            (list 'none (lispm-tr "No backend: add one in LispM's settings (`lispm-backends').")))
+            (list 'none
+                  (if lispm-backends
+                      (lispm-tr "No model chosen: choose a model or set an API key in LispM's settings.")
+                    (lispm-tr "No backend: add one in LispM's settings (`lispm-backends')."))))
            ((null backend)
             (list 'unknown (lispm-tr "Unknown backend %s (see `lispm-backends')" name)))
            ((and value (not (string-empty-p value)))

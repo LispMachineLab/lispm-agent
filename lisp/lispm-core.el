@@ -140,6 +140,9 @@ Each is called with no argument and returns non-nil when it is, as
 
 (require 'lispm-auth)
 
+(defvar lispm--auth-started nil
+  "Non-nil once `lispm-ensure-auth' has opened LispM Auth for this session.")
+
 (defun lispm--ensure-auth-service ()
   "Ensure LispM Auth's service is installed when running interactively."
   (when (and (not noninteractive)
@@ -151,6 +154,19 @@ Each is called with no argument and returns non-nil when it is, as
         (lispm-auth--service-program)
       (lispm-auth-unavailable
        (ignore-errors (lispm-auth-install-service))))))
+
+(defun lispm-ensure-auth ()
+  "Ensure LispM Auth is ready and unlocked for `lispm' when interactive."
+  (when (and (not noninteractive)
+             (not (bound-and-true-p ert--running-tests))
+             (not lispm--auth-started)
+             (memq #'lispm-auth--secret-available lispm-secret-available-functions))
+    (setq lispm--auth-started t)
+    (lispm--ensure-auth-service)
+    (when (and (fboundp 'lispm-auth-store-exists-p)
+               (lispm-auth-store-exists-p)
+               (fboundp 'lispm-auth-start-app))
+      (lispm-auth-start-app 'lispm))))
 
 (defun lispm-secret-available-p ()
   "Return non-nil when a program keeps secrets for LispM."

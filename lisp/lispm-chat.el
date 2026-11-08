@@ -1400,6 +1400,7 @@ checked or not as `lispm-ground-code' now says."
 (add-hook 'lispm-sandbox-change-hook #'lispm-chat--sandbox-changed)
 (add-hook 'lispm-language-changed-hook #'lispm-chat--draw-all-again)
 (add-hook 'lispm-ground-change-hook #'lispm-chat--draw-all-again)
+(add-hook 'lispm-settings-change-hook #'lispm-chat--draw-all-again)
 
 ;;;; Input
 
@@ -1776,15 +1777,37 @@ Return the chat of the new conversation."
     (unless (eq resumed agent)
       (lispm-chat--replace agent resumed))))
 
+(declare-function lispm-setup-model "lispm-backend-form" ())
+
 (defun lispm-chat-model (agent argument)
   "Show AGENT's model, or switch it to ARGUMENT."
   (if (string-empty-p argument)
-      (message "%s" (lispm-tr "%s uses %s via %s" (lispm-agent-name agent)
-                         (lispm-agent-model* agent) (lispm-backend-name agent)))
-    (lispm-use-model agent (lispm-agent-backend agent) argument)
-    (with-current-buffer (lispm-agent-view agent)
-      (lispm-chat--redraw))
-    (message "%s" (lispm-tr "%s now uses %s" (lispm-agent-name agent) argument))))
+      (if (lispm-backend-name agent)
+          (message "%s" (lispm-tr "%s uses %s via %s" (lispm-agent-name agent)
+                                  (lispm-agent-model* agent) (lispm-backend-name agent)))
+        (if (and (not noninteractive) (not (bound-and-true-p ert--running-tests)))
+            (progn
+              (require 'lispm-backend-form)
+              (lispm-setup-model))
+          (pcase-let ((`(,backend . ,model) (lispm--read-model agent)))
+            (lispm-use-model agent backend model)
+            (when (buffer-live-p (lispm-agent-view agent))
+              (with-current-buffer (lispm-agent-view agent)
+                (lispm-chat--redraw)))
+            (message "%s" (lispm-tr "%s uses %s via %s" (lispm-agent-name agent)
+                                    (lispm-agent-model* agent) (lispm-backend-name agent))))))
+    (let* ((inferred (unless (lispm-backend-name agent)
+                       (or (plist-get (seq-find (lambda (choice)
+                                                  (equal (plist-get choice :model) argument))
+                                                (and (fboundp 'lispm-model-choices)
+                                                     (lispm-model-choices)))
+                                      :backend)
+                           (car (car lispm-backends))))))
+      (lispm-use-model agent (or (lispm-agent-backend agent) inferred) argument)
+      (when (buffer-live-p (lispm-agent-view agent))
+        (with-current-buffer (lispm-agent-view agent)
+          (lispm-chat--redraw)))
+      (message "%s" (lispm-tr "%s now uses %s" (lispm-agent-name agent) argument)))))
 
 (defun lispm-chat-sandbox (_agent argument)
   "Choose the sandbox level of shell commands and MCP servers, or set ARGUMENT.
