@@ -6754,8 +6754,7 @@ it is, its models, and where its key comes from."
         (lispm-ui-form-set 'name "my-gateway" 'url "127.0.0.1:11434/v1")
         (should (string-match-p "Starts with http" (lispm-test--form-problem)))
         (lispm-ui-form-set 'url "http://127.0.0.1:11434/v1/"
-                           'model "qwen3-coder"
-                           'models "qwen3-coder\nsmall\n\nsmall")
+                           'model "qwen3-coder")
         (lispm-ui-form-set 'api 'anthropic)
         (lispm-test--form-type 'key "sk-1")
         (lispm-ui-form-submit))
@@ -6763,7 +6762,6 @@ it is, its models, and where its key comes from."
         (should (eq (plist-get backend :api) 'anthropic))
         (should (equal (plist-get backend :url) "http://127.0.0.1:11434/v1"))
         (should (equal (plist-get backend :model) "qwen3-coder"))
-        (should (equal (plist-get backend :models) '("small")))
         (should (equal (plist-get backend :features) '(streaming)))
         (should (equal (plist-get backend :key) '(secret . lispm-backend-my-gateway))))
       (should (equal (cdr (assq 'lispm-backend-my-gateway store)) "sk-1"))
@@ -6774,7 +6772,7 @@ it is, its models, and where its key comes from."
         (should (equal (lispm-ui-form-title) (lispm-tr "Backend %s" 'my-gateway)))
         (should (eq (lispm-ui-form-value 'api) 'anthropic))
         (should (equal (lispm-ui-form-value 'url) "http://127.0.0.1:11434/v1"))
-        (should (equal (lispm-ui-form-value 'models) "small"))
+        (should-not (assq 'models (lispm-ui-form-values)))
         (should (eq (lispm-ui-form-value 'key-source) 'secret))
         (should-not (lispm-ui-form-value 'key))
         (lispm-ui-form-set 'url "https://gateway.example/v1")
@@ -6861,7 +6859,7 @@ when LispM starts without a model."
         (should-not (assq 'name (lispm-ui-form-values)))
         (should-not (assq 'api (lispm-ui-form-values)))
         (should-not (assq 'url (lispm-ui-form-values)))
-        (should (assq 'models (lispm-ui-form-values)))
+        (should-not (assq 'models (lispm-ui-form-values)))
         (should-not (assq 'key-source (lispm-ui-form-values)))
         (lispm-test--form-type 'key "sk-openai-1")
         (lispm-ui-form-submit))
@@ -6878,14 +6876,14 @@ when LispM starts without a model."
         (lispm-ui-form-submit))
       (should (eq lispm-backend 'ollama))
       (should (equal (plist-get (lispm-backend-get 'ollama) :url) "http://localhost:11434/v1"))
-      ;; Custom provider shows name, api, url, models, adds it, and activates it.
+      ;; Custom provider shows name, api, url, model, adds it, and activates it.
       (with-current-buffer (lispm-model-setup-form)
         (lispm-ui-form-set 'provider 'custom)
         (lispm-model-setup-form--select-provider 'custom)
         (should (assq 'name (lispm-ui-form-values)))
         (should (assq 'api (lispm-ui-form-values)))
         (should (assq 'url (lispm-ui-form-values)))
-        (should (assq 'models (lispm-ui-form-values)))
+        (should-not (assq 'models (lispm-ui-form-values)))
         (lispm-ui-form-set 'name "my-gw"
                            'url "https://gw.example/v1/"
                            'model "gw-model")

@@ -82,7 +82,6 @@
        'api (or (plist-get props :api) 'openai)
        'url (or (plist-get props :url) "")
        'model (or (plist-get props :model) "")
-       'models (mapconcat #'identity (plist-get props :models) "\n")
        'key-source (or (plist-get props :key-source) default-source)))))
 
 (defun lispm-backend-form--key-source (backend)
@@ -158,10 +157,13 @@ Signal an error when the source needs something that is missing."
   (let* ((new (null name))
          (name (or name (intern (string-trim (alist-get 'name values)))))
          (old (and (not new) (lispm-backend-get name)))
+         (preset-props (and new (cdr (assq (alist-get 'preset values) lispm-backend-presets))))
          (backend (if new (list :features '(streaming)) (copy-tree old)))
          (url (string-remove-suffix "/" (string-trim (alist-get 'url values))))
          (model (string-trim (alist-get 'model values)))
-         (models (lispm-backend-form--models (alist-get 'models values) model))
+         (models (if (assq 'models values)
+                     (lispm-backend-form--models (alist-get 'models values) model)
+                   (delete model (copy-sequence (plist-get (or old preset-props) :models)))))
          (source (alist-get 'key-source values))
          (key (alist-get 'key values))
          (variable (and (stringp (alist-get 'key-env values))
@@ -236,9 +238,6 @@ says, once it is valid."
              (model :type text :label ,(lispm-tr "Model") :required t
                     :value ,(or (plist-get backend :model) "")
                     :help ,(lispm-tr "The model agents use when they name none."))
-             (models :type text-area :label ,(lispm-tr "Other models") :lines 4
-                     :value ,(mapconcat #'identity (plist-get backend :models) "\n")
-                     :help ,(lispm-tr "One on a line; they appear in the model menu."))
              (key-source :type choice :label ,(lispm-tr "Key") :required t
                          :choices ,(lispm-backend-form--key-source-choices source)
                          :value ,source
@@ -321,14 +320,12 @@ says, once it is valid."
   (if (eq provider 'custom)
       (lispm-ui-form-set
        'url ""
-       'model ""
-       'models "")
+       'model "")
     (when-let* ((props (lispm-model-setup-form--props provider)))
       (lispm-ui-form-set
        'api (or (plist-get props :api) 'openai)
        'url (or (plist-get props :url) "")
-       'model (or (plist-get props :model) "")
-       'models (mapconcat #'identity (plist-get props :models) "\n")))))
+       'model (or (plist-get props :model) "")))))
 
 (defun lispm-model-setup-form--submit (values)
   "Save the backend and model VALUES describe, and make it LispM's model."
@@ -432,9 +429,6 @@ says, once it is valid."
             (model :type text :label ,(lispm-tr "Model") :required t
                    :value ,active-model
                    :help ,(lispm-tr "The model agents use when they name none."))
-            (models :type text-area :label ,(lispm-tr "Other models") :lines 4
-                    :value ,(mapconcat #'identity (plist-get props :models) "\n")
-                    :help ,(lispm-tr "One on a line; they appear in the model menu."))
             (key :type password :label ,(lispm-tr "The key")
                  :value ""
                  :when ,key-p
