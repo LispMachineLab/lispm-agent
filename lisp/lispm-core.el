@@ -165,6 +165,11 @@ Each is called with no argument and returns non-nil when it is, as
     (lispm--ensure-auth-service)
     (when (and (fboundp 'lispm-auth-store-exists-p)
                (lispm-auth-store-exists-p)
+               (or (not (fboundp 'lispm-auth-locked-p))
+                   (lispm-auth-locked-p))
+               (not (and (featurep 'lispm-desktop-auth)
+                         (not (and (fboundp 'lispm-desktop-auth-started-hidden-p)
+                                   (lispm-desktop-auth-started-hidden-p)))))
                (fboundp 'lispm-auth-start-app))
       (lispm-auth-start-app 'lispm))))
 

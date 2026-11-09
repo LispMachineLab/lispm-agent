@@ -477,12 +477,12 @@ says, once it is valid."
   (when (and lispm-setup-on-start
              (not noninteractive)
              (not (bound-and-true-p ert--running-tests))
-             (not lispm--setup-offered))
-    (if (and (null (lispm-backend-name agent))
-             (not (seq-some (pcase-lambda (`(,_ . ,props))
-                              (let ((key (plist-get props :key)))
-                                (and (consp key) (eq (car key) 'secret))))
-                            lispm-backends)))
+             (not lispm--setup-offered)
+             (null (lispm-backend-name agent)))
+    (if (not (seq-some (pcase-lambda (`(,_ . ,props))
+                         (let ((key (plist-get props :key)))
+                           (and (consp key) (eq (car key) 'secret))))
+                       lispm-backends))
         (progn
           (setq lispm--setup-offered t)
           (lispm-setup-model)
