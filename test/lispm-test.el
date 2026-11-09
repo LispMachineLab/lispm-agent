@@ -6905,7 +6905,9 @@ when LispM starts without a model."
         (should (= (length shown) 1))
         (mapc #'kill-buffer shown))
       ;; When a model backend is already configured, `lispm-maybe-setup-model'
-      ;; neither offers setup nor prompts to unlock LispM Auth.
+      ;; does not offer setup, and calls `lispm-ensure-auth' once so standalone
+      ;; LispM Agent.app launches unlock if needed while desktop/unlocked
+      ;; launches remain a no-op.
       (setq lispm-backend 'ollama
             shown nil)
       (let ((lispm-setup-on-start t)
@@ -6913,12 +6915,12 @@ when LispM starts without a model."
             (lispm--auth-started nil)
             (noninteractive nil)
             (ert--running-tests nil)
-            (auth-called nil))
+            (auth-called 0))
         (cl-letf (((symbol-function 'lispm-ensure-auth)
-                   (lambda () (setq auth-called t))))
+                   (lambda () (cl-incf auth-called))))
           (lispm-maybe-setup-model)
           (should-not shown)
-          (should-not auth-called)))
+          (should (= auth-called 1))))
       ;; `lispm-ensure-auth' does not call `lispm-auth-start-app' when the
       ;; store is already unlocked or when `lispm-desktop-auth' manages the
       ;; visible desktop.
