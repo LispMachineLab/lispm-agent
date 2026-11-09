@@ -6904,6 +6904,45 @@ when LispM starts without a model."
         (lispm-maybe-setup-model)
         (should (= (length shown) 1))
         (mapc #'kill-buffer shown))
+      ;; When a model backend is already configured, `lispm-maybe-setup-model'
+      ;; does not offer setup, and calls `lispm-ensure-auth' once so standalone
+      ;; LispM Agent.app launches unlock if needed while desktop/unlocked
+      ;; launches remain a no-op.
+      (setq lispm-backend 'ollama
+            shown nil)
+      (let ((lispm-setup-on-start t)
+            (lispm--setup-offered nil)
+            (lispm--auth-started nil)
+            (noninteractive nil)
+            (ert--running-tests nil)
+            (auth-called 0))
+        (cl-letf (((symbol-function 'lispm-ensure-auth)
+                   (lambda () (cl-incf auth-called))))
+          (lispm-maybe-setup-model)
+          (should-not shown)
+          (should (= auth-called 1))))
+      ;; `lispm-ensure-auth' does not call `lispm-auth-start-app' when the
+      ;; store is already unlocked or when `lispm-desktop-auth' manages the
+      ;; visible desktop.
+      (let ((noninteractive nil)
+            (ert--running-tests nil)
+            (lispm-secret-available-functions (list #'lispm-auth--secret-available))
+            (started-apps nil))
+        (cl-letf (((symbol-function 'lispm--ensure-auth-service) #'ignore)
+                  ((symbol-function 'lispm-auth-store-exists-p) (lambda () t))
+                  ((symbol-function 'lispm-auth-start-app)
+                   (lambda (app) (push app started-apps) t)))
+          (let ((lispm--auth-started nil))
+            (cl-letf (((symbol-function 'lispm-auth-locked-p) (lambda () nil)))
+              (lispm-ensure-auth)
+              (should-not started-apps)))
+          (let ((lispm--auth-started nil))
+            (cl-letf (((symbol-function 'featurep)
+                       (lambda (f) (eq f 'lispm-desktop-auth)))
+                      ((symbol-function 'lispm-auth-locked-p) (lambda () t))
+                      ((symbol-function 'lispm-desktop-auth-started-hidden-p) (lambda () nil)))
+              (lispm-ensure-auth)
+              (should-not started-apps)))))
       ;; `lispm-bar-setup-model' opens the setup form.
       (setq shown nil)
       (lispm-bar-setup-model)
