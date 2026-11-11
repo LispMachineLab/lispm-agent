@@ -487,8 +487,6 @@
   ("Starts with http:// or https://" . "Beginnt mit http:// oder https://")
   ("The server's base address, without the path LispM adds." . "Die Basisadresse des Servers, ohne den Pfad, den LispM hinzufügt.")
   ("The model agents use when they name none." . "Das Modell, das Agenten nutzen, wenn sie keines nennen.")
-  ("Other models" . "Weitere Modelle")
-  ("One on a line; they appear in the model menu." . "Eines pro Zeile; sie erscheinen im Modellmenü.")
   ("A key is stored encrypted; leave it empty to keep it." . "Ein Schlüssel ist verschlüsselt gespeichert; lassen Sie das Feld leer, um ihn zu behalten.")
   ("LispM Auth keeps it encrypted." . "LispM Auth bewahrt ihn verschlüsselt auf.")
   ("A key is set; leave it empty to keep it, or type a new one." . "Ein Schlüssel ist gesetzt; lassen Sie das Feld leer, um ihn zu behalten, oder geben Sie einen neuen ein.")

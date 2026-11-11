@@ -596,7 +596,9 @@ which only LispM itself has (see `lispm-system-agent')."
   "How many skills DIRECTORY holds, without reading them."
   (if (file-directory-p directory)
       (+ (length (directory-files directory nil "\\`[^.].*\\.org\\'"))
-         (seq-count (lambda (dir) (file-exists-p (expand-file-name "SKILL.org" dir)))
+         (seq-count (lambda (dir)
+                      (or (file-exists-p (expand-file-name "SKILL.org" dir))
+                          (file-exists-p (expand-file-name "SKILL.md" dir))))
                     (seq-filter #'file-directory-p (directory-files directory t "\\`[^.]"))))
     0))
 

@@ -29,6 +29,20 @@
 
 (require 'lisp-mode)
 
+(defvar tramp-persistency-file-name)
+
+(defun lispm-elisp-worker--setup-root ()
+  "Apply `LISPM_ELISP_ROOT' when running on behalf of a remote agent root."
+  (when-let* ((root (getenv "LISPM_ELISP_ROOT"))
+              ((not (string-empty-p root))))
+    (when (and (string-prefix-p "/" root) (string-search ":" root))
+      (require 'tramp)
+      (require 'tramp-container nil t)
+      (when (string-prefix-p "/mock:" root)
+        (require 'ert-x nil t))
+      (setq tramp-persistency-file-name nil))
+    (setq default-directory (file-name-as-directory root))))
+
 (defun lispm-elisp-worker--forms (code)
   "Read every Lisp form in CODE, rejecting an unfinished final form."
   (with-temp-buffer
@@ -62,6 +76,7 @@ Malformed input, evaluation errors and quits exit with status 1."
     (user-error "The Elisp worker runs only in batch Emacs"))
   (condition-case err
       (let (value)
+        (lispm-elisp-worker--setup-root)
         ;; Parse everything before running any of it: a broken final form
         ;; must not leave earlier forms evaluated without saying so.
         (dolist (form (lispm-elisp-worker--forms (lispm-elisp-worker--input)))

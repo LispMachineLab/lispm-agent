@@ -227,5 +227,21 @@
           (should (= (lispm-elisp-kernel-test--value
                       (lispm-elisp-kernel-test--call runtime agent "(+ 8 9)")) 17)))))))
 
+(ert-deftest lispm-elisp-kernel-test-remote-root ()
+  "A worker started from a remote TRAMP root mounts `default-directory' via `LISPM_ELISP_ROOT'."
+  (lispm-test-with-remote
+    (lispm-elisp-kernel-test--with runtime
+      (lispm-test--write (expand-file-name "remote-note.txt" project) "hello-tramp\n")
+      (let* ((agent (lispm-make-agent 'assistant remote))
+             (_ (setf (lispm-agent-policy agent) '((exec . auto))))
+             (code (prin1-to-string
+                    '(list default-directory
+                           (with-temp-buffer
+                             (insert-file-contents "remote-note.txt")
+                             (buffer-string)))))
+             (result (lispm-elisp-kernel-test--call runtime agent code))
+             (value (lispm-elisp-kernel-test--value result)))
+        (should (equal value (list (file-name-as-directory remote) "hello-tramp\n")))))))
+
 (provide 'lispm-elisp-kernel-test)
 ;;; lispm-elisp-kernel-test.el ends here

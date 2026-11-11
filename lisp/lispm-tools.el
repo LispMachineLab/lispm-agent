@@ -1118,13 +1118,20 @@ nil, or fails, leaves the call in the tool's class."
           (error nil)))
       (lispm-tool-permission tool)))
 
+(defvar lispm-auto-approve-all nil
+  "When non-nil, calls whose policy is `auto' never ask for approval.
+This lets unattended batch runs use `always-ask' tools and write
+outside the agent's root when the policy for their class is `auto'.")
+
 (defun lispm-tools--action (agent tool input)
   "What LispM's own rules decide of AGENT's call of TOOL on INPUT.
 See `lispm-tool-action'."
   (let ((action (lispm-policy-action agent (lispm-tool-call-permission tool input))))
     (cond ((lispm-tools--allowed-p agent tool input) 'auto)
-          ((and (eq action 'auto) (lispm-tool-always-ask tool)) 'ask)
-          ((and (eq action 'auto)
+          ((and (eq action 'auto) (not lispm-auto-approve-all)
+                (lispm-tool-always-ask tool))
+           'ask)
+          ((and (eq action 'auto) (not lispm-auto-approve-all)
                 (eq (lispm-tool-permission tool) 'write)
                 (let ((targets (lispm-tools--targets agent tool input)))
                   (or (eq targets t)
@@ -1379,7 +1386,9 @@ so is a read-only one, before anything is journaled."
   "Make BUFFER's text TEXT as one undo step, journaled and saved."
   (with-current-buffer buffer
     (lispm-journal-snapshot buffer)
-    (let ((source (generate-new-buffer " *lispm-new-text*" t)))
+    (let ((source (generate-new-buffer " *lispm-new-text*" t))
+          (keep-final-newline (or (zerop (buffer-size))
+                                  (eq (char-before (point-max)) ?\n))))
       (unwind-protect
           (progn
             (with-current-buffer source (insert text))
@@ -1390,11 +1399,13 @@ so is a read-only one, before anything is journaled."
               (with-undo-amalgamate
                 (with-no-warnings (replace-buffer-contents source 1.0)))
               (undo-boundary)))
-        (kill-buffer source)))
-    (when (and buffer-file-name lispm-save-edits)
-      (make-directory (file-name-directory buffer-file-name) t)
-      (let ((inhibit-message t))
-        (save-buffer)))))
+        (kill-buffer source))
+      (when (and buffer-file-name lispm-save-edits)
+        (make-directory (file-name-directory buffer-file-name) t)
+        (let ((inhibit-message t)
+              (require-final-newline (and keep-final-newline require-final-newline))
+              (make-backup-files nil))
+          (save-buffer))))))
 
 (defun lispm-tools--buffer (name)
   "The live buffer NAME refers to (see `lispm-tools-buffer-name')."
@@ -1593,6 +1604,37 @@ error for what Emacs regexps cannot express, such as lookaround."
          (t (push (string c) out) (cl-incf i)))))
     (apply #'concat (nreverse out))))
 
+(defun lispm-tools--ere-regexp (pattern)
+  "Translate PATTERN (ripgrep / grep -E syntax) to portable POSIX ERE."
+  (let ((i 0) (n (length pattern)) out)
+    (while (< i n)
+      (let ((c (aref pattern i)))
+        (cond
+         ((eq c ?\\)
+          (when (= (1+ i) n) (error "Trailing backslash in %s" pattern))
+          (let ((d (aref pattern (1+ i))))
+            (setq i (+ i 2))
+            (push (pcase d
+                    (?d "[0-9]") (?D "[^0-9]")
+                    (?s "[[:space:]]") (?S "[^[:space:]]")
+                    (?w "[[:alnum:]_]") (?W "[^[:alnum:]_]")
+                    (?t "\t") (?n "\n") (?r "\r")
+                    (_ (concat "\\" (string d))))
+                  out)))
+         ((eq c ?\()
+          (cond ((eq (string-match "(\\?:" pattern i) i)
+                 (push "(" out) (setq i (+ i 3)))
+                ((eq (string-match "(\\?" pattern i) i)
+                 (error "(?...) groups other than (?:...), such as lookaround, are not supported: %s"
+                        pattern))
+                (t (push "(" out) (cl-incf i))))
+         ((eq c ?\[)
+          (pcase-let ((`(,bracket . ,end) (lispm-tools--bracket pattern i)))
+            (push bracket out)
+            (setq i end)))
+         (t (push (string c) out) (cl-incf i)))))
+    (apply #'concat (nreverse out))))
+
 (defun lispm-tools--glob-body (glob)
   "GLOB as an unanchored Emacs regexp."
   (let ((i 0) (n (length glob)) out)
@@ -1633,24 +1675,88 @@ A GLOB without a slash is matched against the file's name alone."
   (let ((name (file-name-nondirectory (directory-file-name directory))))
     (not (or (string-prefix-p "." name)
              (member name vc-directory-exclusion-list)
-             (member name '("node_modules"))))))
+             (member name '("node_modules" "vendor" "dist" "build" "target" "venv" "__pycache__"))))))
 
-(defun lispm-tools--search-files (target glob)
+(defun lispm-tools--remote-search-files (target ere case-fold)
+  "Return remote files under directory TARGET matching ERE.
+Uses a single remote `process-file' invocation (`git ls-files' or `find'
+piped to `grep -IlE'), plus any open buffers visiting files under TARGET."
+  (let* ((dir (file-name-as-directory target))
+         (default-directory dir)
+         (flag (if case-fold "-i" ""))
+         (script
+          (concat
+           "list_files() {\n"
+           "  git -c safe.directory='*' ls-files -z -co --exclude-standard 2>/dev/null ||\n"
+           "  find . \\( -name '.?*' -o -name CVS -o -name RCS -o -name SCCS -o -name _darcs"
+           " -o -name '{arch}' -o -name node_modules -o -name vendor -o -name dist"
+           " -o -name build -o -name target -o -name venv -o -name __pycache__ \\)"
+           " -prune -o -type f -size -" (number-to-string (1+ lispm-search-max-file-size)) "c -print0 2>/dev/null\n"
+           "}\n"
+           "if [ -n \"$2\" ]; then\n"
+           "  grep \"$2\" -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
+           "else\n"
+           "  grep -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
+           "fi\n"
+           "if [ $? -lt 2 ]; then\n"
+           "  if [ -n \"$2\" ]; then\n"
+           "    list_files | xargs -0 grep \"$2\" -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
+           "  else\n"
+           "    list_files | xargs -0 grep -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
+           "  fi\n"
+           "else\n"
+           "  list_files | tr '\\0' '\\n'\n"
+           "fi\n"))
+         (rel-files
+          (with-temp-buffer
+            (when (ignore-errors
+                    (process-file "sh" nil t nil "-c" script "sh" ere flag)
+                    t)
+              (split-string (buffer-string) "\n" t))))
+         (seen (make-hash-table :test #'equal))
+         out)
+    (dolist (rel rel-files)
+      (unless (equal rel "/dev/null")
+        (let* ((clean (string-remove-prefix "./" rel))
+               (parts (split-string clean "/" t)))
+          (unless (seq-some (lambda (p)
+                              (or (string-prefix-p "." p)
+                                  (member p vc-directory-exclusion-list)
+                                  (member p '("node_modules" "vendor" "dist" "build" "target" "venv" "__pycache__"))))
+                            (butlast parts))
+            (let ((full (expand-file-name clean dir)))
+              (unless (gethash full seen)
+                (puthash full t seen)
+                (push full out)))))))
+    (dolist (b (buffer-list))
+      (when-let* ((f (buffer-file-name b))
+                  (full (expand-file-name f)))
+        (when (and (file-in-directory-p full dir)
+                   (not (gethash full seen)))
+          (puthash full t seen)
+          (push full out))))
+    (nreverse out)))
+
+(defun lispm-tools--search-files (target glob &optional ere case-fold)
   "The files a search of TARGET, a file or directory, goes through.
 Those of the project around TARGET (as `project-files' lists them),
-else all those below it; only those matching GLOB, if given."
+else a directory entry for TARGET that `lispm-tools--search' expands in
+slices; only those matching GLOB, if given."
   (let ((files (cond ((file-regular-p target) (list target))
                      ((not (file-directory-p target))
                       (error "No such file or directory: %s" target))
+                     ((and (file-remote-p target) ere)
+                      (lispm-tools--remote-search-files target ere case-fold))
                      ((let ((process-environment (lispm--git-environment)))
-                        (when-let* ((project (project-current nil target)))
+                        (when-let* ((project (project-current nil target))
+                                    ((and (eq (car-safe project) 'vc)
+                                          (cadr project)
+                                          (file-in-directory-p target (project-root project)))))
                           ;; The project's backend may not work here, such as
                           ;; a checkout of a VCS that is not installed.
                           (ignore-errors (project-files project (list target))))))
-                     (t (sort (directory-files-recursively
-                               target "" nil #'lispm-tools--searchable-directory-p)
-                              #'string<)))))
-    (if glob
+                     (t (list (file-name-as-directory target))))))
+    (if (and glob (not (and (null (cdr files)) (directory-name-p (car files)))))
         (seq-filter (lispm-tools--glob-predicate
                      glob (if (file-directory-p target) target (file-name-directory target)))
                     files)
@@ -1677,10 +1783,13 @@ Each is a string LABEL:LINE:TEXT, TEXT cut at 300 characters."
             (forward-line 1)))
         (nreverse matches)))))
 
-(defun lispm-tools--search (agent regexp case-fold files done)
+(defun lispm-tools--search (agent regexp case-fold files done &optional glob-predicate)
   "Search FILES for REGEXP in slices, and call DONE with what is found.
-CASE-FOLD non-nil ignores case.  The search is abandoned if the turn
-of AGENT in which it started ends meanwhile."
+Directory entries in FILES (ending in `/') are expanded one directory at
+a time within the slices, descending into subdirectories that satisfy
+`lispm-tools--searchable-directory-p' and keeping files that satisfy
+GLOB-PREDICATE, if given.  CASE-FOLD non-nil ignores case.  The search
+is abandoned if the turn of AGENT in which it started ends meanwhile."
   (let ((root (lispm-tools--root))
         (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
         (buffer (generate-new-buffer " *lispm-search*" t))
@@ -1693,6 +1802,18 @@ of AGENT in which it started ends meanwhile."
         ((label (file)
            (if (file-in-directory-p file root) (file-relative-name file root)
              (abbreviate-file-name file)))
+         (expand-directory (dir)
+           (dolist (entry (nreverse (ignore-errors
+                                      (directory-files-and-attributes
+                                       dir t directory-files-no-dot-files-regexp))))
+             (let ((path (car entry))
+                   (type (file-attribute-type (cdr entry))))
+               (cond ((eq type t)
+                      (when (lispm-tools--searchable-directory-p path)
+                        (push (file-name-as-directory path) files)))
+                     ((or (null type) (and (stringp type) (file-regular-p path)))
+                      (when (or (null glob-predicate) (funcall glob-predicate path))
+                        (push path files)))))))
          (search-file (file)
            (let ((open (gethash file visiting))
                  (limit (- lispm-search-max-matches count)))
@@ -1751,10 +1872,13 @@ of AGENT in which it started ends meanwhile."
                  (let ((deadline (+ (float-time) lispm-tools--search-slice)))
                    ;; At least one file per slice, however short the slice.
                    (while (progn
-                            (let ((found (and files (search-file (pop files)))))
-                              (setq matches (nconc (nreverse found) matches)
-                                    count (+ count (length found))
-                                    truncated (>= count lispm-search-max-matches)))
+                            (when-let* ((next (pop files)))
+                              (if (directory-name-p next)
+                                  (expand-directory next)
+                                (let ((found (search-file next)))
+                                  (setq matches (nconc (nreverse found) matches)
+                                        count (+ count (length found))
+                                        truncated (>= count lispm-search-max-matches)))))
                             (and files (not truncated) (< (float-time) deadline))))
                    (if (and files (not truncated))
                        (run-at-time 0 nil #'step)
@@ -1774,11 +1898,16 @@ the unsaved contents of files open in Emacs."
   :async t
   (let* ((agent lispm-current-agent)
          (case-fold (or ignore-case (string-prefix-p "(?i)" pattern)))
-         (regexp (lispm-tools--emacs-regexp (string-remove-prefix "(?i)" pattern)))
+         (clean-pat (string-remove-prefix "(?i)" pattern))
+         (regexp (lispm-tools--emacs-regexp clean-pat))
+         (ere (lispm-tools--ere-regexp clean-pat))
          (target (lispm-tools--file (or path "."))))
     ;; An invalid regexp fails here, not file after file.
     (string-match-p regexp "")
-    (lispm-tools--search agent regexp case-fold (lispm-tools--search-files target glob) done)))
+    (lispm-tools--search
+     agent regexp case-fold (lispm-tools--search-files target glob ere case-fold) done
+     (and glob (lispm-tools--glob-predicate
+                glob (if (file-directory-p target) target (file-name-directory target)))))))
 
 (lispm-deftool list_buffers ()
   "List the buffers open in Emacs: name, major mode, file and whether modified.

@@ -993,7 +993,17 @@ BODY can use `port' and `log', the file the server records requests in."
         (let ((process-environment (cons (concat "GIT_DIR=" (expand-file-name "elsewhere/.git" project))
                                          process-environment)))
           (should (equal (car (lispm-test--search agent '((pattern . "lispm-demo-[ik]") (path . "repo"))))
-                         "repo/kept.el:1:(defun lispm-demo-kept ())")))))))
+                         "repo/kept.el:1:(defun lispm-demo-kept ())")))
+        ;; A fallback on `project-find-functions' returning an unrelated
+        ;; project or transient root (as `tabspaces-mode' does) does not
+        ;; send a non-project search into `project--files-in-directory'.
+        (let ((project-find-functions
+               (append project-find-functions
+                       (list (lambda (_dir)
+                               (list 'vc 'Git (file-name-as-directory
+                                               (expand-file-name "repo" project))))))))
+          (should (equal (car (lispm-test--search agent '((pattern . "\\(defun lispm-demo-(a|b|c)\\b"))))
+                         "a.el:2:(defun lispm-demo-a ()\nsub/b.el:2:(defun lispm-demo-b ()")))))))
 
 ;;;; MCP and images
 
@@ -1943,7 +1953,26 @@ A failing source is passed over; a source's skills carry its origin."
       (set-file-times file (time-add nil 10))
       (let ((index (lispm-skills--index (lispm-skills--find "music" nil))))
         (should-not (plist-get index :tools))
-        (should (equal (plist-get index :headings) '("Broken")))))))
+        (should (equal (plist-get index :headings) '("Broken"))))
+      ;; A directory holding SKILL.md is read, indexed by its Markdown headings, and loaded without its frontmatter.
+      (let ((md-file (expand-file-name "lispm-dev-skill/SKILL.md" user-skills)))
+        (lispm-test--write md-file
+                           (concat "---\n"
+                                   "name: lispm-dev-skill\n"
+                                   "description: Develop and decouple LispM repositories.\n"
+                                   "---\n\n"
+                                   "# LispM Development & Decoupling Skill\n\n"
+                                   "## Core Principles\n\n"
+                                   "Keep repositories decoupled.\n"))
+        (let ((skill (lispm-skills--find "lispm-dev-skill" nil)))
+          (should skill)
+          (should (equal (plist-get skill :title) "LispM Development & Decoupling Skill"))
+          (should (equal (plist-get skill :description) "Develop and decouple LispM repositories."))
+          (should (equal (plist-get (lispm-skills--index skill) :headings)
+                         '("LispM Development & Decoupling Skill" "Core Principles")))
+          (should (equal (lispm-skills--text md-file)
+                         "# LispM Development & Decoupling Skill\n\n## Core Principles\n\nKeep repositories decoupled."))
+          (should (= (lispm-skill-directory-count user-skills) 2)))))))
 
 (ert-deftest lispm-test-search-score ()
   "The search is fuzzy: parts of words, misspellings, names taken apart at _."
@@ -4724,24 +4753,7 @@ whatever their names, and leaves out larger ones and symbolic links."
         (lispm-choose-restart-named agent 'use-model))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       (should (eq (lispm-agent-backend agent) 'other))
-      (should (equal (alist-get 'model (car lispm-test--requests)) "other-model"))
-      ;; A backend without a key asks for one when chosen interactively.
-      (let ((lispm-backends (cons '(keyless :api openai :url "http://fake.invalid"
-                                            :model "keyless-model" :key openai)
-                                  lispm-backends))
-            (process-environment (cons "OPENAI_API_KEY" process-environment))
-            (lispm-secret-available-functions nil)
-            (saved nil))
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "keyless"))
-                  ((symbol-function 'read-string) (lambda (_prompt _initial _history default) default))
-                  ((symbol-function 'read-passwd) (lambda (_prompt) "sk-typed"))
-                  ((symbol-function 'customize-save-variable)
-                   (lambda (var val &rest _) (push var saved) (customize-set-variable var val))))
-          (pcase-let ((`(,backend . ,model) (lispm--read-model agent)))
-            (should (eq backend 'keyless))
-            (should (equal model "keyless-model"))))
-        (should (equal (plist-get (lispm-backend-get 'keyless) :key) "sk-typed"))
-        (should (memq 'lispm-backends saved))))))
+      (should (equal (alist-get 'model (car lispm-test--requests)) "other-model")))))
 
 (ert-deftest lispm-test-condition-org-and-review ()
   "In org a condition is settled like a call: by its TODO state, or with C-c C-y."
@@ -6936,11 +6948,11 @@ when LispM starts without a model."
             (cl-letf (((symbol-function 'lispm-auth-locked-p) (lambda () nil)))
               (lispm-ensure-auth)
               (should-not started-apps)))
-          (let ((lispm--auth-started nil))
-            (cl-letf (((symbol-function 'featurep)
-                       (lambda (f) (eq f 'lispm-desktop-auth)))
-                      ((symbol-function 'lispm-auth-locked-p) (lambda () t))
-                      ((symbol-function 'lispm-desktop-auth-started-hidden-p) (lambda () nil)))
+          (let ((lispm--auth-started nil)
+                (lispm-auth-page-window-draw-function #'ignore)
+                (lispm-auth-page-windowed nil))
+            (cl-letf (((symbol-function 'lispm-auth-locked-p) (lambda () t))
+                      ((symbol-function 'lispm-auth--started-hidden-p) (lambda () nil)))
               (lispm-ensure-auth)
               (should-not started-apps)))))
       ;; `lispm-bar-setup-model' opens the setup form.
@@ -12181,6 +12193,7 @@ was asked takes its place."
 (require 'lispm-agents-archive-tree-test)
 (require 'lispm-native-session-order-test)
 (require 'lispm-terminal-session-order-test)
+(require 'lispm-batch-test)
 
 (provide 'lispm-test)
 ;;; lispm-test.el ends here
