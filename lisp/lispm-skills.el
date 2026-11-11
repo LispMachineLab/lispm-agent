@@ -134,10 +134,23 @@ theirs of the same name.")
                                          (error-message-string err)))))))
     (nreverse directories)))
 
+(defun lispm-skills--md-p (file)
+  "Non-nil if FILE is a Markdown skill file."
+  (and (stringp file) (string-suffix-p ".md" (downcase file))))
+
+(defun lispm-skills--unquote (value)
+  "Trim VALUE, and strip a pair of surrounding quotes if present."
+  (let ((trimmed (string-trim (or value ""))))
+    (if (and (>= (length trimmed) 2)
+             (or (and (string-prefix-p "\"" trimmed) (string-suffix-p "\"" trimmed))
+                 (and (string-prefix-p "'" trimmed) (string-suffix-p "'" trimmed))))
+        (substring trimmed 1 -1)
+      trimmed)))
+
 (defun lispm-skill-name (file)
-  "The name of the skill in FILE: its directory's for a SKILL.org, else
-the file's own, without its extension."
-  (if (equal (file-name-nondirectory file) "SKILL.org")
+  "The name of the skill in FILE: its directory's for a SKILL.org or
+SKILL.md, else the file's own, without its extension."
+  (if (member (file-name-nondirectory file) '("SKILL.org" "SKILL.md"))
       (file-name-nondirectory (directory-file-name (file-name-directory file)))
     (file-name-base file)))
 
@@ -145,25 +158,53 @@ the file's own, without its extension."
   "The skill in FILE: a plist (:name :title :description :file)."
   (with-temp-buffer
     (insert-file-contents file nil 0 4096)
-    (let ((keywords (let ((case-fold-search t) keywords)
-                      (while (re-search-forward "^#\\+\\(title\\|description\\):[ \t]*\\(.*?\\)[ \t]*$" nil t)
-                        (push (cons (downcase (match-string 1)) (match-string 2)) keywords))
-                      keywords))
-          (name (lispm-skill-name file)))
-      (list :name name
-            :title (or (cdr (assoc "title" keywords)) name)
-            :description (or (cdr (assoc "description" keywords)) "")
-            :file file))))
+    (let ((name (lispm-skill-name file)))
+      (if (lispm-skills--md-p file)
+          (let ((case-fold-search t)
+                keywords heading)
+            (goto-char (point-min))
+            (when (looking-at "\\`---[ \t]*\r?\n")
+              (forward-line 1)
+              (let ((start (point)))
+                (when (re-search-forward "^\\(?:---\\|\\.\\.\\.\\)[ \t]*\r?$" nil t)
+                  (let ((end (match-beginning 0))
+                        (after (match-end 0)))
+                    (goto-char start)
+                    (while (re-search-forward "^\\([a-z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*\r?$" end t)
+                      (push (cons (downcase (match-string 1))
+                                  (lispm-skills--unquote (match-string 2)))
+                            keywords))
+                    (goto-char after)))))
+            (when (re-search-forward "^#[ \t]+\\(.+?\\)\\(?:[ \t]+#+\\)?[ \t]*\r?$" nil t)
+              (setq heading (string-trim (match-string 1))))
+            (list :name name
+                  :title (or (cdr (assoc "title" keywords))
+                             heading
+                             (cdr (assoc "name" keywords))
+                             name)
+                  :description (or (cdr (assoc "description" keywords)) "")
+                  :file file))
+        (let ((keywords (let ((case-fold-search t) keywords)
+                          (while (re-search-forward "^#\\+\\(title\\|description\\):[ \t]*\\(.*?\\)[ \t]*$" nil t)
+                            (push (cons (downcase (match-string 1)) (match-string 2)) keywords))
+                          keywords)))
+          (list :name name
+                :title (or (cdr (assoc "title" keywords)) name)
+                :description (or (cdr (assoc "description" keywords)) "")
+                :file file))))))
 
 (defun lispm-skills--in (directory)
   "The skills in DIRECTORY."
   (when (file-directory-p directory)
     (mapcar #'lispm-skills--read
             (append (directory-files directory t "\\`[^.].*\\.org\\'")
-                    (seq-filter #'file-exists-p
-                                (mapcar (lambda (dir) (expand-file-name "SKILL.org" dir))
-                                        (seq-filter #'file-directory-p
-                                                    (directory-files directory t "\\`[^.]"))))))))
+                    (delq nil
+                          (mapcar (lambda (dir)
+                                    (seq-find #'file-regular-p
+                                              (list (expand-file-name "SKILL.org" dir)
+                                                    (expand-file-name "SKILL.md" dir))))
+                                  (seq-filter #'file-directory-p
+                                              (directory-files directory t "\\`[^.]"))))))))
 
 (defun lispm-skills--write-directory ()
   "The directory write_skill saves skills in (see `lispm-write-skill-directory')."
@@ -267,14 +308,18 @@ code is evaluated as written or not at all."
   (when-let* ((attributes (file-attributes file)))
     (list (file-attribute-modification-time attributes) (file-attribute-size attributes))))
 
-(defun lispm-skills--headings (text)
-  "The titles of the org headings of TEXT, without their tags."
+(defun lispm-skills--headings (text &optional md-p)
+  "The titles of the headings of TEXT, without their tags.
+When MD-P is non-nil, read Markdown headings instead of Org headings."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
     (let ((case-fold-search nil) headings)
-      (while (re-search-forward "^\\*+[ \t]+\\(.*?\\)\\(?:[ \t]+:[[:alnum:]_@#%:]+:\\)?[ \t]*$" nil t)
-        (push (match-string-no-properties 1) headings))
+      (if md-p
+          (while (re-search-forward "^#+[ \t]+\\(.+?\\)\\(?:[ \t]+#+\\)?[ \t]*\r?$" nil t)
+            (push (match-string-no-properties 1) headings))
+        (while (re-search-forward "^\\*+[ \t]+\\(.*?\\)\\(?:[ \t]+:[[:alnum:]_@#%:]+:\\)?[ \t]*$" nil t)
+          (push (match-string-no-properties 1) headings)))
       (nreverse headings))))
 
 (defun lispm-skills--tool-forms (form)
@@ -313,10 +358,12 @@ does not read defines none.  Kept until the file changes."
     (if (and kept (equal (car kept) stamp))
         (cdr kept)
       (let* ((text (lispm-skills--file-text file))
-             (entry (list :headings (lispm-skills--headings text)
-                          :tools (condition-case nil
-                                     (mapcan #'lispm-skills--tool-forms (lispm-skills--forms text))
-                                   (error nil)))))
+             (md-p (lispm-skills--md-p file))
+             (entry (list :headings (lispm-skills--headings text md-p)
+                          :tools (unless md-p
+                                   (condition-case nil
+                                       (mapcan #'lispm-skills--tool-forms (lispm-skills--forms text))
+                                     (error nil))))))
         (puthash file (cons stamp entry) lispm-skills--indexed)
         entry))))
 
@@ -406,11 +453,16 @@ and checked: SKILL's file is not read again."
   (get (intern name) 'lispm-skill))
 
 (defun lispm-skills--text (file)
-  "The text of the skill in FILE, without its #+ keywords."
+  "The text of the skill in FILE, without its #+ keywords or YAML frontmatter."
   (with-temp-buffer
     (insert-file-contents file)
     (goto-char (point-min))
-    (while (looking-at "#\\+\\(title\\|description\\):.*\n") (replace-match ""))
+    (if (lispm-skills--md-p file)
+        (when (looking-at "\\`---[ \t]*\r?\n")
+          (forward-line 1)
+          (when (re-search-forward "^\\(?:---\\|\\.\\.\\.\\)[ \t]*\r?\n?" nil t)
+            (delete-region (point-min) (point))))
+      (while (looking-at "#\\+\\(title\\|description\\):.*\n") (replace-match "")))
     (string-trim (buffer-string))))
 
 (defun lispm-skills--loaded-text (skill tools &optional unevaluated extra)
@@ -428,10 +480,12 @@ its code was not evaluated; EXTRA, if non-nil, follows."
 
 (defun lispm-skills--beside (file)
   "The files beside FILE, if it is a skill that is a directory, sorted."
-  (when (equal (file-name-nondirectory file) "SKILL.org")
+  (when (member (file-name-nondirectory file) '("SKILL.org" "SKILL.md"))
     (let ((file (expand-file-name file)))
       (sort (seq-remove (lambda (other) (equal other file))
-                        (directory-files-recursively (file-name-directory file) ""))
+                        (directory-files-recursively
+                         (file-name-directory file) "" nil
+                         (lambda (dir) (not (equal (file-name-nondirectory dir) ".git")))))
             #'string<))))
 
 (defun lispm-skills--hash (file &optional text)
@@ -760,25 +814,29 @@ write the skill again"
 ;;;; Installing skills
 
 (defun lispm-skills--source (source)
-  "The skill file of SOURCE: NAME.org, or SKILL.org in the directory NAME/.
-A file SKILL.org stands for its directory.  An error if SOURCE is
-neither."
+  "The skill file of SOURCE: NAME.org, or SKILL.org/SKILL.md in NAME/.
+A file SKILL.org or SKILL.md stands for its directory.  An error if
+SOURCE is neither."
   (let ((source (expand-file-name source)))
     (cond ((file-directory-p source)
-           (let ((file (expand-file-name "SKILL.org" source)))
-             (unless (file-regular-p file)
+           (let ((file (seq-find #'file-regular-p
+                                 (list (expand-file-name "SKILL.org" source)
+                                       (expand-file-name "SKILL.md" source)))))
+             (unless file
                (user-error "%s" (lispm-tr "%s holds no SKILL.org: it is no skill" (abbreviate-file-name source))))
              file))
           ((not (file-regular-p source))
            (user-error "%s" (lispm-tr "No skill file %s" (abbreviate-file-name source))))
-          ((string-suffix-p ".org" source) source)
+          ((or (string-suffix-p ".org" source)
+               (member (file-name-nondirectory source) '("SKILL.org" "SKILL.md")))
+           source)
           (t (user-error "%s" (lispm-tr "A skill is NAME.org, or a directory holding SKILL.org: not %s"
                                         (abbreviate-file-name source)))))))
 
 (defun lispm-skills--label (name file)
   "FILE, a file of the skill NAME, as shown in diffs."
-  (if (equal (file-name-nondirectory file) "SKILL.org")
-      (concat name "/SKILL.org")
+  (if (member (file-name-nondirectory file) '("SKILL.org" "SKILL.md"))
+      (concat name "/" (file-name-nondirectory file))
     (concat name ".org")))
 
 (defun lispm-skills--install-diff (name old new text)
@@ -831,7 +889,8 @@ skill installed would not replace."
   (interactive (list (read-file-name (lispm-tr "Install the skill (NAME.org, or a directory with SKILL.org): ")
                                      nil nil t)))
   (let* ((file (lispm-skills--source source))
-         (directory-p (equal (file-name-nondirectory file) "SKILL.org"))
+         (entry-name (file-name-nondirectory file))
+         (directory-p (member entry-name '("SKILL.org" "SKILL.md")))
          (name (plist-get (lispm-skills--read file) :name))
          (text (lispm-skills--file-text file))
          (hash (lispm-skills--hash file text))
@@ -839,11 +898,12 @@ skill installed would not replace."
                       (and (file-exists-p existing) existing)))
          (directory (lispm-skills--write-directory))
          (target (expand-file-name (concat name (if directory-p "/" ".org")) directory))
-         (target-file (if directory-p (expand-file-name "SKILL.org" target) target))
+         (target-file (if directory-p (expand-file-name entry-name target) target))
          (other (expand-file-name (concat name (if directory-p ".org" "/")) directory)))
-    (condition-case err
-        (lispm-skills--forms text)
-      (error (user-error "%s" (lispm-tr "Skill %s was not installed: %s" name (error-message-string err)))))
+    (unless (lispm-skills--md-p file)
+      (condition-case err
+          (lispm-skills--forms text)
+        (error (user-error "%s" (lispm-tr "Skill %s was not installed: %s" name (error-message-string err))))))
     (cond
      ((lispm-skills--same-file-p file target-file))
      ((and directory-p (or (file-in-directory-p target (file-name-directory file))
@@ -851,7 +911,13 @@ skill installed would not replace."
       (user-error "%s" (lispm-tr "Skill %s is not installed in %s from inside it, nor from a directory holding it"
                                  name (abbreviate-file-name target))))
      (t
-      (dolist (location (list target-file (if directory-p other (expand-file-name "SKILL.org" other))))
+      (dolist (location (list target-file
+                              (if directory-p
+                                  other
+                                (or (seq-find #'file-exists-p
+                                              (list (expand-file-name "SKILL.org" other)
+                                                    (expand-file-name "SKILL.md" other)))
+                                    (expand-file-name "SKILL.org" other)))))
         (when-let* ((open (find-buffer-visiting location)))
           (when (buffer-modified-p open)
             (user-error "%s" (lispm-tr "%s is open in Emacs with unsaved changes; save or discard them first"
@@ -878,7 +944,7 @@ as it is now" name))))
             (condition-case err
                 (progn
                   (copy-directory (file-name-directory file) copy nil nil t)
-                  (write-region text nil (expand-file-name "SKILL.org" copy) nil 'silent)
+                  (write-region text nil (expand-file-name entry-name copy) nil 'silent)
                   (when (file-directory-p target)
                     (delete-directory target t))
                   (rename-file (directory-file-name copy) (directory-file-name target)))
@@ -888,7 +954,9 @@ as it is now" name))))
       ;; The skill as it was, if it was the other kind.
       (cond ((and directory-p (file-regular-p other))
              (delete-file other))
-            ((and (not directory-p) (file-exists-p (expand-file-name "SKILL.org" other)))
+            ((and (not directory-p)
+                  (or (file-exists-p (expand-file-name "SKILL.org" other))
+                      (file-exists-p (expand-file-name "SKILL.md" other))))
              (delete-directory other t)))
       (when-let* ((open (find-buffer-visiting target-file)))
         (lispm-tools--sync open))
@@ -914,7 +982,8 @@ exits.  Interactively, you are asked first."
   (let* ((directory (lispm-skills--write-directory))
          (file (expand-file-name (concat name ".org") directory))
          (skill-directory (expand-file-name (concat name "/") directory))
-         (dir-p (file-regular-p (expand-file-name "SKILL.org" skill-directory))))
+         (dir-p (or (file-regular-p (expand-file-name "SKILL.org" skill-directory))
+                    (file-regular-p (expand-file-name "SKILL.md" skill-directory)))))
     (when (or (file-in-directory-p directory lispm-skills--builtin)
               (not (or (file-regular-p file) dir-p)))
       (let ((other (lispm-skills--find name (or (bound-and-true-p lispm-session-agent)

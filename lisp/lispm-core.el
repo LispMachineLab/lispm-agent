@@ -167,9 +167,10 @@ Each is called with no argument and returns non-nil when it is, as
                (lispm-auth-store-exists-p)
                (or (not (fboundp 'lispm-auth-locked-p))
                    (lispm-auth-locked-p))
-               (not (and (featurep 'lispm-desktop-auth)
-                         (not (and (fboundp 'lispm-desktop-auth-started-hidden-p)
-                                   (lispm-desktop-auth-started-hidden-p)))))
+               (or (null (bound-and-true-p lispm-auth-page-window-draw-function))
+                   (bound-and-true-p lispm-auth-page-windowed)
+                   (and (fboundp 'lispm-auth--started-hidden-p)
+                        (lispm-auth--started-hidden-p)))
                (fboundp 'lispm-auth-start-app))
       (lispm-auth-start-app 'lispm))))
 
@@ -290,6 +291,10 @@ object.  It runs whenever more of the input arrives.")
 Each is called with the agent, the kind of what arrived (`text',
 `thinking' or `tool', the name of a tool whose call the model starts
 writing) and its text.  `lispm-live-segments' has all of it so far.")
+
+(defvar lispm-response-functions nil
+  "Abnormal hook run when a model response is complete.
+Each is called with the agent and the message alist.")
 
 (defvar lispm-buffer-change-functions nil
   "Abnormal hook run after a tool changed a buffer's text.

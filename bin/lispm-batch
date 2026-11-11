@@ -1,0 +1,86 @@
+#!/bin/sh
+# Copyright (C) 2026  Ryan.K
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# lispm-batch: run a LispM agent turn headlessly in batch Emacs.
+#
+#   lispm-batch [OPTIONS] [PROMPT...]
+#   lispm-batch --prompt-file task.txt --model moonshot/kimi-k3 --output-dir /logs/agent
+
+set -eu
+
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help)
+      cat <<'EOF'
+Usage: lispm-batch [OPTIONS] [PROMPT...]
+
+Run a LispM agent turn headlessly in batch Emacs and record per-call token
+and prompt-cache telemetry compatible with FrontierHarness (Harbor / Pier).
+
+Options:
+  -p, --prompt TEXT          Task instruction to execute
+  -f, --prompt-file FILE     Read task instruction from FILE
+  -C, --cwd DIR              Agent root directory (default: current directory)
+  -m, --model MODEL          Model or LiteLLM `<provider>/<model>' string
+      --provider NAME        Provider route (openai, anthropic, fireworks_ai,
+                             moonshot, openrouter, together_ai, deepseek)
+      --api API              Protocol (`openai' or `anthropic')
+      --url BASE_URL         API base URL override
+      --key-env VAR          Environment variable holding the API key
+      --max-steps N          Maximum model steps in the turn (default: 60)
+      --max-tokens N         Maximum output tokens per response (default: 64000)
+      --effort LEVEL         Reasoning effort (low, medium, high, xhigh, max)
+      --timeout SECONDS      Wall-clock timeout in seconds (default: 1800)
+  -o, --output-dir DIR       Write lispm-calls.jsonl, lispm-usage.json,
+                             result.json and session.org to DIR
+      --calls-file FILE      Write per-call JSONL telemetry to FILE
+      --usage-file FILE      Write cumulative usage JSON to FILE
+      --result-file FILE     Write final run result JSON to FILE
+      --transcript-file FILE Copy the Org session transcript to FILE
+      --json                 Print final result JSON to stdout instead of reply
+  -h, --help                 Show this help message
+EOF
+      exit 0
+      ;;
+  esac
+done
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+parent_dir=$(CDPATH= cd -- "$root_dir/.." && pwd)
+
+if [ -z "${EMACS:-}" ]; then
+  if command -v emacs >/dev/null 2>&1; then
+    EMACS=emacs
+  elif [ -x /opt/homebrew/bin/emacs ]; then
+    EMACS=/opt/homebrew/bin/emacs
+  elif [ -x /Applications/Emacs.app/Contents/MacOS/Emacs ]; then
+    EMACS=/Applications/Emacs.app/Contents/MacOS/Emacs
+  else
+    EMACS=emacs
+  fi
+fi
+
+KIT_LISP=${KIT_LISP:-$parent_dir/lispm-kit}
+UI_LISP=${UI_LISP:-$parent_dir/lispm-ui}
+AUTH_LISP=${AUTH_LISP:-$parent_dir/lispm-auth}
+AGENTS_LISP=${AGENTS_LISP:-$parent_dir/lispm-agents/lisp}
+KERNEL_DIR=${LISPM_KERNEL:-$parent_dir/lispm-kernel}
+KERNEL_LISP=${KERNEL_LISP:-$KERNEL_DIR/lisp}
+
+if [ -z "${LISPM_KERNEL_PROGRAM:-}" ] && [ -x "$KERNEL_DIR/build/lispm-kernel" ]; then
+  export LISPM_KERNEL_PROGRAM="$KERNEL_DIR/build/lispm-kernel"
+fi
+
+exec "$EMACS" -Q --batch \
+  --eval "(when (file-directory-p \"$root_dir/.deps\") (require 'package) (setq package-user-dir \"$root_dir/.deps\") (package-initialize))" \
+  -L "$KIT_LISP" \
+  -L "$UI_LISP" \
+  -L "$AUTH_LISP" \
+  -L "$AGENTS_LISP" \
+  -L "$KERNEL_LISP" \
+  -L "$root_dir/lisp" \
+  -l lispm \
+  -f lispm-batch-main \
+  -- "$@"

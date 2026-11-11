@@ -646,8 +646,10 @@ is none, a fresh session starts."
 (defun lispm--project-root (&optional directory)
   "Root of the project around DIRECTORY (default: `default-directory')."
   (let ((default-directory (or directory default-directory)))
-    (if-let* ((project (project-current)))
-        (project-root project)
+    (if-let* ((project (project-current))
+              (root (project-root project))
+              ((or (null directory) (file-in-directory-p default-directory root))))
+        root
       default-directory)))
 
 (defun lispm-start (&optional role root)
@@ -1394,6 +1396,8 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
     (setf (lispm-agent-process agent) nil)
     (lispm--add-usage agent (alist-get 'usage message))
     (lispm--note-context agent (alist-get 'usage message))
+    (with-demoted-errors "LispM: %S"
+      (run-hook-with-args 'lispm-response-functions agent message))
     (lispm--live-delete agent)
     (let* ((content (append (alist-get 'content message) nil))
            (stop (alist-get 'stop_reason message))

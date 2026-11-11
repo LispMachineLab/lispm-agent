@@ -487,8 +487,6 @@
   ("Starts with http:// or https://" . "http:// または https:// で始まります")
   ("The server's base address, without the path LispM adds." . "サーバーのベースアドレス。LispM が付けるパスは含めません。")
   ("The model agents use when they name none." . "エージェントがモデルを指定しないときに使うモデル。")
-  ("Other models" . "その他のモデル")
-  ("One on a line; they appear in the model menu." . "1 行に 1 つ。モデルメニューに表示されます。")
   ("A key is stored encrypted; leave it empty to keep it." . "キーは暗号化して保存されています。そのまま残すには空欄にしてください。")
   ("LispM Auth keeps it encrypted." . "LispM Auth が暗号化して保持します。")
   ("A key is set; leave it empty to keep it, or type a new one." . "キーは設定済みです。そのまま残すには空欄にし、新しいキーを入力することもできます。")

@@ -51,9 +51,15 @@ No worker is started in Emacs when the kernel is unavailable."
 
 (defun lispm-elisp--environment (directory)
   "The worker's environment in DIRECTORY, respecting Emacs's overrides."
-  (let ((seen (make-hash-table :test #'equal))
-        (entries (list (concat "PWD=" (directory-file-name directory)))))
+  (let* ((remote (file-remote-p directory))
+         (cwd (directory-file-name (if remote temporary-file-directory directory)))
+         (seen (make-hash-table :test #'equal))
+         (entries (if remote
+                      (list (concat "LISPM_ELISP_ROOT=" (file-name-as-directory directory))
+                            (concat "PWD=" cwd))
+                    (list (concat "PWD=" cwd)))))
     (puthash "PWD" t seen)
+    (puthash "LISPM_ELISP_ROOT" t seen)
     (dolist (entry process-environment)
       (let* ((equals (string-search "=" entry))
              (name (if equals (substring entry 0 equals) entry)))
@@ -128,13 +134,13 @@ No worker is started in Emacs when the kernel is unavailable."
 
 (defun lispm-elisp--start (agent code timeout done)
   "Run CODE for AGENT in a kernel child for TIMEOUT seconds; call DONE."
-  (let ((timeout (or timeout 120))
-        (directory (lispm-agent-root agent)))
+  (let* ((timeout (or timeout 120))
+         (directory (lispm-agent-root agent))
+         (remote (file-remote-p directory))
+         (cwd (directory-file-name (if remote temporary-file-directory directory))))
     (unless (and (integerp timeout) (<= 1 timeout 86400))
       (error "timeout must be an integer from 1 to 86400 seconds"))
-    (when (file-remote-p directory)
-      (error "run_elisp runs local workers; it cannot use a remote agent root"))
-    (unless (file-directory-p directory)
+    (unless (file-directory-p cwd)
       (error "No worker directory: %s" directory))
     (unless (and (file-name-absolute-p lispm-elisp-program)
                  (file-executable-p lispm-elisp-program))
@@ -159,7 +165,7 @@ No worker is started in Emacs when the kernel is unavailable."
                      (list :program lispm-elisp-program
                            :args (list "-Q" "--batch" "--load" lispm-elisp--worker
                                        "--funcall" "lispm-elisp-worker-main")
-                           :cwd (directory-file-name directory)
+                           :cwd cwd
                            :env (lispm-elisp--environment directory)
                            :stdin (concat (prin1-to-string code) "\n")
                            :timeout timeout)

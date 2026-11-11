@@ -487,8 +487,6 @@
   ("Starts with http:// or https://" . "以 http:// 或 https:// 開頭")
   ("The server's base address, without the path LispM adds." . "伺服器的基礎位址，不含 LispM 新增的路徑。")
   ("The model agents use when they name none." . "代理未指定模型時使用的模型。")
-  ("Other models" . "其他模型")
-  ("One on a line; they appear in the model menu." . "每行一個；它們會出現在模型選單中。")
   ("A key is stored encrypted; leave it empty to keep it." . "金鑰已加密儲存；留空即可保留。")
   ("LispM Auth keeps it encrypted." . "LispM Auth 會將其加密儲存。")
   ("A key is set; leave it empty to keep it, or type a new one." . "已設定金鑰；留空即可保留，或輸入新金鑰。")

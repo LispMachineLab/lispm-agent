@@ -92,16 +92,29 @@ KERNEL-CALLBACKS maps request ids to callbacks."
         (funcall (alist-get 1 kernel-callbacks) 'success '(:exit 0 :stderr ""))))))
 
 (ert-deftest lispm-elisp-test-invalid-input-does-not-submit ()
-  "Bad deadlines and remote roots cannot become a local kernel process."
+  "Bad deadlines and missing directories cannot become a local kernel process;
+valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
+`LISPM_ELISP_ROOT' in `:env'."
   (lispm-test-env
     (lispm-elisp-test--with-kernel
       (let ((agent (lispm-defagent tester :root project)))
         (dolist (timeout '(0 -1 86401 1.5 "5"))
           (should-error (lispm-elisp--start agent "1" timeout #'ignore)))
-        (setf (lispm-agent-root agent) "/ssh:example.invalid:/work/")
+        (setf (lispm-agent-root agent) (expand-file-name "missing-root/" project))
         (should-error (lispm-elisp--start agent "1" 1 #'ignore))
         (should-not kernel-submissions)
-        (should-not lispm-elisp--jobs)))))
+        (should-not lispm-elisp--jobs))))
+  (lispm-test-with-remote
+    (lispm-elisp-test--with-kernel
+      (let ((agent (lispm-make-agent 'assistant remote)))
+        (lispm-elisp--start agent "(expand-file-name \"a.txt\")" 5 #'ignore)
+        (should (= (length kernel-submissions) 1))
+        (let ((input (nth 2 (car kernel-submissions))))
+          (should (equal (plist-get input :cwd)
+                         (directory-file-name temporary-file-directory)))
+          (should (member (concat "LISPM_ELISP_ROOT=" (file-name-as-directory remote))
+                          (plist-get input :env))))
+        (funcall (alist-get 1 kernel-callbacks) 'success '(:exit 0 :stderr ""))))))
 
 (ert-deftest lispm-elisp-test-runtime-requires-live-exec-kernel ()
   "Having a kernel library alone does not make process execution available."
