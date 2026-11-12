@@ -94,24 +94,48 @@ when the connection closes or the process is signalled."
     (when (and (integerp pid) (> pid 0))
       (ignore-errors (signal-process (- pid) signal)))))
 
+(defun lispm-exec--with-held-sentinel (process body)
+  "Call BODY with PROCESS's sentinel held, running queued events after BODY.
+`tramp-signal-process' waits for its remote command inside a locked TRAMP
+connection; holding PROCESS's sentinel until that lock is released keeps
+the sentinel from re-entering TRAMP on the same connection."
+  (let ((sentinel (process-sentinel process))
+        events)
+    (unwind-protect
+        (progn
+          (when (functionp sentinel)
+            (set-process-sentinel
+             process (lambda (_proc event) (push event events))))
+          (funcall body))
+      (when (functionp sentinel)
+        (ignore-errors (set-process-sentinel process sentinel))
+        (dolist (event (nreverse events))
+          (funcall sentinel process event))))))
+
 (defun lispm-exec-kill (process)
   "Stop PROCESS and the process group it started, locally or on a remote host."
   (when (processp process)
     (let ((inhibit-quit t))
-      (when (process-live-p process)
-        (ignore-errors (process-send-eof process))
-        (lispm-exec--signal-tree process 'SIGKILL))
-      (when (process-live-p process)
-        (ignore-errors (kill-process process))))))
+      (lispm-exec--with-held-sentinel
+       process
+       (lambda ()
+         (when (process-live-p process)
+           (ignore-errors (process-send-eof process))
+           (lispm-exec--signal-tree process 'SIGKILL))
+         (when (process-live-p process)
+           (ignore-errors (kill-process process))))))))
 
 (defun lispm-exec-delete (process)
   "Delete PROCESS after stopping the process group it started."
   (when (processp process)
     (let ((inhibit-quit t))
-      (when (process-live-p process)
-        (ignore-errors (process-send-eof process))
-        (lispm-exec--signal-tree process 'SIGKILL))
-      (ignore-errors (delete-process process)))))
+      (lispm-exec--with-held-sentinel
+       process
+       (lambda ()
+         (when (process-live-p process)
+           (ignore-errors (process-send-eof process))
+           (lispm-exec--signal-tree process 'SIGKILL))
+         (ignore-errors (delete-process process)))))))
 
 (cl-defun lispm-exec (program args callback &key input timeout)
   "Run PROGRAM with ARGS in the background, then call CALLBACK with how it went.
