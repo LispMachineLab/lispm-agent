@@ -265,7 +265,36 @@ not be made says why.  No file is left behind."
   (let* ((ran nil)
          (lispm-exec-function (lambda (&rest arguments) (push arguments ran))))
     (lispm-exec "git" '("status") #'ignore :input "x")
-    (should (equal (list (list "git" '("status") #'ignore :input "x")) ran))))
+    (should (equal (list (list "git" '("status") #'ignore :input "x")) ran))
+    (lispm-exec "git" '("status") #'ignore :input "x" :timeout 5)
+    (should (equal (car ran) (list "git" '("status") #'ignore :input "x" :timeout 5)))))
+
+(ert-deftest lispm-test-exec-timeout-kills-process-group ()
+  "A timed-out `lispm-exec' stops the whole process group, and `lispm-exec-kill'
+signals negative `remote-pid' on TRAMP processes before restoring `remote-pid'."
+  (let ((heard nil))
+    (lispm-exec "sh" '("-c" "sleep 30 & echo $!; wait")
+                (lambda (&rest got) (setq heard got))
+                :timeout 0.2)
+    (should (lispm-test--wait (lambda () heard) 5))
+    (should (equal (car heard) "sh timed out after 0.2s"))
+    (let ((child (string-to-number (string-trim (nth 1 heard)))))
+      (should (> child 0))
+      (should (lispm-test--wait (lambda () (not (eql 0 (signal-process child 0)))) 2))))
+  (let* ((signals nil)
+         (proc (make-process :name "lispm-test-remote" :command '("sh" "-c" "sleep 30")
+                             :connection-type 'pipe :noquery t)))
+    (unwind-protect
+        (progn
+          (process-put proc 'remote-pid 4242)
+          (cl-letf (((symbol-function 'signal-process)
+                     (lambda (p sig &optional _remote)
+                       (push (list (if (processp p) (process-get p 'remote-pid) p) sig) signals)
+                       0)))
+            (lispm-exec--signal-tree proc 'SIGKILL))
+          (should (equal (process-get proc 'remote-pid) 4242))
+          (should (member '(-4242 SIGKILL) signals)))
+      (lispm-exec-delete proc))))
 
 (ert-deftest lispm-test-transcript-roundtrip ()
   "Model output survives rendering and parsing byte for byte."
@@ -2581,11 +2610,15 @@ skills/web.org).  Batch Emacs makes no xwidgets: stubs stand in."
       (should (string-match-p "project/?\nhi\n\n?\\[exit status 3\\]" (car result)))
       (setq result nil)
       (let ((lispm-current-agent agent))
-        (lispm-tool-invoke (lispm-get-tool "run_shell") '((command . "sleep 5") (timeout . 1))
+        (lispm-tool-invoke (lispm-get-tool "run_shell")
+                           '((command . "sleep 30 & echo $! > child.pid; wait") (timeout . 1))
                            (lambda (text errorp) (setq result (cons text errorp)))))
       (should (lispm-test--wait (lambda () result) 5))
       (should (string-match-p "timeout" (car result)))
-      (should (cdr result)))))
+      (should (cdr result))
+      (let ((child (string-to-number (lispm-test--file project "child.pid"))))
+        (should (> child 0))
+        (should (lispm-test--wait (lambda () (not (eql 0 (signal-process child 0)))) 2))))))
 
 ;;;; Shell commands and remote roots
 
@@ -3389,6 +3422,15 @@ commands there; absolute paths name files there too."
         (lispm-test--call-async agent "run_shell"
                                 '((command . "printf 'changed\\n' > a.txt; touch -t 203001010000 a.txt")))
         (should (equal (with-current-buffer buffer (buffer-string)) "changed\n")))
+      ;; A timed-out remote command kills its process group there too.
+      (let ((result (lispm-test--call-async
+                     agent "run_shell"
+                     '((command . "sleep 30 & echo $! > child.pid; wait") (timeout . 1)))))
+        (should (cdr result))
+        (should (string-match-p "killed: timeout" (car result)))
+        (let ((child (string-to-number (lispm-test--disk (expand-file-name "child.pid" project)))))
+          (should (> child 0))
+          (should (lispm-test--wait (lambda () (not (eql 0 (signal-process child 0)))) 3))))
       ;; Its turns have the in-memory journal only.
       (should-not (lispm-journal--top remote))
       (should-not (lispm-journal-records agent))

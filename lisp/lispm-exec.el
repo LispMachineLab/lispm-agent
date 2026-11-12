@@ -44,15 +44,87 @@ By default `lispm-exec-locally'.  Something else that can run programs,
 as LispM's kernel, advises it with `add-function', running them itself
 when it can and leaving the rest to the function it advises.")
 
-(cl-defun lispm-exec (program args callback &key input)
+(defvar lispm-exec-timeout 300
+  "Seconds a program `lispm-exec-locally' runs may take before it is stopped.
+Nil lets it run for ever.")
+
+(defconst lispm-exec--remote-shell-wrapper
+  "exec 9<&0 </dev/null
+trap 'trap : TERM HUP INT; kill -TERM -$$ $cpid 2>/dev/null; sleep 0.05; kill -KILL $cpid $wpid 2>/dev/null; wait 2>/dev/null; exit 143' TERM HUP INT
+\"$0\" \"$1\" \"$2\" &
+cpid=$!
+(
+  while read -r _ <&9; do :; done
+  kill -TERM -$$ $cpid 2>/dev/null
+  sleep 0.05
+  kill -KILL -$$ $cpid 2>/dev/null
+) >/dev/null 2>&1 &
+wpid=$!
+exec 9<&-
+wait $cpid
+rc=$?
+kill -KILL $wpid 2>/dev/null
+wait $wpid 2>/dev/null
+exit $rc"
+  "POSIX shell script keeping a remote command and its children together.
+It runs \"$0\" \"$1\" \"$2\" with standard input from /dev/null while
+watching the pipe on descriptor 9, and stops the whole process group
+when that pipe closes or a signal arrives.")
+
+(defun lispm-exec-shell-command (shell switch command &optional remote)
+  "The command list that runs COMMAND with SHELL and SWITCH.
+When REMOTE is non-nil, wrap COMMAND so its process group is stopped
+when the connection closes or the process is signalled."
+  (if remote
+      (list shell switch lispm-exec--remote-shell-wrapper shell switch command)
+    (list shell switch command)))
+
+(defun lispm-exec--signal-tree (process signal)
+  "Send SIGNAL to PROCESS and its process group, remotely or locally."
+  (when-let* ((rpid (process-get process 'remote-pid)))
+    (when (and (integerp rpid) (/= rpid 0))
+      (let ((group (- (abs rpid))))
+        (unless (eql 0 (unwind-protect
+                           (progn
+                             (process-put process 'remote-pid group)
+                             (ignore-errors (signal-process process signal)))
+                         (process-put process 'remote-pid (abs rpid))))
+          (ignore-errors (signal-process process signal))))))
+  (when-let* ((pid (process-id process)))
+    (when (and (integerp pid) (> pid 0))
+      (ignore-errors (signal-process (- pid) signal)))))
+
+(defun lispm-exec-kill (process)
+  "Stop PROCESS and the process group it started, locally or on a remote host."
+  (when (processp process)
+    (let ((inhibit-quit t))
+      (when (process-live-p process)
+        (ignore-errors (process-send-eof process))
+        (lispm-exec--signal-tree process 'SIGKILL))
+      (when (process-live-p process)
+        (ignore-errors (kill-process process))))))
+
+(defun lispm-exec-delete (process)
+  "Delete PROCESS after stopping the process group it started."
+  (when (processp process)
+    (let ((inhibit-quit t))
+      (when (process-live-p process)
+        (ignore-errors (process-send-eof process))
+        (lispm-exec--signal-tree process 'SIGKILL))
+      (ignore-errors (delete-process process)))))
+
+(cl-defun lispm-exec (program args callback &key input timeout)
   "Run PROGRAM with ARGS in the background, then call CALLBACK with how it went.
 CALLBACK gets PROGRAM's exit code, an integer, or a string saying why it
 did not run or exit, then what it printed to its standard output and its
 standard error, strings read as UTF-8.  It is called later, never before
 this returns.  PROGRAM is found in `exec-path', and runs in
 `default-directory' with `process-environment', reading INPUT, a string,
-when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
-  (funcall lispm-exec-function program args callback :input input)
+when given, else nothing; ARGS are strings.  When TIMEOUT is given,
+stop PROGRAM after TIMEOUT seconds.  See `lispm-exec-function'."
+  (if timeout
+      (funcall lispm-exec-function program args callback :input input :timeout timeout)
+    (funcall lispm-exec-function program args callback :input input))
   nil)
 
 (defun lispm-exec--call (callback &rest arguments)
@@ -60,11 +132,11 @@ when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
   (with-demoted-errors "lispm-exec: %S"
     (apply callback arguments)))
 
-(cl-defun lispm-exec-locally (program args callback &key input)
+(cl-defun lispm-exec-locally (program args callback &key input (timeout lispm-exec-timeout))
   "Run PROGRAM with ARGS as a process of Emacs's own, as `lispm-exec' says."
   (let ((output (generate-new-buffer " *lispm-exec*" t))
         (errors (generate-new-buffer " *lispm-exec errors*" t))
-        stderr)
+        stderr timer)
     (condition-case err
         (let ((process
                (make-process
@@ -75,17 +147,27 @@ when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
                 :sentinel
                 (lambda (process _event)
                   (when (and (not (process-live-p process)) (buffer-live-p output))
+                    (when timer (cancel-timer timer))
                     ;; What it said last, read before its pipe goes.
                     (while (accept-process-output stderr 0 nil t))
                     (delete-process stderr)
-                    (let ((exit (if (eq (process-status process) 'exit)
-                                    (process-exit-status process)
-                                  (format "%s ended by signal %s" program (process-exit-status process))))
+                    (let ((exit (cond ((process-get process 'timed-out)
+                                       (format "%s timed out after %ss" program timeout))
+                                      ((eq (process-status process) 'exit)
+                                       (process-exit-status process))
+                                      (t (format "%s ended by signal %s" program (process-exit-status process)))))
                           (printed (with-current-buffer output (buffer-string)))
                           (said (with-current-buffer errors (buffer-string))))
                       (kill-buffer output)
                       (kill-buffer errors)
                       (lispm-exec--call callback exit printed said)))))))
+          (when timeout
+            (setq timer
+                  (run-at-time timeout nil
+                               (lambda ()
+                                 (when (process-live-p process)
+                                   (process-put process 'timed-out t)
+                                   (lispm-exec-kill process))))))
           ;; A program may be gone before it is sent its input, or the
           ;; end of it, as one reading none, as diff, may be: its
           ;; sentinel then says how it went, later.
@@ -93,7 +175,8 @@ when given, else nothing; ARGS are strings.  See `lispm-exec-function'."
             (when input
               (process-send-string process input))
             (process-send-eof process)))
-      (error (when (process-live-p stderr) (delete-process stderr))
+      (error (when timer (cancel-timer timer))
+             (when (process-live-p stderr) (delete-process stderr))
              (kill-buffer output)
              (kill-buffer errors)
              (run-at-time 0 nil #'lispm-exec--call callback (error-message-string err) "" "")))

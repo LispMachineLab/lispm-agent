@@ -42,9 +42,10 @@
   (setf (lispm-process-tools--run-finished run) t)
   (setq lispm-process-tools--runs (delq run lispm-process-tools--runs))
   (when-let* ((timer (lispm-process-tools--run-timer run))) (cancel-timer timer))
-  (dolist (process (list (lispm-process-tools--run-process run)
-                         (lispm-process-tools--run-errors run)))
-    (when (processp process) (ignore-errors (delete-process process))))
+  (when-let* ((process (lispm-process-tools--run-process run)))
+    (lispm-exec-delete process))
+  (when-let* ((errors (lispm-process-tools--run-errors run)))
+    (when (processp errors) (ignore-errors (delete-process errors))))
   ;; A spawn failure may precede sandbox-attach and its sentinel.
   (when-let* ((sandbox (lispm-process-tools--run-sandbox run)))
     (ignore-errors (lispm-sandbox--forget sandbox)))

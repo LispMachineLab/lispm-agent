@@ -2605,7 +2605,9 @@ allows."
            ;; cannot be had.
            (run (lispm-sandbox-prepare
                  (with-connection-local-variables
-                  (list shell-file-name shell-command-switch command))
+                  (lispm-exec-shell-command
+                   shell-file-name shell-command-switch command
+                   (file-remote-p default-directory)))
                  nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
            (note (lispm-sandbox-run-note run))
            (proc (make-process
@@ -2649,12 +2651,12 @@ allows."
                                 (lambda ()
                                   (when (process-live-p proc)
                                     (process-put proc 'timed-out t)
-                                    (kill-process proc)))))
+                                    (lispm-exec-kill proc)))))
       (when quit-flag
         (setq quit-flag nil)
         (cancel-timer (process-get proc 'timer))
         (process-put proc 'interrupted t)
-        (delete-process proc)
+        (lispm-exec-delete proc)
         (signal 'quit nil)))))
 
 (defun lispm-tools--read-forms (code)

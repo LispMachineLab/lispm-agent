@@ -1767,7 +1767,7 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
     (dolist (p (process-list))
       (when (eq (process-get p 'lispm-agent) agent)
         (process-put p 'lispm-aborted t)
-        (delete-process p)))
+        (lispm-exec-delete p)))
     (lispm--live-delete agent)
     (let (ids)
       (maphash (lambda (id _) (push id ids)) (lispm-agent-pending agent))
