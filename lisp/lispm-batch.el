@@ -278,13 +278,13 @@ cache_read + cache_write), while each call's `input_tokens' in
   (make-directory (file-name-directory (expand-file-name file)) t)
   (let ((coding-system-for-write 'utf-8-unix))
     (with-temp-file file
-      (insert (json-serialize object :null-object :null :false-object :false) "\n"))))
+      (insert (lispm--json-serialize object :null-object :null :false-object :false) "\n"))))
 
 (defun lispm-batch--append-jsonl (file object)
   "Append OBJECT as a single JSON line to FILE."
   (make-directory (file-name-directory (expand-file-name file)) t)
   (let ((coding-system-for-write 'utf-8-unix)
-        (line (concat (json-serialize object :null-object :null :false-object :false) "\n")))
+        (line (concat (lispm--json-serialize object :null-object :null :false-object :false) "\n")))
     (write-region line nil file 'append 'silent)))
 
 (defvar tramp-persistency-file-name)
@@ -378,6 +378,7 @@ OPTIONS:
           (make-backup-files nil)
           (auto-save-default nil)
           (lispm-auto-approve-all t)
+          (select-safe-coding-system-function nil)
           (lispm-default-policy lispm-batch-policy)
           (lispm-condition-handlers lispm-batch-condition-handlers)
           (lispm-unattended-condition-handlers lispm-batch-condition-handlers)
@@ -582,7 +583,7 @@ Options:
           (error "No prompt given (pass --prompt TEXT, --prompt-file FILE, or positional text)"))
         (let ((result (apply #'lispm-batch-run prompt opts)))
           (if (plist-get opts :json)
-              (princ (concat (json-serialize result :null-object :null :false-object :false) "\n"))
+              (princ (concat (lispm--json-serialize result :null-object :null :false-object :false) "\n"))
             (let ((reply (alist-get 'reply result)))
               (when (and (stringp reply) (not (string-empty-p reply)))
                 (princ (concat reply (unless (string-suffix-p "\n" reply) "\n"))))))

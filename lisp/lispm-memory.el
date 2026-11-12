@@ -159,7 +159,10 @@ that is an error."
       (when (and (zerop (buffer-size)) (eq (lispm-tools--state buffer) 'current))
         (insert header)
         (org-mode)
-        (let ((inhibit-message t)) (save-buffer))))
+        (let ((inhibit-message t)
+              (select-safe-coding-system-function nil)
+              (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
+          (save-buffer))))
     buffer))
 
 (defun lispm-memory--buffer (agent &optional scope role to-change)
@@ -234,7 +237,10 @@ number)."
 (defun lispm-memory--save (buffer)
   "Save BUFFER quietly."
   (with-current-buffer buffer
-    (let ((inhibit-message t)) (save-buffer))))
+    (let ((inhibit-message t)
+          (select-safe-coding-system-function nil)
+          (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
+      (save-buffer))))
 
 (defun lispm-memory--tag (tag)
   "TAG made valid for org."
