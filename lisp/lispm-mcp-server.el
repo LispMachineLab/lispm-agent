@@ -150,7 +150,7 @@ CLOSED invalidates queued calls; PENDING holds answers not yet delivered."
       (dolist (process (process-list))
         (when (eq (process-get process 'lispm-agent) agent)
           (process-put process 'lispm-aborted t)
-          (ignore-errors (delete-process process)))))
+          (lispm-exec-delete process))))
     (dolist (answer (lispm-mcp-server-session-pending session))
       (condition-case err (funcall answer '("Cancelled: the session has ended.") t)
         ((error quit) (message "LispM MCP pending answer: %s" (error-message-string err)))))))
