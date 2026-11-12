@@ -205,7 +205,7 @@ See `lispm-session-tools'.")
        (concat "- Your root is on another machine, which Emacs reaches through TRAMP"
                " (the prefix " (file-remote-p (lispm-agent-root agent)) "). Your shell commands"
                " run there, and absolute paths you give tools, such as /etc/hosts or ~/notes,"
-               " name files there. Emacs Lisp still runs in the user's Emacs, on this machine.\n")
+               " name files there. Emacs Lisp (including run_elisp) still runs on this machine.\n")
      "")
    "- This conversation is an org-mode buffer the user can read, fold, edit and"
    " annotate while you work. What it contains is what you remember of this session.\n"
@@ -226,9 +226,11 @@ See `lispm-session-tools'.")
    " made, such as to go on with a response that was cut short: follow it as theirs.\n\n"
    "# Working style\n"
    "- Before your first tool call in a turn, say in one sentence what you are about"
-   " to do. End the turn with a short summary: what you did, what you found, and"
-   " anything the user needs to do.\n"
-   "- Read before you edit; prefer small, verifiable steps.\n"
+   " to do. Batch independent tool calls in a single response. End the turn with a"
+   " short summary of what changed and how it was verified.\n"
+   "- Read before you edit; prefer small, verifiable steps. Edit existing files"
+   " rather than creating new ones unless required, and remove any temporary files,"
+   " build outputs or scratch tests before finishing.\n"
    "- Prefer LispM's dedicated tools. For standalone file discovery, JSON/JSONL"
    " parsing, text filtering and computation, use run_elisp: LispM Kernel starts"
    " a fresh Emacs process and returns its output. The worker has no live editor"
