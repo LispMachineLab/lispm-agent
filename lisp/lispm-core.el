@@ -989,9 +989,45 @@ agent, is replaced.  Errors are reported, not raised."
                                     (apply function args))))
            lispm--idle-work))
 
+(defconst lispm--json-invalid-char-regexp
+  (string ?\[ #xd800 ?- #xdfff #x110000 ?- #x3fff7f #x3fff80 ?- #x3fffff ?\])
+  "Regexp matching surrogates, non-Unicode chars and raw 8-bit bytes.")
+
+(defun lispm--json-sanitize-string (s)
+  "Return S with any non-Unicode or surrogate characters replaced by U+FFFD."
+  (let ((case-fold-search nil)
+        (m (if (multibyte-string-p s) s (decode-coding-string s 'utf-8))))
+    (if (string-match-p lispm--json-invalid-char-regexp m)
+        (replace-regexp-in-string lispm--json-invalid-char-regexp "\uFFFD" m t t)
+      m)))
+
+(defun lispm--json-sanitize (object)
+  "Sanitize strings in OBJECT so `json-serialize' accepts them."
+  (cond
+   ((stringp object) (lispm--json-sanitize-string object))
+   ((consp object)
+    (cons (lispm--json-sanitize (car object))
+          (lispm--json-sanitize (cdr object))))
+   ((vectorp object)
+    (vconcat (mapcar #'lispm--json-sanitize object)))
+   ((hash-table-p object)
+    (let ((copy (copy-hash-table object)))
+      (maphash (lambda (k v)
+                 (puthash k (lispm--json-sanitize v) copy))
+               object)
+      copy))
+   (t object)))
+
+(defun lispm--json-serialize (object &rest args)
+  "Like `json-serialize', sanitizing raw bytes on `json-value-p' error."
+  (condition-case nil
+      (apply #'json-serialize object args)
+    (wrong-type-argument
+     (apply #'json-serialize (lispm--json-sanitize object) args))))
+
 (defun lispm--json-encode (object)
   "Encode OBJECT as a JSON string (decoded text, not bytes)."
-  (decode-coding-string (json-serialize object) 'utf-8))
+  (decode-coding-string (lispm--json-serialize object) 'utf-8))
 
 (defun lispm--json-decode (string)
   "Decode the JSON STRING.

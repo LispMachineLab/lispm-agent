@@ -820,7 +820,11 @@ newest file."
          (buffer (or visiting (find-file-noselect file))))
     (with-current-buffer buffer
       (lispm--set-keyword "title" title)
-      (let ((inhibit-message t) (lispm-inhibit-triggers t)) (save-buffer)))
+      (let ((inhibit-message t)
+            (lispm-inhibit-triggers t)
+            (select-safe-coding-system-function nil)
+            (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
+        (save-buffer)))
     (unless visiting (kill-buffer buffer))))
 
 (defmacro lispm--in-session (agent &rest body)
@@ -863,7 +867,9 @@ Windows that showed the end of the buffer keep following it."
     (when (and lispm-save-sessions (buffer-live-p buffer) (buffer-file-name buffer))
       (with-current-buffer buffer
         (let ((inhibit-message t)
-              (lispm-inhibit-triggers t))
+              (lispm-inhibit-triggers t)
+              (select-safe-coding-system-function nil)
+              (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
           (save-buffer))))))
 
 (defun lispm--add-section (agent title text)

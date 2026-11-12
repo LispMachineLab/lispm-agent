@@ -1402,9 +1402,18 @@ so is a read-only one, before anything is journaled."
         (kill-buffer source))
       (when (and buffer-file-name lispm-save-edits)
         (make-directory (file-name-directory buffer-file-name) t)
-        (let ((inhibit-message t)
-              (require-final-newline (and keep-final-newline require-final-newline))
-              (make-backup-files nil))
+        (let* ((inhibit-message t)
+               (require-final-newline (and keep-final-newline require-final-newline))
+               (make-backup-files nil)
+               (select-safe-coding-system-function nil)
+               (base (and buffer-file-coding-system
+                          (coding-system-base buffer-file-coding-system)))
+               (coding-system-for-write
+                (or coding-system-for-write
+                    (if (memq base '(nil undecided us-ascii))
+                        (coding-system-change-text-conversion
+                         (or buffer-file-coding-system 'utf-8-unix) 'utf-8)
+                      buffer-file-coding-system))))
           (save-buffer))))))
 
 (defun lispm-tools--buffer (name)
@@ -1756,7 +1765,7 @@ slices; only those matching GLOB, if given."
                           ;; a checkout of a VCS that is not installed.
                           (ignore-errors (project-files project (list target))))))
                      (t (list (file-name-as-directory target))))))
-    (if (and glob (not (and (null (cdr files)) (directory-name-p (car files)))))
+    (if (and glob (not (and (car files) (null (cdr files)) (directory-name-p (car files)))))
         (seq-filter (lispm-tools--glob-predicate
                      glob (if (file-directory-p target) target (file-name-directory target)))
                     files)

@@ -160,7 +160,7 @@ curl process."
     (let ((coding-system-for-write 'binary))
       (with-temp-file file
         (set-buffer-multibyte nil)
-        (insert (json-serialize body))))
+        (insert (lispm--json-serialize body))))
     (setq proc
           (make-process
            :name "lispm-api"

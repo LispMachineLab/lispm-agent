@@ -198,5 +198,65 @@
               (should (= (alist-get 'cached_input_tokens trial) 10))
               (should (= (alist-get 'output_tokens trial) 14)))))))))
 
+(ert-deftest lispm-test-batch-no-coding-prompt-and-empty-glob-search ()
+  "Saving raw bytes / UTF-8 on ASCII buffers never prompts, and empty glob search succeeds."
+  (lispm-test-env
+    ;; 1. Empty directory search with glob should return nil instead of signaling wrong-type-argument
+    (let ((empty-dir (expand-file-name "empty-sub" project)))
+      (make-directory empty-dir t)
+      (cl-letf (((symbol-function 'lispm-tools--remote-search-files)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'file-remote-p)
+                 (lambda (&rest _) "/docker:test:")))
+        (should (null (lispm-tools--search-files empty-dir "*" "needle" nil)))))
+    ;; 2. replace_text on a us-ascii-unix buffer with UTF-8 + raw 8-bit bytes must not prompt
+    (let ((target (expand-file-name "mixed.txt" project))
+          (prompted nil))
+      (with-temp-file target
+        (insert "old\n"))
+      (let ((buf (find-file-noselect target)))
+        (unwind-protect
+            (progn
+              (with-current-buffer buf
+                (setq buffer-file-coding-system 'us-ascii-unix))
+              (cl-letf (((symbol-function 'select-safe-coding-system)
+                         (lambda (&rest _)
+                           (setq prompted t)
+                           'raw-text)))
+                (let ((rep (concat "中文-" (string (unibyte-char-to-multibyte #xff)) "\n")))
+                  (lispm-tools--replace-text buf rep)))
+              (should-not prompted))
+          (when (buffer-live-p buf)
+            (kill-buffer buf))))
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally target)
+        (should (equal (buffer-string)
+                       (encode-coding-string
+                        (concat "中文-" (string (unibyte-char-to-multibyte #xff)) "\n")
+                        'utf-8-unix)))))
+    ;; 3. Saving a session buffer containing raw 8-bit bytes must not prompt
+    (let* ((agent (lispm-register-agent 'tester :root project))
+           (sbuf (lispm-session-buffer agent))
+           (prompted nil))
+      (with-current-buffer sbuf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert "raw byte: " (unibyte-char-to-multibyte #xff) "\n")))
+      (cl-letf (((symbol-function 'select-safe-coding-system)
+                 (lambda (&rest _)
+                   (setq prompted t)
+                   'raw-text)))
+        (lispm--save-session agent))
+      (should-not prompted))
+    ;; 4. JSON serialization of tool results / API payloads containing raw 8-bit bytes must not fail
+    (let* ((raw-str (concat "P5\n958 78\n255\n"
+                            (string (unibyte-char-to-multibyte #x96)
+                                    (unibyte-char-to-multibyte #xff)
+                                    #xd800)))
+           (encoded (lispm--json-encode `((role . "user") (content . ,raw-str)))))
+      (should (stringp encoded))
+      (should (string-search "P5\\n958 78\\n255\\n" encoded)))))
+
 (provide 'lispm-batch-test)
 ;;; lispm-batch-test.el ends here
