@@ -3469,8 +3469,9 @@ commands there; absolute paths name files there too."
       ;; Its turns have the in-memory journal only.
       (should-not (lispm-journal--top remote))
       (should-not (lispm-journal-records agent))
-      ;; The model is told where it works.
-      (should (string-match-p "Your shell commands run there" (lispm--environment-prompt agent))))))
+      ;; The model is told where it works and to keep the workspace clean.
+      (should (string-match-p "Your shell commands run there" (lispm--environment-prompt agent)))
+      (should (string-match-p "remove any temporary files" (lispm--environment-prompt agent))))))
 
 (ert-deftest lispm-test-remote-turn ()
   "An agent started from a buffer of another machine works there: a whole turn,

@@ -2110,7 +2110,7 @@ writable.  A missing directory that can be made is no error."
     ((path string "File to create or overwrite, absolute or relative to your root.")
      (content string "The complete new contents."))
   "Create a file, or replace a file's entire contents.  Prefer edit_file
-for changes to existing files."
+for existing files; create new files only when required."
   :permission write
   :diff (lambda (path content)
           (let ((file (lispm-tools--file path)))
