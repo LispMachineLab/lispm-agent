@@ -369,10 +369,12 @@ must not leave half done, so quitting is inhibited meanwhile."
       (when lispm-revert-after-calls
         ;; Hooks the reverts run are the agent's doing.
         (let ((lispm-current-agent agent))
-          (condition-case nil
+          (condition-case err
               (lispm-tools--interruptibly #'lispm-tools--revert-changed
                                           (list (lispm-agent-root agent)))
-            (quit nil)))))
+            (quit nil)
+            (error
+             (message "LispM: reverting changed buffers: %S" err))))))
     (apply done text errorp (and images (list images)))))
 
 (declare-function tramp-dissect-file-name "tramp")
@@ -416,7 +418,8 @@ runs."
                        (setq called t)
                        (if running
                            (setq result args)
-                         (apply #'lispm-tools--deliver done agent tool args)))))))
+                         (run-at-time 0 nil #'apply #'lispm-tools--deliver
+                                      done agent tool args)))))))
     (condition-case err
         ;; What the tool says is for the model: in English, though it
         ;; reach a function that speaks to the user too.
@@ -2628,30 +2631,35 @@ allows."
                           (set-marker (process-mark p) (point))))))
                   :sentinel
                   (lambda (p _event)
-                    (unless (or (process-live-p p) (process-get p 'interrupted))
+                    (unless (or (process-live-p p) (process-get p 'interrupted)
+                                (process-get p 'lispm-done))
+                      (process-put p 'lispm-done t)
                       (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
-                      (let ((status (process-exit-status p)))
-                        (funcall done
-                                 (concat output
-                                         "\n["
-                                         (if (process-get p 'timed-out)
-                                             "killed: timeout"
-                                           (format "exit status %d" status))
-                                         (if note (concat "; " note) "")
-                                         "]")
-                                 (process-get p 'timed-out))))))))
+                      (let ((status (process-exit-status p))
+                            (timed-out (process-get p 'timed-out)))
+                        (run-at-time
+                         0 nil done
+                         (concat output
+                                 "\n["
+                                 (if timed-out
+                                     "killed: timeout"
+                                   (format "exit status %d" status))
+                                 (if note (concat "; " note) "")
+                                 "]")
+                         timed-out)))))))
       (lispm-sandbox-attach run proc)
       (with-current-buffer buffer
         (goto-char (point-max))
         (insert (format "\n$ %s\n" command))
         (set-marker (process-mark proc) (point)))
       (process-put proc 'lispm-agent agent)
-      (process-put proc 'timer
-                   (run-at-time (or timeout lispm-shell-timeout) nil
-                                (lambda ()
-                                  (when (process-live-p proc)
-                                    (process-put proc 'timed-out t)
-                                    (lispm-exec-kill proc)))))
+      (when (and (process-live-p proc) (not (process-get proc 'lispm-done)))
+        (process-put proc 'timer
+                     (run-at-time (or timeout lispm-shell-timeout) nil
+                                  (lambda ()
+                                    (when (process-live-p proc)
+                                      (process-put proc 'timed-out t)
+                                      (lispm-exec-kill proc))))))
       (when quit-flag
         (setq quit-flag nil)
         (cancel-timer (process-get proc 'timer))

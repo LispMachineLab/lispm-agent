@@ -2627,7 +2627,33 @@ skills/web.org).  Batch Emacs makes no xwidgets: stubs stand in."
       (should (cdr result))
       (let ((child (string-to-number (lispm-test--file project "child.pid"))))
         (should (> child 0))
-        (should (lispm-test--wait (lambda () (not (eql 0 (signal-process child 0)))) 2))))))
+        (should (lispm-test--wait (lambda () (not (eql 0 (signal-process child 0)))) 2)))
+      ;; Asynchronous completion defers delivery out of the sentinel stack frame,
+      ;; and an error in `lispm-tools--revert-changed' never drops `done'.
+      (let (callback result in-sentinel revert-in-sentinel)
+        (cl-letf (((symbol-function 'lispm-tools--revert-changed)
+                   (lambda (_root)
+                     (setq revert-in-sentinel in-sentinel)
+                     (signal 'file-error '("Forbidden reentrant call of Tramp")))))
+          (let ((lispm-tools--registry (copy-hash-table lispm-tools--registry))
+                (lispm-current-agent agent))
+            (lispm-register-tool
+             (lispm-tool--create :name "lispm_test_async_shell"
+                                 :description "Async test tool."
+                                 :input-schema '((type . "object") (properties))
+                                 :permission 'shell :async t
+                                 :function (lambda (done _input)
+                                             (setq callback done))))
+            (lispm-tool-invoke (lispm-get-tool "lispm_test_async_shell") nil
+                               (lambda (text errorp) (setq result (cons text errorp))))
+            (should-not result)
+            (setq in-sentinel t)
+            (funcall callback "ok" nil)
+            (should-not result)
+            (setq in-sentinel nil)
+            (should (lispm-test--wait (lambda () result) 2))
+            (should (equal result '("ok" . nil)))
+            (should-not revert-in-sentinel)))))))
 
 ;;;; Shell commands and remote roots
 
