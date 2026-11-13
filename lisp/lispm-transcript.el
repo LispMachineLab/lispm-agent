@@ -398,9 +398,11 @@ The others become a line of text; see `lispm-context-images'."
     (lispm-transcript--map-images (lambda (block) (cl-incf total) (list block)) messages)
     (if (zerop total)
         messages
-      (let* ((keep (max 1 lispm-context-images))
-             (drop (- total keep))
-             (drop (if (> drop 0) (- drop (% drop keep)) 0)))
+      (let* ((keep (max 0 lispm-context-images))
+             (drop (if (zerop keep)
+                       total
+                     (let ((d (- total keep)))
+                       (if (> d 0) (- d (% d keep)) 0)))))
         (lispm-transcript--map-images
          (lambda (block)
            (let* ((file (alist-get 'lispm-file block))

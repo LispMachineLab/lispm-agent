@@ -1448,16 +1448,18 @@ or cannot be written (see `lispm-tools--check-writable')."
 
 (defun lispm-tools--media (file)
   "The result of reading FILE, an image or a video: said in a line, and shown."
-  (lispm-tool-result
-   (if (eq (lispm-media-kind file) 'video)
-       (format "[video %s]" (lispm-video-description file))
-     (format "[image %s%s]" (file-name-nondirectory file)
-             (if-let* (((fboundp 'image-size))
-                       ((display-images-p))
-                       (size (ignore-errors (image-size (create-image file) t))))
-                 (format ", %d×%d" (car size) (cdr size))
-               "")))
-   (list file)))
+  (let ((desc (if (eq (lispm-media-kind file) 'video)
+                  (format "[video %s]" (lispm-video-description file))
+                (format "[image %s%s]" (file-name-nondirectory file)
+                        (if-let* (((fboundp 'image-size))
+                                  ((display-images-p))
+                                  (size (ignore-errors (image-size (create-image file) t))))
+                            (format ", %d×%d" (car size) (cdr size))
+                          "")))))
+    (if (and (boundp 'lispm-context-images) (<= lispm-context-images 0))
+        (format "%s (binary media attachment is disabled for this text-only model; inspect image/video files programmatically with Python cv2/PIL/numpy or ffprobe instead of read_file)"
+                desc)
+      (lispm-tool-result desc (list file)))))
 
 (lispm-deftool read_file
     ((path string "File path, absolute or relative to your root directory, or a place [[file:PATH::LINE]].")
@@ -1899,6 +1901,90 @@ is abandoned if the turn of AGENT in which it started ends meanwhile."
                     (funcall done (error-message-string err) t)))))
       (step))))
 
+(declare-function lispm-kernel-search-files "lispm-kernel-exec")
+(declare-function lispm-kernel-exec--submit "lispm-kernel-exec")
+(defvar lispm-kernel-exec-mode)
+
+(defun lispm-tools--search-via-kernel (agent regexp clean-pat case-fold files glob glob-dir
+                                       glob-predicate done)
+  "Search local FILES for CLEAN-PAT via `lispm-kernel-search-files'.
+Return non-nil when the kernel took the search, or nil to fall back."
+  (when (and (fboundp 'lispm-kernel-search-files)
+             (not (string-search "\\n" clean-pat))
+             (cl-every (lambda (f) (and (stringp f) (not (file-remote-p f)))) files))
+    (let ((root (lispm-tools--root))
+          (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
+          (visiting (make-hash-table :test #'equal))
+          (open-files nil))
+      (dolist (b (buffer-list))
+        (when-let* ((file (buffer-file-name b))
+                    (full (expand-file-name file)))
+          (when (and (not (file-remote-p full))
+                     (lispm--buffer-current-p b))
+            (puthash full b visiting)
+            (push full open-files))))
+      (lispm-kernel-search-files
+       files clean-pat case-fold
+       (lambda (res)
+         (if (plist-get res :error)
+             (lispm-tools--search agent regexp case-fold files done glob-predicate)
+           (unless (and turn (or (not (lispm-agent-busy-p agent))
+                                 (/= turn (lispm-agent-turn agent))))
+             (condition-case err
+                 (let ((matches nil)
+                       (count 0)
+                       (large 0)
+                       (truncated nil))
+                   (dolist (item (plist-get res :items))
+                     (unless truncated
+                       (let* ((file (plist-get item :file))
+                              (label (and file
+                                          (if (file-in-directory-p file root)
+                                              (file-relative-name file root)
+                                            (abbreviate-file-name file))))
+                              (limit (- lispm-search-max-matches count)))
+                         (cond
+                          ((plist-get item :large)
+                           (cl-incf large))
+                          ((plist-get item :open)
+                           (let ((open (gethash file visiting)))
+                             (when (and (buffer-live-p open) (lispm--buffer-current-p open))
+                               (let ((found (with-current-buffer open
+                                              (let ((case-fold-search case-fold))
+                                                (lispm-tools--matches regexp label limit)))))
+                                 (setq matches (nconc (nreverse found) matches)
+                                       count (+ count (length found))
+                                       truncated (>= count lispm-search-max-matches))))))
+                          (t
+                           (dolist (m (plist-get item :matches))
+                             (unless truncated
+                               (push (format "%s:%d:%s" label (car m) (cadr m)) matches)
+                               (cl-incf count)
+                               (when (>= count lispm-search-max-matches)
+                                 (setq truncated t)))))))))
+                   (funcall done
+                            (if (null matches)
+                                (concat "No matches."
+                                        (if (> large 0)
+                                            (format " (%d files over %d bytes were not searched)"
+                                                    large lispm-search-max-file-size)
+                                          ""))
+                              (concat (string-join (nreverse matches) "\n")
+                                      (if truncated
+                                          (format "\n[stopped after %d matches; narrow the search with path or glob]"
+                                                  count)
+                                        "")
+                                      (if (> large 0)
+                                          (format "\n[%d files over %d bytes were not searched]"
+                                                  large lispm-search-max-file-size)
+                                        "")))))
+               (error (funcall done (error-message-string err) t))))))
+       :glob glob
+       :glob-dir glob-dir
+       :open-files open-files
+       :max-file-size lispm-search-max-file-size
+       :max-matches lispm-search-max-matches))))
+
 (lispm-deftool search_files
     ((pattern string "Regular expression, in the syntax of ripgrep or grep -E: (a|b), \\d, \\w, \\s, x{2,3}, [^...]; no lookaround.")
      (path string "File or directory to search (default: your root)." :optional t)
@@ -1913,13 +1999,16 @@ the unsaved contents of files open in Emacs."
          (clean-pat (string-remove-prefix "(?i)" pattern))
          (regexp (lispm-tools--emacs-regexp clean-pat))
          (ere (lispm-tools--ere-regexp clean-pat))
-         (target (lispm-tools--file (or path "."))))
+         (target (lispm-tools--file (or path ".")))
+         (files (lispm-tools--search-files target glob ere case-fold))
+         (glob-dir (if (file-directory-p target) target (file-name-directory target)))
+         (glob-predicate (and glob (lispm-tools--glob-predicate glob glob-dir))))
     ;; An invalid regexp fails here, not file after file.
     (string-match-p regexp "")
-    (lispm-tools--search
-     agent regexp case-fold (lispm-tools--search-files target glob ere case-fold) done
-     (and glob (lispm-tools--glob-predicate
-                glob (if (file-directory-p target) target (file-name-directory target)))))))
+    (unless (and (not (file-remote-p target))
+                 (lispm-tools--search-via-kernel
+                  agent regexp clean-pat case-fold files glob glob-dir glob-predicate done))
+      (lispm-tools--search agent regexp case-fold files done glob-predicate))))
 
 (lispm-deftool list_buffers ()
   "List the buffers open in Emacs: name, major mode, file and whether modified.
@@ -2582,6 +2671,98 @@ nothing to send."
 (defvar lispm-tools--shell-seq 0
   "Monotonic counter for unique `run_shell' process names.")
 
+(defvar lispm-tools--kernel-shells nil
+  "Active kernel `run_shell' jobs as (AGENT . CANCEL) pairs.")
+
+(defun lispm-tools--cancel-kernel-shells (agent)
+  "Cancel all active kernel `run_shell' jobs belonging to AGENT."
+  (dolist (entry (copy-sequence lispm-tools--kernel-shells))
+    (when (eq (car entry) agent)
+      (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
+      (ignore-errors (funcall (cdr entry)))))
+  (unless lispm-tools--kernel-shells
+    (remove-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
+    (remove-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
+    (remove-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended)))
+
+(defun lispm-tools--kernel-shell-state-changed (agent)
+  "Cancel AGENT's kernel `run_shell' jobs when its turn is aborted."
+  (when (eq (lispm-agent-state agent) 'aborting)
+    (lispm-tools--cancel-kernel-shells agent)))
+
+(defun lispm-tools--kernel-shell-terminal-ended (terminal)
+  "Cancel kernel `run_shell' jobs of the external agent whose TERMINAL closes."
+  (when (and (buffer-live-p terminal)
+             (local-variable-p 'lispm-agents-bridge--agent terminal))
+    (lispm-tools--cancel-kernel-shells
+     (buffer-local-value 'lispm-agents-bridge--agent terminal))))
+
+(defun lispm-tools--run-shell-via-kernel (agent command timeout log-buffer done fallback)
+  "Run local unsandboxed COMMAND in the kernel when `lispm-kernel-exec-mode' is on.
+Return non-nil when the kernel took the command, or nil to run FALLBACK."
+  (when (and (bound-and-true-p lispm-kernel-exec-mode)
+             (not (file-remote-p default-directory))
+             (eq lispm-sandbox-level 'none)
+             (fboundp 'lispm-kernel-exec--submit))
+    (let* ((cmd (lispm-exec-shell-command shell-file-name shell-command-switch command nil))
+           (effective-timeout (ceiling (or timeout lispm-shell-timeout)))
+           (entry (cons agent nil))
+           (cancel
+            (lispm-kernel-exec--submit
+             (car cmd) (cdr cmd)
+             (lambda (exit printed said)
+               (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
+               (unless lispm-tools--kernel-shells
+                 (remove-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
+                 (remove-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
+                 (remove-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended))
+               (let* ((output (concat printed said))
+                      (timed-out (and (stringp exit)
+                                      (or (string-match-p "did not finish" exit)
+                                          (string-match-p "timed out" exit))
+                                      t))
+                      (status (cond ((integerp exit) exit)
+                                    ((and (stringp exit)
+                                          (string-match "ended by signal \\([0-9]+\\)" exit))
+                                     (+ 128 (string-to-number (match-string 1 exit))))
+                                    (t 1))))
+                 (run-at-time
+                  0 nil done
+                  (concat output
+                          "\n["
+                          (if timed-out
+                              "killed: timeout"
+                            (format "exit status %d" status))
+                          "]")
+                  timed-out)))
+             (lambda (&rest _)
+               (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
+               (funcall fallback))
+             :timeout effective-timeout
+             :combine-error t
+             :on-output (lambda (chunk)
+                          (when (buffer-live-p log-buffer)
+                            (with-current-buffer log-buffer
+                              (save-excursion
+                                (goto-char (point-max))
+                                (insert chunk))))))))
+      (when cancel
+        (setcdr entry cancel)
+        (push entry lispm-tools--kernel-shells)
+        (add-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
+        (add-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
+        (add-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended)
+        (when (buffer-live-p log-buffer)
+          (with-current-buffer log-buffer
+            (goto-char (point-max))
+            (insert (format "\n$ %s\n" command))))
+        (when quit-flag
+          (setq quit-flag nil)
+          (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
+          (ignore-errors (funcall cancel))
+          (signal 'quit nil))
+        t))))
+
 (lispm-deftool run_shell
     ((command string "Shell command, run in your root directory.")
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
@@ -2605,97 +2786,102 @@ allows."
     (let* ((agent lispm-current-agent)
            (log-buffer (get-buffer-create
                         (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
-           (proc-buffer (generate-new-buffer
-                         (format " *lispm-shell-proc: %s*" (if agent (lispm-agent-name agent) "?"))
-                         t))
-           (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
-           (default-directory (lispm-tools--root))
-           (output "")
-           ;; At `lispm-sandbox-level', or not at all if the sandbox
-           ;; cannot be had.
-           (run (lispm-sandbox-prepare
-                 (with-connection-local-variables
-                  (lispm-exec-shell-command
-                   shell-file-name shell-command-switch command
-                   (file-remote-p default-directory)))
-                 nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
-           (note (lispm-sandbox-run-note run))
-           (proc (make-process
-                  :name proc-name :buffer proc-buffer :noquery t
-                  :connection-type 'pipe
-                  ;; On a remote root, TRAMP runs the command there,
-                  ;; with that machine's shell.
-                  :file-handler t
-                  :command (lispm-sandbox-run-command run)
-                  :filter
-                  (lambda (_p chunk)
-                    (setq output (concat output chunk))
-                    (when (buffer-live-p log-buffer)
-                      (with-current-buffer log-buffer
-                        (save-excursion
-                          (goto-char (point-max))
-                          (insert chunk)))))
-                  :sentinel
-                  (lambda (p _event)
-                    (unless (or (process-live-p p) (process-get p 'interrupted)
-                                (process-get p 'lispm-done))
-                      (process-put p 'lispm-done t)
-                      (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
-                      (when (and (buffer-live-p proc-buffer) (string-empty-p output))
-                        (let ((pre (with-current-buffer proc-buffer (buffer-string))))
-                          (unless (string-empty-p pre)
-                            (setq output pre))))
-                      (when (buffer-live-p proc-buffer)
-                        (kill-buffer proc-buffer))
-                      (let ((status (process-exit-status p))
-                            (timed-out (process-get p 'timed-out)))
-                        (run-at-time
-                         0 nil done
-                         (concat output
-                                 "\n["
-                                 (if timed-out
-                                     "killed: timeout"
-                                   (format "exit status %d" status))
-                                 (if note (concat "; " note) "")
-                                 "]")
-                         timed-out)))))))
-      (lispm-sandbox-attach run proc)
-      (when (buffer-live-p log-buffer)
-        (with-current-buffer log-buffer
-          (goto-char (point-max))
-          (insert (format "\n$ %s\n" command))))
-      (when (and (buffer-live-p proc-buffer) (string-empty-p output))
-        (let ((pre (with-current-buffer proc-buffer (buffer-string))))
-          (unless (string-empty-p pre)
-            (setq output pre)
-            (when (buffer-live-p log-buffer)
-              (with-current-buffer log-buffer
-                (goto-char (point-max))
-                (insert pre))))))
-      (process-put proc 'lispm-agent agent)
-      (cond
-       ((and (not (process-live-p proc)) (not (process-get proc 'lispm-done)))
-        (funcall (process-sentinel proc) proc "finished\n"))
-       ((and (process-live-p proc) (not (process-get proc 'lispm-done)))
-        (process-put proc 'timer
-                     (run-at-time (or timeout lispm-shell-timeout) nil
-                                  (lambda ()
-                                    (unless (process-get proc 'lispm-done)
-                                      (if (process-live-p proc)
-                                          (progn
-                                            (process-put proc 'timed-out t)
-                                            (lispm-exec-kill proc)
-                                            (when (and (not (process-live-p proc))
-                                                       (not (process-get proc 'lispm-done)))
-                                              (funcall (process-sentinel proc) proc "killed\n")))
-                                        (funcall (process-sentinel proc) proc "finished\n"))))))))
-      (when quit-flag
-        (setq quit-flag nil)
-        (when-let* ((timer (process-get proc 'timer))) (cancel-timer timer))
-        (process-put proc 'interrupted t)
-        (lispm-exec-delete proc)
-        (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
-        (signal 'quit nil)))))
+           (default-directory (lispm-tools--root)))
+      (cl-labels
+          ((run-locally ()
+             (let* ((proc-buffer (generate-new-buffer
+                                  (format " *lispm-shell-proc: %s*" (if agent (lispm-agent-name agent) "?"))
+                                  t))
+                    (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
+                    (output "")
+                    ;; At `lispm-sandbox-level', or not at all if the sandbox
+                    ;; cannot be had.
+                    (run (lispm-sandbox-prepare
+                          (with-connection-local-variables
+                           (lispm-exec-shell-command
+                            shell-file-name shell-command-switch command
+                            (file-remote-p default-directory)))
+                          nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
+                    (note (lispm-sandbox-run-note run))
+                    (proc (make-process
+                           :name proc-name :buffer proc-buffer :noquery t
+                           :connection-type 'pipe
+                           ;; On a remote root, TRAMP runs the command there,
+                           ;; with that machine's shell.
+                           :file-handler t
+                           :command (lispm-sandbox-run-command run)
+                           :filter
+                           (lambda (_p chunk)
+                             (setq output (concat output chunk))
+                             (when (buffer-live-p log-buffer)
+                               (with-current-buffer log-buffer
+                                 (save-excursion
+                                   (goto-char (point-max))
+                                   (insert chunk)))))
+                           :sentinel
+                           (lambda (p _event)
+                             (unless (or (process-live-p p) (process-get p 'interrupted)
+                                         (process-get p 'lispm-done))
+                               (process-put p 'lispm-done t)
+                               (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
+                               (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+                                 (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+                                   (unless (string-empty-p pre)
+                                     (setq output pre))))
+                               (when (buffer-live-p proc-buffer)
+                                 (kill-buffer proc-buffer))
+                               (let ((status (process-exit-status p))
+                                     (timed-out (process-get p 'timed-out)))
+                                 (run-at-time
+                                  0 nil done
+                                  (concat output
+                                          "\n["
+                                          (if timed-out
+                                              "killed: timeout"
+                                            (format "exit status %d" status))
+                                          (if note (concat "; " note) "")
+                                          "]")
+                                  timed-out)))))))
+               (lispm-sandbox-attach run proc)
+               (when (buffer-live-p log-buffer)
+                 (with-current-buffer log-buffer
+                   (goto-char (point-max))
+                   (insert (format "\n$ %s\n" command))))
+               (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+                 (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+                   (unless (string-empty-p pre)
+                     (setq output pre)
+                     (when (buffer-live-p log-buffer)
+                       (with-current-buffer log-buffer
+                         (goto-char (point-max))
+                         (insert pre))))))
+               (process-put proc 'lispm-agent agent)
+               (cond
+                ((and (not (process-live-p proc)) (not (process-get proc 'lispm-done)))
+                 (funcall (process-sentinel proc) proc "finished\n"))
+                ((and (process-live-p proc) (not (process-get proc 'lispm-done)))
+                 (process-put proc 'timer
+                              (run-at-time (or timeout lispm-shell-timeout) nil
+                                           (lambda ()
+                                             (unless (process-get proc 'lispm-done)
+                                               (if (process-live-p proc)
+                                                   (progn
+                                                     (process-put proc 'timed-out t)
+                                                     (lispm-exec-kill proc)
+                                                     (when (and (not (process-live-p proc))
+                                                                (not (process-get proc 'lispm-done)))
+                                                       (funcall (process-sentinel proc) proc "killed\n")))
+                                                 (funcall (process-sentinel proc) proc "finished\n"))))))))
+               (when quit-flag
+                 (setq quit-flag nil)
+                 (when-let* ((timer (process-get proc 'timer))) (cancel-timer timer))
+                 (process-put proc 'interrupted t)
+                 (lispm-exec-delete proc)
+                 (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
+                 (signal 'quit nil)))))
+        (unless (lispm-tools--run-shell-via-kernel
+                 agent command timeout log-buffer done #'run-locally)
+          (run-locally))))))
 
 (defun lispm-tools--read-forms (code)
   "All Lisp forms in the string CODE."

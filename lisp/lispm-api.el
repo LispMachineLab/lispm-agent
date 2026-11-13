@@ -128,6 +128,8 @@ alists in Messages shape."
 
 ;;;; Transport
 
+(declare-function lispm-kernel-http-stream "lispm-kernel-exec")
+
 (defun lispm-api--curl-config (headers)
   "curl configuration sending HEADERS.
 It is fed on stdin, so keys stay off the command line."
@@ -139,28 +141,16 @@ It is fed on stdin, so keys stay off the command line."
 (defconst lispm-api--status-marker "\n__LISPM_HTTP_STATUS__:"
   "Separator curl prints before the HTTP status.")
 
-(cl-defun lispm-api-stream (backend body betas &key on-delta on-done on-error)
-  "POST BODY to BACKEND and stream the response.
-Responses that are not streamed (BODY asks for none) arrive whole.
-BETAS are beta feature names, for APIs that have them.  ON-DELTA
-receives (KIND STRING) as content streams in: KIND text, thinking or
-tool (STRING being the tool's name); and (tool-input PLIST) as a tool
-call's input arrives, PLIST holding its :id, :name and the :json
-received so far.  ON-DONE receives the final message, in Messages
-shape; ON-ERROR a plist with :status, :type and :message.  Return the
-curl process."
-  (let* ((shape (lispm-api--shape backend))
-         (state (funcall (plist-get shape :stream)))
-         (file (make-temp-file "lispm-request-" nil ".json"))
-         (url (concat (string-remove-suffix "/" (plist-get backend :url))
-                      (plist-get shape :path)))
-         (raw nil)
-         (client-error nil)
-         proc)
+(defun lispm-api--stream-locally (shape state headers payload url on-delta on-done on-error)
+  "POST PAYLOAD to URL with HEADERS using a local curl process."
+  (let ((file (make-temp-file "lispm-request-" nil ".json"))
+        (raw nil)
+        (client-error nil)
+        proc)
     (let ((coding-system-for-write 'binary))
       (with-temp-file file
         (set-buffer-multibyte nil)
-        (insert (lispm--json-serialize body))))
+        (insert payload)))
     (setq proc
           (make-process
            :name "lispm-api"
@@ -169,8 +159,9 @@ curl process."
            :connection-type 'pipe
            :coding '(utf-8-unix . utf-8-unix)
            :command (list lispm-curl-program "--silent" "--show-error" "--no-buffer"
+                          "-H" "Expect:"
                           "--connect-timeout" "30"
-                          "--speed-limit" "1" "--speed-time" "300"
+                          "--speed-limit" "1" "--speed-time" "120"
                           "--max-time" "900"
                           "--config" "-"
                           "--data-binary" (concat "@" file)
@@ -191,11 +182,45 @@ curl process."
                            (lispm-api--finish shape state client-error
                                               (apply #'concat (nreverse raw))
                                               on-done on-error))))))
-    (process-send-string
-     proc (lispm-api--curl-config
-           (funcall (plist-get shape :headers) (lispm-api--key backend) betas)))
+    (process-send-string proc (lispm-api--curl-config headers))
     (process-send-eof proc)
     proc))
+
+(cl-defun lispm-api-stream (backend body betas &key on-delta on-done on-error)
+  "POST BODY to BACKEND and stream the response.
+Responses that are not streamed (BODY asks for none) arrive whole.
+BETAS are beta feature names, for APIs that have them.  ON-DELTA
+receives (KIND STRING) as content streams in: KIND text, thinking or
+tool (STRING being the tool's name); and (tool-input PLIST) as a tool
+call's input arrives, PLIST holding its :id, :name and the :json
+received so far.  ON-DONE receives the final message, in Messages
+shape; ON-ERROR a plist with :status, :type and :message.  Return the
+curl process or kernel cancellation function."
+  (let* ((shape (lispm-api--shape backend))
+         (state (funcall (plist-get shape :stream)))
+         (headers (funcall (plist-get shape :headers) (lispm-api--key backend) betas))
+         (payload (lispm--json-serialize body))
+         (url (concat (string-remove-suffix "/" (plist-get backend :url))
+                      (plist-get shape :path)))
+         (client-error nil))
+    (or (and (fboundp 'lispm-kernel-http-stream)
+             (lispm-kernel-http-stream
+              url headers payload
+              (lambda (chunk)
+                (unless client-error
+                  (condition-case err
+                      (funcall (plist-get shape :feed) state chunk on-delta)
+                    (error (setq client-error
+                                 `((type . "client_error")
+                                   (message . ,(error-message-string err))))))))
+              (lambda (output)
+                (lispm-api--finish shape state client-error output on-done on-error))
+              :curl lispm-curl-program
+              :fallback (lambda ()
+                          (lispm-api--stream-locally
+                           shape state headers payload url on-delta on-done on-error))))
+        (lispm-api--stream-locally
+         shape state headers payload url on-delta on-done on-error))))
 
 (defun lispm-api--error-plist (status err)
   "The error plist for HTTP STATUS and the error object or string ERR."
@@ -234,8 +259,8 @@ CLIENT-ERROR is an error raised while decoding, if any."
      ((eql status 200)
       (funcall on-error (list :status status :type "incomplete_stream"
                               :message "The response stream ended early")))
-     ((or (null status) (zerop status))
-      (funcall on-error (list :status nil :type "network_error"
+     ((or (null status) (zerop status) (eql status 100))
+      (funcall on-error (list :status status :type "network_error"
                               :message (if (string-empty-p body) "curl failed" body))))
      (t
       (let ((json (ignore-errors (lispm--json-decode body))))
@@ -246,11 +271,13 @@ CLIENT-ERROR is an error raised while decoding, if any."
 
 (defun lispm-api-retryable-p (err)
   "Non-nil if the error plist ERR is worth retrying."
-  (let ((status (plist-get err :status)))
+  (let ((status (plist-get err :status))
+        (msg (plist-get err :message)))
     (or (member (plist-get err :type)
                 '("overloaded_error" "rate_limit_error" "api_error" "server_error"
                   "upstream_error" "network_error" "incomplete_stream"))
-        (and status (or (= status 429) (>= status 500))))))
+        (and (stringp msg) (string-prefix-p "curl: (" msg))
+        (and status (or (= status 100) (= status 429) (>= status 500))))))
 
 (provide 'lispm-api)
 ;;; lispm-api.el ends here

@@ -53,7 +53,7 @@
   "Approval policy for autonomous headless batch execution.")
 
 (defconst lispm-batch-condition-handlers
-  '((request-failed retry :after 2 :times 2 :then abort)
+  '((request-failed retry :after 5 :times 15 :then abort)
     (step-limit abort)
     (output-limit retry-larger :then abort)
     (context-full compact :then abort)
@@ -301,6 +301,8 @@ cache_read + cache_write), while each call's `input_tokens' in
 (declare-function lispm-kernel-stop "lispm-kernel" (runtime))
 (declare-function lispm-kernel-dispatch "lispm-kernel" (runtime))
 (declare-function lispm-kernel-runtime-hello "lispm-kernel" (runtime))
+(declare-function lispm-kernel-exec-mode "lispm-kernel-exec" (&optional arg))
+(defvar lispm-kernel-exec-mode)
 
 (defun lispm-batch--start-kernel ()
   "Start a LispM Kernel runtime if `LISPM_KERNEL_PROGRAM' is available."
@@ -362,6 +364,14 @@ find . \\( -name .git -o -name .hg -o -name .svn -o -name CVS -o -name node_modu
          "\\(?:\\`_?test_\\|_test\\.\\|\\.test\\.\\|\\.spec\\.\\)"
          base))))
 
+(defun lispm-batch--deliverable-build-file-p (rel-path)
+  "Non-nil if REL-PATH is an in-place compiled extension or proof artifact."
+  (let ((case-fold-search t))
+    (or (string-prefix-p "build/" rel-path)
+        (string-match-p
+         "\\.\\(?:so\\|dylib\\|dll\\|pyd\\|vo\\|vok\\|vos\\|vio\\|glob\\|aux\\|whl\\)\\'"
+         rel-path))))
+
 (defun lispm-batch--hygiene-prompt (root before-files agent)
   "Return a follow-up hygiene prompt if suspect new files remain under ROOT."
   (let ((before-set (make-hash-table :test #'equal))
@@ -380,7 +390,8 @@ find . \\( -name .git -o -name .hg -o -name .svn -o -name CVS -o -name node_modu
               (push f tool-new-files)
               (when (lispm-batch--scratch-file-p f)
                 (push f scratch-tool-files)))
-          (push f shell-files))))
+          (unless (lispm-batch--deliverable-build-file-p f)
+            (push f shell-files)))))
     (setq shell-files (nreverse shell-files)
           tool-new-files (nreverse tool-new-files)
           scratch-tool-files (nreverse scratch-tool-files))
@@ -395,7 +406,7 @@ find . \\( -name .git -o -name .hg -o -name .svn -o -name CVS -o -name node_modu
            (format "- Created by write_file/edit_file: %s\n"
                    (string-join tool-new-files ", "))
          "")
-       "Remove any temporary build outputs, compiled test binaries, or scratch test files that are not required task deliverables, then provide your final summary."))))
+       "Remove only temporary scratch files or one-off test binaries (such as a.out or cmain) that are NOT required task deliverables. NEVER delete required deliverables, requested output files, or in-place compiled artifacts (such as .so C extensions, .vo compiled proofs, or target binaries). Then provide your final summary."))))
 
 (cl-defun lispm-batch-run (prompt &rest options
                                   &key cwd model provider api url key key-env
@@ -476,6 +487,13 @@ OPTIONS:
                                    (if (symbolp sandbox) sandbox 'low)
                                  'none))
           (lispm-shell-timeout 180)
+          (lispm-context-images
+           (cond ((lispm-batch--non-empty-env "LISPM_CONTEXT_IMAGES")
+                  (string-to-number (getenv "LISPM_CONTEXT_IMAGES")))
+                 ((string-match-p "deepseek"
+                                  (downcase (or (plist-get backend-spec :model) "")))
+                  0)
+                 (t lispm-context-images)))
           (lispm-max-steps (or max-steps 120))
           (lispm-max-tokens (or max-tokens lispm-max-tokens))
           (lispm-effort (or effort lispm-effort))
@@ -485,7 +503,8 @@ OPTIONS:
            (if kernel-rt
                (lambda () kernel-rt)
              (and (boundp 'lispm-kernel-exec-runtime-function)
-                  lispm-kernel-exec-runtime-function))))
+                  lispm-kernel-exec-runtime-function)))
+          (had-exec-mode (bound-and-true-p lispm-kernel-exec-mode)))
       (let* ((agent (lispm-register-agent 'batch
                                           :role (or role lispm-default-role)
                                           :root root
@@ -506,6 +525,8 @@ OPTIONS:
                      usage-path
                      (lispm-batch-summarize-calls (reverse call-records))))))))
         (add-hook 'lispm-response-functions on-response)
+        (when (and kernel-rt (fboundp 'lispm-kernel-exec-mode))
+          (lispm-kernel-exec-mode 1))
         (unwind-protect
             (let ((deadline (+ (float-time) timeout-sec))
                   (initial-files (lispm-batch--workspace-files root)))
@@ -534,6 +555,8 @@ OPTIONS:
               (when (not done)
                 (setq timed-out t)
                 (ignore-errors (lispm-abort agent))))
+          (when (and kernel-rt (fboundp 'lispm-kernel-exec-mode) (not had-exec-mode))
+            (lispm-kernel-exec-mode -1))
           (remove-hook 'lispm-response-functions on-response)
           (when kernel-rt
             (ignore-errors (lispm-kernel-stop kernel-rt))))
