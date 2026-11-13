@@ -11820,6 +11820,7 @@ Stickies, whose opening `opened' records."
             (lispm-bar-hide-function #'ignore)
             (lispm-bar-ready-function (lambda (_agent) t))
             (lispm-bar--open nil) (lispm-bar--asked nil) (lispm-bar--reply nil)
+            (lispm-bar--evaluated nil)
             (lispm-bar--waiting nil) (lispm-bar--expanded nil) (lispm-bar--things nil)
             (lispm-bar--text "") (lispm-bar--found nil) (lispm-bar--choice 0)
             (lispm-bar-history nil))
@@ -11970,7 +11971,8 @@ so, while it is closed a message names the key opening it."
       (should-not (lispm-bar--approval-message other "run_shell")))))
 
 (ert-deftest lispm-test-bar-without-a-model ()
-  "With no model, the bar is a launcher, and what was asked waits for one."
+  "With no model, the bar falls back to Lisp eval first while still opening
+applications found and offering `Set up a model…' below."
   (lispm-test-with-bar
     (let* ((agent (lispm-system-agent))
            (setup 0)
@@ -11978,16 +11980,35 @@ so, while it is closed a message names the key opening it."
            (lispm-bar-setup-function (lambda () (cl-incf setup))))
       (lispm-bar-ready-p)
       (let ((lispm-bar--open t))
+        (lispm-bar--gather)
+        (should (string-match-p "^Find applications, or evaluate Lisp\\.$"
+                                (substring-no-properties (lispm-bar--text))))
         (lispm-bar--set-text "stick")
-        ;; The best thing found is what Return opens.
-        (should (eq (plist-get (lispm-bar--chosen) :kind) 'application))
-        (should (string-match-p "^  Set up a model…  then LispM is asked “stick”"
+        ;; Line 0 defaults to Lisp eval; matched applications and model setup follow.
+        (should-not (lispm-bar--chosen))
+        (let ((text (substring-no-properties (lispm-bar--text))))
+          (should (string-match-p "\\`❯ Evaluate Lisp “stick”" text))
+          (should (string-match-p "^  Stickies  Notes on the desktop.*Application$" text))
+          (should (string-match-p "^  Set up a model…  then LispM is asked “stick”" text))))
+      ;; Return on line 0 evaluates Emacs Lisp in place and renders `=> result'.
+      (lispm-test--bar-keys "(+ SPC 20 SPC 22) RET <escape>")
+      (should (equal lispm-bar--evaluated '("(+ 20 22)" . "=> 42")))
+      (should (= setup 0))
+      (let ((lispm-bar--open t))
+        (should (string-match-p "λ (\\+ 20 22)\n=> 42"
                                 (substring-no-properties (lispm-bar--text)))))
-      ;; Words an application is found by open it.
-      (lispm-test--bar-keys "take SPC a SPC note RET")
+      ;; Reader/evaluation errors are formatted cleanly without crashing the bar.
+      (lispm-test--bar-keys "(1+ SPC \"bad\") RET <escape>")
+      (should (string-prefix-p "error: " (cdr lispm-bar--evaluated)))
+      ;; TAB completes Lisp symbols in the bar's field.
+      (lispm-test--bar-keys "emacs-ver TAB RET <escape>")
+      (should (equal (cdr lispm-bar--evaluated) (format "=> %S" emacs-version)))
+      ;; Selecting a matched application still opens it and closes the bar.
+      (lispm-test--bar-keys "take SPC a SPC note C-n RET")
       (should (equal opened '(stickies)))
       (should (= setup 0))
-      (lispm-test--bar-keys "how SPC late SPC is SPC it RET")
+      ;; Choosing `Set up a model…' queues what was typed and opens model setup.
+      (lispm-test--bar-keys "how SPC late SPC is SPC it C-p RET")
       (should (= setup 1))
       (should (equal lispm-bar--waiting '("how late is it" . "how late is it")))
       (should-not (lispm-agent-inbox agent))
