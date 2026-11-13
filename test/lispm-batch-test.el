@@ -258,5 +258,44 @@
       (should (stringp encoded))
       (should (string-search "P5\\n958 78\\n255\\n" encoded)))))
 
+(ert-deftest lispm-test-batch-workspace-hygiene-gate ()
+  "Pre-exit workspace check stays silent for clean deliverables and catches shell/scratch files."
+  (lispm-test-env
+    (let* ((agent (lispm-register-agent 'hygiene :root project))
+           (lispm-current-agent agent)
+           (initial (lispm-batch--workspace-files project))
+           (sub (expand-file-name "polyglot" project))
+           (src (expand-file-name "polyglot/main.py.c" project))
+           (bin (expand-file-name "polyglot/cmain" project)))
+      (make-directory sub t)
+      ;; 1. Deliverable created via write_file (recorded in journal) -> no hygiene prompt
+      (let ((buf (find-file-noselect src)))
+        (unwind-protect
+            (lispm-tools--replace-text buf "int main() { return 0; }\n")
+          (when (buffer-live-p buf)
+            (kill-buffer buf))))
+      (should (equal (lispm-batch--journal-files agent project) '("polyglot/main.py.c")))
+      (should (null (lispm-batch--hygiene-prompt project initial agent)))
+      ;; 2. Stray binary created outside write_file (e.g. gcc -o cmain) -> triggers hygiene prompt
+      (with-temp-file bin
+        (insert "\x7fELF"))
+      (let ((prompt (lispm-batch--hygiene-prompt project initial agent)))
+        (should (stringp prompt))
+        (should (string-search "polyglot/cmain" prompt))
+        (should (string-search "polyglot/main.py.c" prompt)))
+      ;; 3. Removing the stray binary restores clean state -> nil again
+      (delete-file bin)
+      (should (null (lispm-batch--hygiene-prompt project initial agent)))
+      ;; 4. Scratch test file created via write_file -> triggers hygiene prompt
+      (let* ((scratch (expand-file-name "polyglot/scratch_debug.py" project))
+             (buf (find-file-noselect scratch)))
+        (unwind-protect
+            (lispm-tools--replace-text buf "print(1)\n")
+          (when (buffer-live-p buf)
+            (kill-buffer buf)))
+        (let ((prompt (lispm-batch--hygiene-prompt project initial agent)))
+          (should (stringp prompt))
+          (should (string-search "polyglot/scratch_debug.py" prompt)))))))
+
 (provide 'lispm-batch-test)
 ;;; lispm-batch-test.el ends here
