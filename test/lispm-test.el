@@ -12280,6 +12280,45 @@ was asked takes its place."
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
+(ert-deftest lispm-test-request-context-functions ()
+  "Live scenario context from `lispm-request-context-functions' is captured
+once per turn and attached to the turn's user message in `lispm-request-body'
+without mutating the transcript buffer."
+  (lispm-test-env
+    (let* ((counter 0)
+           (lispm-request-context-functions
+            (list (lambda (_agent)
+                    (cl-incf counter)
+                    (format "Surface: Dynamic Lisp Listener 1 (snapshot %d)" counter))))
+           (agent (lispm-start nil project))
+           (buf (lispm-session-buffer agent)))
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (insert "Where am I typing?\n"))
+      (setf (lispm-agent-turn agent) 1)
+      (pcase-let* ((`(,body1 . ,_) (lispm-request-body agent))
+                   (`(,body2 . ,_) (lispm-request-body agent))
+                   (msgs1 (alist-get 'messages body1))
+                   (last1 (aref msgs1 (1- (length msgs1))))
+                   (content1 (alist-get 'content last1)))
+        ;; Captured once for turn 1 across multiple steps in the same turn.
+        (should (= counter 1))
+        (should (equal body1 body2))
+        (should (= (length content1) 2))
+        (should (string-search "[Current LispM scenario]\nSurface: Dynamic Lisp Listener 1 (snapshot 1)"
+                               (alist-get 'text (aref content1 1))))
+        ;; The session buffer on disk/screen is untouched by transient scenario blocks.
+        (with-current-buffer buf
+          (should-not (string-search "Surface: Dynamic Lisp Listener 1" (buffer-string)))))
+      ;; Advancing to turn 2 captures a fresh scenario snapshot.
+      (setf (lispm-agent-turn agent) 2)
+      (pcase-let* ((`(,body3 . ,_) (lispm-request-body agent))
+                   (msgs3 (alist-get 'messages body3))
+                   (last3 (aref msgs3 (1- (length msgs3))))
+                   (content3 (alist-get 'content last3)))
+        (should (= counter 2))
+        (should (string-search "snapshot 2" (alist-get 'text (aref content3 1))))))))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

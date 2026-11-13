@@ -187,6 +187,9 @@ See `lispm-session-tools'.")
 (defvar-local lispm--live-kind nil
   "Kind of the content last streamed into the live region.")
 
+(defvar-local lispm--turn-context nil
+  "Live scenario context captured for the current turn: (TURN . TEXT), or nil.")
+
 (defvar org-state)
 
 ;;;; System prompt
@@ -209,6 +212,13 @@ See `lispm-session-tools'.")
      "")
    "- This conversation is an org-mode buffer the user can read, fold, edit and"
    " annotate while you work. What it contains is what you remember of this session.\n"
+   "- You have self-introspection over this live Emacs session and your own UI"
+   " scenario: when a turn includes a `[Current LispM scenario]' block, it tells"
+   " you which surface the user is talking to you from and the current window and"
+   " buffer state. Never guess which UI surface the user is using when the"
+   " scenario block or live Emacs state tells you; use eval_elisp,"
+   " describe_symbol, apropos, runtime_status or skills to inspect live state"
+   " whenever needed.\n"
    "- Calls that change files or run code may wait for the user's approval. Such"
    " calls take a `why` argument: one plain sentence the user reads when deciding."
    " If a call is denied, adapt; do not repeat it unchanged.\n"
@@ -1158,6 +1168,55 @@ the request prefix changes once."
   (seq-some (lambda (schema) (equal (alist-get 'name schema) name))
             (lispm-session-tools agent)))
 
+(defun lispm--request-context (agent)
+  "Return the live scenario context string for AGENT's current turn, or nil.
+Captured once per turn from `lispm-request-context-functions' so every
+request step within the same turn keeps an identical message prefix."
+  (when lispm-request-context-functions
+    (let ((turn (lispm-agent-turn agent))
+          (buffer (lispm-agent-buffer agent)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (if (and (consp lispm--turn-context)
+                   (eql (car lispm--turn-context) turn))
+              (cdr lispm--turn-context)
+            (let* ((parts (seq-remove
+                           (lambda (s) (or (null s) (string-blank-p s)))
+                           (mapcar (lambda (fn)
+                                     (with-demoted-errors "LispM: request context: %S"
+                                       (funcall fn agent)))
+                                   lispm-request-context-functions)))
+                   (text (and parts
+                              (concat "[Current LispM scenario]\n"
+                                      (string-join (mapcar #'string-trim parts) "\n")))))
+              (setq lispm--turn-context (cons turn text))
+              text)))))))
+
+(defun lispm--attach-request-context (messages context)
+  "Return MESSAGES with CONTEXT appended to the last user text message.
+Does not mutate MESSAGES or its shared content vectors in place."
+  (if (or (null context) (string-empty-p context) (null messages))
+      messages
+    (let ((rev (reverse messages))
+          (attached nil)
+          (out nil))
+      (dolist (m rev)
+        (if (and (not attached)
+                 (equal (alist-get 'role m) "user")
+                 (let ((content (alist-get 'content m)))
+                   (and (vectorp content)
+                        (seq-some (lambda (b) (equal (alist-get 'type b) "text"))
+                                  content))))
+            (let ((content (alist-get 'content m)))
+              (setq attached t)
+              (push `((role . "user")
+                      (content . ,(vconcat content
+                                           (list `((type . "text")
+                                                   (text . ,context))))))
+                    out))
+          (push m out)))
+      out)))
+
 (defun lispm-request-body (agent)
   "Request for AGENT's next model call, as (BODY . BETAS).
 Signal a `user-error' if the session cannot be sent as it is."
@@ -1171,15 +1230,17 @@ Signal a `user-error' if the session cannot be sent as it is."
                      (equal (plist-get parsed :last-role) "assistant")))
       (user-error "Nothing to send: write under a \"* User\" heading"))
     (setf (lispm-agent-continuing agent) nil)
-    (lispm-api-request (let ((backend (lispm-agent-backend* agent)))
-                         (if-let* ((limit (lispm-agent-max-tokens agent)))
-                             (plist-put (copy-sequence backend) :max-tokens limit)
-                           backend))
-                       (lispm-agent-model* agent)
-                       (lispm-agent-effort* agent)
-                       (plist-get parsed :system)
-                       (lispm-session-tools agent)
-                       (plist-get parsed :messages))))
+    (let* ((context (lispm--request-context agent))
+           (messages (lispm--attach-request-context (plist-get parsed :messages) context)))
+      (lispm-api-request (let ((backend (lispm-agent-backend* agent)))
+                           (if-let* ((limit (lispm-agent-max-tokens agent)))
+                               (plist-put (copy-sequence backend) :max-tokens limit)
+                             backend))
+                         (lispm-agent-model* agent)
+                         (lispm-agent-effort* agent)
+                         (plist-get parsed :system)
+                         (lispm-session-tools agent)
+                         messages))))
 
 (defun lispm--max-tokens (agent)
   "The output limit of AGENT's requests now."
