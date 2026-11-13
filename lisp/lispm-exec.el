@@ -113,8 +113,13 @@ the sentinel from re-entering TRAMP on the same connection."
           (funcall sentinel process event))))))
 
 (defun lispm-exec-kill (process)
-  "Stop PROCESS and the process group it started, locally or on a remote host."
-  (when (processp process)
+  "Stop PROCESS and the process group it started, locally or on a remote host.
+When PROCESS is a zero-argument cancellation function (as a kernel job
+returns), call it."
+  (cond
+   ((functionp process)
+    (ignore-errors (funcall process)))
+   ((processp process)
     (let ((inhibit-quit t))
       (lispm-exec--with-held-sentinel
        process
@@ -123,11 +128,16 @@ the sentinel from re-entering TRAMP on the same connection."
            (ignore-errors (process-send-eof process))
            (lispm-exec--signal-tree process 'SIGKILL))
          (when (process-live-p process)
-           (ignore-errors (kill-process process))))))))
+           (ignore-errors (kill-process process)))))))))
 
 (defun lispm-exec-delete (process)
-  "Delete PROCESS after stopping the process group it started."
-  (when (processp process)
+  "Delete PROCESS after stopping the process group it started.
+When PROCESS is a zero-argument cancellation function (as a kernel job
+returns), call it."
+  (cond
+   ((functionp process)
+    (ignore-errors (funcall process)))
+   ((processp process)
     (let ((inhibit-quit t))
       (lispm-exec--with-held-sentinel
        process
@@ -135,7 +145,7 @@ the sentinel from re-entering TRAMP on the same connection."
          (when (process-live-p process)
            (ignore-errors (process-send-eof process))
            (lispm-exec--signal-tree process 'SIGKILL))
-         (ignore-errors (delete-process process)))))))
+         (ignore-errors (delete-process process))))))))
 
 (cl-defun lispm-exec (program args callback &key input timeout)
   "Run PROGRAM with ARGS in the background, then call CALLBACK with how it went.

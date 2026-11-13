@@ -243,5 +243,44 @@
              (value (lispm-elisp-kernel-test--value result)))
         (should (equal value (list (file-name-as-directory remote) "hello-tramp\n")))))))
 
+(ert-deftest lispm-elisp-kernel-test-search-and-shell-and-api ()
+  "The kernel runs local `search_files', `run_shell', and `lispm-api-stream'."
+  (lispm-test-env
+    (lispm-elisp-kernel-test--with runtime
+      (let ((agent (lispm-defagent tester :root project)))
+        ;; 1. search_files in the kernel (including open unsaved buffer).
+        (make-directory (expand-file-name "sub" project) t)
+        (with-temp-file (expand-file-name "a.el" project)
+          (insert ";; header\n(defun lispm-demo-a ())\n"))
+        (with-temp-file (expand-file-name "sub/b.el" project)
+          (insert ";; header\n(defun lispm-demo-b ())\n"))
+        (with-current-buffer (find-file-noselect (expand-file-name "a.el" project))
+          (goto-char (point-max))
+          (insert "(defun lispm-demo-unsaved ())\n"))
+        (cl-letf (((symbol-function 'lispm-tools--search)
+                   (lambda (&rest _) (ert-fail "Fell back to Emacs search"))))
+          (let ((lispm-current-agent agent)
+                result)
+            (lispm-tool-invoke (lispm-get-tool "search_files")
+                               '((pattern . "lispm-demo-(b|unsaved)"))
+                               (lambda (text errorp) (setq result (cons text errorp))))
+            (should (lispm-elisp-kernel-test--wait runtime (lambda () result)))
+            (should (equal result
+                           '("a.el:3:(defun lispm-demo-unsaved ())\nsub/b.el:2:(defun lispm-demo-b ())"
+                             . nil)))))
+        ;; 2. run_shell in the kernel when lispm-kernel-exec-mode is on.
+        (unwind-protect
+            (progn
+              (lispm-kernel-exec-mode 1)
+              (let ((lispm-current-agent agent)
+                    (lispm-sandbox-level 'none)
+                    result)
+                (lispm-tool-invoke (lispm-get-tool "run_shell")
+                                   '((command . "printf 'out\\n'; printf 'err\\n' >&2; exit 3"))
+                                   (lambda (text errorp) (setq result (cons text errorp))))
+                (should (lispm-elisp-kernel-test--wait runtime (lambda () result)))
+                (should (equal result '("out\nerr\n\n[exit status 3]" . nil)))))
+          (lispm-kernel-exec-mode -1))))))
+
 (provide 'lispm-elisp-kernel-test)
 ;;; lispm-elisp-kernel-test.el ends here

@@ -229,8 +229,11 @@ See `lispm-session-tools'.")
    " to do. Batch independent tool calls in a single response. End the turn with a"
    " short summary of what changed and how it was verified.\n"
    "- Read before you edit; prefer small, verifiable steps. Edit existing files"
-   " rather than creating new ones unless required, and remove any temporary files,"
-   " build outputs or scratch tests before finishing.\n"
+   " rather than creating new ones unless required. Put scratch test binaries and"
+   " one-off verification scripts in /tmp, and remove any temporary files,"
+   " scratch build outputs or scratch tests before finishing (never delete"
+   " required deliverables or in-place compiled artifacts such as .so extensions,"
+   " .vo proofs or target binaries).\n"
    "- Prefer LispM's dedicated tools. For standalone file discovery, JSON/JSONL"
    " parsing, text filtering and computation, use run_elisp: LispM Kernel starts"
    " a fresh Emacs process and returns its output. The worker has no live editor"
@@ -1700,15 +1703,24 @@ observers, as the runtime's agent status does for other interfaces."
   (when (eq (lispm-agent-state agent) 'requesting)
     (setf (lispm-agent-process agent) nil)
     (lispm--live-delete agent)
-    (if (and (lispm-api-retryable-p err) (< attempt lispm-api-max-retries))
-        (let ((delay (* 2 (expt 2 attempt))))
-          (lispm-set-state agent 'requesting
-                           (format "%s; retrying in %ds" (plist-get err :type) delay)
-                           'retry)
-          (run-at-time delay nil
-                       (lambda ()
-                         (when (eq (lispm-agent-state agent) 'requesting)
-                           (lispm--send agent body betas (1+ attempt))))))
+    (cond
+     ((and (eql (plist-get err :status) 413)
+           (buffer-live-p (lispm-agent-buffer agent))
+           (> (buffer-local-value 'lispm-context-images (lispm-agent-buffer agent)) 0))
+      (lispm--in-session agent
+        (setq-local lispm-context-images 0))
+      (cl-decf (lispm-agent-steps agent))
+      (lispm--request agent))
+     ((and (lispm-api-retryable-p err) (< attempt lispm-api-max-retries))
+      (let ((delay (* 2 (expt 2 attempt))))
+        (lispm-set-state agent 'requesting
+                         (format "%s; retrying in %ds" (plist-get err :type) delay)
+                         'retry)
+        (run-at-time delay nil
+                     (lambda ()
+                       (when (eq (lispm-agent-state agent) 'requesting)
+                         (lispm--send agent body betas (1+ attempt)))))))
+     (t
       (let ((raised (lispm-agent-max-tokens agent)))
         ;; The server may refuse a limit raised past what the model
         ;; allows: lower it again, or every retry fails alike.
@@ -1722,7 +1734,7 @@ observers, as the runtime's agent status does for other interfaces."
                  (if (and raised (null (lispm-agent-max-tokens agent)))
                      (format "\nThe output limit raised to %d for this turn is back to %d."
                              raised (lispm--max-tokens agent))
-                   "")))))))
+                   ""))))))))
 
 ;;;; Commands
 
@@ -1797,6 +1809,10 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
     (when (gethash agent lispm--idle-handovers)
       (lispm--give-up-idle-handover agent))
     (lispm-set-state agent 'aborting)
+    (when-let* ((proc (lispm-agent-process agent)))
+      (setf (lispm-agent-process agent) nil)
+      (when (functionp proc)
+        (lispm-exec-delete proc)))
     (dolist (p (process-list))
       (when (eq (process-get p 'lispm-agent) agent)
         (process-put p 'lispm-aborted t)
@@ -3197,15 +3213,18 @@ non-nil goes on with the turn in the continuation."
                (proc (funcall lispm-api-function (lispm-agent-backend* agent)
                               (car request) (cdr request)
                               :on-done (lambda (message)
+                                         (setf (lispm-agent-process agent) nil)
                                          (lispm--continue agent (lispm--reply-text
                                                                  (append (alist-get 'content message) nil))
                                                           resume (car kept)))
                               :on-error (lambda (err)
+                                          (setf (lispm-agent-process agent) nil)
                                           (lispm--compaction-failed
                                            agent (format "%s: %s" (plist-get err :type)
                                                          (plist-get err :message))
                                            resume)))))
-          (when (processp proc) (process-put proc 'lispm-agent agent)))
+          (when (processp proc) (process-put proc 'lispm-agent agent))
+          (setf (lispm-agent-process agent) proc))
       (error (lispm--compaction-failed agent (error-message-string err) resume)))))
 
 (defun lispm--continue (agent summary &optional resume kept)
@@ -3397,8 +3416,9 @@ is given up.  A handover the next turn waits for takes it (see
                                (lispm--compaction-failed
                                 agent (format "%s: %s" (plist-get err :type) (plist-get err :message)))
                              (lispm--give-up-idle-handover agent)))))))
-            (when (and (processp proc) (funcall current))
-              (process-put proc 'lispm-agent agent)
+            (when (funcall current)
+              (when (processp proc)
+                (process-put proc 'lispm-agent agent))
               (setf (nth 2 token) proc))))
       (error (lispm--give-up-idle-handover agent)
              (message "%s" (lispm-tr "LispM: could not compact %s: %s"
@@ -3419,9 +3439,11 @@ comes, as one a turn waits for."
   (when-let* ((token (gethash agent lispm--idle-handovers)))
     (remhash agent lispm--idle-handovers)
     (when-let* ((proc (and (consp token) (nth 2 token))))
-      (when (process-live-p proc)
-        (process-put proc 'lispm-aborted t)
-        (delete-process proc)))))
+      (cond ((functionp proc)
+             (lispm-exec-delete proc))
+            ((process-live-p proc)
+             (process-put proc 'lispm-aborted t)
+             (delete-process proc))))))
 
 (defun lispm--give-up-idle-handover (agent)
   "Give up handing AGENT's session over at idle, until it is handed over.
