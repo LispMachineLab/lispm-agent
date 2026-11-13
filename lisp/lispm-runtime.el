@@ -1168,7 +1168,21 @@ the request prefix changes once."
   (seq-some (lambda (schema) (equal (alist-get 'name schema) name))
             (lispm-session-tools agent)))
 
-(defun lispm--request-context (agent)
+(defun lispm--last-user-text-index (messages)
+  "Return the index of the last user message in MESSAGES holding a text block."
+  (let ((idx (1- (length messages)))
+        (found nil))
+    (while (and (>= idx 0) (not found))
+      (let* ((m (nth idx messages))
+             (content (and (equal (alist-get 'role m) "user")
+                           (alist-get 'content m))))
+        (if (and (vectorp content)
+                 (seq-some (lambda (b) (equal (alist-get 'type b) "text")) content))
+            (setq found idx)
+          (setq idx (1- idx)))))
+    found))
+
+(defun lispm--request-context (agent &optional messages)
   "Return the live scenario context string for AGENT's current turn, or nil.
 Captured once per turn from `lispm-request-context-functions' so every
 request step within the same turn keeps an identical message prefix."
@@ -1179,7 +1193,7 @@ request step within the same turn keeps an identical message prefix."
         (with-current-buffer buffer
           (if (and (consp lispm--turn-context)
                    (eql (car lispm--turn-context) turn))
-              (cdr lispm--turn-context)
+              (cddr lispm--turn-context)
             (let* ((parts (seq-remove
                            (lambda (s) (or (null s) (string-blank-p s)))
                            (mapcar (lambda (fn)
@@ -1188,34 +1202,39 @@ request step within the same turn keeps an identical message prefix."
                                    lispm-request-context-functions)))
                    (text (and parts
                               (concat "[Current LispM scenario]\n"
-                                      (string-join (mapcar #'string-trim parts) "\n")))))
-              (setq lispm--turn-context (cons turn text))
+                                      (string-join (mapcar #'string-trim parts) "\n"))))
+                   (idx (and messages (lispm--last-user-text-index messages))))
+              (setq lispm--turn-context (cons turn (cons idx text)))
               text)))))))
 
-(defun lispm--attach-request-context (messages context)
-  "Return MESSAGES with CONTEXT appended to the last user text message.
-Does not mutate MESSAGES or its shared content vectors in place."
+(defun lispm--attach-request-context (messages context &optional target-index)
+  "Return MESSAGES with CONTEXT appended to the turn's user text message.
+When TARGET-INDEX is a valid user text message index in MESSAGES, attach
+CONTEXT there so mid-turn continuations preserve earlier steps' prefix;
+otherwise attach to the last user text message.  Does not mutate MESSAGES."
   (if (or (null context) (string-empty-p context) (null messages))
       messages
-    (let ((rev (reverse messages))
-          (attached nil)
-          (out nil))
-      (dolist (m rev)
-        (if (and (not attached)
-                 (equal (alist-get 'role m) "user")
-                 (let ((content (alist-get 'content m)))
-                   (and (vectorp content)
-                        (seq-some (lambda (b) (equal (alist-get 'type b) "text"))
-                                  content))))
-            (let ((content (alist-get 'content m)))
-              (setq attached t)
-              (push `((role . "user")
-                      (content . ,(vconcat content
-                                           (list `((type . "text")
-                                                   (text . ,context))))))
-                    out))
-          (push m out)))
-      out)))
+    (let ((idx (if (and (integerp target-index)
+                        (>= target-index 0)
+                        (< target-index (length messages))
+                        (let* ((m (nth target-index messages))
+                               (c (and (equal (alist-get 'role m) "user")
+                                       (alist-get 'content m))))
+                          (and (vectorp c)
+                               (seq-some (lambda (b) (equal (alist-get 'type b) "text")) c))))
+                   target-index
+                 (lispm--last-user-text-index messages))))
+      (if (null idx)
+          messages
+        (cl-loop for m in messages
+                 for i from 0
+                 collect (if (= i idx)
+                             (let ((content (alist-get 'content m)))
+                               `((role . "user")
+                                 (content . ,(vconcat content
+                                                      (list `((type . "text")
+                                                              (text . ,context)))))))
+                           m))))))
 
 (defun lispm-request-body (agent)
   "Request for AGENT's next model call, as (BODY . BETAS).
@@ -1230,8 +1249,12 @@ Signal a `user-error' if the session cannot be sent as it is."
                      (equal (plist-get parsed :last-role) "assistant")))
       (user-error "Nothing to send: write under a \"* User\" heading"))
     (setf (lispm-agent-continuing agent) nil)
-    (let* ((context (lispm--request-context agent))
-           (messages (lispm--attach-request-context (plist-get parsed :messages) context)))
+    (let* ((raw-messages (plist-get parsed :messages))
+           (context (lispm--request-context agent raw-messages))
+           (target-idx (with-current-buffer (lispm-agent-buffer agent)
+                         (and (consp lispm--turn-context)
+                              (cadr lispm--turn-context))))
+           (messages (lispm--attach-request-context raw-messages context target-idx)))
       (lispm-api-request (let ((backend (lispm-agent-backend* agent)))
                            (if-let* ((limit (lispm-agent-max-tokens agent)))
                                (plist-put (copy-sequence backend) :max-tokens limit)
