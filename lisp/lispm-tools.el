@@ -2579,6 +2579,9 @@ nothing to send."
 
 ;;;; Built-in tools: execution
 
+(defvar lispm-tools--shell-seq 0
+  "Monotonic counter for unique `run_shell' process names.")
+
 (lispm-deftool run_shell
     ((command string "Shell command, run in your root directory.")
      (timeout integer "Seconds before the command is killed (default 120)." :optional t))
@@ -2600,8 +2603,12 @@ allows."
   ;; A C-g meanwhile stops the command once it is set up.
   (let ((inhibit-quit t))
     (let* ((agent lispm-current-agent)
-           (buffer (get-buffer-create
-                    (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
+           (log-buffer (get-buffer-create
+                        (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
+           (proc-buffer (generate-new-buffer
+                         (format " *lispm-shell-proc: %s*" (if agent (lispm-agent-name agent) "?"))
+                         t))
+           (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
            (default-directory (lispm-tools--root))
            (output "")
            ;; At `lispm-sandbox-level', or not at all if the sandbox
@@ -2614,27 +2621,32 @@ allows."
                  nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
            (note (lispm-sandbox-run-note run))
            (proc (make-process
-                  :name "lispm-shell" :buffer buffer :noquery t
+                  :name proc-name :buffer proc-buffer :noquery t
                   :connection-type 'pipe
                   ;; On a remote root, TRAMP runs the command there,
                   ;; with that machine's shell.
                   :file-handler t
                   :command (lispm-sandbox-run-command run)
                   :filter
-                  (lambda (p chunk)
+                  (lambda (_p chunk)
                     (setq output (concat output chunk))
-                    (when (buffer-live-p (process-buffer p))
-                      (with-current-buffer (process-buffer p)
+                    (when (buffer-live-p log-buffer)
+                      (with-current-buffer log-buffer
                         (save-excursion
-                          (goto-char (process-mark p))
-                          (insert chunk)
-                          (set-marker (process-mark p) (point))))))
+                          (goto-char (point-max))
+                          (insert chunk)))))
                   :sentinel
                   (lambda (p _event)
                     (unless (or (process-live-p p) (process-get p 'interrupted)
                                 (process-get p 'lispm-done))
                       (process-put p 'lispm-done t)
                       (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
+                      (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+                        (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+                          (unless (string-empty-p pre)
+                            (setq output pre))))
+                      (when (buffer-live-p proc-buffer)
+                        (kill-buffer proc-buffer))
                       (let ((status (process-exit-status p))
                             (timed-out (process-get p 'timed-out)))
                         (run-at-time
@@ -2648,23 +2660,41 @@ allows."
                                  "]")
                          timed-out)))))))
       (lispm-sandbox-attach run proc)
-      (with-current-buffer buffer
-        (goto-char (point-max))
-        (insert (format "\n$ %s\n" command))
-        (set-marker (process-mark proc) (point)))
+      (when (buffer-live-p log-buffer)
+        (with-current-buffer log-buffer
+          (goto-char (point-max))
+          (insert (format "\n$ %s\n" command))))
+      (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+        (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+          (unless (string-empty-p pre)
+            (setq output pre)
+            (when (buffer-live-p log-buffer)
+              (with-current-buffer log-buffer
+                (goto-char (point-max))
+                (insert pre))))))
       (process-put proc 'lispm-agent agent)
-      (when (and (process-live-p proc) (not (process-get proc 'lispm-done)))
+      (cond
+       ((and (not (process-live-p proc)) (not (process-get proc 'lispm-done)))
+        (funcall (process-sentinel proc) proc "finished\n"))
+       ((and (process-live-p proc) (not (process-get proc 'lispm-done)))
         (process-put proc 'timer
                      (run-at-time (or timeout lispm-shell-timeout) nil
                                   (lambda ()
-                                    (when (process-live-p proc)
-                                      (process-put proc 'timed-out t)
-                                      (lispm-exec-kill proc))))))
+                                    (unless (process-get proc 'lispm-done)
+                                      (if (process-live-p proc)
+                                          (progn
+                                            (process-put proc 'timed-out t)
+                                            (lispm-exec-kill proc)
+                                            (when (and (not (process-live-p proc))
+                                                       (not (process-get proc 'lispm-done)))
+                                              (funcall (process-sentinel proc) proc "killed\n")))
+                                        (funcall (process-sentinel proc) proc "finished\n"))))))))
       (when quit-flag
         (setq quit-flag nil)
-        (cancel-timer (process-get proc 'timer))
+        (when-let* ((timer (process-get proc 'timer))) (cancel-timer timer))
         (process-put proc 'interrupted t)
         (lispm-exec-delete proc)
+        (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
         (signal 'quit nil)))))
 
 (defun lispm-tools--read-forms (code)

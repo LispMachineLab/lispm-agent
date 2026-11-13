@@ -1461,15 +1461,44 @@ once every call has a result."
             (let* ((id (alist-get 'id b))
                    (decision (alist-get id decisions nil nil #'equal)))
               (pcase (nth 1 decision)
-                ('run (lispm--run-tool agent id))
+                ('run
+                 (if (lispm--running-tool-p agent)
+                     (plist-put (gethash id pending) :queued t)
+                   (lispm--run-tool agent id)))
                 ('ask (lispm--ask-approval agent id))
                 (_ (lispm--tool-done agent id (nth 2 decision) t (car decision)))))))
       (setf (lispm-agent-dispatching agent) nil))
+    (lispm--run-next-queued-tool agent)
     (lispm--update-state agent)
     ;; The calls, awaiting approval or running, are on disk.
     (lispm--save-session agent)
     (when proceed
       (lispm--maybe-continue agent))))
+
+(defun lispm--running-tool-p (agent)
+  "Non-nil if AGENT currently has an active started tool call in `run' state."
+  (let (active)
+    (maphash (lambda (_id call)
+               (when (and (eq (plist-get call :status) 'run)
+                          (plist-get call :started))
+                 (setq active t)))
+             (lispm-agent-pending agent))
+    active))
+
+(defun lispm--run-next-queued-tool (agent)
+  "Start the next queued `run' tool call for AGENT when none is currently active."
+  (while (and (not (lispm--running-tool-p agent))
+              (let (next-id)
+                (maphash (lambda (id call)
+                           (when (and (null next-id)
+                                      (eq (plist-get call :status) 'run)
+                                      (plist-get call :queued))
+                             (setq next-id id)))
+                         (lispm-agent-pending agent))
+                (when next-id
+                  (plist-put (gethash next-id (lispm-agent-pending agent)) :queued nil)
+                  (lispm--run-tool agent next-id)
+                  t)))))
 
 (defvar lispm-current-call nil
   "Id of the call whose tool is starting, among the acting agent's pending calls.
@@ -1487,6 +1516,7 @@ tools of MCP servers appear only once the servers have started."
                                            (plist-get call :name))
                           t "FAILED")
       (plist-put call :status 'run)
+      (plist-put call :started t)
       (lispm--in-session agent
         (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
       (lispm-set-state agent 'acting (format "running %s" (plist-get call :name))
@@ -1549,6 +1579,7 @@ result holds besides TEXT."
             (when (> (cl-count ?\n text) 12)
               (lispm-transcript-fold start))))))
     (unless (lispm-agent-dispatching agent)
+      (lispm--run-next-queued-tool agent)
       (lispm--update-state agent)
       (lispm--maybe-continue agent))))
 
