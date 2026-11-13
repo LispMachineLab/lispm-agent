@@ -1903,87 +1903,91 @@ is abandoned if the turn of AGENT in which it started ends meanwhile."
 
 (declare-function lispm-kernel-search-files "lispm-kernel-exec")
 (declare-function lispm-kernel-exec--submit "lispm-kernel-exec")
+(declare-function lispm-kernel-exec--runtime "lispm-kernel-exec")
 (defvar lispm-kernel-exec-mode)
 
 (defun lispm-tools--search-via-kernel (agent regexp clean-pat case-fold files glob glob-dir
                                        glob-predicate done)
-  "Search local FILES for CLEAN-PAT via `lispm-kernel-search-files'.
+  "Search FILES for CLEAN-PAT via `lispm-kernel-search-files'.
 Return non-nil when the kernel took the search, or nil to fall back."
   (when (and (fboundp 'lispm-kernel-search-files)
-             (not (string-search "\\n" clean-pat))
-             (cl-every (lambda (f) (and (stringp f) (not (file-remote-p f)))) files))
-    (let ((root (lispm-tools--root))
-          (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
-          (visiting (make-hash-table :test #'equal))
-          (open-files nil))
-      (dolist (b (buffer-list))
-        (when-let* ((file (buffer-file-name b))
-                    (full (expand-file-name file)))
-          (when (and (not (file-remote-p full))
-                     (lispm--buffer-current-p b))
-            (puthash full b visiting)
-            (push full open-files))))
-      (lispm-kernel-search-files
-       files clean-pat case-fold
-       (lambda (res)
-         (if (plist-get res :error)
-             (lispm-tools--search agent regexp case-fold files done glob-predicate)
-           (unless (and turn (or (not (lispm-agent-busy-p agent))
-                                 (/= turn (lispm-agent-turn agent))))
-             (condition-case err
-                 (let ((matches nil)
-                       (count 0)
-                       (large 0)
-                       (truncated nil))
-                   (dolist (item (plist-get res :items))
-                     (unless truncated
-                       (let* ((file (plist-get item :file))
-                              (label (and file
-                                          (if (file-in-directory-p file root)
-                                              (file-relative-name file root)
-                                            (abbreviate-file-name file))))
-                              (limit (- lispm-search-max-matches count)))
-                         (cond
-                          ((plist-get item :large)
-                           (cl-incf large))
-                          ((plist-get item :open)
-                           (let ((open (gethash file visiting)))
-                             (when (and (buffer-live-p open) (lispm--buffer-current-p open))
-                               (let ((found (with-current-buffer open
-                                              (let ((case-fold-search case-fold))
-                                                (lispm-tools--matches regexp label limit)))))
-                                 (setq matches (nconc (nreverse found) matches)
-                                       count (+ count (length found))
-                                       truncated (>= count lispm-search-max-matches))))))
-                          (t
-                           (dolist (m (plist-get item :matches))
-                             (unless truncated
-                               (push (format "%s:%d:%s" label (car m) (cadr m)) matches)
-                               (cl-incf count)
-                               (when (>= count lispm-search-max-matches)
-                                 (setq truncated t)))))))))
-                   (funcall done
-                            (if (null matches)
-                                (concat "No matches."
-                                        (if (> large 0)
-                                            (format " (%d files over %d bytes were not searched)"
-                                                    large lispm-search-max-file-size)
-                                          ""))
-                              (concat (string-join (nreverse matches) "\n")
-                                      (if truncated
-                                          (format "\n[stopped after %d matches; narrow the search with path or glob]"
-                                                  count)
-                                        "")
-                                      (if (> large 0)
-                                          (format "\n[%d files over %d bytes were not searched]"
-                                                  large lispm-search-max-file-size)
-                                        "")))))
-               (error (funcall done (error-message-string err) t))))))
-       :glob glob
-       :glob-dir glob-dir
-       :open-files open-files
-       :max-file-size lispm-search-max-file-size
-       :max-matches lispm-search-max-matches))))
+             (consp files)
+             (stringp (car files))
+             (not (string-search "\\n" clean-pat)))
+    (let ((host (file-remote-p (car files))))
+      (when (cl-every (lambda (f) (and (stringp f) (equal (file-remote-p f) host))) files)
+        (let ((root (lispm-tools--root))
+              (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
+              (visiting (make-hash-table :test #'equal))
+              (open-files nil))
+          (dolist (b (buffer-list))
+            (when-let* ((file (buffer-file-name b))
+                        (full (expand-file-name file)))
+              (when (and (equal (file-remote-p full) host)
+                         (lispm--buffer-current-p b))
+                (puthash full b visiting)
+                (push full open-files))))
+          (lispm-kernel-search-files
+           files clean-pat case-fold
+           (lambda (res)
+             (if (plist-get res :error)
+                 (lispm-tools--search agent regexp case-fold files done glob-predicate)
+               (unless (and turn (or (not (lispm-agent-busy-p agent))
+                                     (/= turn (lispm-agent-turn agent))))
+                 (condition-case err
+                     (let ((matches nil)
+                           (count 0)
+                           (large 0)
+                           (truncated nil))
+                       (dolist (item (plist-get res :items))
+                         (unless truncated
+                           (let* ((file (plist-get item :file))
+                                  (label (and file
+                                              (if (file-in-directory-p file root)
+                                                  (file-relative-name file root)
+                                                (abbreviate-file-name file))))
+                                  (limit (- lispm-search-max-matches count)))
+                             (cond
+                              ((plist-get item :large)
+                               (cl-incf large))
+                              ((plist-get item :open)
+                               (let ((open (gethash file visiting)))
+                                 (when (and (buffer-live-p open) (lispm--buffer-current-p open))
+                                   (let ((found (with-current-buffer open
+                                                  (let ((case-fold-search case-fold))
+                                                    (lispm-tools--matches regexp label limit)))))
+                                     (setq matches (nconc (nreverse found) matches)
+                                           count (+ count (length found))
+                                           truncated (>= count lispm-search-max-matches))))))
+                              (t
+                               (dolist (m (plist-get item :matches))
+                                 (unless truncated
+                                   (push (format "%s:%d:%s" label (car m) (cadr m)) matches)
+                                   (cl-incf count)
+                                   (when (>= count lispm-search-max-matches)
+                                     (setq truncated t)))))))))
+                       (funcall done
+                                (if (null matches)
+                                    (concat "No matches."
+                                            (if (> large 0)
+                                                (format " (%d files over %d bytes were not searched)"
+                                                        large lispm-search-max-file-size)
+                                              ""))
+                                  (concat (string-join (nreverse matches) "\n")
+                                          (if truncated
+                                              (format "\n[stopped after %d matches; narrow the search with path or glob]"
+                                                      count)
+                                            "")
+                                          (if (> large 0)
+                                              (format "\n[%d files over %d bytes were not searched]"
+                                                      large lispm-search-max-file-size)
+                                            "")))))
+                   (error (funcall done (error-message-string err) t))))))
+           :glob glob
+           :glob-dir (and glob-dir (or (file-remote-p glob-dir 'localname) glob-dir))
+           :open-files open-files
+           :max-file-size lispm-search-max-file-size
+           :max-matches lispm-search-max-matches))))))
 
 (lispm-deftool search_files
     ((pattern string "Regular expression, in the syntax of ripgrep or grep -E: (a|b), \\d, \\w, \\s, x{2,3}, [^...]; no lookaround.")
@@ -2000,15 +2004,24 @@ the unsaved contents of files open in Emacs."
          (regexp (lispm-tools--emacs-regexp clean-pat))
          (ere (lispm-tools--ere-regexp clean-pat))
          (target (lispm-tools--file (or path ".")))
-         (files (lispm-tools--search-files target glob ere case-fold))
-         (glob-dir (if (file-directory-p target) target (file-name-directory target)))
+         (remote-kernel (and (file-remote-p target)
+                             (fboundp 'lispm-kernel-exec--runtime)
+                             (lispm-kernel-exec--runtime :search-files target)))
+         (files (if remote-kernel
+                    (list target)
+                  (lispm-tools--search-files target glob ere case-fold)))
+         (glob-dir (if (or remote-kernel (file-directory-p target))
+                       target
+                     (file-name-directory target)))
          (glob-predicate (and glob (lispm-tools--glob-predicate glob glob-dir))))
     ;; An invalid regexp fails here, not file after file.
     (string-match-p regexp "")
-    (unless (and (not (file-remote-p target))
-                 (lispm-tools--search-via-kernel
-                  agent regexp clean-pat case-fold files glob glob-dir glob-predicate done))
-      (lispm-tools--search agent regexp case-fold files done glob-predicate))))
+    (unless (lispm-tools--search-via-kernel
+             agent regexp clean-pat case-fold files glob glob-dir glob-predicate done)
+      (lispm-tools--search
+       agent regexp case-fold
+       (if remote-kernel (lispm-tools--search-files target glob ere case-fold) files)
+       done glob-predicate))))
 
 (lispm-deftool list_buffers ()
   "List the buffers open in Emacs: name, major mode, file and whether modified.
@@ -2698,13 +2711,17 @@ nothing to send."
      (buffer-local-value 'lispm-agents-bridge--agent terminal))))
 
 (defun lispm-tools--run-shell-via-kernel (agent command timeout log-buffer done fallback)
-  "Run local unsandboxed COMMAND in the kernel when `lispm-kernel-exec-mode' is on.
+  "Run unsandboxed COMMAND in the kernel when `lispm-kernel-exec-mode' is on.
 Return non-nil when the kernel took the command, or nil to run FALLBACK."
   (when (and (bound-and-true-p lispm-kernel-exec-mode)
-             (not (file-remote-p default-directory))
-             (eq lispm-sandbox-level 'none)
+             (or (file-remote-p default-directory)
+                 (eq lispm-sandbox-level 'none))
              (fboundp 'lispm-kernel-exec--submit))
-    (let* ((cmd (lispm-exec-shell-command shell-file-name shell-command-switch command nil))
+    (let* ((remote (file-remote-p default-directory))
+           (cmd (lispm-exec-shell-command
+                 (if remote "/bin/sh" shell-file-name)
+                 (if remote "-c" shell-command-switch)
+                 command nil))
            (effective-timeout (ceiling (or timeout lispm-shell-timeout)))
            (entry (cons agent nil))
            (cancel

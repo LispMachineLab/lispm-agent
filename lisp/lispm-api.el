@@ -161,7 +161,7 @@ It is fed on stdin, so keys stay off the command line."
            :command (list lispm-curl-program "--silent" "--show-error" "--no-buffer"
                           "-H" "Expect:"
                           "--connect-timeout" "30"
-                          "--speed-limit" "1" "--speed-time" "120"
+                          "--speed-limit" "1" "--speed-time" "600"
                           "--max-time" "900"
                           "--config" "-"
                           "--data-binary" (concat "@" file)
