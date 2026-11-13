@@ -302,7 +302,23 @@ cache_read + cache_write), while each call's `input_tokens' in
 (declare-function lispm-kernel-dispatch "lispm-kernel" (runtime))
 (declare-function lispm-kernel-runtime-hello "lispm-kernel" (runtime))
 (declare-function lispm-kernel-exec-mode "lispm-kernel-exec" (&optional arg))
+(declare-function xwidget-event-handler "xwidget" ())
 (defvar lispm-kernel-exec-mode)
+
+(defun lispm-batch--pump-events ()
+  "Dispatch any queued `xwidget-event' when running on a graphical display."
+  (when (and (not noninteractive) (fboundp 'xwidget-event-handler))
+    (let* ((inhibit-quit t)
+           (saved unread-command-events)
+           (unread-command-events nil)
+           (ev (read-event nil nil 0.01)))
+      (setq unread-command-events
+            (if (and (consp ev) (eq (car ev) 'xwidget-event))
+                (progn
+                  (let ((last-input-event ev))
+                    (xwidget-event-handler))
+                  saved)
+              (if ev (append saved (list ev)) saved))))))
 
 (defun lispm-batch--start-kernel ()
   "Start a LispM Kernel runtime if `LISPM_KERNEL_PROGRAM' is available."
@@ -587,6 +603,7 @@ OPTIONS:
                                                          done t)))
               (while (and (not done) (< (float-time) soft-deadline))
                 (accept-process-output nil 0.05)
+                (lispm-batch--pump-events)
                 (when kernel-rt
                   (ignore-errors (lispm-kernel-dispatch kernel-rt))))
               (let ((hit-step-limit (and done (>= (lispm-agent-steps agent) lispm-max-steps)))
@@ -622,6 +639,7 @@ OPTIONS:
                                           (setq done t)))
                   (while (and (not done) (< (float-time) deadline))
                     (accept-process-output nil 0.05)
+                    (lispm-batch--pump-events)
                     (when kernel-rt
                       (ignore-errors (lispm-kernel-dispatch kernel-rt))))))
               (when (not done)
@@ -665,7 +683,15 @@ OPTIONS:
                 (write-region (point-min) (point-max) transcript-path nil 'silent))))
           (when result-path
             (lispm-batch--write-json result-path result))
+          (when (fboundp 'lispm-web-close-session)
+            (ignore-errors (lispm-web-close-session)))
           (unless out-dir
+            (when-let* ((buf (lispm-agent-buffer agent)))
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (set-buffer-modified-p nil)
+                  (setq buffer-file-name nil))
+                (kill-buffer buf)))
             (ignore-errors (delete-directory state-dir t)))
           result)))))
 
