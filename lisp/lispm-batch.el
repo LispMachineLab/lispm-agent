@@ -311,6 +311,84 @@ cache_read + cache_write), while each call's `input_tokens' in
             (ignore-errors (lispm-kernel-stop rt))
             nil))))))
 
+(defconst lispm-batch--workspace-files-script
+  "git -c safe.directory='*' ls-files -z --cached --others --exclude-standard 2>/dev/null ||
+find . \\( -name .git -o -name .hg -o -name .svn -o -name CVS -o -name node_modules -o -name vendor -o -name .venv -o -name venv -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache -o -name .tox -o -name .lispm-state \\) -prune -o -type f -print0 2>/dev/null"
+  "Shell snippet listing NUL-separated relative file paths in `default-directory'.")
+
+(defun lispm-batch--workspace-files (root)
+  "Return a sorted list of relative file paths under ROOT."
+  (let ((default-directory (file-name-as-directory (expand-file-name root))))
+    (with-temp-buffer
+      (when (ignore-errors
+              (process-file "sh" nil t nil "-c" lispm-batch--workspace-files-script)
+              t)
+        (let (out)
+          (dolist (raw (split-string (buffer-string) "\0" t))
+            (let ((clean (string-remove-prefix "./" raw)))
+              (unless (or (string-empty-p clean)
+                          (string-prefix-p ".lispm-state/" clean))
+                (push clean out))))
+          (sort (delete-dups out) #'string<))))))
+
+(defun lispm-batch--journal-files (agent root)
+  "Return relative paths under ROOT touched by AGENT's file tools."
+  (let ((root-dir (file-name-as-directory (expand-file-name root)))
+        out)
+    (dolist (turn-cell (lispm-agent-journal agent))
+      (dolist (entry (cdr turn-cell))
+        (when-let* ((file (plist-get (cdr entry) :file))
+                    (full (expand-file-name file)))
+          (when (string-prefix-p root-dir full)
+            (push (substring full (length root-dir)) out)))))
+    (sort (delete-dups out) #'string<)))
+
+(defun lispm-batch--scratch-file-p (rel-path)
+  "Non-nil if REL-PATH looks like a scratch or temporary test file."
+  (let ((case-fold-search t)
+        (base (file-name-nondirectory rel-path)))
+    (or (string-match-p
+         "\\(?:\\`\\|[_.-]\\)\\(?:scratch\\|debug\\|tmp\\|temp\\|repro\\)\\(?:[_.-]\\|\\'\\)"
+         base)
+        (string-match-p
+         "\\(?:\\`_?test_\\|_test\\.\\|\\.test\\.\\|\\.spec\\.\\)"
+         base))))
+
+(defun lispm-batch--hygiene-prompt (root before-files agent)
+  "Return a follow-up hygiene prompt if suspect new files remain under ROOT."
+  (let ((before-set (make-hash-table :test #'equal))
+        (tool-set (make-hash-table :test #'equal))
+        shell-files
+        tool-new-files
+        scratch-tool-files)
+    (dolist (f before-files)
+      (puthash f t before-set))
+    (dolist (f (lispm-batch--journal-files agent root))
+      (puthash f t tool-set))
+    (dolist (f (lispm-batch--workspace-files root))
+      (unless (gethash f before-set)
+        (if (gethash f tool-set)
+            (progn
+              (push f tool-new-files)
+              (when (lispm-batch--scratch-file-p f)
+                (push f scratch-tool-files)))
+          (push f shell-files))))
+    (setq shell-files (nreverse shell-files)
+          tool-new-files (nreverse tool-new-files)
+          scratch-tool-files (nreverse scratch-tool-files))
+    (when (or shell-files scratch-tool-files)
+      (concat
+       "[From LispM, for the user] Workspace check before finishing — new files were created during this session:\n"
+       (if shell-files
+           (format "- Created by shell/build commands (outside write_file/edit_file): %s\n"
+                   (string-join shell-files ", "))
+         "")
+       (if tool-new-files
+           (format "- Created by write_file/edit_file: %s\n"
+                   (string-join tool-new-files ", "))
+         "")
+       "Remove any temporary build outputs, compiled test binaries, or scratch test files that are not required task deliverables, then provide your final summary."))))
+
 (cl-defun lispm-batch-run (prompt &rest options
                                   &key cwd model provider api url key key-env
                                   max-steps max-tokens effort timeout
@@ -421,7 +499,8 @@ OPTIONS:
                      (lispm-batch-summarize-calls (reverse call-records))))))))
         (add-hook 'lispm-response-functions on-response)
         (unwind-protect
-            (let ((deadline (+ (float-time) timeout-sec)))
+            (let ((deadline (+ (float-time) timeout-sec))
+                  (initial-files (lispm-batch--workspace-files root)))
               (lispm-tell agent prompt :callback (lambda (reply)
                                                    (setq final-reply reply
                                                          done t)))
@@ -429,6 +508,21 @@ OPTIONS:
                 (accept-process-output nil 0.05)
                 (when kernel-rt
                   (ignore-errors (lispm-kernel-dispatch kernel-rt))))
+              (when-let* (((and done (< (float-time) deadline)
+                                (< call-count lispm-max-steps)))
+                          (hygiene-prompt (lispm-batch--hygiene-prompt root initial-files agent)))
+                (let ((lispm-max-steps 5))
+                  (setq done nil)
+                  (lispm-tell agent hygiene-prompt
+                              :callback (lambda (reply)
+                                          (when (and (stringp reply)
+                                                     (not (string-empty-p (string-trim reply))))
+                                            (setq final-reply reply))
+                                          (setq done t)))
+                  (while (and (not done) (< (float-time) deadline))
+                    (accept-process-output nil 0.05)
+                    (when kernel-rt
+                      (ignore-errors (lispm-kernel-dispatch kernel-rt))))))
               (when (not done)
                 (setq timed-out t)
                 (ignore-errors (lispm-abort agent))))
