@@ -169,6 +169,9 @@ curl process."
            :connection-type 'pipe
            :coding '(utf-8-unix . utf-8-unix)
            :command (list lispm-curl-program "--silent" "--show-error" "--no-buffer"
+                          "--connect-timeout" "30"
+                          "--speed-limit" "1" "--speed-time" "300"
+                          "--max-time" "900"
                           "--config" "-"
                           "--data-binary" (concat "@" file)
                           "--write-out" (concat lispm-api--status-marker "%{http_code}\n")
@@ -246,7 +249,7 @@ CLIENT-ERROR is an error raised while decoding, if any."
   (let ((status (plist-get err :status)))
     (or (member (plist-get err :type)
                 '("overloaded_error" "rate_limit_error" "api_error" "server_error"
-                  "network_error" "incomplete_stream"))
+                  "upstream_error" "network_error" "incomplete_stream"))
         (and status (or (= status 429) (>= status 500))))))
 
 (provide 'lispm-api)

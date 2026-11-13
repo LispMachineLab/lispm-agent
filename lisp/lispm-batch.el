@@ -133,13 +133,21 @@ PROPS may specify `:model' (including LiteLLM strings such as
                         lispm-model
                         "claude-opus-4-6"))
          (provider (plist-get props :provider))
+         (explicit-url (plist-get props :url))
+         (rotom-url-p (and (stringp explicit-url)
+                           (string-search "127.0.0.1:14550" explicit-url)))
          (slash (and (stringp raw-model) (string-search "/" raw-model)))
          (prefix (and slash (substring raw-model 0 slash)))
          (route (or (and provider (cdr (assoc (downcase (format "%s" provider))
                                               lispm-batch-provider-routes)))
+                    (and rotom-url-p
+                         (cdr (assoc "rotom" lispm-batch-provider-routes)))
                     (and prefix (cdr (assoc (downcase prefix)
                                             lispm-batch-provider-routes)))))
-         (model (if (and prefix (assoc (downcase prefix) lispm-batch-provider-routes))
+         (model (if (and prefix
+                         (if rotom-url-p
+                             (member (downcase prefix) '("rotom" "rotom-messages"))
+                           (assoc (downcase prefix) lispm-batch-provider-routes)))
                     (substring raw-model (1+ slash))
                   raw-model))
          (api (or (plist-get props :api)
@@ -172,7 +180,7 @@ PROPS may specify `:model' (including LiteLLM strings such as
                             url)))
          (key-env (or (plist-get props :key-env)
                       (and (lispm-batch--non-empty-env "LISPM_API_KEY") "LISPM_API_KEY")
-                      (plist-get route :key-env)
+                      (and (not local-url-p) (plist-get route :key-env))
                       (and (not local-url-p)
                            (if (eq api 'anthropic)
                                "ANTHROPIC_API_KEY"

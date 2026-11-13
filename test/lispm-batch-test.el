@@ -36,7 +36,15 @@
     (let ((custom (lispm-batch-resolve-backend :model "openai/gpt-5.4")))
       (should (eq (plist-get custom :api) 'openai))
       (should (equal (plist-get custom :url) "http://127.0.0.1:19999/v1"))
-      (should (equal (plist-get custom :model) "gpt-5.4")))))
+      (should (equal (plist-get custom :model) "gpt-5.4")))
+    (let ((rotom-ds (lispm-batch-resolve-backend
+                     :url "http://127.0.0.1:14550/v1"
+                     :model "deepseek/deepseek-v4.1-flash-1017")))
+      (should (eq (plist-get rotom-ds :api) 'openai))
+      (should (equal (plist-get rotom-ds :url) "http://127.0.0.1:14550/v1"))
+      (should (equal (plist-get rotom-ds :model) "deepseek/deepseek-v4.1-flash-1017"))
+      (should (null (plist-get rotom-ds :key-env)))
+      (should (equal (plist-get rotom-ds :features) '(reasoning-effort))))))
 
 (ert-deftest lispm-test-batch-openai-cache-variants ()
   "Chat Completions usage normalizes OpenAI, Moonshot and DeepSeek cache fields."
@@ -296,6 +304,27 @@
         (let ((prompt (lispm-batch--hygiene-prompt project initial agent)))
           (should (stringp prompt))
           (should (string-search "polyglot/scratch_debug.py" prompt)))))))
+
+(ert-deftest lispm-test-batch-multiple-run-shell-in-one-turn ()
+  "Multiple `run_shell' calls batched in a single turn execute sequentially without colliding."
+  (lispm-test-env
+    (let* ((default-directory project)
+           (agent (lispm-start)))
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (setq lispm-test--scripts
+            `((assistant@project
+               ,(lispm-test--msg "tool_use"
+                                 (lispm-test--tool "t1" "run_shell"
+                                                   '((why . "first") (command . "printf 'one\\n'")))
+                                 (lispm-test--tool "t2" "run_shell"
+                                                   '((why . "second") (command . "printf 'two\\n'"))))
+               ,(lispm-test--msg "end_turn" (lispm-test--text "Both done.")))))
+      (lispm-tell agent "run two shells")
+      (should (lispm-test--wait (lispm-test--idle-p agent) 5))
+      (let ((transcript (lispm-test--transcript agent)))
+        (should (= (lispm-test--count "^\\*\\* DONE run_shell" transcript) 2))
+        (should (string-search "one\n\n[exit status 0]" transcript))
+        (should (string-search "two\n\n[exit status 0]" transcript))))))
 
 (provide 'lispm-batch-test)
 ;;; lispm-batch-test.el ends here
