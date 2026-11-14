@@ -408,6 +408,47 @@ find . \\( -name .git -o -name .hg -o -name .svn -o -name CVS -o -name node_modu
          "")
        "Remove only temporary scratch files or one-off test binaries (such as a.out or cmain) that are NOT required task deliverables. NEVER delete required deliverables, requested output files, or in-place compiled artifacts (such as .so C extensions, .vo compiled proofs, or target binaries). Then provide your final summary."))))
 
+(defconst lispm-batch--wrapup-prompt
+  "[From LispM, for the user] URGENT: The session time or step budget has been reached. Do NOT start any more exploratory scripts or long benchmarks in /tmp. Immediately write or copy your best working implementation and outputs to the exact deliverable file paths required by the task, verify that all required output files exist and are non-empty, remove any temporary scratch files created in the workspace, and provide a brief final summary."
+  "Follow-up wrap-up prompt sent when a batch turn hits its soft deadline.")
+
+(defun lispm-batch--reserve-seconds (timeout-sec)
+  "Seconds reserved before hard TIMEOUT-SEC for a finalization wrap-up pass."
+  (if (and (numberp timeout-sec) (>= timeout-sec 300))
+      (min 150 (max 60 (floor (* 0.06 timeout-sec))))
+    0))
+
+(defun lispm-batch--budget-note (agent started-flt soft-deadline max-steps stage-cell)
+  "Return a one-time budget notice string for AGENT when thresholds are crossed.
+STARTED-FLT and SOFT-DEADLINE are `float-time' values; MAX-STEPS is the
+turn's step cap; STAGE-CELL is a cons cell `(STAGE . nil)' tracking
+whether the 70%% (`1') or 85%% (`2') notice has already been emitted."
+  (when (and (numberp started-flt) (numberp soft-deadline) (> soft-deadline started-flt))
+    (let* ((now (float-time))
+           (total (max 1.0 (- soft-deadline started-flt)))
+           (elapsed (max 0.0 (- now started-flt)))
+           (rem (max 0 (floor (- soft-deadline now))))
+           (time-frac (/ elapsed total))
+           (steps (or (and agent (lispm-agent-steps agent)) 0))
+           (step-frac (if (and (numberp max-steps) (> max-steps 0))
+                          (/ (float steps) max-steps)
+                        0.0))
+           (frac (max time-frac step-frac))
+           (stage (or (car stage-cell) 0)))
+      (cond
+       ((and (>= frac 0.85) (< stage 2))
+        (setcar stage-cell 2)
+        (format "[LispM URGENT budget notice: %d%% of session budget used (%dm %ds remaining, step %d/%d). Stop exploratory /tmp experiments immediately, write all required deliverable files to their exact target paths now, and verify they exist on disk.]"
+                (min 99 (round (* 100 frac)))
+                (/ rem 60) (mod rem 60)
+                steps (or max-steps 0)))
+       ((and (>= frac 0.70) (< stage 1))
+        (setcar stage-cell 1)
+        (format "[LispM budget notice: %d%% of session budget used (%dm %ds remaining, step %d/%d). Begin converging on your final implementation and writing required deliverable files soon.]"
+                (min 99 (round (* 100 frac)))
+                (/ rem 60) (mod rem 60)
+                steps (or max-steps 0)))))))
+
 (cl-defun lispm-batch-run (prompt &rest options
                                   &key cwd model provider api url key key-env
                                   max-steps max-tokens effort timeout
@@ -494,7 +535,7 @@ OPTIONS:
                                   (downcase (or (plist-get backend-spec :model) "")))
                   0)
                  (t lispm-context-images)))
-          (lispm-max-steps (or max-steps 120))
+          (lispm-max-steps (or max-steps 400))
           (lispm-max-tokens (or max-tokens lispm-max-tokens))
           (lispm-effort (or effort lispm-effort))
           (lispm-backends (cons (cons 'batch backend-spec) lispm-backends))
@@ -528,19 +569,50 @@ OPTIONS:
         (when (and kernel-rt (fboundp 'lispm-kernel-exec-mode))
           (lispm-kernel-exec-mode 1))
         (unwind-protect
-            (let ((deadline (+ (float-time) timeout-sec))
-                  (initial-files (lispm-batch--workspace-files root)))
+            (let* ((started-flt (float-time started-time))
+                   (deadline (+ started-flt timeout-sec))
+                   (reserve (lispm-batch--reserve-seconds timeout-sec))
+                   (soft-deadline (- deadline reserve))
+                   (budget-stage (cons 0 nil))
+                   (lispm-turn-started-at started-flt)
+                   (lispm-turn-deadline deadline)
+                   (lispm-tool-result-note-function
+                    (lambda (ag _call _text _errorp)
+                      (when (eq ag agent)
+                        (lispm-batch--budget-note
+                         agent started-flt soft-deadline lispm-max-steps budget-stage))))
+                   (initial-files (lispm-batch--workspace-files root)))
               (lispm-tell agent prompt :callback (lambda (reply)
                                                    (setq final-reply reply
                                                          done t)))
-              (while (and (not done) (< (float-time) deadline))
+              (while (and (not done) (< (float-time) soft-deadline))
                 (accept-process-output nil 0.05)
                 (when kernel-rt
                   (ignore-errors (lispm-kernel-dispatch kernel-rt))))
+              (let ((hit-step-limit (and done (>= (lispm-agent-steps agent) lispm-max-steps)))
+                    (hit-soft-deadline (not done)))
+                (when (and (or hit-soft-deadline hit-step-limit)
+                           (> (- deadline (float-time)) 15))
+                  (when hit-soft-deadline
+                    (ignore-errors (lispm-abort agent)))
+                  (let ((lispm-max-steps 6)
+                        (lispm-tool-result-note-function nil))
+                    (setq done nil)
+                    (lispm-tell agent lispm-batch--wrapup-prompt
+                                :callback (lambda (reply)
+                                            (when (and (stringp reply)
+                                                       (not (string-empty-p (string-trim reply))))
+                                              (setq final-reply reply))
+                                            (setq done t)))
+                    (while (and (not done) (< (float-time) deadline))
+                      (accept-process-output nil 0.05)
+                      (when kernel-rt
+                        (ignore-errors (lispm-kernel-dispatch kernel-rt)))))))
               (when-let* (((and done (< (float-time) deadline)
                                 (< call-count lispm-max-steps)))
                           (hygiene-prompt (lispm-batch--hygiene-prompt root initial-files agent)))
-                (let ((lispm-max-steps 5))
+                (let ((lispm-max-steps 5)
+                      (lispm-tool-result-note-function nil))
                   (setq done nil)
                   (lispm-tell agent hygiene-prompt
                               :callback (lambda (reply)

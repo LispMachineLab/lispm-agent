@@ -1570,16 +1570,25 @@ result holds besides TEXT."
     (remhash id (lispm-agent-pending agent))
     (when (fboundp 'lispm-agents-roster-notify)
       (lispm-agents-roster-notify agent '(calls)))
-    (let ((marker (plist-get call :marker)))
+    (let* ((marker (plist-get call :marker))
+           (note (and (functionp lispm-tool-result-note-function)
+                      (ignore-errors
+                        (funcall lispm-tool-result-note-function
+                                 agent call text errorp))))
+           (full-text (if (and (stringp note) (not (string-empty-p note)))
+                          (concat text
+                                  (unless (string-suffix-p "\n" text) "\n")
+                                  note)
+                        text)))
       (lispm--in-session agent
         (when (and marker (marker-buffer marker))
           (lispm-transcript-set-state marker (or state (if errorp "FAILED" "DONE")))
           (goto-char (lispm-transcript-subtree-end marker 2))
           (let ((start (point)))
-            (insert (lispm-transcript-result text errorp images
+            (insert (lispm-transcript-result full-text errorp images
                                              (and buffer-file-name
                                                   (file-name-directory buffer-file-name))))
-            (when (> (cl-count ?\n text) 12)
+            (when (> (cl-count ?\n full-text) 12)
               (lispm-transcript-fold start))))))
     (unless (lispm-agent-dispatching agent)
       (lispm--run-next-queued-tool agent)
