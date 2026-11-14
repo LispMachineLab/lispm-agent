@@ -326,5 +326,65 @@
         (should (string-search "one\n\n[exit status 0]" transcript))
         (should (string-search "two\n\n[exit status 0]" transcript))))))
 
+(ert-deftest lispm-test-batch-deadline-and-budget-notices ()
+  "Shell timeout clamping and one-time budget notices preserve cache-safe tool output."
+  (lispm-test-env
+    ;; 1. Reserve seconds calculation
+    (should (= (lispm-batch--reserve-seconds 120) 0))
+    (should (= (lispm-batch--reserve-seconds 600) 60))
+    (should (= (lispm-batch--reserve-seconds 3600) 150))
+    ;; 2. Effective shell timeout clamping against turn deadline
+    (let ((lispm-turn-deadline nil)
+          (lispm-turn-started-at nil))
+      (should (= (lispm-tools--effective-shell-timeout 3000) 3000)))
+    (let* ((now (float-time))
+           (lispm-turn-started-at (- now 3200.0))
+           (lispm-turn-deadline (+ now 400.0)))
+      ;; Total turn = 3600s -> reserve = 90s -> remaining budget ~310s (< 3000s requested)
+      (let ((clamped (lispm-tools--effective-shell-timeout 3000)))
+        (should (<= clamped 315))
+        (should (>= clamped 300))))
+    ;; 3. One-time 70% and 85% budget notices and tool result note hook
+    (let* ((default-directory project)
+           (agent (lispm-start))
+           (now (float-time))
+           (stage (cons 0 nil)))
+      ;; Below 70% -> nil
+      (setf (lispm-agent-steps agent) 10)
+      (should (null (lispm-batch--budget-note agent (- now 500.0) (+ now 500.0) 100 stage)))
+      ;; Cross 70% via steps (75/100) -> emits stage 1 once
+      (setf (lispm-agent-steps agent) 75)
+      (let ((n1 (lispm-batch--budget-note agent (- now 500.0) (+ now 500.0) 100 stage)))
+        (should (stringp n1))
+        (should (string-search "LispM budget notice: 75%" n1))
+        (should (= (car stage) 1)))
+      ;; Subsequent call at 76% -> nil (not repeated)
+      (setf (lispm-agent-steps agent) 76)
+      (should (null (lispm-batch--budget-note agent (- now 500.0) (+ now 500.0) 100 stage)))
+      ;; Cross 85% via steps (88/100) -> emits stage 2 once
+      (setf (lispm-agent-steps agent) 88)
+      (let ((n2 (lispm-batch--budget-note agent (- now 500.0) (+ now 500.0) 100 stage)))
+        (should (stringp n2))
+        (should (string-search "LispM URGENT budget notice: 88%" n2))
+        (should (= (car stage) 2)))
+      ;; Subsequent call at 92% -> nil (not repeated)
+      (setf (lispm-agent-steps agent) 92)
+      (should (null (lispm-batch--budget-note agent (- now 500.0) (+ now 500.0) 100 stage)))
+      ;; Verify `lispm-tool-result-note-function' appends to tool result in transcript
+      (setf (lispm-agent-policy agent) '((exec . auto)))
+      (let ((lispm-tool-result-note-function
+             (lambda (_ag _call _text _err)
+               "[LispM budget notice: test marker]")))
+        (setq lispm-test--scripts
+              `((assistant@project
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t1" "run_shell"
+                                                     '((why . "echo") (command . "printf 'hi\\n'"))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+        (lispm-tell agent "test note")
+        (should (lispm-test--wait (lispm-test--idle-p agent) 5))
+        (should (string-search "[LispM budget notice: test marker]"
+                               (lispm-test--transcript agent)))))))
+
 (provide 'lispm-batch-test)
 ;;; lispm-batch-test.el ends here

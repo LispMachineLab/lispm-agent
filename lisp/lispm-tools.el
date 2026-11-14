@@ -2710,6 +2710,23 @@ nothing to send."
     (lispm-tools--cancel-kernel-shells
      (buffer-local-value 'lispm-agents-bridge--agent terminal))))
 
+(defun lispm-tools--effective-shell-timeout (timeout)
+  "Effective shell command timeout in seconds for requested TIMEOUT.
+When `lispm-turn-deadline' is bound to a positive `float-time', clamp
+the timeout so a single shell command cannot consume the entire remaining
+wall-clock budget."
+  (let ((requested (max 1 (ceiling (or timeout lispm-shell-timeout)))))
+    (if (and (numberp lispm-turn-deadline) (> lispm-turn-deadline 0))
+        (let* ((remaining (- lispm-turn-deadline (float-time)))
+               (total (and (numberp lispm-turn-started-at)
+                           (- lispm-turn-deadline lispm-turn-started-at)))
+               (reserve (if (and total (>= total 300))
+                            (min 90.0 (max 30.0 (* 0.04 total)))
+                          0.0))
+               (budget (max 5 (floor (- remaining reserve)))))
+          (min requested budget))
+      requested)))
+
 (defun lispm-tools--run-shell-via-kernel (agent command timeout log-buffer done fallback)
   "Run unsandboxed COMMAND in the kernel when `lispm-kernel-exec-mode' is on.
 Return non-nil when the kernel took the command, or nil to run FALLBACK."
@@ -2722,7 +2739,7 @@ Return non-nil when the kernel took the command, or nil to run FALLBACK."
                  (if remote "/bin/sh" shell-file-name)
                  (if remote "-c" shell-command-switch)
                  command nil))
-           (effective-timeout (ceiling (or timeout lispm-shell-timeout)))
+           (effective-timeout (lispm-tools--effective-shell-timeout timeout))
            (entry (cons agent nil))
            (cancel
             (lispm-kernel-exec--submit
@@ -2878,7 +2895,7 @@ allows."
                  (funcall (process-sentinel proc) proc "finished\n"))
                 ((and (process-live-p proc) (not (process-get proc 'lispm-done)))
                  (process-put proc 'timer
-                              (run-at-time (or timeout lispm-shell-timeout) nil
+                              (run-at-time (lispm-tools--effective-shell-timeout timeout) nil
                                            (lambda ()
                                              (unless (process-get proc 'lispm-done)
                                                (if (process-live-p proc)

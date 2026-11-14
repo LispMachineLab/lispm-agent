@@ -250,6 +250,21 @@ until they had one of their own (see `lispm--permission-fallbacks')."
 Bound while a tool executes, so tools, and hooks they trigger, know
 who is acting.")
 
+(defvar lispm-turn-started-at nil
+  "Wall-clock `float-time' when the current turn started, or nil.")
+
+(defvar lispm-turn-deadline nil
+  "Wall-clock `float-time' deadline for the current turn, or nil.
+When bound to a positive number, long-running tools such as `run_shell'
+clamp their per-command timeout so they finish before the deadline.")
+
+(defvar lispm-tool-result-note-function nil
+  "Optional function appending a one-time note to a completed tool result.
+Called by `lispm--tool-done' with (AGENT CALL TEXT ERRORP) before TEXT
+is written into the session transcript.  Because the note is written
+once when the tool finishes and never mutated on later turns, it
+preserves the prompt-cache prefix.")
+
 (defvar lispm-state-change-functions nil
   "Abnormal hook run with an agent whenever its state changes.")
 
