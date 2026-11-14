@@ -345,6 +345,14 @@ Return (FIN OPCODE PAYLOAD . CONSUMED), or nil if INPUT is incomplete."
                 (aset payload i (logxor (aref payload i) (aref mask (% i 4)))))))
           (cl-list* fin opcode payload (+ offset len)))))))
 
+(defun lispm-web--cdp-fail-pending (ws message)
+  "Fail all pending CDP callbacks on WebSocket process WS with MESSAGE."
+  (let ((pending (process-get ws :pending)))
+    (process-put ws :pending nil)
+    (dolist (entry (nreverse pending))
+      (ignore-errors
+        (funcall (cdr entry) nil `((message . ,message)))))))
+
 (defun lispm-web--cdp-filter (ws bytes)
   "Accumulate BYTES on client WebSocket WS and dispatch complete CDP JSON responses."
   (process-put ws :buf (concat (process-get ws :buf) bytes))
@@ -384,7 +392,10 @@ Return (FIN OPCODE PAYLOAD . CONSUMED), or nil if INPUT is incomplete."
                    (process-send-string
                     ws (concat (unibyte-string #x8a (logior #x80 (length payload)) 0 0 0 0)
                                payload))))
-                (8 (delete-process ws) (throw 'done nil))))))))))
+                (8
+                 (lispm-web--cdp-fail-pending ws "CDP WebSocket closed by browser.")
+                 (delete-process ws)
+                 (throw 'done nil))))))))))
 
 (defun lispm-web--cdp-call (session method params callback)
   "Call CDP METHOD with PARAMS on SESSION; pass (RESULT ERROR) to CALLBACK."
@@ -528,7 +539,11 @@ When SHOW is non-nil, open a visible Chrome window instead of `--headless=new'."
                                                           :service port
                                                           :coding 'binary
                                                           :noquery t
-                                                          :filter #'lispm-web--cdp-filter)))
+                                                          :filter #'lispm-web--cdp-filter
+                                                          :sentinel (lambda (p _event)
+                                                                      (unless (process-live-p p)
+                                                                        (lispm-web--cdp-fail-pending
+                                                                         p "CDP WebSocket connection closed."))))))
                                                 (plist-put session :ws ws)
                                                 (process-put
                                                  ws :on-open
@@ -989,6 +1004,9 @@ failed."
       L.snapshot();
       return {kind: 'done', note: 'Snapshot'};
     }
+    if (act === 'screenshot') {
+      return {kind: 'done', note: 'Error: screenshot requires Chrome'};
+    }
     if (act === 'eval') {
       var code = (value != null && value !== '') ? String(value) : String(target || '');
       try {
@@ -1270,11 +1288,17 @@ failed."
                (funcall callback (format "Error capturing screenshot: %s"
                                          (or (alist-get 'message err) err)))
              (let* ((b64 (alist-get 'data res))
-                    (file (if (and (stringp value) (not (string-empty-p value)))
-                              (expand-file-name value)
+                    (raw-path (cond
+                               ((and (stringp value) (not (string-empty-p value))) value)
+                               ((and (stringp target) (not (string-empty-p target))) target)
+                               (t nil)))
+                    (file (if raw-path
+                              (expand-file-name raw-path)
                             (make-temp-file "lispm-web-screenshot-" nil ".png"))))
                (if (not (stringp b64))
                    (funcall callback "Error: empty screenshot data")
+                 (when-let* ((dir (file-name-directory file)))
+                   (make-directory dir t))
                  (let ((coding-system-for-write 'binary))
                    (with-temp-file file
                      (set-buffer-multibyte nil)
@@ -1469,7 +1493,7 @@ CALLBACK receives (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
                        (if (equal status "loading")
                            (setq loaded-at nil)
                          (unless loaded-at (setq loaded-at (float-time)))
-                         (when (and (> (- (float-time) loaded-at) phase-settle)
+                         (when (and (>= (- (float-time) loaded-at) phase-settle)
                                     (equal status "ready"))
                            (if (eq state 'pre-act)
                                (progn
@@ -1530,12 +1554,18 @@ Call CALLBACK with (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
            (funcall callback dom (if (string-empty-p final) (or url "") final)
                     title problem note elements)))))
      ((lispm-web--chrome-p)
-      (let ((settle (if url lispm-web-settle 0.05)))
+      (let* ((eff-url (or url
+                          (and (null lispm-web--cdp-session)
+                               lispm-web--webkit-session
+                               (when-let* ((xw (plist-get lispm-web--webkit-session :xwidget))
+                                           (u (ignore-errors (xwidget-webkit-uri xw))))
+                                 (and (stringp u) (not (member u '("" "about:blank"))) u)))))
+             (settle (if eff-url lispm-web-settle 0.05)))
         (lispm-web--ensure-cdp-session
-         url
+         eff-url
          (lambda (session problem)
            (if problem
-               (funcall callback nil (or url "") nil problem nil nil)
+               (funcall callback nil (or eff-url "") nil problem nil nil)
              (lispm-web--drive-session
               (lambda (js fn)
                 (lispm-web--cdp-eval session js (lambda (val _err) (funcall fn val))))
@@ -1556,7 +1586,7 @@ Call CALLBACK with (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
                    (funcall fn (or status "loading")))))
               settle wait-for action target value
               (lambda (dom final title err note elements)
-                (funcall callback dom (if (string-empty-p final) (or url "") final)
+                (funcall callback dom (if (string-empty-p final) (or eff-url "") final)
                          title err note elements)))))
          show)))
      (t
