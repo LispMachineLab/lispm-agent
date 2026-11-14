@@ -103,7 +103,7 @@
   :group 'lispm-bar)
 
 (defconst lispm-bar--instructions
-  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar, a one-line field with a small window for your reply, and from a chat; both are this one conversation. You act for the user across Emacs and the computer: find what the system and what is installed can do (search_tools finds their skills, the manuals with their tools), open and change things, and answer questions. Your reply first shows in that small window: lead with the answer or with what you did, and keep it short unless asked for more."
+  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar (a one-line field with a small window for your reply), from a Listener command prompt, from a chat window, or from the LispM terminal; all share this one conversation. Check `[Current LispM scenario]' when present on a turn to know which surface the user is currently using, what windows or buffers are active, and what recent commands ran. You act for the user across Emacs and the computer: find what the system and what is installed can do (search_tools finds their skills, the manuals with their tools), open and change things, introspect live Emacs state when asked about UI behavior, and answer questions. When answering in the LispM bar or inline in a Listener, lead with the answer or with what you did, and keep it short unless asked for more."
   "What LispM itself is told it is, beyond what every agent is told.")
 
 (lispm-defrole system
@@ -298,6 +298,11 @@ when it opens next."
   "What was last asked from the bar: (TEXT . ENTRY-ID), or nil.
 TEXT is what the user typed; ENTRY-ID the id of the input it is in
 the system agent's inbox, then of its turn.")
+
+(defvar lispm-bar-entrypoint nil
+  "Symbol naming the UI surface that called `lispm-bar-ask' most recently.
+For example, `bar' when asked from the LispM bar field, or
+`genera-listener' when asked from `Dynamic Lisp Listener 1'.")
 
 (defvar lispm-bar--reply nil
   "The reply of the turn that answered what was last asked, once it ended.")
@@ -879,7 +884,8 @@ setup and queues what was asked until `lispm-bar-model-ready'."
                 thing
                 (or (plist-get thing :setup) (plist-get thing :ask)))
            (add-to-history 'lispm-bar-history text)
-           (setq lispm-bar--waiting (cons text request)
+           (setq lispm-bar-entrypoint 'bar
+                 lispm-bar--waiting (cons text request)
                  lispm-bar--then lispm-bar-setup-function)
            (exit-minibuffer))
           ((not lispm-bar--ready)
@@ -890,6 +896,7 @@ setup and queues what was asked until `lispm-bar-model-ready'."
            (lispm-bar-redraw))
           (t
            (add-to-history 'lispm-bar-history text)
+           (setq lispm-bar-entrypoint 'bar)
            (lispm-bar-ask request text)
            (delete-minibuffer-contents)
            (lispm-bar--set-text "")

@@ -274,6 +274,15 @@ Each is called with the agent and returns a string or nil.  The
 prompt is frozen when the session starts: changing it later would
 invalidate the model's cached prefix.")
 
+(defvar lispm-request-context-functions nil
+  "Functions giving live scenario context for an agent's current turn.
+Each is called with the agent and returns a string describing the live
+usage scenario (such as the active UI entrypoint, open desktop windows,
+selected buffer or recent Listener commands), or nil.  The combined
+context is captured once per turn and attached to the turn's user
+message in requests without altering the transcript buffer or earlier
+turns' cached prefix.")
+
 (defvar lispm-session-end-functions nil
   "Abnormal hook run with an agent whose session is closing.")
 
