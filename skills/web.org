@@ -1,33 +1,69 @@
 #+title: Browse the web
-#+description: Search the web and read pages, rendered by Emacs's own WebKit (xwidgets) when it has one, else fetched with url.el; show a page to the user in Emacs.
+#+description: Search the web, read pages and perform browser computer use (real mouse click, double-click, hover, drag, form fill/type, key press, mouse-wheel scroll, screenshot), rendered with JavaScript (JS) and DOM by Emacs's WebKit browser (xwidgets) or Chrome (CDP), else fetched with url.el.
 
-Emacs is your browser.  This skill gives you two tools, ~web_search~ and ~web_fetch~,
-and the functions behind them, for ~eval_elisp~ when you need more than they do.
+Emacs is your browser.  This skill gives you three tools, ~web_search~, ~web_fetch~ and
+~web_act~, and the functions behind them, for ~eval_elisp~ when you need more than they do.
 
-* Searching and reading
+* Searching, reading and computer use
 
 - ~web_search~ QUERY: results as title, URL and snippet (DuckDuckGo's HTML page, see
   ~lispm-web-search-url~).  Search, then read the pages that look right; do not answer from
   snippets alone when the details matter.
 - ~web_fetch~ URL: the page's title, its readable text (the main content, as eww's readable
   mode finds it) and its links, numbered.  A long page is cut; ask for more with START.
-- Pages are rendered by WebKit when this Emacs has xwidgets: their scripts run, and the
-  cookies are those of the user's own xwidget browsing, so sites they are signed in to are
-  signed in here too.  Otherwise url.el fetches the HTML, without scripts.
+  For dynamic SPA / JavaScript pages, pass ~wait_for~ (a CSS selector to wait for before
+  reading the DOM) or ~script~ (JavaScript to run in the page before reading its DOM).
+- ~web_act~: interactive browser *computer use* on a live page session.
+  - Pass ~url~ to open a page and receive a snapshot of its readable text and numbered
+    interactive elements with their viewport coordinates, such as:
+    - ~[1] field "Access Code" (value="") @(97,31)~
+    - ~[2] select "Mode" (value="ro") [options: Read Only, Read Write] @(215,31)~
+    - ~[3] button "Activate" @(310,31)~
+  - Pass ~action~ to interact with the page:
+    - ~"click"~, ~"double_click"~, ~"right_click"~, ~"hover"~: move the mouse to ~target~ (an
+      element number like ~"3"~, a CSS selector like ~"#submit"~, or explicit coordinates
+      ~"310,31"~) and perform a real mouse click / hover.
+    - ~"drag"~: drag with the mouse from ~target~ to ~value~ (an element number, CSS selector
+      or ~"x,y"~ coordinates).
+    - ~"fill"~ / ~"type"~: click ~target~ at its coordinates to focus it, then replace (~"fill"~)
+      or append (~"type"~) ~value~ using real key/input events.
+    - ~"select"~: choose option ~value~ in ~<select>~ element ~target~.
+    - ~"key"~ / ~"enter"~: press a key (~"Enter"~, ~"Tab"~, ~"Escape"~, ~"Backspace"~,
+      ~"ArrowDown"~, ~"ArrowUp"~, ~"PageDown"~, etc.).
+    - ~"scroll"~: scroll with a mouse-wheel event (~value~: ~"down"~, ~"up"~, ~"left"~,
+      ~"right"~, ~"top"~, ~"bottom"~, or pixel ~"deltaY"~ / ~"deltaX,deltaY"~) on the viewport
+      or on scrollable container ~target~.
+    - ~"screenshot"~: capture a PNG screenshot of the browser viewport (saved to ~value~ or a
+      temporary file).
+    - ~"eval"~: run JavaScript ~value~ in the page.
+- Rendering and computer-use engines (automatic fallback):
+  1. *WebKit* (~xwidget-webkit~) when this Emacs has a graphical display and xwidgets.
+  2. *Chrome / Chromium via CDP* (~google-chrome~ / ~chromium~) when WebKit is unavailable, or
+     when ~engine~ is ~"chrome"~, or for ~"screenshot"~: dispatches hardware-trusted browser
+     input events (~Input.dispatchMouseEvent~, ~Input.dispatchKeyEvent~, ~Input.insertText~ with
+     ~event.isTrusted === true~) and captures ~Page.captureScreenshot~.  Pass ~show: t~ with
+     ~engine: "chrome"~ to open a visible Chrome window on the desktop.
+  3. *url.el* static HTML fetch when neither WebKit nor Chrome is available.
 
 * Showing a page to the user
 
-~(xwidget-webkit-browse-url URL)~ opens it in a WebKit buffer they can use; ~(eww URL)~ in
+~(lispm-browser-browse-url URL)~ (when ~lispm-browser~ is loaded, else
+~(xwidget-webkit-browse-url URL)~) opens it in a WebKit buffer they can use; ~(eww URL)~ in
 eww.  Do this when they want to see a page, not to read one yourself.
 
 * Beyond the tools
 
 With ~eval_elisp~, ending in ~lispm-async~ to wait for the page:
 
-- ~(lispm-web-dom URL CALLBACK)~ loads URL and calls CALLBACK with its DOM (see the ~dom~
-  library: ~dom-by-tag~, ~dom-by-class~, ~dom-by-id~, ~dom-texts~, ~dom-attr~), the final URL,
-  the title, and, if it failed, a description of the problem.
+- ~(lispm-web-dom URL CALLBACK &optional WAIT-FOR SCRIPT)~ loads URL and calls CALLBACK with
+  its DOM (see the ~dom~ library: ~dom-by-tag~, ~dom-by-class~, ~dom-by-id~, ~dom-texts~,
+  ~dom-attr~), the final URL, the title, and, if it failed, a description of the problem (plus
+  SCRIPT's string value as a fifth argument when SCRIPT is given and CALLBACK takes five).
+- ~(lispm-web-act CALLBACK &key URL ACTION TARGET VALUE WAIT-FOR SHOW ENGINE)~ drives the live
+  browser session and calls CALLBACK with ~(DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)~.
 - ~(lispm-web-text DOM URL)~ is the readable text of DOM; ~(lispm-web-links DOM URL)~ its links.
+- When ~lispm-browser~ has an open tab (~(lispm-browser-shown-buffer)~),
+  ~(lispm-browser-run-script XWIDGET SCRIPT CALLBACK)~ runs JavaScript in that live tab.
 
 For instance, the tables of a page:
 
@@ -50,8 +86,12 @@ For instance, the tables of a page:
 * The code
 
 #+begin_src emacs-lisp :lispm load
+(require 'cl-lib)
 (require 'dom)
+(require 'json)
+(require 'seq)
 (require 'shr)
+(require 'subr-x)
 (require 'eww)
 (require 'url)
 (require 'xwidget nil t)
@@ -65,12 +105,39 @@ For instance, the tables of a page:
 (defvar lispm-web-settle 0.8
   "Seconds to wait after a page has loaded, for its scripts to run.")
 
+(defvar lispm-web-act-settle 0.35
+  "Seconds to wait after an interactive action on a page, for scripts or navigation.")
+
 (defvar lispm-web-chunk 20000
   "Characters of a page web_fetch returns at a time.")
+
+(defvar lispm-web-chrome-program 'auto
+  "Program for headless Chrome when WebKit is unavailable, `auto' to find one, or nil.")
 
 (defun lispm-web--webkit-p ()
   "Non-nil if pages can be rendered by WebKit in this Emacs."
   (and (featurep 'xwidget-internal) (memq initial-window-system '(ns x pgtk))))
+
+(defun lispm-web--chrome-program ()
+  "Return the Chrome or Chromium executable to use, or nil."
+  (cond
+   ((null lispm-web-chrome-program) nil)
+   ((stringp lispm-web-chrome-program)
+    (or (executable-find lispm-web-chrome-program)
+        (and (file-executable-p lispm-web-chrome-program) lispm-web-chrome-program)))
+   (t
+    (or (seq-some #'executable-find
+                  '("google-chrome" "google-chrome-stable" "chromium" "chromium-browser"))
+        (let ((mac "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
+          (and (file-executable-p mac) mac))))))
+
+(defun lispm-web--chrome-p ()
+  "Non-nil if pages can be rendered by Chrome."
+  (not (null (lispm-web--chrome-program))))
+
+(defun lispm-web--js-engine-p ()
+  "Non-nil if pages can be rendered with JavaScript (WebKit or Chrome)."
+  (or (lispm-web--webkit-p) (lispm-web--chrome-p)))
 
 (defun lispm-web--parse (html)
   "The DOM of the string HTML."
@@ -81,6 +148,15 @@ For instance, the tables of a page:
 (defun lispm-web--title (dom)
   "The title of DOM."
   (string-trim (dom-texts (car (dom-by-tag dom 'title)) "")))
+
+(defun lispm-web--call-dom-callback (callback dom final title problem &optional script script-result)
+  "Call CALLBACK with DOM, FINAL, TITLE, PROBLEM and optional SCRIPT-RESULT."
+  (if script
+      (condition-case nil
+          (funcall callback dom final title problem script-result)
+        (wrong-number-of-arguments
+         (funcall callback dom final title problem)))
+    (funcall callback dom final title problem)))
 
 ;; The function given to `xwidget-webkit-execute-script' could crash
 ;; Emacs on macOS (Emacs 31.1, NS build).  The bug is Emacs's.  Only GTK
@@ -112,29 +188,42 @@ its page is closed, as WebKit may still call back.")
 (defvar lispm-web--hold-seconds 60
   "Seconds a page's xwidget and script callback are held after it is closed.")
 
-(defun lispm-web--webkit-dom (url callback)
+(defun lispm-web--webkit-dom (url callback &optional wait-for script)
   "Load URL in a WebKit widget out of sight; call CALLBACK as `lispm-web-dom' does.
+When WAIT-FOR, a CSS selector, is non-nil, wait until it matches in the
+document (or `lispm-web-timeout' passes) before reading the page.  When
+SCRIPT, JavaScript, is non-nil, evaluate it in the page before reading
+its HTML and pass its string value as a fifth argument to CALLBACK when
+accepted.
 A timer watches the page load.  It also keeps Emacs's event loop
 turning: the widget's events, the results of its scripts among them,
 wait in the queue until something wakes the loop.  The widget, and the
-callback of the script that reads its HTML, are held in
-`lispm-web--held' until a while after the page is closed."
+callbacks of the scripts sent to it, are held in `lispm-web--held'
+until a while after the page is closed."
   (let* ((buffer (generate-new-buffer " *lispm-web*" t))
          (xwidget (make-xwidget 'webkit "lispm-web" 1280 1600 nil buffer))
          (deadline (+ (float-time) lispm-web-timeout))
          (state 'loading)
-         loaded-at pump held)
+         loaded-at pump held checking-selector)
     (cl-labels
-        ((finish (dom final title problem)
+        ((hold-and-run (js fn)
+           (let ((cell (list xwidget fn)))
+             (push cell held)
+             (push cell lispm-web--held)
+             (xwidget-webkit-execute-script xwidget js fn)))
+         (finish (dom final title problem &optional script-result)
            (unless (eq state 'done)
              (setq state 'done)
              (cancel-timer pump)
              (ignore-errors (kill-xwidget xwidget))
              (when (buffer-live-p buffer) (kill-buffer buffer))
              (when held
-               (run-at-time lispm-web--hold-seconds nil
-                            (lambda () (setq lispm-web--held (delq held lispm-web--held)))))
-             (funcall callback dom final title problem)))
+               (let ((cells held))
+                 (run-at-time lispm-web--hold-seconds nil
+                              (lambda ()
+                                (dolist (cell cells)
+                                  (setq lispm-web--held (delq cell lispm-web--held)))))))
+             (lispm-web--call-dom-callback callback dom final title problem script script-result)))
          (loaded-p ()
            (let ((uri (xwidget-webkit-uri xwidget)))
              (and (stringp uri) (not (member uri '("" "about:blank")))
@@ -142,19 +231,40 @@ callback of the script that reads its HTML, are held in
          (grab ()
            (setq state 'grabbing
                  deadline (+ (float-time) 10))
-           (let ((answer (lambda (html)
-                           ;; An answer after the deadline finds the page closed.
-                           (unless (eq state 'done)
-                             (if (stringp html)
-                                 (let ((dom (lispm-web--parse html)))
-                                   (finish dom (or (xwidget-webkit-uri xwidget) url)
-                                           (or (xwidget-webkit-title xwidget) (lispm-web--title dom))
-                                           nil))
-                               (finish nil url nil "The page did not give its HTML."))))))
-             (setq held (list xwidget answer))
-             (push held lispm-web--held)
-             (xwidget-webkit-execute-script
-              xwidget "document.documentElement.outerHTML" answer)))
+           (if script
+               (hold-and-run
+                (format "(function () {
+  var value;
+  try {
+    value = eval(%s);
+  } catch (e) {
+    value = 'Error: ' + (e && e.message ? e.message : String(e));
+  }
+  return JSON.stringify([value === undefined || value === null ? '' : String(value),
+                         document.documentElement ? document.documentElement.outerHTML : '']);
+})()"
+                        (json-encode script))
+                (lambda (payload)
+                  (unless (eq state 'done)
+                    (let ((parsed (and (stringp payload)
+                                       (ignore-errors (json-parse-string payload :array-type 'list)))))
+                      (if (and (consp parsed) (stringp (nth 1 parsed))
+                               (not (string-empty-p (nth 1 parsed))))
+                          (let ((dom (lispm-web--parse (nth 1 parsed))))
+                            (finish dom (or (xwidget-webkit-uri xwidget) url)
+                                    (or (xwidget-webkit-title xwidget) (lispm-web--title dom))
+                                    nil (nth 0 parsed)))
+                        (finish nil url nil "The page did not give its HTML."))))))
+             (let ((answer (lambda (html)
+                             ;; An answer after the deadline finds the page closed.
+                             (unless (eq state 'done)
+                               (if (stringp html)
+                                   (let ((dom (lispm-web--parse html)))
+                                     (finish dom (or (xwidget-webkit-uri xwidget) url)
+                                             (or (xwidget-webkit-title xwidget) (lispm-web--title dom))
+                                             nil))
+                                 (finish nil url nil "The page did not give its HTML."))))))
+               (hold-and-run "document.documentElement.outerHTML" answer))))
          (tick ()
            (pcase state
              ('loading
@@ -162,7 +272,17 @@ callback of the script that reads its HTML, are held in
                     ((not (loaded-p)) (setq loaded-at nil))
                     ((null loaded-at) (setq loaded-at (float-time)))
                     ;; Loaded a moment ago: let its scripts run.
-                    ((> (- (float-time) loaded-at) lispm-web-settle) (grab))))
+                    ((> (- (float-time) loaded-at) lispm-web-settle)
+                     (if (null wait-for)
+                         (grab)
+                       (unless checking-selector
+                         (setq checking-selector t)
+                         (hold-and-run
+                          (format "document.querySelector(%s) ? '1' : '0'" (json-encode wait-for))
+                          (lambda (matched)
+                            (setq checking-selector nil)
+                            (when (and (eq state 'loading) (equal matched "1"))
+                              (grab)))))))))
              ('grabbing
               (when (> (float-time) deadline)
                 (finish nil url nil "The page did not give its HTML."))))))
@@ -172,6 +292,513 @@ callback of the script that reads its HTML, are held in
                        (funcall (nth 3 last-input-event) (nth 4 last-input-event)))))
       (setq pump (run-at-time 0.2 0.2 #'tick))
       (xwidget-webkit-goto-uri xwidget url))))
+
+;;;; Chrome DevTools Protocol (CDP) client and real input injection
+
+(defun lispm-web--cdp-send-frame (ws text)
+  "Send UTF-8 TEXT over the client WebSocket network process WS."
+  (when (process-live-p ws)
+    (let* ((payload (if (multibyte-string-p text)
+                        (encode-coding-string text 'utf-8)
+                      text))
+           (len (length payload))
+           (header (concat (unibyte-string #x81)
+                           (cond ((< len 126)
+                                  (unibyte-string (logior #x80 len)))
+                                 ((< len 65536)
+                                  (unibyte-string (logior #x80 126)
+                                                  (ash len -8)
+                                                  (logand len #xff)))
+                                 (t
+                                  (apply #'unibyte-string (logior #x80 127)
+                                         (mapcar (lambda (shift)
+                                                   (logand (ash len (- shift)) #xff))
+                                                 '(56 48 40 32 24 16 8 0)))))
+                           ;; A zero mask key satisfies RFC 6455 client masking
+                           ;; without altering payload bytes.
+                           (unibyte-string 0 0 0 0))))
+      (process-send-string ws (concat header payload)))))
+
+(defun lispm-web--cdp-next-frame (input)
+  "Parse the first server frame from unibyte INPUT.
+Return (FIN OPCODE PAYLOAD . CONSUMED), or nil if INPUT is incomplete."
+  (when (>= (length input) 2)
+    (let* ((b0 (aref input 0))
+           (b1 (aref input 1))
+           (fin (/= 0 (logand b0 #x80)))
+           (opcode (logand b0 #x0f))
+           (masked (/= 0 (logand b1 #x80)))
+           (short (logand b1 #x7f))
+           (offset (+ (pcase short (126 4) (127 10) (_ 2))
+                      (if masked 4 0)))
+           (len (and (>= (length input) (pcase short (126 4) (127 10) (_ 2)))
+                     (pcase short
+                       (126 (logior (ash (aref input 2) 8) (aref input 3)))
+                       (127 (seq-reduce (lambda (acc byte) (logior (ash acc 8) byte))
+                                        (substring input 2 10) 0))
+                       (_ short)))))
+      (when (and len (>= (length input) (+ offset len)))
+        (let ((payload (substring input offset (+ offset len))))
+          (when masked
+            (let ((mask (substring input (- offset 4) offset)))
+              (dotimes (i len)
+                (aset payload i (logxor (aref payload i) (aref mask (% i 4)))))))
+          (cl-list* fin opcode payload (+ offset len)))))))
+
+(defun lispm-web--cdp-fail-pending (ws message)
+  "Fail all pending CDP callbacks on WebSocket process WS with MESSAGE."
+  (let ((pending (process-get ws :pending)))
+    (process-put ws :pending nil)
+    (dolist (entry (nreverse pending))
+      (ignore-errors
+        (funcall (cdr entry) nil `((message . ,message)))))))
+
+(defun lispm-web--cdp-filter (ws bytes)
+  "Accumulate BYTES on client WebSocket WS and dispatch complete CDP JSON responses."
+  (process-put ws :buf (concat (process-get ws :buf) bytes))
+  (unless (process-get ws :open)
+    (let ((buf (process-get ws :buf)))
+      (when-let* ((end (string-search "\r\n\r\n" buf)))
+        (process-put ws :open t)
+        (process-put ws :buf (substring buf (+ end 4)))
+        (when-let* ((on-open (process-get ws :on-open)))
+          (process-put ws :on-open nil)
+          (funcall on-open)))))
+  (when (process-get ws :open)
+    (catch 'done
+      (while (process-live-p ws)
+        (let ((frame (lispm-web--cdp-next-frame (process-get ws :buf))))
+          (if (null frame)
+              (throw 'done nil)
+            (pcase-let ((`(,fin ,opcode ,payload . ,consumed) frame))
+              (process-put ws :buf (substring (process-get ws :buf) consumed))
+              (pcase opcode
+                ((or 0 1)
+                 (let ((full (concat (process-get ws :frag) payload)))
+                   (process-put ws :frag (unless fin full))
+                   (when fin
+                     (when-let* ((msg (ignore-errors
+                                        (json-parse-string
+                                         (decode-coding-string full 'utf-8)
+                                         :object-type 'alist
+                                         :array-type 'list)))
+                                 (id (alist-get 'id msg))
+                                 (pending (process-get ws :pending))
+                                 (cb (alist-get id pending)))
+                       (process-put ws :pending (assq-delete-all id pending))
+                       (funcall cb (alist-get 'result msg) (alist-get 'error msg))))))
+                (9
+                 (when (process-live-p ws)
+                   (process-send-string
+                    ws (concat (unibyte-string #x8a (logior #x80 (length payload)) 0 0 0 0)
+                               payload))))
+                (8
+                 (lispm-web--cdp-fail-pending ws "CDP WebSocket closed by browser.")
+                 (delete-process ws)
+                 (throw 'done nil))))))))))
+
+(defun lispm-web--cdp-call (session method params callback)
+  "Call CDP METHOD with PARAMS on SESSION; pass (RESULT ERROR) to CALLBACK."
+  (let* ((ws (plist-get session :ws))
+         (id (1+ (or (plist-get session :id) 0))))
+    (plist-put session :id id)
+    (if (not (and ws (process-live-p ws)))
+        (funcall callback nil '((message . "CDP WebSocket is not connected.")))
+      (process-put ws :pending (cons (cons id callback) (process-get ws :pending)))
+      (lispm-web--cdp-send-frame
+       ws (json-encode `((id . ,id)
+                         (method . ,method)
+                         (params . ,(or params (make-hash-table)))))))))
+
+(defun lispm-web--cdp-run-steps (session steps callback)
+  "Execute STEPS, a list of (METHOD . PARAMS), sequentially on SESSION; call CALLBACK."
+  (if (null steps)
+      (funcall callback nil)
+    (let ((step (car steps)))
+      (lispm-web--cdp-call
+       session (car step) (cdr step)
+       (lambda (_res err)
+         (if err
+             (funcall callback (or (alist-get 'message err) "CDP input command failed."))
+           (lispm-web--cdp-run-steps session (cdr steps) callback)))))))
+
+(defun lispm-web--cdp-eval (session expression callback)
+  "Evaluate JavaScript EXPRESSION in SESSION; call CALLBACK with its string result."
+  (lispm-web--cdp-call
+   session "Runtime.evaluate"
+   `((expression . ,expression)
+     (returnByValue . t)
+     (awaitPromise . t))
+   (lambda (result err)
+     (if err
+         (funcall callback nil (or (alist-get 'message err) "CDP evaluation failed."))
+       (let* ((inner (alist-get 'result result))
+              (val (alist-get 'value inner)))
+         (funcall callback (if (stringp val) val (and val (format "%s" val))) nil))))))
+
+(defun lispm-web--cdp-close (session)
+  "Close the Chrome CDP SESSION and clean up its temporary profile."
+  (when session
+    (when-let* ((timer (plist-get session :timer)))
+      (cancel-timer timer))
+    (when-let* ((ws (plist-get session :ws)))
+      (when (process-live-p ws)
+        (ignore-errors
+          (lispm-web--cdp-send-frame
+           ws "{\"id\":999999,\"method\":\"Browser.close\",\"params\":{}}")))
+      (ignore-errors (delete-process ws)))
+    (when-let* ((proc (plist-get session :process)))
+      (ignore-errors (delete-process proc)))
+    (when-let* ((buf (plist-get session :stdout)))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (when-let* ((buf (plist-get session :stderr)))
+      (when (buffer-live-p buf) (kill-buffer buf)))
+    (when-let* ((dir (plist-get session :dir)))
+      (ignore-errors (delete-directory dir t)))
+    (plist-put session :closed t)))
+
+(defun lispm-web--cdp-open (initial-url callback &optional show)
+  "Start a Chrome CDP session at INITIAL-URL; call CALLBACK with (SESSION PROBLEM).
+When SHOW is non-nil, open a visible Chrome window instead of `--headless=new'."
+  (let ((program (lispm-web--chrome-program)))
+    (if (not program)
+        (funcall callback nil "Chrome is not available on this machine.")
+      (let* ((dir (make-temp-file "lispm-web-chrome-" t))
+             (stdout (generate-new-buffer " *lispm-web-chrome-stdout*" t))
+             (stderr (generate-new-buffer " *lispm-web-chrome-stderr*" t))
+             (deadline (+ (float-time) lispm-web-timeout))
+             (session (list :dir dir :stdout stdout :stderr stderr :id 0 :show show))
+             proc timer)
+        (condition-case err
+            (setq proc (make-process
+                        :name "lispm-web-chrome"
+                        :buffer stdout
+                        :connection-type 'pipe
+                        :command `(,program
+                                   ,@(unless show '("--headless=new"))
+                                   "--disable-gpu"
+                                   "--no-first-run"
+                                   "--no-default-browser-check"
+                                   "--window-size=1280,900"
+                                   ,(concat "--user-data-dir=" dir)
+                                   "--remote-debugging-port=0"
+                                   ,(or initial-url "about:blank"))
+                        :stderr stderr
+                        :noquery t))
+          (error
+           (lispm-web--cdp-close session)
+           (funcall callback nil (format "Could not start Chrome: %s" (error-message-string err)))))
+        (when proc
+          (plist-put session :process proc)
+          (setq timer
+                (run-at-time
+                 0.05 0.05
+                 (lambda ()
+                   (cond
+                    ((plist-get session :closed)
+                     (cancel-timer timer))
+                    ((> (float-time) deadline)
+                     (lispm-web--cdp-close session)
+                     (funcall callback nil "Timed out starting Chrome."))
+                    ((not (plist-get session :port))
+                     (when (buffer-live-p stderr)
+                       (with-current-buffer stderr
+                         (goto-char (point-min))
+                         (when (re-search-forward
+                                "DevTools listening on ws://127\\.0\\.0\\.1:\\([0-9]+\\)/"
+                                nil t)
+                           (let ((port (string-to-number (match-string 1))))
+                             (plist-put session :port port)
+                             (url-retrieve
+                              (format "http://127.0.0.1:%d/json" port)
+                              (lambda (status)
+                                (let ((buf (current-buffer)))
+                                  (unwind-protect
+                                      (if (plist-get status :error)
+                                          (plist-put session :port nil)
+                                        (goto-char (point-min))
+                                        (when (re-search-forward "\r?\n\r?\n" nil t)
+                                          (let* ((targets (ignore-errors
+                                                            (json-parse-buffer
+                                                             :object-type 'alist
+                                                             :array-type 'list)))
+                                                 (page (seq-find
+                                                        (lambda (it)
+                                                          (equal (alist-get 'type it) "page"))
+                                                        targets))
+                                                 (ws-url (alist-get 'webSocketDebuggerUrl page)))
+                                            (if (not (and (stringp ws-url)
+                                                          (string-match
+                                                           "ws://127\\.0\\.0\\.1:\\([0-9]+\\)\\(/.*\\)"
+                                                           ws-url)))
+                                                (plist-put session :port nil)
+                                              (let* ((path (match-string 2 ws-url))
+                                                     (ws (make-network-process
+                                                          :name "lispm-web-cdp-ws"
+                                                          :host "127.0.0.1"
+                                                          :service port
+                                                          :coding 'binary
+                                                          :noquery t
+                                                          :filter #'lispm-web--cdp-filter
+                                                          :sentinel (lambda (p _event)
+                                                                      (unless (process-live-p p)
+                                                                        (lispm-web--cdp-fail-pending
+                                                                         p "CDP WebSocket connection closed."))))))
+                                                (plist-put session :ws ws)
+                                                (process-put
+                                                 ws :on-open
+                                                 (lambda ()
+                                                   (cancel-timer timer)
+                                                   (plist-put session :timer nil)
+                                                   (lispm-web--cdp-call
+                                                    session "Page.enable" nil
+                                                    (lambda (_res _err)
+                                                      (funcall callback session nil)))))
+                                                (process-send-string
+                                                 ws
+                                                 (format (concat "GET %s HTTP/1.1\r\n"
+                                                                 "Host: 127.0.0.1:%d\r\n"
+                                                                 "Upgrade: websocket\r\n"
+                                                                 "Connection: Upgrade\r\n"
+                                                                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                                                                 "Sec-WebSocket-Version: 13\r\n\r\n")
+                                                         path port)))))))
+                                    (kill-buffer buf))))
+                              nil t t))))))))))
+          (plist-put session :timer timer))))))
+
+(defun lispm-web--cdp-key-spec (key-name)
+  "Return a CDP key descriptor alist for KEY-NAME."
+  (pcase (string-trim (or key-name "Enter"))
+    ((or "Enter" "Return" "enter" "return")
+     '((key . "Enter") (code . "Enter") (windowsVirtualKeyCode . 13) (text . "\r")))
+    ((or "Tab" "tab")
+     '((key . "Tab") (code . "Tab") (windowsVirtualKeyCode . 9)))
+    ((or "Escape" "Esc" "escape" "esc")
+     '((key . "Escape") (code . "Escape") (windowsVirtualKeyCode . 27)))
+    ((or "Backspace" "backspace")
+     '((key . "Backspace") (code . "Backspace") (windowsVirtualKeyCode . 8)))
+    ((or "Delete" "delete")
+     '((key . "Delete") (code . "Delete") (windowsVirtualKeyCode . 46)))
+    ((or "ArrowDown" "Down" "down")
+     '((key . "ArrowDown") (code . "ArrowDown") (windowsVirtualKeyCode . 40)))
+    ((or "ArrowUp" "Up" "up")
+     '((key . "ArrowUp") (code . "ArrowUp") (windowsVirtualKeyCode . 38)))
+    ((or "ArrowLeft" "Left" "left")
+     '((key . "ArrowLeft") (code . "ArrowLeft") (windowsVirtualKeyCode . 37)))
+    ((or "ArrowRight" "Right" "right")
+     '((key . "ArrowRight") (code . "ArrowRight") (windowsVirtualKeyCode . 39)))
+    ((or "PageDown" "pagedown")
+     '((key . "PageDown") (code . "PageDown") (windowsVirtualKeyCode . 34)))
+    ((or "PageUp" "pageup")
+     '((key . "PageUp") (code . "PageUp") (windowsVirtualKeyCode . 33)))
+    ((or "Home" "home")
+     '((key . "Home") (code . "Home") (windowsVirtualKeyCode . 36)))
+    ((or "End" "end")
+     '((key . "End") (code . "End") (windowsVirtualKeyCode . 35)))
+    ((or "Space" "space" " ")
+     '((key . " ") (code . "Space") (windowsVirtualKeyCode . 32) (text . " ")))
+    (other
+     (let* ((ch (if (> (length other) 0) (aref other 0) ?\r))
+            (up (upcase ch))
+            (s (char-to-string ch)))
+       `((key . ,s)
+         (code . ,(if (and (>= up ?A) (<= up ?Z)) (format "Key%c" up) ""))
+         (windowsVirtualKeyCode . ,up)
+         (text . ,s))))))
+
+(defun lispm-web--cdp-mouse-steps (x y &optional button clicks)
+  "CDP `Input.dispatchMouseEvent' steps to move to (X, Y) and click BUTTON CLICKS times."
+  (let* ((btn (or button "left"))
+         (mask (if (equal btn "right") 2 1))
+         (n (or clicks 1))
+         (steps (list `("Input.dispatchMouseEvent"
+                        . ((type . "mouseMoved") (x . ,x) (y . ,y) (button . "none") (buttons . 0))))))
+    (dotimes (i n)
+      (let ((c (1+ i)))
+        (setq steps
+              (append steps
+                      (list `("Input.dispatchMouseEvent"
+                              . ((type . "mousePressed")
+                                 (x . ,x) (y . ,y)
+                                 (button . ,btn) (buttons . ,mask) (clickCount . ,c)))
+                            `("Input.dispatchMouseEvent"
+                              . ((type . "mouseReleased")
+                                 (x . ,x) (y . ,y)
+                                 (button . ,btn) (buttons . 0) (clickCount . ,c))))))))
+    steps))
+
+(defun lispm-web--cdp-key-steps (key-name)
+  "CDP `Input.dispatchKeyEvent' steps for pressing and releasing KEY-NAME."
+  (let ((spec (lispm-web--cdp-key-spec key-name)))
+    (list `("Input.dispatchKeyEvent" . ((type . "keyDown") ,@spec))
+          `("Input.dispatchKeyEvent"
+            . ((type . "keyUp")
+               (key . ,(alist-get 'key spec))
+               (code . ,(alist-get 'code spec))
+               (windowsVirtualKeyCode . ,(alist-get 'windowsVirtualKeyCode spec)))))))
+
+(defun lispm-web--cdp-text-steps (text &optional clear-first)
+  "CDP input steps to optionally clear existing text with Backspace and type TEXT."
+  (let ((steps (if clear-first
+                   (append
+                    (list '("Input.dispatchKeyEvent"
+                            . ((type . "rawKeyDown")
+                               (key . "a") (code . "KeyA")
+                               (windowsVirtualKeyCode . 65)
+                               (commands . ("selectAll"))))
+                          '("Input.dispatchKeyEvent"
+                            . ((type . "keyUp")
+                               (key . "a") (code . "KeyA")
+                               (windowsVirtualKeyCode . 65))))
+                    (lispm-web--cdp-key-steps "Backspace"))
+                 (lispm-web--cdp-key-steps "End"))))
+    (cond
+     ((string-empty-p text) steps)
+     ;; Dispatch keyDown/keyUp for the first character so keydown/keyup listeners
+     ;; see a trusted keystroke, and insertText for the remaining string.
+     (t
+      (let ((first (substring text 0 1))
+            (rest (substring text 1)))
+        (append steps
+                (lispm-web--cdp-key-steps first)
+                (unless (string-empty-p rest)
+                  (list `("Input.insertText" . ((text . ,rest)))))))))))
+
+(defun lispm-web--chrome-cdp-dom (url callback &optional wait-for script)
+  "Load URL in headless Chrome via CDP; call CALLBACK as `lispm-web-dom' does."
+  (lispm-web--cdp-open
+   url
+   (lambda (session problem)
+     (if problem
+         (lispm-web--url-dom url callback)
+       (let ((deadline (+ (float-time) lispm-web-timeout))
+             (state 'loading)
+             loaded-at pump checking)
+         (cl-labels
+             ((finish (dom final title err &optional script-result)
+                (unless (eq state 'done)
+                  (setq state 'done)
+                  (when pump (cancel-timer pump))
+                  (lispm-web--cdp-close session)
+                  (lispm-web--call-dom-callback callback dom final title err script script-result)))
+              (grab ()
+                (setq state 'grabbing
+                      deadline (+ (float-time) 10))
+                (lispm-web--cdp-eval
+                 session
+                 (format "(function () {
+  var value = '';
+  if (%s) {
+    try {
+      var r = eval(%s);
+      value = (r === undefined || r === null) ? '' : String(r);
+    } catch (e) {
+      value = 'Error: ' + (e && e.message ? e.message : String(e));
+    }
+  }
+  return JSON.stringify([value,
+                         location.href || '',
+                         document.title || '',
+                         document.documentElement ? document.documentElement.outerHTML : '']);
+})()"
+                         (if script "true" "false")
+                         (json-encode (or script "")))
+                 (lambda (payload err)
+                   (unless (eq state 'done)
+                     (let ((parsed (and (null err) (stringp payload)
+                                        (ignore-errors (json-parse-string payload :array-type 'list)))))
+                       (if (and (consp parsed) (stringp (nth 3 parsed))
+                                (not (string-empty-p (nth 3 parsed))))
+                           (let ((dom (lispm-web--parse (nth 3 parsed))))
+                             (finish dom
+                                     (if (string-empty-p (nth 1 parsed)) url (nth 1 parsed))
+                                     (if (string-empty-p (nth 2 parsed)) (lispm-web--title dom) (nth 2 parsed))
+                                     nil (nth 0 parsed)))
+                         (finish nil url nil (or err "The page did not give its HTML."))))))))
+              (tick ()
+                (pcase state
+                  ('loading
+                   (if (> (float-time) deadline)
+                       (grab)
+                     (unless checking
+                       (setq checking t)
+                       (lispm-web--cdp-eval
+                        session
+                        (format "(function () {
+  var ready = document.readyState === 'complete' && location.href !== 'about:blank';
+  if (!ready) return 'loading';
+  if (%s && !document.querySelector(%s)) return 'waiting';
+  return 'ready';
+})()"
+                                (if wait-for "true" "false")
+                                (json-encode (or wait-for "")))
+                        (lambda (status _err)
+                          (setq checking nil)
+                          (when (eq state 'loading)
+                            (cond
+                             ((equal status "loading")
+                              (setq loaded-at nil))
+                             (t
+                              (unless loaded-at (setq loaded-at (float-time)))
+                              (when (and (> (- (float-time) loaded-at) lispm-web-settle)
+                                         (equal status "ready"))
+                                (grab))))))))))
+                  ('grabbing
+                   (when (> (float-time) deadline)
+                     (finish nil url nil "The page did not give its HTML."))))))
+           (setq pump (run-at-time 0.15 0.15 #'tick))))))))
+
+(defun lispm-web--chrome-dump-dom (url callback)
+  "Load URL with `chrome --headless=new --dump-dom'; fall back to `url.el' on failure."
+  (let ((program (lispm-web--chrome-program)))
+    (if (not program)
+        (lispm-web--url-dom url callback)
+      (let* ((buffer (generate-new-buffer " *lispm-web-chrome*" t))
+             (stderr (generate-new-buffer " *lispm-web-chrome-err*" t))
+             (done nil)
+             timer proc)
+        (cl-labels
+            ((finish (ok)
+               (unless done
+                 (setq done t)
+                 (when timer (cancel-timer timer))
+                 (when (and proc (process-live-p proc))
+                   (ignore-errors (delete-process proc)))
+                 (let ((html (and ok (buffer-live-p buffer)
+                                  (with-current-buffer buffer (buffer-string)))))
+                   (when (buffer-live-p buffer) (kill-buffer buffer))
+                   (when (buffer-live-p stderr) (kill-buffer stderr))
+                   (if (and (stringp html) (string-match-p "<" html))
+                       (let ((dom (lispm-web--parse html)))
+                         (funcall callback dom url (lispm-web--title dom) nil))
+                     (lispm-web--url-dom url callback))))))
+          (condition-case nil
+              (progn
+                (setq proc (make-process
+                            :name "lispm-web-chrome-dump"
+                            :buffer buffer
+                            :stderr stderr
+                            :connection-type 'pipe
+                            :command (list program
+                                           "--headless=new"
+                                           "--disable-gpu"
+                                           "--no-first-run"
+                                           "--no-default-browser-check"
+                                           "--dump-dom"
+                                           url)
+                            :noquery t
+                            :sentinel (lambda (p _event)
+                                        (unless (process-live-p p)
+                                          (finish (= (process-exit-status p) 0))))))
+                (setq timer (run-at-time lispm-web-timeout nil (lambda () (finish nil)))))
+            (error (finish nil))))))))
+
+(defun lispm-web--chrome-dom (url callback &optional wait-for script)
+  "Load URL with headless Chrome; use CDP when WAIT-FOR or SCRIPT is given."
+  (if (or wait-for script)
+      (lispm-web--chrome-cdp-dom url callback wait-for script)
+    (lispm-web--chrome-dump-dom url callback)))
 
 (defun lispm-web--url-dom (url callback)
   "Fetch URL with url.el; call CALLBACK as `lispm-web-dom' does."
@@ -199,13 +826,773 @@ callback of the script that reads its HTML, are held in
          (kill-buffer response))))
    nil t t))
 
-(defun lispm-web-dom (url callback)
+(defun lispm-web-dom (url callback &optional wait-for script)
   "Load URL, then call CALLBACK with its DOM, final URL, title and problem.
-The page is rendered by WebKit if this Emacs has it, scripts and all;
-otherwise url.el fetches its HTML.  PROBLEM is nil, or why it failed."
-  (if (lispm-web--webkit-p)
-      (lispm-web--webkit-dom url callback)
-    (lispm-web--url-dom url callback)))
+The page is rendered by WebKit if this Emacs has it, else by headless
+Chrome if installed, else fetched as static HTML with url.el.  When
+WAIT-FOR, a CSS selector, is given on WebKit or Chrome, wait until it
+matches in the document (or `lispm-web-timeout' passes) before reading
+the page.  When SCRIPT, JavaScript, is given on WebKit or Chrome, run
+it in the page before reading the DOM and pass its string value as a
+fifth argument to CALLBACK when accepted.  PROBLEM is nil, or why it
+failed."
+  (cond
+   ((lispm-web--webkit-p)
+    (lispm-web--webkit-dom url callback wait-for script))
+   ((lispm-web--chrome-p)
+    (lispm-web--chrome-dom url callback wait-for script))
+   (t
+    (lispm-web--url-dom url callback))))
+
+;;;; Browser Computer Use (`window.__lme' + real mouse/keyboard/wheel events)
+
+(defconst lispm-web--lme-script
+  "(function () {
+  var L = window.__lme = window.__lme || {els: [], rects: [], box: null};
+  var FIELD = /^(text|search|email|url|tel|password|number|date|datetime-local|month|week|time|)$/;
+  var CLICKABLE = 'a[href], button, input:not([type=hidden]), textarea, select, summary, ' +
+    '[role=button], [role=link], [role=checkbox], [role=radio], [role=tab], [role=menuitem], ' +
+    '[role=option], [onclick], [contenteditable=\"\"], [contenteditable=true], ' +
+    '[tabindex]:not([tabindex=\"-1\"])';
+  L.kind = function (el) {
+    var tag = el.tagName;
+    if (tag === 'TEXTAREA' || el.isContentEditable) return 'field';
+    if (tag === 'INPUT') {
+      var t = (el.getAttribute('type') || '').toLowerCase();
+      if (t === 'checkbox') return 'checkbox';
+      if (t === 'radio') return 'radio';
+      return FIELD.test(t) ? 'field' : 'button';
+    }
+    if (tag === 'SELECT') return 'select';
+    if (tag === 'A' && el.href) return 'link';
+    return 'button';
+  };
+  L.visible = function (el) {
+    var r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return null;
+    var style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none' || +style.opacity === 0)
+      return null;
+    return r;
+  };
+  L.point = function (el) {
+    var r = el.getBoundingClientRect();
+    return {
+      x: Math.max(1, Math.round(r.left + r.width / 2)),
+      y: Math.max(1, Math.round(r.top + r.height / 2)),
+      w: Math.round(r.width),
+      h: Math.round(r.height)
+    };
+  };
+  L.clean = function (s) {
+    return String(s == null ? '' : s).replace(/[\\s\\u00a0]+/g, ' ').trim().slice(0, 80);
+  };
+  L.label = function (el) {
+    var aria = el.getAttribute('aria-label');
+    if (aria) return L.clean(aria);
+    if (el.labels && el.labels.length) return L.clean(el.labels[0].innerText || el.labels[0].textContent);
+    if (el.id) {
+      try {
+        var lb = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+        if (lb) return L.clean(lb.innerText || lb.textContent);
+      } catch (e) {}
+    }
+    var ph = el.getAttribute('placeholder');
+    if (ph) return L.clean(ph);
+    var txt = el.innerText || el.textContent;
+    if (txt && L.clean(txt)) return L.clean(txt);
+    if (el.tagName === 'INPUT' && el.value && L.kind(el) === 'button') return L.clean(el.value);
+    return L.clean(el.getAttribute('title') || el.getAttribute('name') || el.id || '');
+  };
+  L.desc = function (el) {
+    if (!el) return 'page';
+    var idTag = el.getAttribute && el.getAttribute('data-lme-id')
+      ? '[' + el.getAttribute('data-lme-id') + '] ' : '';
+    var lb = L.label(el);
+    var pt = L.point(el);
+    return idTag + L.kind(el) + (lb ? ' \"' + lb + '\"' : '') + ' @(' + pt.x + ',' + pt.y + ')';
+  };
+  L.snapshot = function () {
+    L.els = []; L.rects = [];
+    var items = [];
+    document.querySelectorAll(CLICKABLE).forEach(function (el) {
+      if (el.disabled) return;
+      var r = L.visible(el);
+      if (!r) return;
+      var id = L.els.length + 1;
+      L.els.push(el);
+      L.rects.push(r);
+      el.setAttribute('data-lme-id', String(id));
+      var kind = L.kind(el);
+      var pt = L.point(el);
+      var item = {id: id, kind: kind, label: L.label(el), x: pt.x, y: pt.y};
+      if (kind === 'field' || kind === 'select') {
+        item.value = el.isContentEditable ? L.clean(el.innerText || el.textContent) : String(el.value || '');
+      }
+      if (kind === 'checkbox' || kind === 'radio') {
+        item.checked = !!el.checked;
+      }
+      if (kind === 'select' && el.options) {
+        item.options = Array.prototype.slice.call(el.options, 0, 15).map(function (o) {
+          return L.clean(o.text || o.value);
+        });
+      }
+      if (kind === 'link' && el.href) {
+        item.href = el.href;
+      }
+      items.push(item);
+    });
+    return items;
+  };
+  L.parseCoords = function (s) {
+    var m = /^\\s*\\(?\\s*(-?[0-9]+(?:\\.[0-9]+)?)\\s*,\\s*(-?[0-9]+(?:\\.[0-9]+)?)\\s*\\)?\\s*$/.exec(String(s || ''));
+    return m ? {x: Math.round(parseFloat(m[1])), y: Math.round(parseFloat(m[2]))} : null;
+  };
+  L.resolve = function (target) {
+    if (!L.els || !L.els.length) L.snapshot();
+    if (target == null || target === '') return document.activeElement;
+    var s = String(target).trim();
+    var xy = L.parseCoords(s);
+    if (xy) return document.elementFromPoint(xy.x, xy.y);
+    var m = /^\\[?([0-9]+)\\]?$/.exec(s);
+    if (m) {
+      var idx = parseInt(m[1], 10);
+      var el = L.els[idx - 1];
+      if (el && el.isConnected) return el;
+      return document.querySelector('[data-lme-id=\"' + idx + '\"]');
+    }
+    try { return document.querySelector(s); } catch (e) { return null; }
+  };
+  L.scrollDelta = function (spec) {
+    var s = String(spec || 'down').trim().toLowerCase();
+    var xy = L.parseCoords(s);
+    if (xy) return {dx: xy.x, dy: xy.y, label: xy.x + ',' + xy.y};
+    if (/^-?[0-9]+$/.test(s)) return {dx: 0, dy: parseInt(s, 10), label: s + 'px'};
+    if (s === 'up') return {dx: 0, dy: -450, label: 'up'};
+    if (s === 'left') return {dx: -450, dy: 0, label: 'left'};
+    if (s === 'right') return {dx: 450, dy: 0, label: 'right'};
+    if (s === 'top') return {dx: 0, dy: -99999, label: 'top'};
+    if (s === 'bottom') return {dx: 0, dy: 99999, label: 'bottom'};
+    return {dx: 0, dy: 450, label: 'down'};
+  };
+  L.selectOption = function (el, value) {
+    if (!el || el.tagName !== 'SELECT') return 'Error: not a select element';
+    var want = String(value == null ? '' : value).trim();
+    var wantLow = want.toLowerCase();
+    var chosen = -1;
+    for (var i = 0; i < el.options.length; i++) {
+      var o = el.options[i];
+      if (o.value === want || L.clean(o.text).toLowerCase() === wantLow) {
+        chosen = i;
+        break;
+      }
+    }
+    if (chosen < 0 && /^[0-9]+$/.test(want)) {
+      var n = parseInt(want, 10);
+      if (n >= 0 && n < el.options.length) chosen = n;
+    }
+    if (chosen < 0) return 'Error: option not found: ' + want;
+    el.focus();
+    el.selectedIndex = chosen;
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+    return 'Selected \"' + L.clean(el.options[chosen].text || el.options[chosen].value) + '\" in ' + L.desc(el);
+  };
+  L.prepare = function (action, target, value) {
+    var act = String(action || 'snapshot').toLowerCase().trim();
+    if (!act || act === 'snapshot') {
+      L.snapshot();
+      return {kind: 'done', note: 'Snapshot'};
+    }
+    if (act === 'screenshot') {
+      return {kind: 'done', note: 'Error: screenshot requires Chrome'};
+    }
+    if (act === 'eval') {
+      var code = (value != null && value !== '') ? String(value) : String(target || '');
+      try {
+        var r = eval(code);
+        return {kind: 'done', note: 'Eval: ' + (r === undefined || r === null ? '' : String(r))};
+      } catch (e) {
+        return {kind: 'done', note: 'Error: ' + (e && e.message ? e.message : String(e))};
+      }
+    }
+    if (act === 'scroll') {
+      var dirSpec = (value != null && value !== '') ? value : (target || 'down');
+      var hasTarget = (value != null && value !== '' && target != null && target !== '');
+      var delta = L.scrollDelta(dirSpec);
+      if (hasTarget) {
+        var box = L.resolve(target);
+        if (!box) return {kind: 'done', note: 'Error: scroll target not found: ' + target};
+        if (box.scrollIntoView) box.scrollIntoView({block: 'nearest'});
+        var bpt = L.point(box);
+        return {kind: 'wheel', x: bpt.x, y: bpt.y, dx: delta.dx, dy: delta.dy,
+                note: 'Scrolled ' + L.desc(box) + ' ' + delta.label};
+      }
+      var cx = Math.max(1, Math.round((window.innerWidth || 1280) / 2));
+      var cy = Math.max(1, Math.round((window.innerHeight || 900) / 2));
+      return {kind: 'wheel', x: cx, y: cy, dx: delta.dx, dy: delta.dy,
+              note: 'Scrolled page ' + delta.label + ' @(' + cx + ',' + cy + ')'};
+    }
+    if (act === 'key' && (!target || (value == null || value === ''))) {
+      var k = String(value || target || 'Enter').trim();
+      return {kind: 'key', key: k, note: 'Pressed key ' + k};
+    }
+    var xy = L.parseCoords(target);
+    var el = xy ? document.elementFromPoint(xy.x, xy.y) : L.resolve(target);
+    if (!el && (act === 'fill' || act === 'type')) {
+      L.snapshot();
+      el = L.els.find(function (x) { return L.kind(x) === 'field'; }) || null;
+    }
+    if (!el && (act === 'enter' || act === 'submit')) {
+      return {kind: 'key', key: 'Enter', note: 'Pressed Enter'};
+    }
+    if (!el && !xy) {
+      return {kind: 'done', note: 'Error: element not found: ' + (target || '')};
+    }
+    if (el && !xy && el.scrollIntoView) {
+      var r0 = el.getBoundingClientRect();
+      if (r0.top < 0 || r0.left < 0 || r0.bottom > window.innerHeight || r0.right > window.innerWidth) {
+        el.scrollIntoView({block: 'center', inline: 'center'});
+      }
+    }
+    var pt = xy || L.point(el);
+    var d = el ? L.desc(el) : ('@(' + pt.x + ',' + pt.y + ')');
+    if (act === 'select') {
+      return {kind: 'done', note: L.selectOption(el, value)};
+    }
+    if (act === 'click' || act === 'follow') {
+      if (el && el.tagName === 'A' && el.href && el.target && el.target !== '_self') {
+        el.removeAttribute('target');
+      }
+      return {kind: 'click', x: pt.x, y: pt.y, button: 'left', clicks: 1, note: 'Clicked ' + d};
+    }
+    if (act === 'double_click' || act === 'dblclick') {
+      return {kind: 'click', x: pt.x, y: pt.y, button: 'left', clicks: 2, note: 'Double-clicked ' + d};
+    }
+    if (act === 'right_click' || act === 'contextmenu') {
+      return {kind: 'click', x: pt.x, y: pt.y, button: 'right', clicks: 1, note: 'Right-clicked ' + d};
+    }
+    if (act === 'hover' || act === 'move') {
+      return {kind: 'hover', x: pt.x, y: pt.y, note: 'Hovered ' + d};
+    }
+    if (act === 'drag') {
+      var xy2 = L.parseCoords(value);
+      var el2 = xy2 ? null : L.resolve(value);
+      if (!xy2 && !el2) return {kind: 'done', note: 'Error: drag destination not found: ' + (value || '')};
+      var pt2 = xy2 || L.point(el2);
+      return {kind: 'drag', x: pt.x, y: pt.y, x2: pt2.x, y2: pt2.y,
+              note: 'Dragged ' + d + ' to @(' + pt2.x + ',' + pt2.y + ')'};
+    }
+    if (act === 'fill' || act === 'type') {
+      var text = String(value == null ? '' : value);
+      var had = false;
+      if (el) {
+        el.focus();
+        if (act === 'fill') {
+          if (el.isContentEditable) {
+            had = !!(el.innerText || el.textContent);
+            el.textContent = '';
+          } else {
+            had = !!(el.value && el.value.length);
+            try { el.select(); } catch (e) {}
+          }
+        } else {
+          try { var n = (el.value || '').length; el.setSelectionRange(n, n); } catch (e) {}
+        }
+      }
+      return {kind: act, x: pt.x, y: pt.y, text: text, clear: (act === 'fill' && had),
+              note: (act === 'type' ? 'Typed in ' : 'Filled ') + d};
+    }
+    if (act === 'enter' || act === 'submit' || act === 'key') {
+      var keyName = (act === 'key' && value) ? String(value) : 'Enter';
+      return {kind: 'key', x: pt.x, y: pt.y, clickFirst: true, key: keyName,
+              note: 'Pressed ' + keyName + ' on ' + d};
+    }
+    return {kind: 'done', note: 'Error: unknown action: ' + act};
+  };
+  L.fireMouse = function (x, y, button, clicks) {
+    var el = document.elementFromPoint(x, y) || document.body;
+    var btn = button === 'right' ? 2 : 0;
+    var mask = button === 'right' ? 2 : 1;
+    var base = {bubbles: true, cancelable: true, composed: true, view: window,
+                clientX: x, clientY: y, screenX: x, screenY: y, button: btn};
+    ['pointerover', 'mouseover', 'pointerenter', 'mouseenter', 'pointermove', 'mousemove'].forEach(function (t) {
+      var Ctor = t.indexOf('pointer') === 0 && window.PointerEvent ? PointerEvent : MouseEvent;
+      el.dispatchEvent(new Ctor(t, Object.assign({buttons: 0}, base)));
+    });
+    if (clicks && clicks > 0) {
+      for (var c = 1; c <= clicks; c++) {
+        ['pointerdown', 'mousedown'].forEach(function (t) {
+          var Ctor = t.indexOf('pointer') === 0 && window.PointerEvent ? PointerEvent : MouseEvent;
+          el.dispatchEvent(new Ctor(t, Object.assign({buttons: mask, detail: c}, base)));
+        });
+        if (el.focus) el.focus();
+        ['pointerup', 'mouseup'].forEach(function (t) {
+          var Ctor = t.indexOf('pointer') === 0 && window.PointerEvent ? PointerEvent : MouseEvent;
+          el.dispatchEvent(new Ctor(t, Object.assign({buttons: 0, detail: c}, base)));
+        });
+        if (button === 'right') {
+          el.dispatchEvent(new MouseEvent('contextmenu', Object.assign({buttons: 0, detail: c}, base)));
+        } else {
+          el.click();
+          if (c === 2) el.dispatchEvent(new MouseEvent('dblclick', Object.assign({buttons: 0, detail: 2}, base)));
+        }
+      }
+    }
+  };
+  L.fireWheel = function (x, y, dx, dy) {
+    var el = document.elementFromPoint(x, y) || document.body || document.documentElement;
+    if (window.WheelEvent) {
+      el.dispatchEvent(new WheelEvent('wheel', {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y, deltaX: dx, deltaY: dy
+      }));
+    }
+    var cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      var st = getComputedStyle(cur);
+      var oy = st.overflowY, ox = st.overflowX;
+      if (((dy !== 0) && (oy === 'auto' || oy === 'scroll') && cur.scrollHeight > cur.clientHeight) ||
+          ((dx !== 0) && (ox === 'auto' || ox === 'scroll') && cur.scrollWidth > cur.clientWidth)) {
+        cur.scrollBy(dx, dy);
+        return;
+      }
+      cur = cur.parentElement;
+    }
+    window.scrollBy(dx, dy);
+  };
+  L.fireKeys = function (x, y, text, append) {
+    L.fireMouse(x, y, 'left', 1);
+    var el = document.activeElement || document.elementFromPoint(x, y);
+    if (!el) return;
+    var cur = el.isContentEditable ? (el.innerText || el.textContent || '') : (el.value || '');
+    var next = append ? (cur + text) : text;
+    var first = text.length ? text[0] : '';
+    if (first) {
+      el.dispatchEvent(new KeyboardEvent('keydown', {key: first, bubbles: true, cancelable: true}));
+    }
+    if (el.isContentEditable) {
+      el.textContent = next;
+    } else {
+      var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement && HTMLTextAreaElement.prototype
+                                            : window.HTMLInputElement && HTMLInputElement.prototype;
+      var desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, next); else el.value = next;
+      try { var n = next.length; el.setSelectionRange(n, n); } catch (e) {}
+    }
+    el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}));
+    if (first) {
+      el.dispatchEvent(new KeyboardEvent('keyup', {key: first, bubbles: true, cancelable: true}));
+    }
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+  };
+  L.fireKey = function (keyName) {
+    var el = document.activeElement || document.body;
+    var code = keyName === 'Enter' ? 13 : (keyName === 'Escape' ? 27 : (keyName === 'Tab' ? 9 : 0));
+    var opts = {key: keyName, code: keyName, keyCode: code, which: code, bubbles: true, cancelable: true};
+    var go = el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    if (keyName === 'Enter' && go && el.form) {
+      if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
+    }
+  };
+  L.act = function (action, target, value) {
+    var p = L.prepare(action, target, value);
+    if (p.kind === 'click') L.fireMouse(p.x, p.y, p.button, p.clicks);
+    else if (p.kind === 'hover') L.fireMouse(p.x, p.y, 'left', 0);
+    else if (p.kind === 'drag') { L.fireMouse(p.x, p.y, 'left', 1); L.fireMouse(p.x2, p.y2, 'left', 1); }
+    else if (p.kind === 'wheel') L.fireWheel(p.x, p.y, p.dx, p.dy);
+    else if (p.kind === 'fill') L.fireKeys(p.x, p.y, p.text, false);
+    else if (p.kind === 'type') L.fireKeys(p.x, p.y, p.text, true);
+    else if (p.kind === 'key') {
+      if (p.clickFirst && p.x != null) L.fireMouse(p.x, p.y, 'left', 1);
+      L.fireKey(p.key || 'Enter');
+    }
+    return p.note || 'Done';
+  };
+})();"
+  "Page-side script defining `window.__lme' for browser computer use.")
+
+(defvar lispm-web--webkit-session nil
+  "Persistent WebKit session plist (:buffer :xwidget) for `lispm-web-act'.")
+
+(defvar lispm-web--cdp-session nil
+  "Persistent Chrome CDP session plist for `lispm-web-act'.")
+
+(defun lispm-web-close-session ()
+  "Close any persistent browser session held by `lispm-web-act'."
+  (when lispm-web--webkit-session
+    (let ((xw (plist-get lispm-web--webkit-session :xwidget))
+          (buf (plist-get lispm-web--webkit-session :buffer)))
+      (setq lispm-web--webkit-session nil)
+      (when xw (ignore-errors (kill-xwidget xw)))
+      (when (and buf (buffer-live-p buf)) (kill-buffer buf))))
+  (when lispm-web--cdp-session
+    (let ((session lispm-web--cdp-session))
+      (setq lispm-web--cdp-session nil)
+      (lispm-web--cdp-close session))))
+
+(add-hook 'kill-emacs-hook #'lispm-web-close-session)
+
+(defun lispm-web--ensure-webkit-session (&optional show)
+  "Return the persistent WebKit xwidget for `lispm-web-act', creating it if needed."
+  (let ((buf (plist-get lispm-web--webkit-session :buffer))
+        (xw (plist-get lispm-web--webkit-session :xwidget)))
+    (unless (and buf (buffer-live-p buf) xw)
+      (setq buf (generate-new-buffer " *lispm-web-session*" t)
+            xw (make-xwidget 'webkit "lispm-web-session" 1280 900 nil buf)
+            lispm-web--webkit-session (list :buffer buf :xwidget xw))
+      (xwidget-put xw 'callback
+                   (lambda (_xwidget type)
+                     (when (eq type 'javascript-callback)
+                       (funcall (nth 3 last-input-event) (nth 4 last-input-event))))))
+    (when (and show (buffer-live-p buf))
+      (display-buffer buf))
+    xw))
+
+(defun lispm-web--ensure-cdp-session (initial-url callback &optional show)
+  "Pass a live persistent CDP session to CALLBACK as (SESSION PROBLEM)."
+  (let ((ws (and lispm-web--cdp-session (plist-get lispm-web--cdp-session :ws)))
+        (proc (and lispm-web--cdp-session (plist-get lispm-web--cdp-session :process)))
+        (was-show (and lispm-web--cdp-session (plist-get lispm-web--cdp-session :show))))
+    (if (and ws (process-live-p ws) proc (process-live-p proc)
+             (or (null show) was-show))
+        (if initial-url
+            (lispm-web--cdp-call
+             lispm-web--cdp-session "Page.navigate" `((url . ,initial-url))
+             (lambda (_res err)
+               (if err
+                   (funcall callback nil (or (alist-get 'message err) "Navigation failed."))
+                 (funcall callback lispm-web--cdp-session nil))))
+          (funcall callback lispm-web--cdp-session nil))
+      (when lispm-web--cdp-session
+        (lispm-web--cdp-close lispm-web--cdp-session)
+        (setq lispm-web--cdp-session nil))
+      (lispm-web--cdp-open
+       (or initial-url "about:blank")
+       (lambda (session problem)
+         (unless problem
+           (setq lispm-web--cdp-session session))
+         (funcall callback session problem))
+       show))))
+
+(defun lispm-web--cdp-execute-action (session action target value callback)
+  "Execute computer-use ACTION on TARGET with VALUE in CDP SESSION; pass NOTE to CALLBACK."
+  (let ((act (downcase (string-trim (or action "snapshot")))))
+    (if (equal act "screenshot")
+        (lispm-web--cdp-call
+         session "Page.captureScreenshot" '((format . "png"))
+         (lambda (res err)
+           (if err
+               (funcall callback (format "Error capturing screenshot: %s"
+                                         (or (alist-get 'message err) err)))
+             (let* ((b64 (alist-get 'data res))
+                    (raw-path (cond
+                               ((and (stringp value) (not (string-empty-p value))) value)
+                               ((and (stringp target) (not (string-empty-p target))) target)
+                               (t nil)))
+                    (file (if raw-path
+                              (expand-file-name raw-path)
+                            (make-temp-file "lispm-web-screenshot-" nil ".png"))))
+               (if (not (stringp b64))
+                   (funcall callback "Error: empty screenshot data")
+                 (when-let* ((dir (file-name-directory file)))
+                   (make-directory dir t))
+                 (let ((coding-system-for-write 'binary))
+                   (with-temp-file file
+                     (set-buffer-multibyte nil)
+                     (insert (base64-decode-string b64))))
+                 (funcall callback (format "Screenshot saved to %s" file)))))))
+      (lispm-web--cdp-eval
+       session
+       (concat lispm-web--lme-script
+               (format "\nJSON.stringify(window.__lme.prepare(%s, %s, %s))"
+                       (json-encode act)
+                       (json-encode (or target ""))
+                       (json-encode (or value ""))))
+       (lambda (json-str err)
+         (if (or err (not (stringp json-str)))
+             (funcall callback (or err "Error preparing action"))
+           (let* ((plan (ignore-errors
+                          (json-parse-string json-str :object-type 'alist :array-type 'list)))
+                  (kind (alist-get 'kind plan))
+                  (note (or (alist-get 'note plan) "Done"))
+                  (x (or (alist-get 'x plan) 0))
+                  (y (or (alist-get 'y plan) 0))
+                  (steps
+                   (pcase kind
+                     ("click"
+                      (lispm-web--cdp-mouse-steps
+                       x y (alist-get 'button plan) (alist-get 'clicks plan)))
+                     ("hover"
+                      (list `("Input.dispatchMouseEvent"
+                              . ((type . "mouseMoved") (x . ,x) (y . ,y) (button . "none") (buttons . 0)))))
+                     ("drag"
+                      (let ((x2 (or (alist-get 'x2 plan) x))
+                            (y2 (or (alist-get 'y2 plan) y)))
+                        (list `("Input.dispatchMouseEvent"
+                                . ((type . "mouseMoved") (x . ,x) (y . ,y) (button . "none") (buttons . 0)))
+                              `("Input.dispatchMouseEvent"
+                                . ((type . "mousePressed") (x . ,x) (y . ,y)
+                                   (button . "left") (buttons . 1) (clickCount . 1)))
+                              `("Input.dispatchMouseEvent"
+                                . ((type . "mouseMoved")
+                                   (x . ,(/ (+ x x2) 2)) (y . ,(/ (+ y y2) 2))
+                                   (button . "left") (buttons . 1)))
+                              `("Input.dispatchMouseEvent"
+                                . ((type . "mouseMoved") (x . ,x2) (y . ,y2)
+                                   (button . "left") (buttons . 1)))
+                              `("Input.dispatchMouseEvent"
+                                . ((type . "mouseReleased") (x . ,x2) (y . ,y2)
+                                   (button . "left") (buttons . 0) (clickCount . 1))))))
+                     ("wheel"
+                      (list `("Input.dispatchMouseEvent"
+                              . ((type . "mouseMoved") (x . ,x) (y . ,y) (button . "none") (buttons . 0)))
+                            `("Input.dispatchMouseEvent"
+                              . ((type . "mouseWheel") (x . ,x) (y . ,y)
+                                 (deltaX . ,(or (alist-get 'dx plan) 0))
+                                 (deltaY . ,(or (alist-get 'dy plan) 450))))))
+                     ((or "fill" "type")
+                      (append (lispm-web--cdp-mouse-steps x y "left" 1)
+                              (lispm-web--cdp-text-steps
+                               (or (alist-get 'text plan) "")
+                               (eq (alist-get 'clear plan) t))))
+                     ("key"
+                      (append (when (eq (alist-get 'clickFirst plan) t)
+                                (lispm-web--cdp-mouse-steps x y "left" 1))
+                              (lispm-web--cdp-key-steps (or (alist-get 'key plan) "Enter"))))
+                     (_ nil))))
+             (if (null steps)
+                 (funcall callback note)
+               (lispm-web--cdp-run-steps
+                session steps
+                (lambda (step-err)
+                  (if step-err
+                      (funcall callback (format "Error: %s" step-err))
+                    ;; Ensure React/Vue change listeners see blurred/committed state when filling.
+                    (if (member kind '("fill" "type"))
+                        (lispm-web--cdp-eval
+                         session
+                         "(function () {
+  var el = document.activeElement;
+  if (el) el.dispatchEvent(new Event('change', {bubbles: true}));
+  return 'ok';
+})()"
+                         (lambda (_ _) (funcall callback note)))
+                      (funcall callback note)))))))))))))
+
+(defun lispm-web--format-elements (elements)
+  "Format ELEMENTS, a list of alists from `window.__lme.snapshot()', for the model."
+  (if (null elements)
+      ""
+    (concat
+     "\n\nInteractive elements:\n"
+     (mapconcat
+      (lambda (el)
+        (let ((id (alist-get 'id el))
+              (kind (alist-get 'kind el))
+              (label (or (alist-get 'label el) ""))
+              (val (alist-get 'value el))
+              (checked (alist-get 'checked el))
+              (options (alist-get 'options el))
+              (href (alist-get 'href el))
+              (x (alist-get 'x el))
+              (y (alist-get 'y el)))
+          (concat (format "[%s] %s" id kind)
+                  (if (not (string-empty-p label)) (format " %S" label) "")
+                  (cond
+                   ((and (stringp val) (not (string-empty-p val)))
+                    (format " (value=%S)" val))
+                   ((member kind '("field" "select"))
+                    " (value=\"\")")
+                   ((member kind '("checkbox" "radio"))
+                    (format " (%s)" (if (eq checked t) "checked" "unchecked")))
+                   (t ""))
+                  (if (and options (consp options))
+                      (format " [options: %s]" (string-join options ", "))
+                    "")
+                  (if (and (numberp x) (numberp y))
+                      (format " @(%d,%d)" x y)
+                    "")
+                  (if (and (stringp href) (not (string-empty-p href)))
+                      (format " -> %s" href)
+                    ""))))
+      elements "\n"))))
+
+(defun lispm-web--snapshot-js ()
+  "JavaScript returning JSON [url, title, html, elements] using `window.__lme'."
+  (concat lispm-web--lme-script
+          "\n(function () {
+  var items = window.__lme.snapshot();
+  return JSON.stringify([location.href || '',
+                         document.title || '',
+                         document.documentElement ? document.documentElement.outerHTML : '',
+                         items]);
+})()"))
+
+(defun lispm-web--act-js (action target value)
+  "JavaScript running `window.__lme.act(ACTION, TARGET, VALUE)'."
+  (concat lispm-web--lme-script
+          (format "\n(function () { return String(window.__lme.act(%s, %s, %s)); })()"
+                  (json-encode (or action "snapshot"))
+                  (json-encode (or target ""))
+                  (json-encode (or value "")))))
+
+(defun lispm-web--drive-session (eval-fn act-fn loaded-fn settle-seconds wait-for action target value callback)
+  "Drive a live browser page through EVAL-FN, ACT-FN and LOADED-FN, then call CALLBACK.
+CALLBACK receives (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
+  (let* ((deadline (+ (float-time) lispm-web-timeout))
+         (need-act (and action (not (member (downcase (string-trim action)) '("" "snapshot")))))
+         (state (if need-act 'pre-act 'post-act))
+         (phase-settle settle-seconds)
+         loaded-at pump checking action-note)
+    (cl-labels
+        ((finish (dom final title problem &optional elements)
+           (unless (eq state 'done)
+             (setq state 'done)
+             (when pump (cancel-timer pump))
+             (funcall callback dom final title problem action-note elements)))
+         (snapshot ()
+           (setq state 'snapshotting
+                 deadline (+ (float-time) 10))
+           (funcall
+            eval-fn
+            (lispm-web--snapshot-js)
+            (lambda (payload)
+              (unless (eq state 'done)
+                (let ((parsed (and (stringp payload)
+                                   (ignore-errors
+                                     (json-parse-string payload
+                                                        :object-type 'alist
+                                                        :array-type 'list)))))
+                  (if (and (consp parsed) (stringp (nth 2 parsed))
+                           (not (string-empty-p (nth 2 parsed))))
+                      (let ((dom (lispm-web--parse (nth 2 parsed))))
+                        (finish dom
+                                (nth 0 parsed)
+                                (if (string-empty-p (nth 1 parsed))
+                                    (lispm-web--title dom)
+                                  (nth 1 parsed))
+                                nil
+                                (nth 3 parsed)))
+                    (finish nil "" nil "The page did not give its snapshot.")))))))
+         (tick ()
+           (pcase state
+             ((or 'pre-act 'post-act)
+              (if (> (float-time) deadline)
+                  (snapshot)
+                (unless checking
+                  (setq checking t)
+                  (funcall
+                   loaded-fn
+                   (if (eq state 'post-act) wait-for nil)
+                   (lambda (status)
+                     (setq checking nil)
+                     (when (memq state '(pre-act post-act))
+                       (if (equal status "loading")
+                           (setq loaded-at nil)
+                         (unless loaded-at (setq loaded-at (float-time)))
+                         (when (and (>= (- (float-time) loaded-at) phase-settle)
+                                    (equal status "ready"))
+                           (if (eq state 'pre-act)
+                               (progn
+                                 (setq state 'acting
+                                       checking t)
+                                 (funcall
+                                  act-fn
+                                  action target value
+                                  (lambda (note)
+                                    (setq action-note note
+                                          checking nil
+                                          loaded-at nil
+                                          phase-settle lispm-web-act-settle
+                                          state 'post-act))))
+                             (snapshot))))))))))
+             ('snapshotting
+              (when (> (float-time) deadline)
+                (finish nil "" nil "Timed out reading page snapshot."))))))
+      (setq pump (run-at-time 0.1 0.1 #'tick)))))
+
+(cl-defun lispm-web-act (callback &key url action target value wait-for show engine)
+  "Interact with a live page using `window.__lme' on WebKit or Chrome CDP.
+Call CALLBACK with (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
+  (let* ((eng (downcase (string-trim (or engine "auto"))))
+         (act-low (downcase (string-trim (or action "snapshot"))))
+         (use-webkit (and (lispm-web--webkit-p)
+                          (not (equal eng "chrome"))
+                          (not (and (equal act-low "screenshot") (lispm-web--chrome-p))))))
+    (cond
+     (use-webkit
+      (let* ((xw (lispm-web--ensure-webkit-session show))
+             (settle (if url lispm-web-settle 0.05))
+             (run-js (lambda (js fn)
+                       (let ((cell (list xw fn)))
+                         (push cell lispm-web--held)
+                         (run-at-time lispm-web--hold-seconds nil
+                                      (lambda () (setq lispm-web--held (delq cell lispm-web--held))))
+                         (xwidget-webkit-execute-script xw js fn)))))
+        (when url
+          (xwidget-webkit-goto-uri xw url))
+        (lispm-web--drive-session
+         run-js
+         (lambda (act tgt val fn)
+           (funcall run-js (lispm-web--act-js act tgt val) fn))
+         (lambda (selector fn)
+           (let ((uri (xwidget-webkit-uri xw)))
+             (if (not (and (stringp uri) (not (member uri '("" "about:blank")))
+                           (>= (or (xwidget-webkit-estimated-load-progress xw) 0) 1.0)))
+                 (funcall fn "loading")
+               (if (null selector)
+                   (funcall fn "ready")
+                 (funcall run-js
+                          (format "document.querySelector(%s) ? '1' : '0'" (json-encode selector))
+                          (lambda (matched)
+                            (funcall fn (if (equal matched "1") "ready" "waiting"))))))))
+         settle wait-for action target value
+         (lambda (dom final title problem note elements)
+           (funcall callback dom (if (string-empty-p final) (or url "") final)
+                    title problem note elements)))))
+     ((lispm-web--chrome-p)
+      (let* ((eff-url (or url
+                          (and (null lispm-web--cdp-session)
+                               lispm-web--webkit-session
+                               (when-let* ((xw (plist-get lispm-web--webkit-session :xwidget))
+                                           (u (ignore-errors (xwidget-webkit-uri xw))))
+                                 (and (stringp u) (not (member u '("" "about:blank"))) u)))))
+             (settle (if eff-url lispm-web-settle 0.05)))
+        (lispm-web--ensure-cdp-session
+         eff-url
+         (lambda (session problem)
+           (if problem
+               (funcall callback nil (or eff-url "") nil problem nil nil)
+             (lispm-web--drive-session
+              (lambda (js fn)
+                (lispm-web--cdp-eval session js (lambda (val _err) (funcall fn val))))
+              (lambda (act tgt val fn)
+                (lispm-web--cdp-execute-action session act tgt val fn))
+              (lambda (selector fn)
+                (lispm-web--cdp-eval
+                 session
+                 (format "(function () {
+  var ready = document.readyState === 'complete' && location.href !== 'about:blank';
+  if (!ready) return 'loading';
+  if (%s && !document.querySelector(%s)) return 'waiting';
+  return 'ready';
+})()"
+                         (if selector "true" "false")
+                         (json-encode (or selector "")))
+                 (lambda (status _err)
+                   (funcall fn (or status "loading")))))
+              settle wait-for action target value
+              (lambda (dom final title err note elements)
+                (funcall callback dom (if (string-empty-p final) (or eff-url "") final)
+                         title err note elements)))))
+         show)))
+     (t
+      (funcall callback nil (or url "") nil
+               "Interactive browser actions require WebKit (graphical Emacs with xwidgets) or Chrome."
+               nil nil)))))
 
 (defun lispm-web-links (dom url)
   "The links of DOM, a page at URL: a list of (TEXT . ABSOLUTE-URL)."
@@ -281,13 +1668,15 @@ otherwise url.el fetches its HTML.  PROBLEM is nil, or why it failed."
 
 (lispm-deftool web_fetch
     ((url string "The page's URL.")
-     (start integer "Character of the text to start from, to read on (default 0)." :optional t))
-  "Read a web page: its title, main text and links."
+     (start integer "Character of the text to start from, to read on (default 0)." :optional t)
+     (wait-for string "CSS selector to wait for in WebKit or Chrome before reading the page, for async JS/SPA pages." :optional t)
+     (script string "JavaScript expression or statements to run in the page in WebKit or Chrome before reading its DOM." :optional t))
+  "Read a web page, rendered with JavaScript in WebKit or headless Chrome when available: its title, main text and links."
   :permission web
   :async t
   (lispm-web-dom
    url
-   (lambda (dom final title &optional problem)
+   (lambda (dom final title &optional problem script-result)
      (if problem
          (funcall done problem t)
        (let* ((text (lispm-web-text dom final))
@@ -296,6 +1685,9 @@ otherwise url.el fetches its HTML.  PROBLEM is nil, or why it failed."
               (links (seq-take (lispm-web-links dom final) 60)))
          (funcall done
                   (concat (format "Title: %s\nURL: %s\n\n" (or title "") final)
+                          (if (and script (stringp script-result) (not (string-empty-p script-result)))
+                              (format "Script result: %s\n\n" script-result)
+                            "")
                           (substring text start end)
                           (if (< end (length text))
                               (format "\n\n[... %d more characters; read on with start %d]"
@@ -307,5 +1699,41 @@ otherwise url.el fetches its HTML.  PROBLEM is nil, or why it failed."
                                         (mapconcat (lambda (link)
                                                      (format "[%d] %s: %s" (cl-incf n) (car link) (cdr link)))
                                                    links "\n")))
-                            ""))))))))
+                            "")
+                          (if (and (not (lispm-web--js-engine-p)) (or wait-for script))
+                              "\n\n[Fetched with url.el without JavaScript: no graphical WebKit display or headless Chrome in this Emacs.]"
+                            ""))))))
+   wait-for script))
+
+(lispm-deftool web_act
+    ((url string "URL to open in the browser session before acting; omit to act on the current page." :optional t)
+     (action string "Action: \"snapshot\" (default), \"click\", \"double_click\", \"right_click\", \"hover\", \"drag\", \"fill\", \"type\", \"select\", \"key\", \"enter\", \"scroll\", \"screenshot\" or \"eval\"." :optional t)
+     (target string "Element number from the snapshot (e.g. \"1\"), CSS selector (e.g. \"#btn\"), or viewport coordinates \"x,y\"." :optional t)
+     (value string "Text to fill/type, option to select, key name (\"Enter\", \"Tab\", \"ArrowDown\"), scroll direction/delta (\"down\", \"up\", \"300\"), drag destination, screenshot path or JS code." :optional t)
+     (wait-for string "CSS selector to wait for after navigating or acting before reading the snapshot." :optional t)
+     (show boolean "Show the browser window (WebKit buffer in Emacs, or visible Chrome window when engine is \"chrome\")." :optional t)
+     (engine string "Browser engine: \"auto\" (default), \"webkit\" or \"chrome\" (uses CDP hardware-trusted Input.* events)." :optional t))
+  "Browser computer use (via WebKit or Chrome CDP): inspect numbered interactive elements with @(x,y) coordinates and perform real mouse clicks, double-clicks, hovers, drags, form filling/typing, key presses, mouse-wheel scrolling or screenshots."
+  :permission web
+  :async t
+  (if (and (null url)
+           (null lispm-web--webkit-session)
+           (null lispm-web--cdp-session))
+      (funcall done "Pass `url' first to open a page in the browser session." t)
+    (lispm-web-act
+     (lambda (dom final title problem note elements)
+       (if problem
+           (funcall done problem t)
+         (let ((text (lispm-web-text dom final)))
+           (funcall done
+                    (concat (format "Title: %s\nURL: %s\n" (or title "") final)
+                            (if (and (stringp note) (not (string-empty-p note))
+                                     (not (equal note "Snapshot")))
+                                (format "Action: %s\n" note)
+                              "")
+                            "\n"
+                            (lispm--truncate text lispm-web-chunk)
+                            (lispm-web--format-elements elements))))))
+     :url url :action action :target target :value value
+     :wait-for wait-for :show show :engine engine)))
 #+end_src

@@ -2523,9 +2523,13 @@ starts is, so its schema is made outside the call that loaded it."
                                           (goto-char (point-min))
                                           (when (re-search-forward "port \\([0-9]+\\)" nil t)
                                             (setq port (match-string 1)))))))
-            (should (string-match-p "tools now available: web_fetch, web_search"
+            (should (seq-some (lambda (entry)
+                                (string-match-p "^- skill web:" (plist-get entry :line)))
+                              (cdr (lispm-tools--discover agent "javascript" 5))))
+            (should (string-match-p "tools now available: web_act, web_fetch, web_search"
                                     (car (lispm-test--call agent "skill" '((name . "web"))))))
             (let ((lispm-web-search-url (format "http://127.0.0.1:%s/search.html?q=%%s" port))
+                  (lispm-web-chrome-program nil)
                   result)
               (let ((lispm-current-agent agent))
                 (lispm-tool-invoke (lispm-get-tool "web_search") '((query . "lisp machine"))
@@ -2548,11 +2552,35 @@ starts is, so its schema is made outside the call that loaded it."
                 ;; The readable part, not the navigation; its links, absolute.
                 (should-not (string-match-p "Privacy" (car (split-string page "\n\nLinks:\n"))))
                 (should (string-match-p (format "^\\[[0-9]+\\] Genera: http://127\\.0\\.0\\.1:%s/genera\\.html$" port)
-                                        page)))))
+                                        page)))
+              ;; When wait_for or script is asked without graphical WebKit or Chrome, the fallback is noted.
+              (setq result nil)
+              (let ((lispm-current-agent agent))
+                (lispm-tool-invoke (lispm-get-tool "web_fetch")
+                                   `((url . ,(format "http://127.0.0.1:%s/page.html" port))
+                                     (wait_for . "#ready"))
+                                   (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+              (should (lispm-test--wait (lambda () result)))
+              (should (string-match-p "\\[Fetched with url\\.el without JavaScript:" (car result)))
+              ;; When WebKit is unavailable and headless Chrome is available, it falls back to Chrome.
+              (let ((fake-chrome (expand-file-name "fake-chrome.sh" project)))
+                (with-temp-file fake-chrome
+                  (insert "#!/bin/sh\nprintf '<html><head><title>Chrome Fallback</title></head><body><main><p>Rendered by headless Chrome.</p></main></body></html>'\n"))
+                (set-file-modes fake-chrome #o755)
+                (setq result nil)
+                (let ((lispm-current-agent agent)
+                      (lispm-web-chrome-program fake-chrome))
+                  (lispm-tool-invoke (lispm-get-tool "web_fetch")
+                                     `((url . ,(format "http://127.0.0.1:%s/page.html" port)))
+                                     (lambda (text errorp &rest _) (setq result (cons text errorp)))))
+                (should (lispm-test--wait (lambda () result)))
+                (should (string-match-p "Title: Chrome Fallback" (car result)))
+                (should (string-match-p "Rendered by headless Chrome\\." (car result))))))
         (delete-process server)
         (kill-buffer (process-buffer server))
         (remhash "web_search" lispm-tools--registry)
-        (remhash "web_fetch" lispm-tools--registry)))))
+        (remhash "web_fetch" lispm-tools--registry)
+        (remhash "web_act" lispm-tools--registry)))))
 
 (ert-deftest lispm-test-web-skill-holds-callbacks ()
   "WebKit's script callback and page are held until a while after the page closes.
@@ -2605,9 +2633,45 @@ skills/web.org).  Batch Emacs makes no xwidgets: stubs stand in."
                 (should (funcall held-p (car scripts)))
                 (funcall (car scripts) html)
                 (should (= (length results) 1))
-                (should (lispm-test--wait (lambda () (not (funcall held-p (car scripts)))))))))
+                (should (lispm-test--wait (lambda () (not (funcall held-p (car scripts))))))
+                ;; wait_for polls until the selector matches, then script runs before reading the DOM.
+                (setq scripts nil results nil)
+                (lispm-web-dom "https://example.org/" (lambda (&rest args) (push args results))
+                               "#ready" "21 * 2")
+                (should (lispm-test--wait (lambda () scripts)))
+                ;; First poll answers "0" (not yet matched); next poll answers "1".
+                (funcall (car scripts) "0")
+                (should (lispm-test--wait (lambda () (= (length scripts) 2))))
+                (funcall (car scripts) "1")
+                (should (= (length scripts) 3))
+                (funcall (car scripts) (json-encode (vector "42" html)))
+                (should (equal (cdar results) '("https://example.org/" "Example" nil "42")))
+                (should (lispm-test--wait (lambda () (null lispm-web--held))))
+                ;; web_act drives a live session with window.__lme and formats interactive elements.
+                (setq scripts nil results nil)
+                (lispm-web-act (lambda (&rest args) (push args results))
+                               :url "https://example.org/"
+                               :action "fill" :target "1" :value "Alice")
+                (should (lispm-test--wait (lambda () scripts)))
+                (funcall (car scripts) "Filled [1] field \"Username\"")
+                (should (lispm-test--wait (lambda () (= (length scripts) 2))))
+                (funcall (car scripts)
+                         (json-encode
+                          (vector "https://example.org/" "Example" html
+                                  (vector '((id . 1) (kind . "field") (label . "Username") (value . "Alice") (x . 120) (y . 45))
+                                          '((id . 2) (kind . "button") (label . "Sign in") (x . 240) (y . 45))))))
+                (should (equal (nth 4 (car results)) "Filled [1] field \"Username\""))
+                (should (string-match-p "\\[1\\] field \"Username\" (value=\"Alice\") @(120,45)"
+                                        (lispm-web--format-elements (nth 5 (car results)))))
+                (should (= (length (lispm-web--cdp-mouse-steps 120 45 "left" 1)) 3))
+                (should (= (length (lispm-web--cdp-mouse-steps 120 45 "left" 2)) 5))
+                (should (seq-some (lambda (step) (equal (car step) "Input.insertText"))
+                                  (lispm-web--cdp-text-steps "Alice" t)))
+                (lispm-web-close-session)
+                (should (lispm-test--wait (lambda () (null lispm-web--held)))))))
         (remhash "web_search" lispm-tools--registry)
-        (remhash "web_fetch" lispm-tools--registry)))))
+        (remhash "web_fetch" lispm-tools--registry)
+        (remhash "web_act" lispm-tools--registry)))))
 
 (ert-deftest lispm-test-run-shell ()
   (lispm-test-env
