@@ -1095,7 +1095,8 @@ is given up: the session goes on."
                                     (plist-put (copy-sequence entry) :id (lispm-inbox-new-id))))
   (lispm--in-session agent
     (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
-    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)))
+    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)
+          lispm--turn-context nil))
   (when entry
     (lispm--in-session agent
       (let ((input (lispm--input-heading-p)))
@@ -2143,7 +2144,8 @@ condition it waits at, if any; see `lispm--resume-calls'."
   (cl-incf (lispm-agent-turn agent))
   (lispm--in-session agent
     (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
-    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)))
+    (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)
+          lispm--turn-context nil))
   (setf (lispm-agent-steps agent) 0
         (lispm-agent-auto-restarts agent) nil
         (lispm-agent-entry agent) entry

@@ -884,7 +884,8 @@ setup and queues what was asked until `lispm-bar-model-ready'."
                 thing
                 (or (plist-get thing :setup) (plist-get thing :ask)))
            (add-to-history 'lispm-bar-history text)
-           (setq lispm-bar--waiting (cons text request)
+           (setq lispm-bar-entrypoint 'bar
+                 lispm-bar--waiting (cons text request)
                  lispm-bar--then lispm-bar-setup-function)
            (exit-minibuffer))
           ((not lispm-bar--ready)
