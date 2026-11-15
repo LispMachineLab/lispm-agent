@@ -1433,7 +1433,8 @@ INITIAL is pre-filled in the directory field."
                       (set 'lispm-ui-form--props
                            (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
                     (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
-                    (local-set-key (kbd "ESC") #'lispm-ui-form-cancel))))
+                    (local-set-key (kbd "ESC") #'lispm-ui-form-cancel)
+                    (local-set-key (kbd "<escape>") #'lispm-ui-form-cancel))))
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook
                 (lambda ()
