@@ -252,9 +252,11 @@ DIRECTORY defaults to the project of the agent the listener talks to.
 With a prefix argument, choose its ROLE as well."
   (interactive
    (let ((agent (lispm-terminal-agent)))
-     (list (read-directory-name (lispm-tr "New session in: ")
-                                (if agent (lispm-agent-root agent) default-directory)
-                                nil t)
+     (list (lispm-agents-read-directory
+            'lispm
+            (if (and agent (not (lispm-system-agent-p agent)))
+                (lispm-agent-root agent)
+              (lispm-agents-default-directory)))
            (and current-prefix-arg (lispm-read-role (lispm-tr "Role"))))))
   (lispm-terminal-show (lispm-start role (lispm--project-root directory))))
 

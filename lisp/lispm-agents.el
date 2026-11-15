@@ -68,11 +68,15 @@
 (require 'lispm-agents-context)
 (require 'lispm-i18n)
 (require 'lispm-ui-ask)
+(require 'lispm-ui-form)
+(require 'lispm-finder nil t)
 
 (autoload 'lispm-agents-open-project "lispm-agents-work"
   "Show already active agents belonging to DIRECTORY's project." t)
 
 (declare-function project-root "project" (project))
+(declare-function project-known-project-roots "project" ())
+(declare-function lispm-system-agent-p "lispm-bar" (agent))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function eat-make "eat" (name program &optional startfile &rest switches))
@@ -81,7 +85,13 @@
 (declare-function lispm-agents-roster--collect "lispm-agents-roster" (subject fields event))
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
+(defvar project-current-directory-override)
 (defvar lispm-agents--root-cache)
+(defvar lispm-agents-work-directory)
+(defvar lispm-finder--directory)
+(defvar lispm-finder--had-focus)
+(defvar lispm-chat-agent)
+(defvar lispm-session-agent)
 
 ;;;; Interface
 ;;
@@ -1203,17 +1213,273 @@ those running."
   (run-hooks 'lispm-agents-sessions-changed-hook)
   buffer)
 
+(defun lispm-agents--splash-buffer-p (&optional buffer)
+  "Return non-nil when BUFFER is a welcome, desktop or system-agent buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (with-current-buffer buffer
+      (or (and (not buffer-file-name)
+               (member (buffer-name buffer)
+                       '("*GNU Emacs*" "*scratch*"
+                         "*Desktop*" " *Desktop*" " *Desktop Background*"
+                         "*Setup Assistant*" " *Setup Assistant*" " *LispM Setup Assistant*"
+                         "*LispM Guide*" " *LispM Guide*" " *LispM Emacs*"
+                         "*Agents*")))
+          (let ((agent (or (bound-and-true-p lispm-chat-agent)
+                           (bound-and-true-p lispm-session-agent))))
+            (and agent (fboundp 'lispm-system-agent-p) (lispm-system-agent-p agent)))))))
+
+(defvar lispm-agents-default-directory-function nil
+  "Optional function returning the default directory for a new session or shell.
+When non-nil and returning a directory string, `lispm-agents-default-directory'
+uses it before falling back to the main window's buffer.")
+
 (defun lispm-agents-project-directory ()
-  "Return the current project root, or `default-directory' outside projects."
-  (if-let* ((project (project-current)))
-      (project-root project)
-    default-directory))
+  "Return the current project root, or `default-directory' outside projects.
+Welcome and surface buffers resolve to the home directory."
+  (cond
+   ((and (bound-and-true-p lispm-agents-work-directory)
+         (stringp lispm-agents-work-directory)
+         (file-directory-p lispm-agents-work-directory))
+    (file-name-as-directory (expand-file-name lispm-agents-work-directory)))
+   ((and (bound-and-true-p lispm-finder--directory)
+         (stringp lispm-finder--directory)
+         (file-directory-p lispm-finder--directory))
+    (file-name-as-directory (expand-file-name lispm-finder--directory)))
+   ((lispm-agents--splash-buffer-p)
+    (file-name-as-directory (expand-file-name "~")))
+   ((if-let* ((project (project-current)))
+        (project-root project)
+      default-directory))))
 
 (defun lispm-agents-default-directory ()
   "Return where a new session or shell starts: the project root of the main
 window's buffer, see `lispm-agents-main-window-function'."
-  (with-selected-window (funcall lispm-agents-main-window-function)
-    (lispm-agents-project-directory)))
+  (or (and lispm-agents-default-directory-function
+           (funcall lispm-agents-default-directory-function))
+      (let* ((selected (selected-window))
+             (main (funcall lispm-agents-main-window-function))
+             (window (if (with-selected-window selected
+                           (or (and (bound-and-true-p lispm-agents-work-directory)
+                                    (stringp lispm-agents-work-directory))
+                               (and (bound-and-true-p lispm-finder--directory)
+                                    (stringp lispm-finder--directory))))
+                         selected
+                       main)))
+        (with-selected-window window
+          (if (and (lispm-agents--splash-buffer-p)
+                   (bound-and-true-p lispm-finder--had-focus)
+                   (get-buffer " *Finder*")
+                   (with-current-buffer " *Finder*"
+                     (and (bound-and-true-p lispm-finder--directory)
+                          (stringp lispm-finder--directory)
+                          (file-directory-p lispm-finder--directory))))
+              (with-current-buffer " *Finder*"
+                (file-name-as-directory (expand-file-name lispm-finder--directory)))
+            (lispm-agents-project-directory))))))
+
+(defvar lispm-agents-read-directory-function nil
+  "Optional function overriding `lispm-agents-read-directory'.
+When non-nil, called with (&optional AGENT DEFAULT) and returns the
+chosen directory.")
+
+(defcustom lispm-agents-max-known-directories 16
+  "Maximum number of directories offered in the New Agent Project menu."
+  :type 'natnum
+  :group 'lispm-agents)
+
+(defun lispm-agents--ignored-project-directory-p (directory)
+  "Return non-nil when DIRECTORY is a temporary or package-cache path."
+  (let ((expanded (file-name-as-directory (expand-file-name directory)))
+        (temp (and (boundp 'temporary-file-directory)
+                   (stringp temporary-file-directory)
+                   (file-name-as-directory (expand-file-name temporary-file-directory)))))
+    (or (string-prefix-p "/tmp/" expanded)
+        (string-prefix-p "/private/tmp/" expanded)
+        (string-prefix-p "/var/folders/" expanded)
+        (string-prefix-p "/private/var/folders/" expanded)
+        (and temp (string-prefix-p temp expanded))
+        (string-search "/elpa/" expanded))))
+
+(defun lispm-agents-known-directories (&optional default)
+  "Return abbreviated existing project and session directories, DEFAULT first."
+  (let ((dirs nil)
+        (cached-sessions nil))
+    (cl-flet ((add (dir &optional allow-ignored)
+                (when (and (stringp dir)
+                           (not (string-empty-p dir))
+                           (< (length dirs) lispm-agents-max-known-directories))
+                  (let ((expanded (expand-file-name dir)))
+                    (when (and (file-directory-p expanded)
+                               (or allow-ignored
+                                   (not (lispm-agents--ignored-project-directory-p expanded))))
+                      (let ((abbr (abbreviate-file-name (file-name-as-directory expanded))))
+                        (unless (member abbr dirs)
+                          (push abbr dirs))))))))
+      (add default t)
+      (dolist (buffer (lispm-agents-live-buffers))
+        (when-let* ((cwd (buffer-local-value 'default-directory buffer))
+                    (root (lispm-agents-project-root cwd))
+                    ((stringp root)))
+          (add root)))
+      (dolist (entry lispm-agents--session-readers)
+        (let ((res (ignore-errors (funcall (cdr entry)))))
+          (when (listp res)
+            (dolist (session res)
+              (push session cached-sessions)))))
+      (maphash (lambda (_file entry)
+                 (when-let* ((session (cdr entry)))
+                   (push session cached-sessions)))
+               lispm-agents--session-cache)
+      (dolist (session (sort cached-sessions
+                             (lambda (a b)
+                               (> (or (plist-get a :time) 0)
+                                  (or (plist-get b :time) 0)))))
+        (when-let* ((cwd (plist-get session :cwd))
+                    (root (lispm-agents-project-root cwd))
+                    ((stringp root)))
+          (add root)))
+      (when (fboundp 'project-known-project-roots)
+        (dolist (root (ignore-errors (project-known-project-roots)))
+          (add root)))
+      (add "~" t))
+    (nreverse dirs)))
+
+(defun lispm-agents--directory-choice-label (directory)
+  "Return a display label for DIRECTORY in a project choice menu."
+  (let* ((trimmed (directory-file-name directory))
+         (home (directory-file-name (expand-file-name "~")))
+         (expanded (directory-file-name (expand-file-name directory)))
+         (name (file-name-nondirectory trimmed)))
+    (cond ((string= expanded home)
+           (format "%s (%s)" (lispm-ui-tr "Home") directory))
+          ((and (not (string-empty-p name)) (not (equal name trimmed)))
+           (format "%s (%s)" name trimmed))
+          (t directory))))
+
+(defun lispm-agents--read-directory-form (title initial)
+  "Ask for a session directory in a modal form titled TITLE.
+INITIAL is pre-filled in the directory field."
+  (let* ((choices (lispm-agents-known-directories initial))
+         (choice-pairs (mapcar (lambda (dir)
+                                 (cons dir (lispm-agents--directory-choice-label dir)))
+                               choices))
+         (submitted nil)
+         (result nil)
+         (buffer nil)
+         (cleanup nil)
+         (depth (recursion-depth))
+         (browse-buttons
+          `((,(lispm-ui-tr "Choose…") .
+             ,(lambda ()
+                (when (buffer-live-p buffer)
+                  (let* ((current (with-current-buffer buffer
+                                    (or (lispm-ui-form-value :directory) initial)))
+                         (start (expand-file-name current))
+                         (modal-frame (selected-frame))
+                         (chosen (condition-case nil
+                                     (unwind-protect
+                                         (lispm-ui-choose-file
+                                          :title (lispm-tr "Directory")
+                                          :directory (if (file-directory-p start)
+                                                         (file-name-as-directory start)
+                                                       (file-name-as-directory (expand-file-name "~")))
+                                          :predicate #'file-directory-p)
+                                       (when (frame-live-p modal-frame)
+                                         (select-frame-set-input-focus modal-frame)))
+                                   (quit nil))))
+                    (when (and chosen (buffer-live-p buffer))
+                      (let ((abbr (abbreviate-file-name
+                                   (file-name-as-directory (expand-file-name chosen)))))
+                        (with-current-buffer buffer
+                          (lispm-ui-form-set
+                           :directory abbr
+                           :preset (and (assoc abbr choice-pairs) abbr)))))))))))
+         (validate (lambda (val)
+                     (let ((expanded (and (stringp val) (not (string-empty-p (string-trim val)))
+                                          (expand-file-name (string-trim val)))))
+                       (unless (and expanded (file-directory-p expanded))
+                         (lispm-tr "Working directory no longer exists: %s" (or val ""))))))
+         (fields
+          `((:directory :type text :label ,(lispm-tr "Directory")
+                        :value ,initial :required t :submit t
+                        :validate ,validate)
+             ,@(when choice-pairs
+                 `((:preset :type choice :label ,(lispm-tr "Project")
+                            :value ,(and (assoc initial choice-pairs) initial)
+                            :choices ,choice-pairs
+                            ,@(when (bound-and-true-p lispm-ui-form-choice-buttons-supported)
+                                `(:buttons ,browse-buttons :buttons-key :browse))
+                            :on-change ,(lambda (val)
+                                          (when (and val (buffer-live-p buffer))
+                                            (with-current-buffer buffer
+                                              (lispm-ui-form-set :directory val)))))))
+             ,@(when (or (not choice-pairs)
+                         (not (bound-and-true-p lispm-ui-form-choice-buttons-supported)))
+                 `((:browse :type buttons :buttons ,browse-buttons))))))
+    (setq buffer
+          (lispm-ui-form
+           title fields
+           :on-submit (lambda (values)
+                        (setq submitted t
+                              result (or (alist-get :directory values) initial))
+                        (when (> (recursion-depth) depth)
+                          (exit-recursive-edit)))
+           :on-cancel (lambda ()
+                        (setq submitted nil)
+                        (when (> (recursion-depth) depth)
+                          (exit-recursive-edit)))
+           :setup (lambda ()
+                    (when (boundp 'lispm-ui-form--props)
+                      (set 'lispm-ui-form--props
+                           (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
+                    (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
+                    (local-set-key (kbd "ESC") #'lispm-ui-form-cancel))))
+    (with-current-buffer buffer
+      (add-hook 'kill-buffer-hook
+                (lambda ()
+                  (when (> (recursion-depth) depth)
+                    (exit-recursive-edit)))
+                nil t))
+    (unwind-protect
+        (progn
+          (setq cleanup (funcall lispm-ui-form-modal-show-function buffer))
+          (with-current-buffer buffer
+            (lispm-ui-form--first-field))
+          (let ((lispm-ui-in-gui-action nil)
+                (lispm-ui--command-from-mouse nil))
+            (recursive-edit)))
+      (when (functionp cleanup)
+        (ignore-errors (funcall cleanup)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))
+    (unless submitted
+      (signal 'quit nil))
+    (file-name-as-directory (expand-file-name result))))
+
+(defun lispm-agents-read-directory (&optional agent default)
+  "Ask for the working directory of a new session of AGENT.
+DEFAULT, by default `lispm-agents-default-directory', is pre-filled in
+the prompt.  A GUI action opens a modal form with a text field, known
+projects and a button to browse for a folder; keyboard commands read the
+directory in the minibuffer."
+  (when (and agent (lispm-agents-props agent))
+    (lispm-agents--check-available agent))
+  (if lispm-agents-read-directory-function
+      (file-name-as-directory
+       (expand-file-name (funcall lispm-agents-read-directory-function agent default)))
+    (let* ((initial (abbreviate-file-name
+                     (file-name-as-directory
+                      (expand-file-name (or default (lispm-agents-default-directory))))))
+           (title (if-let* ((name (and agent (plist-get (lispm-agents-props agent) :name))))
+                      (lispm-tr "New %s session" name)
+                    (lispm-tr "New session"))))
+      (if (lispm-ui-gui-action-p)
+          (lispm-agents--read-directory-form title initial)
+        (let ((lispm-ui-in-gui-action nil)
+              (lispm-ui--command-from-mouse nil))
+          (file-name-as-directory
+           (expand-file-name
+            (read-directory-name (lispm-tr "New session in: ") initial initial t))))))))
 
 (defun lispm-agents-fresh-name (agent directory)
   "Return an unused terminal name for a new AGENT session in DIRECTORY."
@@ -1326,15 +1592,26 @@ a model signals a user error instead."
 
 (defun lispm-agents-new (agent &optional directory)
   "Start a new AGENT session in DIRECTORY.
-DIRECTORY defaults to the project root of the main window's buffer."
+When DIRECTORY is nil, ask for it with `lispm-agents-read-directory'
+\(defaulting to `lispm-agents-default-directory' in batch mode)."
   (let* ((props (lispm-agents--check-available agent))
-         (directory (or directory (lispm-agents-default-directory))))
+         (directory (file-name-as-directory
+                     (expand-file-name
+                      (or directory
+                          (if (and noninteractive (not lispm-agents-read-directory-function))
+                              (lispm-agents-default-directory)
+                            (lispm-agents-read-directory agent)))))))
     (lispm-agents-show
      (if-let* ((new (plist-get props :new)))
          (let ((time (float-time)))
            (lispm-agents--opened-buffer agent (funcall new directory) time))
-       (pcase-let ((`(,id . ,args) (when-let* ((new-arguments (plist-get props :new-arguments)))
-                                     (funcall new-arguments))))
+       (pcase-let ((`(,id . ,args)
+                    (when-let* ((new-arguments (plist-get props :new-arguments)))
+                      (let ((default-directory directory)
+                            (project-current-directory-override directory))
+                        (if (memq (cdr (func-arity new-arguments)) '(0))
+                            (funcall new-arguments)
+                          (funcall new-arguments directory))))))
          (lispm-agents--launch agent directory (lispm-agents-fresh-name agent directory)
                                args id
                                (lispm-tr "New %s · %s" (plist-get props :name)

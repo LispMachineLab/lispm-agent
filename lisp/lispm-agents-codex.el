@@ -362,10 +362,10 @@ exclusion replaces any `shell_environment_policy.exclude' of config.toml."
 
 ;;;; The agent
 
-(defun lispm-agents-codex-new ()
-  "Start a new Codex session at the current project root."
-  (interactive)
-  (lispm-agents-new 'codex))
+(defun lispm-agents-codex-new (&optional directory)
+  "Start a new Codex session in DIRECTORY."
+  (interactive (list (lispm-agents-read-directory 'codex)))
+  (lispm-agents-new 'codex directory))
 
 (defun lispm-agents-setup-codex ()
   "Make Codex one of the editor's agents."

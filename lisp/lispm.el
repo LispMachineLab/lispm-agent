@@ -211,10 +211,12 @@ you write under its last heading and send with C-c RET."
 
 ;;;###autoload
 (defun lispm (&optional role directory)
-  "Start a new agent in the current project, as starting Claude Code there would.
+  "Start a new agent in DIRECTORY, as starting Claude Code there would.
 The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
-  (interactive (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))))
+  (interactive
+   (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))
+         (lispm-agents-read-directory 'lispm)))
   (lispm-show (lispm-start role directory)))
 
 ;;;###autoload

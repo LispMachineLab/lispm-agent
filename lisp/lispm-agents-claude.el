@@ -392,10 +392,10 @@ the id it is given, so its terminal knows its session from the start."
   (let ((id (lispm-agents-uuid)))
     (cons id (list "--session-id" id))))
 
-(defun lispm-agents-claude-new ()
-  "Start a new Claude Code session at the current project root."
-  (interactive)
-  (lispm-agents-new 'claude))
+(defun lispm-agents-claude-new (&optional directory)
+  "Start a new Claude Code session in DIRECTORY."
+  (interactive (list (lispm-agents-read-directory 'claude)))
+  (lispm-agents-new 'claude directory))
 
 (defun lispm-agents-setup-claude ()
   "Make Claude Code one of the editor's agents."
