@@ -701,7 +701,7 @@ BODY can use `port' and `log', the file the server records requests in."
     (let ((backend (list :url (format "http://127.0.0.1:%d" port)
                          :key "test-key"))
           result err deltas)
-      (lispm-api-stream backend '((model . "fake") (messages . [((role . "user") (content . "hi"))]))
+      (lispm-api-stream backend '((model . "fake") (messages . [((role . "user") (content . "你好 λ→∀"))]))
                         '("beta-a" "beta-b")
                         :on-delta (lambda (kind text) (push (cons kind text) deltas))
                         :on-done (lambda (m) (setq result m))
@@ -718,11 +718,27 @@ BODY can use `port' and `log', the file the server records requests in."
       (let* ((logged (lispm--json-decode (with-temp-buffer
                                            (insert-file-contents log)
                                            (buffer-substring (point-min) (line-end-position)))))
-             (headers (alist-get 'headers logged)))
+             (headers (alist-get 'headers logged))
+             (body (alist-get 'body logged)))
         (should (equal (alist-get 'path logged) "/v1/messages"))
         (should (equal (alist-get 'x-api-key headers) "test-key"))
         (should (equal (alist-get 'anthropic-beta headers) "beta-a,beta-b"))
-        (should (equal (alist-get 'model (alist-get 'body logged)) "fake")))
+        (should (equal (alist-get 'model body) "fake"))
+        (should (equal (alist-get 'content (aref (alist-get 'messages body) 0)) "你好 λ→∀")))
+      ;; Also verify that when `lispm-kernel-http-stream' intercepts the request,
+      ;; the payload passed to it is a decoded multibyte string so `prin1-to-string'
+      ;; does not emit raw octal byte escapes.
+      (let (captured-payload)
+        (cl-letf (((symbol-function 'lispm-kernel-http-stream)
+                   (lambda (_url _headers payload _on-chunk _on-finish &rest _)
+                     (setq captured-payload payload)
+                     #'ignore)))
+          (lispm-api-stream backend '((model . "fake") (messages . [((role . "user") (content . "我要你画一个蚂蚁骑自行车的网页图"))]))
+                            nil :on-done #'ignore :on-error #'ignore)
+          (should (stringp captured-payload))
+          (should (multibyte-string-p captured-payload))
+          (should (equal (alist-get 'content (aref (alist-get 'messages (lispm--json-decode captured-payload)) 0))
+                         "我要你画一个蚂蚁骑自行车的网页图"))))
       (setq result nil err nil)
       (lispm-api-stream backend '((model . "fake") (stream . :false)) nil
                         :on-done (lambda (m) (setq result m))
