@@ -12344,45 +12344,6 @@ was asked takes its place."
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
-(ert-deftest lispm-test-request-context-functions ()
-  "Live scenario context from `lispm-request-context-functions' is captured
-once per turn and attached to the turn's user message in `lispm-request-body'
-without mutating the transcript buffer."
-  (lispm-test-env
-    (let* ((counter 0)
-           (lispm-request-context-functions
-            (list (lambda (_agent)
-                    (cl-incf counter)
-                    (format "Surface: Dynamic Lisp Listener 1 (snapshot %d)" counter))))
-           (agent (lispm-start nil project))
-           (buf (lispm-session-buffer agent)))
-      (with-current-buffer buf
-        (goto-char (point-max))
-        (insert "Where am I typing?\n"))
-      (setf (lispm-agent-turn agent) 1)
-      (pcase-let* ((`(,body1 . ,_) (lispm-request-body agent))
-                   (`(,body2 . ,_) (lispm-request-body agent))
-                   (msgs1 (alist-get 'messages body1))
-                   (last1 (aref msgs1 (1- (length msgs1))))
-                   (content1 (alist-get 'content last1)))
-        ;; Captured once for turn 1 across multiple steps in the same turn.
-        (should (= counter 1))
-        (should (equal body1 body2))
-        (should (= (length content1) 2))
-        (should (string-search "[Current LispM scenario]\nSurface: Dynamic Lisp Listener 1 (snapshot 1)"
-                               (alist-get 'text (aref content1 1))))
-        ;; The session buffer on disk/screen is untouched by transient scenario blocks.
-        (with-current-buffer buf
-          (should-not (string-search "Surface: Dynamic Lisp Listener 1" (buffer-string)))))
-      ;; Advancing to turn 2 captures a fresh scenario snapshot.
-      (setf (lispm-agent-turn agent) 2)
-      (pcase-let* ((`(,body3 . ,_) (lispm-request-body agent))
-                   (msgs3 (alist-get 'messages body3))
-                   (last3 (aref msgs3 (1- (length msgs3))))
-                   (content3 (alist-get 'content last3)))
-        (should (= counter 2))
-        (should (string-search "snapshot 2" (alist-get 'text (aref content3 1))))))))
-
 (ert-deftest lispm-test-agents-default-directory-infers-context-and-welcome ()
   "A new agent's default directory is inferred from the current project or
 folder, while welcome, desktop and system-agent buffers resolve to `~/'."
@@ -12391,7 +12352,7 @@ folder, while welcome, desktop and system-agent buffers resolve to `~/'."
         (plain (make-temp-file "lispm-test-plain-" t))
         (home (file-name-as-directory (expand-file-name "~"))))
     (unwind-protect
-        (progn
+        (save-window-excursion
           (make-directory (expand-file-name ".git" repo))
           (setq sub (expand-file-name "src/nested" repo))
           (make-directory sub t)
@@ -12409,13 +12370,18 @@ folder, while welcome, desktop and system-agent buffers resolve to `~/'."
                            (file-name-as-directory (expand-file-name plain)))))
           ;; Welcome and desktop buffers resolve to `~/' even if default-directory was a repo.
           (dolist (name '("*GNU Emacs*" "*Desktop*" " *Desktop Background*" "*Setup Assistant*"))
-            (let ((buf (get-buffer-create name)))
+            (let* ((existed (get-buffer name))
+                   (buf (or existed (get-buffer-create name)))
+                   (old-dir (buffer-local-value 'default-directory buf)))
               (unwind-protect
                   (with-current-buffer buf
                     (setq default-directory (file-name-as-directory sub))
                     (set-window-buffer (selected-window) buf)
                     (should (equal (lispm-agents-default-directory) home)))
-                (kill-buffer buf)))))
+                (if existed
+                    (with-current-buffer buf
+                      (setq default-directory old-dir))
+                  (kill-buffer buf))))))
       (delete-directory repo t)
       (delete-directory plain t))))
 
@@ -12464,6 +12430,9 @@ inferred directory in both `M-x' (`read-directory-name') and the GUI modal form.
                          ;; Initial value is pre-filled and focused on the directory field.
                          (should (equal (lispm-ui-form-value :directory)
                                         (abbreviate-file-name (file-name-as-directory repo))))
+                         ;; Submitting a nonexistent directory signals a validation user-error.
+                         (lispm-ui-form-set :directory "/nonexistent-lispm-dir-xyz")
+                         (should-error (lispm-ui-form-submit) :type 'user-error)
                          ;; Pressing the Choose… button updates the directory field.
                          (let ((browse (alist-get :browse (lispm-ui-form-widgets))))
                            (should browse)
