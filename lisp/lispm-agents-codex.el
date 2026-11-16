@@ -201,33 +201,63 @@ Forked threads share their session's id; the newest is listed."
                                   (lispm-agents-codex--named session names)))))
 
 (defvar lispm-agents-codex--meta-cache (make-hash-table :test #'equal)
-  "Memoized (MTIME . KEEP-P) per rollout file for session readers.")
+  "Memoized (MTIME . STATE) per rollout file for session readers.
+STATE is `keep', `drop' or `named-only'.")
 
-(defun lispm-agents-codex--keep-file-p (file)
-  "Return non-nil when FILE records an interactive session or titled subagent."
+(defun lispm-agents-codex--file-state (file &optional mtime)
+  "Return `keep', `drop' or `named-only' for rollout FILE at MTIME."
   (if (not (and (stringp file) (file-readable-p file)))
-      t
-    (let* ((mtime (lispm-agents-file-time file))
+      'keep
+    (let* ((mtime (or mtime (lispm-agents-file-time file)))
            (cached (gethash file lispm-agents-codex--meta-cache)))
-      (if (and cached (equal (car cached) mtime))
+      (if (and cached (equal (car cached) mtime)
+               (memq (cdr cached) '(keep drop named-only)))
           (cdr cached)
-        (let* ((meta (car (lispm-agents-read-json-region
-                           file 0 lispm-agents-transcript-head-bytes)))
-               (payload (and (equal (plist-get meta :type) "session_meta")
-                             (plist-get meta :payload)))
-               (keep (if payload
-                         (and (not (lispm-agents-codex--exec-p payload))
-                              (or (not (lispm-agents-codex--parent payload))
-                                  (and (lispm-agents-codex--subagent-title payload) t)))
-                       t)))
-          (puthash file (cons mtime keep) lispm-agents-codex--meta-cache)
-          keep)))))
+        (let* ((line (with-temp-buffer
+                       (insert-file-contents file nil 0 4096)
+                       (goto-char (point-min))
+                       (when (= (line-end-position) (point-max))
+                         (erase-buffer)
+                         (insert-file-contents
+                          file nil 0 lispm-agents-transcript-head-bytes)
+                         (goto-char (point-min)))
+                       (buffer-substring-no-properties
+                        (point-min) (line-end-position))))
+               (state
+                (if (not (string-match-p
+                          "codex_exec\\|\"exec\"\\|parent_thread_id\\|subagent"
+                          line))
+                    'keep
+                  (let* ((meta (ignore-errors
+                                 (json-parse-string line
+                                                    :object-type 'plist
+                                                    :array-type 'list
+                                                    :null-object nil
+                                                    :false-object nil)))
+                         (payload (and (equal (plist-get meta :type) "session_meta")
+                                       (plist-get meta :payload))))
+                    (cond ((null payload) 'keep)
+                          ((lispm-agents-codex--exec-p payload) 'drop)
+                          ((not (lispm-agents-codex--parent payload)) 'keep)
+                          ((lispm-agents-codex--subagent-title payload) 'keep)
+                          (t 'named-only))))))
+          (puthash file (cons mtime state) lispm-agents-codex--meta-cache)
+          state)))))
 
 (defun lispm-agents-codex--normalize-sessions (sessions)
   "Filter out non-interactive `codex exec' and untitled subagent SESSIONS."
-  (seq-filter (lambda (session)
-                (lispm-agents-codex--keep-file-p (plist-get session :file)))
-              sessions))
+  (let ((names nil))
+    (seq-filter
+     (lambda (session)
+       (pcase (lispm-agents-codex--file-state
+               (plist-get session :file) (plist-get session :time))
+         ('keep t)
+         ('drop nil)
+         ('named-only
+          (unless names
+            (setq names (lispm-agents-codex--thread-names)))
+          (and (gethash (plist-get session :id) names) t))))
+     sessions)))
 
 (defun lispm-agents-codex--rename (session title)
   "Give Codex SESSION the TITLE: a thread name appended to its index."
