@@ -110,15 +110,12 @@ time is the first timestamp in the transcript head, in float seconds."
          (task (when-let* ((description (plist-get subagent :description))
                            ((stringp description))
                            ((not (string-blank-p description))))
-                 description))
-         (resolved-title (or title task prompt
-                             (lispm-agents-claude--custom-title
-                              (list :id id :file file)))))
-    (when (and cwd resolved-title)
+                 description)))
+    (when cwd
       (append (list :agent 'claude
                     :id id
                     :cwd cwd
-                    :title resolved-title
+                    :title (or title task prompt)
                     :started (seq-some
                               (lambda (object)
                                 (when-let* ((stamp (plist-get object :timestamp))
@@ -162,11 +159,12 @@ session's own directory, rather than in the transcript, which it rewrites."
   "Return SESSION titled by its custom title, when one was chosen.
 The title file changes without the transcript, so it is no part of the
 transcript memo and is read after it; SESSION, shared with the memo, is
-not modified."
-  (when session
-    (if-let* ((title (lispm-agents-claude--custom-title session)))
-        (plist-put (copy-sequence session) :title title)
-      session)))
+not modified.  Return nil when SESSION has neither a custom title nor a
+title of its own to show."
+  (when-let* ((session)
+              (title (or (lispm-agents-claude--custom-title session)
+                         (plist-get session :title))))
+    (plist-put (copy-sequence session) :title title)))
 
 (defun lispm-agents-claude--files ()
   "Return every Claude Code transcript file: the sessions' own, and

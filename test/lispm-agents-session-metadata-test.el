@@ -63,7 +63,8 @@
     (should-not (lispm-agents-codex--parent (list :source source)))))
 
 (ert-deftest lispm-test-codex-session-excludes-exec-and-untitled-subagents ()
-  "Non-interactive `codex exec' runs and untitled review subagents are excluded."
+  "Non-interactive `codex exec' runs and untitled review subagents are excluded,
+while subagents named in the session index are preserved."
   (let* ((exec-payload '(:id "exec-1" :cwd "/tmp" :originator "codex_exec" :source "exec"
                          :timestamp "2026-10-20T08:00:00Z"))
          (review-payload '(:id "rev-1" :cwd "/tmp" :parent_thread_id "exec-1"
@@ -75,36 +76,77 @@
                  (list (list (list :type "session_meta" :payload exec-payload) prompt))))
     (let ((rev (lispm-agents-codex--session
                 "/tmp/review.jsonl"
-                (list (list (list :type "session_meta" :payload review-payload) prompt)))))
+                (list (list (list :type "session_meta" :payload review-payload) prompt))))
+          (names (make-hash-table :test #'equal)))
       (should-not (plist-get rev :title))
-      (should-not (lispm-agents-codex--named rev (make-hash-table :test #'equal))))))
+      (should-not (lispm-agents-codex--named rev names))
+      (puthash "rev-1" "Named review subagent" names)
+      (should (equal (plist-get (lispm-agents-codex--named rev names) :title)
+                     "Named review subagent"))))
+  ;; A >4 KiB `session_meta` line (including multibyte UTF-8 `cwd` + `base_instructions`)
+  ;; still classifies `codex_exec` and untitled subagents accurately via
+  ;; `lispm-agents-codex--file-state', and legacy boolean cache entries are migrated.
+  (let ((file (make-temp-file "lispm-codex-large-meta-" nil ".jsonl"))
+        (lispm-agents-codex--meta-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file file
+              (insert (decode-coding-string
+                       (json-serialize
+                        `(:type "session_meta"
+                          :payload (:id "exec-big" :cwd "/tmp/中文目录"
+                                    :base_instructions ,(make-string 5000 ?x)
+                                    :originator "codex_exec" :source "exec")))
+                       'utf-8)
+                      "\n")))
+          (should (eq (lispm-agents-codex--file-state file) 'drop))
+          ;; Legacy `(mtime . t)' or `(mtime . nil)' cache entries from v0.18.15 are recomputed.
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cli-1\",\"cwd\":\"/tmp\",\"source\":\"cli\"}}\n"))
+          (let ((mtime (lispm-agents-file-time file)))
+            (puthash file (cons mtime t) lispm-agents-codex--meta-cache)
+            (should (equal (mapcar (lambda (s) (plist-get s :id))
+                                   (lispm-agents-codex--normalize-sessions
+                                    (list (list :id "cli-1" :file file :time mtime))))
+                           '("cli-1")))))
+      (delete-file file))))
 
 (ert-deftest lispm-test-claude-session-recovers-custom-title-without-head-prompt ()
-  "A Claude session with a custom-title.json is kept even when head/tail has no prompt."
-  (let* ((dir (make-temp-file "lispm-claude-custom-" t))
+  "A Claude session with a custom-title.json is kept even when head/tail has no prompt,
+and clearing or changing custom-title.json takes effect without transcript cache staleness."
+  (let* ((lispm-agents-claude-projects-directory (make-temp-file "lispm-claude-custom-" t))
+         (dir (expand-file-name "-tmp" lispm-agents-claude-projects-directory))
          (file (expand-file-name "0199.jsonl" dir))
+         (title-file (expand-file-name "0199/custom-title.json" dir))
          (sub-dir (expand-file-name "0199/subagents" dir))
          (sub-file (expand-file-name "agent-a1.jsonl" sub-dir))
          (lispm-agents--session-cache (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (make-directory sub-dir t)
-          (with-temp-file (expand-file-name "0199/custom-title.json" dir)
+          (with-temp-file title-file
             (insert "{\"customTitle\":\"Custom Parent Title\"}"))
           (with-temp-file file
             (insert "{\"type\":\"queue-operation\",\"cwd\":\"/tmp\",\"timestamp\":\"2026-10-20T08:00:00Z\"}\n"))
           (with-temp-file sub-file
             (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"message\":{\"content\":\"Subtask\"}}\n"))
-          (let ((parent (lispm-agents-claude--session
-                         file '(((:type "queue-operation" :cwd "/tmp" :timestamp "2026-10-20T08:00:00Z"))))))
-            (should parent)
-            (should (equal (plist-get parent :title) "Custom Parent Title")))
-          (let* ((sub (list :agent 'claude :id "agent-a1" :parent "0199" :cwd "/tmp"
+          (let* ((sessions (lispm-agents-claude-sessions))
+                 (parent (seq-find (lambda (s) (equal (plist-get s :id) "0199")) sessions))
+                 (sub (list :agent 'claude :id "agent-a1" :parent "0199" :cwd "/tmp"
                             :title "Subtask" :file sub-file :time 10.0))
-                (normalized (lispm-agents-claude--normalize-sessions (list sub))))
+                 (normalized (lispm-agents-claude--normalize-sessions (list sub))))
+            (should (= (length sessions) 2))
+            (should (equal (plist-get parent :title) "Custom Parent Title"))
             (should (= (length normalized) 2))
-            (should (seq-find (lambda (s) (equal (plist-get s :id) "0199")) normalized))))
-      (delete-directory dir t))))
+            (should (seq-find (lambda (s) (equal (plist-get s :id) "0199")) normalized)))
+          ;; Clearing custom-title.json without modifying 0199.jsonl drops the untitled parent.
+          (with-temp-file title-file
+            (insert "{\"customTitle\":\"   \"}"))
+          (let ((sessions (lispm-agents-claude-sessions)))
+            (should (= (length sessions) 1))
+            (should-not (seq-find (lambda (s) (equal (plist-get s :id) "0199")) sessions))))
+      (delete-directory lispm-agents-claude-projects-directory t))))
 
 (ert-deftest lispm-test-native-session-start-survives-continuation ()
   "A LispM session's original id dates every continuation consistently."
