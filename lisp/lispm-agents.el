@@ -694,7 +694,10 @@ sessions cannot be read lists none, and says so."
                                  agent (plist-get props :sessions) recent))))
         (if (and reader (eq sessions 'pending))
             'pending
-          (delq nil (copy-sequence sessions))))
+          (let ((sessions (delq nil (copy-sequence sessions))))
+            (if-let* ((normalize (plist-get props :normalize)))
+                (funcall normalize sessions)
+              sessions))))
     (error (message (lispm-tr "%s sessions unavailable: %s") (plist-get props :name)
                     (error-message-string err))
            nil)))

@@ -105,16 +105,20 @@ time is the first timestamp in the transcript head, in float seconds."
                                                           :content))))
                                     (and (lispm-agents-human-text-p text) text))))
                            (car objects)))
+         (id (file-name-base file))
          (cwd (seq-some (lambda (object) (plist-get object :cwd)) all))
          (task (when-let* ((description (plist-get subagent :description))
                            ((stringp description))
                            ((not (string-blank-p description))))
-                 description)))
-    (when (and cwd (or title prompt task))
+                 description))
+         (resolved-title (or title task prompt
+                             (lispm-agents-claude--custom-title
+                              (list :id id :file file)))))
+    (when (and cwd resolved-title)
       (append (list :agent 'claude
-                    :id (file-name-base file)
+                    :id id
                     :cwd cwd
-                    :title (or title task prompt)
+                    :title resolved-title
                     :started (seq-some
                               (lambda (object)
                                 (when-let* ((stamp (plist-get object :timestamp))
@@ -178,6 +182,29 @@ those of the subagents they ran, see `lispm-agents-claude--subagent'."
   (lispm-agents-file-sessions (lispm-agents-claude--files)
                               #'lispm-agents-claude--session
                               #'lispm-agents-claude--titled))
+
+(defun lispm-agents-claude--normalize-sessions (sessions)
+  "Ensure custom-titled parent sessions are present for SESSIONS."
+  (let ((ids (make-hash-table :test #'equal))
+        (missing nil))
+    (dolist (session sessions)
+      (puthash (plist-get session :id) t ids))
+    (dolist (session sessions)
+      (when-let* ((parent (plist-get session :parent))
+                  ((not (gethash parent ids)))
+                  (file (plist-get session :file))
+                  (dir (file-name-directory (directory-file-name (file-name-directory file))))
+                  (parent-file (expand-file-name (concat parent ".jsonl")
+                                                 (file-name-directory (directory-file-name dir))))
+                  ((file-readable-p parent-file)))
+        (puthash parent t ids)
+        (push parent-file missing)))
+    (if missing
+        (append (lispm-agents-file-sessions (nreverse missing)
+                                            #'lispm-agents-claude--session
+                                            #'lispm-agents-claude--titled)
+                sessions)
+      sessions)))
 
 (defun lispm-agents-claude--rename (session title)
   "Give Claude SESSION the TITLE, in its custom title file.
@@ -409,6 +436,7 @@ the id it is given, so its terminal knows its session from the start."
    :built-in t
    :program "claude"
    :sessions #'lispm-agents-claude-sessions
+   :normalize #'lispm-agents-claude--normalize-sessions
    :rename #'lispm-agents-claude--rename
    :files #'lispm-agents-claude--session-files
    :resumable #'lispm-agents-claude--resumable-p
