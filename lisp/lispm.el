@@ -4,7 +4,7 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
-;; Version: 0.18.12
+;; Version: 0.18.13
 ;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-kit "0.2.0") (lispm-ui "0.7.1") (lispm-auth "0.2.8"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
@@ -211,10 +211,12 @@ you write under its last heading and send with C-c RET."
 
 ;;;###autoload
 (defun lispm (&optional role directory)
-  "Start a new agent in the current project, as starting Claude Code there would.
+  "Start a new agent in DIRECTORY, as starting Claude Code there would.
 The agent has `lispm-default-role'; with a prefix argument, choose
 ROLE.  DIRECTORY defaults to the current project's root."
-  (interactive (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))))
+  (interactive
+   (list (and current-prefix-arg (lispm-read-role (lispm-tr "Role")))
+         (lispm-agents-read-directory 'lispm)))
   (lispm-show (lispm-start role directory)))
 
 ;;;###autoload

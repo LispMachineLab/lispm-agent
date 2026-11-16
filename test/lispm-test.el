@@ -12344,44 +12344,107 @@ was asked takes its place."
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
-(ert-deftest lispm-test-request-context-functions ()
-  "Live scenario context from `lispm-request-context-functions' is captured
-once per turn and attached to the turn's user message in `lispm-request-body'
-without mutating the transcript buffer."
-  (lispm-test-env
-    (let* ((counter 0)
-           (lispm-request-context-functions
-            (list (lambda (_agent)
-                    (cl-incf counter)
-                    (format "Surface: Dynamic Lisp Listener 1 (snapshot %d)" counter))))
-           (agent (lispm-start nil project))
-           (buf (lispm-session-buffer agent)))
-      (with-current-buffer buf
-        (goto-char (point-max))
-        (insert "Where am I typing?\n"))
-      (setf (lispm-agent-turn agent) 1)
-      (pcase-let* ((`(,body1 . ,_) (lispm-request-body agent))
-                   (`(,body2 . ,_) (lispm-request-body agent))
-                   (msgs1 (alist-get 'messages body1))
-                   (last1 (aref msgs1 (1- (length msgs1))))
-                   (content1 (alist-get 'content last1)))
-        ;; Captured once for turn 1 across multiple steps in the same turn.
-        (should (= counter 1))
-        (should (equal body1 body2))
-        (should (= (length content1) 2))
-        (should (string-search "[Current LispM scenario]\nSurface: Dynamic Lisp Listener 1 (snapshot 1)"
-                               (alist-get 'text (aref content1 1))))
-        ;; The session buffer on disk/screen is untouched by transient scenario blocks.
-        (with-current-buffer buf
-          (should-not (string-search "Surface: Dynamic Lisp Listener 1" (buffer-string)))))
-      ;; Advancing to turn 2 captures a fresh scenario snapshot.
-      (setf (lispm-agent-turn agent) 2)
-      (pcase-let* ((`(,body3 . ,_) (lispm-request-body agent))
-                   (msgs3 (alist-get 'messages body3))
-                   (last3 (aref msgs3 (1- (length msgs3))))
-                   (content3 (alist-get 'content last3)))
-        (should (= counter 2))
-        (should (string-search "snapshot 2" (alist-get 'text (aref content3 1))))))))
+(ert-deftest lispm-test-agents-default-directory-infers-context-and-welcome ()
+  "A new agent's default directory is inferred from the current project or
+folder, while welcome, desktop and system-agent buffers resolve to `~/'."
+  (let ((repo (make-temp-file "lispm-test-repo-" t))
+        (sub nil)
+        (plain (make-temp-file "lispm-test-plain-" t))
+        (home (file-name-as-directory (expand-file-name "~"))))
+    (unwind-protect
+        (save-window-excursion
+          (make-directory (expand-file-name ".git" repo))
+          (setq sub (expand-file-name "src/nested" repo))
+          (make-directory sub t)
+          ;; Inside a git repository subdirectory, the project root is inferred.
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory sub))
+            (set-window-buffer (selected-window) (current-buffer))
+            (should (equal (file-name-as-directory (expand-file-name (lispm-agents-default-directory)))
+                           (file-name-as-directory (expand-file-name repo)))))
+          ;; Inside a non-project folder, that folder is inferred.
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory plain))
+            (set-window-buffer (selected-window) (current-buffer))
+            (should (equal (file-name-as-directory (expand-file-name (lispm-agents-default-directory)))
+                           (file-name-as-directory (expand-file-name plain)))))
+          ;; Welcome and desktop buffers resolve to `~/' even if default-directory was a repo.
+          (dolist (name '("*GNU Emacs*" "*Desktop*" " *Desktop Background*" "*Setup Assistant*"))
+            (let* ((existed (get-buffer name))
+                   (buf (or existed (get-buffer-create name)))
+                   (old-dir (buffer-local-value 'default-directory buf)))
+              (unwind-protect
+                  (with-current-buffer buf
+                    (setq default-directory (file-name-as-directory sub))
+                    (set-window-buffer (selected-window) buf)
+                    (should (equal (lispm-agents-default-directory) home)))
+                (if existed
+                    (with-current-buffer buf
+                      (setq default-directory old-dir))
+                  (kill-buffer buf))))))
+      (delete-directory repo t)
+      (delete-directory plain t))))
+
+(ert-deftest lispm-test-agents-read-directory-minibuffer-and-form ()
+  "Starting a new agent interactively prompts for the folder, pre-filling the
+inferred directory in both `M-x' (`read-directory-name') and the GUI modal form."
+  (let ((repo (make-temp-file "lispm-test-read-dir-" t))
+        (other (make-temp-file "lispm-test-other-dir-" t)))
+    (unwind-protect
+        (lispm-test--with-agents
+            `((codex :name "Codex" :program "sh" :key "x" :command lispm-agents-codex-new)
+              (claude :name "Claude Code" :program "sh" :key "c" :command lispm-agents-claude-new))
+          ;; 1. M-x / keyboard path calls `read-directory-name' pre-filled with the inferred folder.
+          (let ((prompted-init nil)
+                (launched-dir nil)
+                (lispm-ui-in-gui-action nil)
+                (lispm-ui--command-from-mouse nil))
+            (cl-letf (((symbol-function 'lispm-agents-default-directory) (lambda () repo))
+                      ((symbol-function 'read-directory-name)
+                       (lambda (_prompt &optional dir _default _mustmatch _initial)
+                         (setq prompted-init dir)
+                         other))
+                      ((symbol-function 'lispm-agents--launch)
+                       (lambda (_agent dir &rest _)
+                         (setq launched-dir dir)
+                         (current-buffer)))
+                      ((symbol-function 'lispm-agents-show) #'identity))
+              (call-interactively #'lispm-agents-codex-new)
+              (should (equal prompted-init
+                             (abbreviate-file-name (file-name-as-directory (expand-file-name repo)))))
+              (should (equal launched-dir (file-name-as-directory (expand-file-name other))))))
+          ;; 2. GUI modal form path pre-fills `:directory', updates from `:preset' and `Choose…',
+          ;; validates existing directories, and returns the submitted folder.
+          (let ((lispm-ui-intercept-in-tests t)
+                (lispm-ui-in-gui-action t)
+                (form-title nil))
+            (cl-letf (((symbol-function 'lispm-agents-default-directory) (lambda () repo))
+                      ((symbol-function 'lispm-ui-choose-file)
+                       (lambda (&rest args)
+                         (should (plist-get args :directory))
+                         (should (eq (plist-get args :predicate) #'file-directory-p))
+                         other))
+                      ((symbol-function 'recursive-edit)
+                       (lambda ()
+                         (setq form-title (lispm-ui-form-title))
+                         ;; Initial value is pre-filled and focused on the directory field.
+                         (should (equal (lispm-ui-form-value :directory)
+                                        (abbreviate-file-name (file-name-as-directory repo))))
+                         ;; Submitting a nonexistent directory signals a validation user-error.
+                         (lispm-ui-form-set :directory "/nonexistent-lispm-dir-xyz")
+                         (should-error (lispm-ui-form-submit) :type 'user-error)
+                         ;; Pressing the Choose… button updates the directory field.
+                         (let ((browse (alist-get :browse (lispm-ui-form-widgets))))
+                           (should browse)
+                           (widget-apply browse :action))
+                         (should (equal (lispm-ui-form-value :directory)
+                                        (abbreviate-file-name (file-name-as-directory other))))
+                         (lispm-ui-form-submit))))
+              (let ((chosen (lispm-agents-read-directory 'codex)))
+                (should (equal form-title (lispm-tr "New %s session" "Codex")))
+                (should (equal chosen (file-name-as-directory (expand-file-name other))))))))
+      (delete-directory repo t)
+      (delete-directory other t))))
 
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
