@@ -62,6 +62,50 @@
                        (:subagent (:thread_spawn (:parent_thread_id " ")))))
     (should-not (lispm-agents-codex--parent (list :source source)))))
 
+(ert-deftest lispm-test-codex-session-excludes-exec-and-untitled-subagents ()
+  "Non-interactive `codex exec' runs and untitled review subagents are excluded."
+  (let* ((exec-payload '(:id "exec-1" :cwd "/tmp" :originator "codex_exec" :source "exec"
+                         :timestamp "2026-10-20T08:00:00Z"))
+         (review-payload '(:id "rev-1" :cwd "/tmp" :parent_thread_id "exec-1"
+                           :source (:subagent "review") :thread_source "subagent"
+                           :timestamp "2026-10-20T08:00:00Z"))
+         (prompt '(:type "event_msg" :payload (:type "user_message" :message "Review the code"))))
+    (should-not (lispm-agents-codex--session
+                 "/tmp/exec.jsonl"
+                 (list (list (list :type "session_meta" :payload exec-payload) prompt))))
+    (let ((rev (lispm-agents-codex--session
+                "/tmp/review.jsonl"
+                (list (list (list :type "session_meta" :payload review-payload) prompt)))))
+      (should-not (plist-get rev :title))
+      (should-not (lispm-agents-codex--named rev (make-hash-table :test #'equal))))))
+
+(ert-deftest lispm-test-claude-session-recovers-custom-title-without-head-prompt ()
+  "A Claude session with a custom-title.json is kept even when head/tail has no prompt."
+  (let* ((dir (make-temp-file "lispm-claude-custom-" t))
+         (file (expand-file-name "0199.jsonl" dir))
+         (sub-dir (expand-file-name "0199/subagents" dir))
+         (sub-file (expand-file-name "agent-a1.jsonl" sub-dir))
+         (lispm-agents--session-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (make-directory sub-dir t)
+          (with-temp-file (expand-file-name "0199/custom-title.json" dir)
+            (insert "{\"customTitle\":\"Custom Parent Title\"}"))
+          (with-temp-file file
+            (insert "{\"type\":\"queue-operation\",\"cwd\":\"/tmp\",\"timestamp\":\"2026-10-20T08:00:00Z\"}\n"))
+          (with-temp-file sub-file
+            (insert "{\"type\":\"user\",\"cwd\":\"/tmp\",\"message\":{\"content\":\"Subtask\"}}\n"))
+          (let ((parent (lispm-agents-claude--session
+                         file '(((:type "queue-operation" :cwd "/tmp" :timestamp "2026-10-20T08:00:00Z"))))))
+            (should parent)
+            (should (equal (plist-get parent :title) "Custom Parent Title")))
+          (let* ((sub (list :agent 'claude :id "agent-a1" :parent "0199" :cwd "/tmp"
+                            :title "Subtask" :file sub-file :time 10.0))
+                (normalized (lispm-agents-claude--normalize-sessions (list sub))))
+            (should (= (length normalized) 2))
+            (should (seq-find (lambda (s) (equal (plist-get s :id) "0199")) normalized))))
+      (delete-directory dir t))))
+
 (ert-deftest lispm-test-native-session-start-survives-continuation ()
   "A LispM session's original id dates every continuation consistently."
   (let* ((directory (make-temp-file "lispm-native-start-" t))
