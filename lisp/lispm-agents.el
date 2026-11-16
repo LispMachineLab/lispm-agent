@@ -1376,6 +1376,7 @@ INITIAL is pre-filled in the directory field."
                                  (cons dir (lispm-agents--directory-choice-label dir)))
                                choices))
          (submitted nil)
+         (closing nil)
          (result nil)
          (buffer nil)
          (cleanup nil)
@@ -1432,35 +1433,43 @@ INITIAL is pre-filled in the directory field."
           (lispm-ui-form
            title fields
            :on-submit (lambda (values)
-                        (setq submitted t
-                              result (or (alist-get :directory values) initial))
-                        (when (> (recursion-depth) depth)
-                          (exit-recursive-edit)))
+                        (when (<= (recursion-depth) (1+ depth))
+                          (setq submitted t
+                                result (or (alist-get :directory values) initial))
+                          (when (= (recursion-depth) (1+ depth))
+                            (exit-recursive-edit))))
            :on-cancel (lambda ()
-                        (setq submitted nil)
-                        (when (> (recursion-depth) depth)
-                          (exit-recursive-edit)))
+                        (when (<= (recursion-depth) (1+ depth))
+                          (setq submitted nil)
+                          (when (= (recursion-depth) (1+ depth))
+                            (exit-recursive-edit))))
            :setup (lambda ()
                     (when (boundp 'lispm-ui-form--props)
                       (set 'lispm-ui-form--props
                            (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
+                    (use-local-map (copy-keymap (current-local-map)))
                     (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
                     (local-set-key (kbd "ESC") #'lispm-ui-form-cancel)
                     (local-set-key (kbd "<escape>") #'lispm-ui-form-cancel))))
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook
                 (lambda ()
-                  (when (> (recursion-depth) depth)
-                    (exit-recursive-edit)))
+                  (unless closing
+                    (setq submitted nil)
+                    (when (= (recursion-depth) (1+ depth))
+                      (exit-recursive-edit))))
                 nil t))
     (unwind-protect
         (progn
           (setq cleanup (funcall lispm-ui-form-modal-show-function buffer))
           (with-current-buffer buffer
-            (lispm-ui-form--first-field))
+            (if (fboundp 'lispm-ui-form-first-field)
+                (lispm-ui-form-first-field)
+              (lispm-ui-form--first-field)))
           (let ((lispm-ui-in-gui-action nil)
                 (lispm-ui--command-from-mouse nil))
             (recursive-edit)))
+      (setq closing t)
       (when (functionp cleanup)
         (ignore-errors (funcall cleanup)))
       (when (buffer-live-p buffer)
