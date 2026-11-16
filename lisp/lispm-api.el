@@ -150,7 +150,9 @@ It is fed on stdin, so keys stay off the command line."
     (let ((coding-system-for-write 'binary))
       (with-temp-file file
         (set-buffer-multibyte nil)
-        (insert payload)))
+        (insert (if (multibyte-string-p payload)
+                    (encode-coding-string payload 'utf-8)
+                  payload))))
     (setq proc
           (make-process
            :name "lispm-api"
@@ -199,7 +201,7 @@ curl process or kernel cancellation function."
   (let* ((shape (lispm-api--shape backend))
          (state (funcall (plist-get shape :stream)))
          (headers (funcall (plist-get shape :headers) (lispm-api--key backend) betas))
-         (payload (lispm--json-serialize body))
+         (payload (lispm--json-encode body))
          (url (concat (string-remove-suffix "/" (plist-get backend :url))
                       (plist-get shape :path)))
          (client-error nil))
