@@ -1254,8 +1254,10 @@ Welcome and surface buffers resolve to the home directory."
 (defun lispm-agents-default-directory ()
   "Return where a new session or shell starts: the project root of the main
 window's buffer, see `lispm-agents-main-window-function'."
-  (or (and lispm-agents-default-directory-function
-           (funcall lispm-agents-default-directory-function))
+  (or (let ((dir (and lispm-agents-default-directory-function
+                      (funcall lispm-agents-default-directory-function))))
+        (and (stringp dir) (not (string-empty-p dir))
+             (file-name-as-directory (expand-file-name dir))))
       (let* ((selected (selected-window))
              (main (funcall lispm-agents-main-window-function))
              (window (if (with-selected-window selected
@@ -1455,7 +1457,7 @@ INITIAL is pre-filled in the directory field."
         (kill-buffer buffer)))
     (unless submitted
       (signal 'quit nil))
-    (file-name-as-directory (expand-file-name result))))
+    (file-name-as-directory (expand-file-name (string-trim result)))))
 
 (defun lispm-agents-read-directory (&optional agent default)
   "Ask for the working directory of a new session of AGENT.
