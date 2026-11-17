@@ -73,6 +73,22 @@ Customize for the chats open to follow."
          (set-default symbol value)
          (run-hooks 'lispm-ground-change-hook)))
 
+(defcustom lispm-ground-layer-check nil
+  "Whether `lispm-ground-check' warns when code crosses package layer boundaries.
+In an open system without kernel barriers (as Walker, Moon, Weinreb and
+McMahon noted of Symbolics Genera), layer boundaries are invisible unless
+explicitly checked.  When non-nil (`t' for all loaded namespaces, or a
+list of package prefix strings such as \\='(\"lispm\" \"org\")), references
+to internal `PKG--NAME' symbols that the reply itself does not define
+are reported as `(internal SYMBOL PUBLIC-ALTERNATIVES)'."
+  :type '(choice (const :tag "Off" nil)
+                 (const :tag "All namespaces" t)
+                 (repeat :tag "Protected prefixes" string))
+  :group 'lispm
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (run-hooks 'lispm-ground-change-hook)))
+
 (defconst lispm-ground--symbol-re
   "\\`\\(?:#?'\\)?\\([a-z][a-z0-9]*\\(?:--?[a-z0-9]+\\)+[?!*]?\\)\\'"
   "Code that looks like the symbol of a package: lowercase words joined
@@ -137,10 +153,32 @@ leaves the names it makes up unknown to this Emacs."
           (and (= end (length code)) form))
       (error nil))))
 
+(defun lispm-ground--internal-check (symbol defined)
+  "Check whether SYMBOL crosses an internal package boundary (`PKG--NAME').
+When `lispm-ground-layer-check' covers SYMBOL's package and DEFINED does
+not define SYMBOL, return `(internal SYMBOL PUBLIC-ALTERNATIVES)'."
+  (when (and lispm-ground-layer-check symbol)
+    (let ((name (symbol-name symbol)))
+      (when (and (not (lispm-ground--defined-by name defined))
+                 (string-match "\\`\\([a-z0-9-]+?\\)--\\([a-z0-9-]+\\)\\'" name))
+        (let ((pkg (match-string 1 name))
+              (stem (match-string 2 name)))
+          (when (or (eq lispm-ground-layer-check t)
+                    (and (listp lispm-ground-layer-check)
+                         (seq-some (lambda (prefix)
+                                     (or (equal pkg prefix)
+                                         (string-prefix-p (concat prefix "-") pkg)))
+                                   lispm-ground-layer-check)))
+            (let* ((direct (intern-soft (concat pkg "-" stem)))
+                   (public (and direct (or (fboundp direct) (boundp direct))
+                                (list direct))))
+              (list 'internal symbol public))))))))
+
 (defun lispm-ground--call (form defined)
   "What is wrong with FORM, a call written as code, or nil.
-Its function is a name nothing defines, or one taking more or fewer
-arguments than FORM gives it.  DEFINED are the names the reply defines."
+Its function is a name nothing defines, one taking more or fewer
+arguments than FORM gives it, or an internal symbol when
+`lispm-ground-layer-check' is active.  DEFINED are the names the reply defines."
   (when (and (consp form) (symbolp (car form)) (proper-list-p form))
     (let* ((name (symbol-name (car form)))
            (symbol (intern-soft name)))
@@ -157,23 +195,25 @@ arguments than FORM gives it.  DEFINED are the names the reply defines."
                ;; An autoload's arity is known only once its file is
                ;; loaded, and a macro or special form takes its
                ;; arguments as it pleases.
-               (unless (or (autoloadp function) (macrop function) (special-form-p function))
-                 (let ((arity (ignore-errors (func-arity function))))
-                   (when (and arity (or (< given (car arity))
-                                        (and (natnump (cdr arity)) (> given (cdr arity)))))
-                     (list 'arity symbol given arity))))))))))
+               (or (unless (or (autoloadp function) (macrop function) (special-form-p function))
+                     (let ((arity (ignore-errors (func-arity function))))
+                       (when (and arity (or (< given (car arity))
+                                            (and (natnump (cdr arity)) (> given (cdr arity)))))
+                         (list 'arity symbol given arity))))
+                   (lispm-ground--internal-check symbol defined))))))))
 
-(defun lispm-ground--path (code)
+(defun lispm-ground--path (code &optional root)
   "The path CODE is, without a line after a colon, if it looks like one.
 That is, it starts at the home or the current or parent directory, at
-the root with a directory there is, or with a directory, no dot in it,
-and ends with an extension; and it has no space, wildcard, variable,
-scheme or remote host."
-  (let ((path (if (string-match "\\`\\(.+\\):[0-9]+\\'" code) (match-string 1 code) code)))
+the root with a directory there is (on ROOT's machine when ROOT is
+remote), or with a directory, no dot in it, and ends with an extension;
+and it has no space, wildcard, variable, scheme or remote host."
+  (let ((path (if (string-match "\\`\\(.+\\):[0-9]+\\'" code) (match-string 1 code) code))
+        (remote (file-remote-p (or root default-directory))))
     (and (not (string-match-p "[][ \t\n*?{}$<>:\"'`|;&=,()#%\\]" path))
          (cond ((string-match "\\`/\\([^/]+\\)/[^/]" path)
                 ;; Not the path of a URL, /api/v1/users say.
-                (and (file-directory-p (concat "/" (match-string 1 path))) path))
+                (and (file-directory-p (concat (or remote "") "/" (match-string 1 path))) path))
                ((string-match-p "\\`\\(?:~\\|\\.\\.?\\)/" path) path)
                ((string-match-p "\\`[[:alpha:]_][^/.]*/\\(?:.*/\\)?[^/]*\\.[[:alnum:]]+\\'" path)
                 path)))))
@@ -192,18 +232,28 @@ scheme or remote host."
   "What CODE, set as code in a reply, names that this Emacs lacks, or nil.
 That is (undefined NAME), a symbol nothing defines, see lispm-ground.el;
 \(arity SYMBOL GIVEN ARITY), a call giving GIVEN arguments to a function
-whose `func-arity' is ARITY; or (missing FILE), a path, relative to
-ROOT (by default `default-directory'), to a file that is not there.
+whose `func-arity' is ARITY; (internal SYMBOL PUBLIC), an internal
+`PKG--NAME' symbol when `lispm-ground-layer-check' is active; or
+\(missing FILE), a path, relative to ROOT (by default
+`default-directory'), to a file that is not there.
 DEFINED are the names the reply defines."
-  (let ((code (string-trim (substring-no-properties code)))
-        (case-fold-search nil))
+  (let* ((code (string-trim (substring-no-properties code)))
+         (dir (or root default-directory))
+         (remote (file-remote-p dir))
+         (case-fold-search nil))
     (cond ((string-prefix-p "(" code)
            (lispm-ground--call (lispm-ground--read code) defined))
           ((string-match lispm-ground--symbol-re code)
            (let ((name (match-string 1 code)))
-             (and (lispm-ground--undefined-p name defined) (list 'undefined name))))
-          ((when-let* ((path (lispm-ground--path code))
-                       (file (expand-file-name path (or root default-directory))))
+             (if (lispm-ground--undefined-p name defined)
+                 (list 'undefined name)
+               (lispm-ground--internal-check (intern-soft name) defined))))
+          ((when-let* ((path (lispm-ground--path code dir))
+                       (file (expand-file-name
+                              (if (and remote (file-name-absolute-p path) (not (file-remote-p path)))
+                                  (concat remote path)
+                                path)
+                              dir)))
              (unless (file-exists-p file) (list 'missing file)))))))
 
 (defun lispm-ground--arguments (arity)
@@ -219,6 +269,11 @@ DEFINED are the names the reply defines."
     (`(undefined ,name) (lispm-tr "%s is not defined in this Emacs" name))
     (`(arity ,symbol ,given ,arity)
      (lispm-tr "%s takes %s; %d given here" symbol (lispm-ground--arguments arity) given))
+    (`(internal ,symbol ,public)
+     (if public
+         (lispm-tr "%s is internal; prefer public interface: %s"
+                   symbol (mapconcat #'symbol-name public ", "))
+       (lispm-tr "%s is an internal symbol" symbol)))
     (`(missing ,file) (lispm-tr "No such file: %s" (abbreviate-file-name file)))))
 
 (defun lispm-ground-mark (string finding)

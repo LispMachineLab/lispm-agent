@@ -560,19 +560,26 @@ A nil value leaves its argument out."
                   input)))))
     (nreverse input)))
 
-(defun lispm-lisp--outcome (entry)
-  "What the call ENTRY of a program's log gives the program."
+(defun lispm-lisp--outcome (entry &optional index)
+  "What the call ENTRY (at INDEX) of a program's log gives the program."
   (pcase-let ((`(,name ,_input ,outcome ,text) entry))
     (pcase outcome
       ('value text)
-      ('denied (signal 'lispm-call-denied (list (format "%s: %s" name text))))
-      (_ (signal 'lispm-call-failed (list (format "%s: %s" name text)))))))
+      ('denied (signal 'lispm-call-denied
+                       (list (propertize (format "%s: %s" name text)
+                                         'lispm-call-index index))))
+      (_ (signal 'lispm-call-failed
+                 (list (propertize (format "%s: %s" name text)
+                                   'lispm-call-index index)))))))
 
 (defun lispm-lisp--record (run index name input outcome text)
   "Record in RUN's log that its call INDEX, of NAME on INPUT, had OUTCOME and TEXT."
-  (setf (lispm-lisp--run-log run)
-        (append (seq-take (lispm-lisp--run-log run) index)
-                (list (list name input outcome text)))))
+  (let ((log (lispm-lisp--run-log run))
+        (entry (list name input outcome text)))
+    (if (< index (length log))
+        (setf (nth index (lispm-lisp--run-log run)) entry)
+      (setf (lispm-lisp--run-log run)
+            (append (seq-take log index) (list entry))))))
 
 (defun lispm-lisp--invoke (run tool input callback)
   "Run TOOL on INPUT as a call of RUN's agent; CALLBACK gets TEXT and ERRORP.
@@ -608,10 +615,12 @@ the run before gets the result it had then."
     (when (>= index lispm-lisp-max-calls)
       (error "The program made more than %d tool calls" lispm-lisp-max-calls))
     (setf (lispm-lisp--run-index run) (1+ index))
-    (if (and entry (equal (car entry) name) (equal (nth 1 entry) input))
-        (lispm-lisp--outcome entry)
-      ;; The program does something else than it did before.
-      (setf (lispm-lisp--run-log run) (seq-take (lispm-lisp--run-log run) index))
+    (if (and entry (equal (car entry) name) (equal (nth 1 entry) input)
+             (not (eq (nth 2 entry) 'retry)))
+        (lispm-lisp--outcome entry index)
+      ;; If the program takes a different branch than before, discard the old tail.
+      (unless (and entry (equal (car entry) name) (equal (nth 1 entry) input))
+        (setf (lispm-lisp--run-log run) (seq-take (lispm-lisp--run-log run) index)))
       (let ((agent (lispm-lisp--run-agent run)))
         (pcase (lispm-tool-decision agent tool input)
           (`(auto . ,_)
@@ -626,11 +635,11 @@ the run before gets the result it had then."
                    ((equal (car result) lispm-tools--interrupted) (signal 'quit nil))
                    (t (lispm-lisp--record run index name input
                                           (if (nth 1 result) 'failed 'value) (car result))
-                      (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)))))))
+                      (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)) index)))))
           (`(ask . ,reasons) (lispm-lisp--stop run (list :ask index tool input reasons)))
           (`(,_ . ,reasons)
            (lispm-lisp--record run index name input 'denied (lispm-tools-denial agent tool reasons))
-           (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)))))))))
+           (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)) index)))))))
 
 ;;;; Running a program
 
@@ -688,9 +697,28 @@ program's errors are signaled."
             (if (nthcdr 30 log) (format "\n- ... %d more" (- (length log) 30)) "")
             "\n\n")))
 
-(defun lispm-lisp--finish (run text errorp)
-  "End RUN with the result TEXT; ERRORP if it failed."
+(defun lispm-lisp--saved-log (run orig-index)
+  "Saved call log for RUN when an error originated at call ORIG-INDEX."
+  (let* ((log (mapcar #'copy-sequence
+                      (seq-take (lispm-lisp--run-log run)
+                                (lispm-lisp--run-index run))))
+         (len (length log)))
+    (cond
+     ((null orig-index) log)
+     ((= orig-index (1- len)) (butlast log))
+     ((and (>= orig-index 0) (< orig-index len))
+      (setf (nth 2 (nth orig-index log)) 'retry)
+      log)
+     (t log))))
+
+(defun lispm-lisp--finish (run text errorp &optional saved-log)
+  "End RUN with the result TEXT; ERRORP if it failed.
+When RUN fails in a turn, store SAVED-LOG on its pending call record
+\(`:lisp-log') so a `retry' restart replays earlier completed and
+handled steps without repeating their side effects."
   (setf (lispm-lisp--run-finished run) t)
+  (when-let* ((call (lispm-lisp--run-call run)))
+    (plist-put call :lisp-log (and errorp saved-log)))
   (funcall (lispm-lisp--run-done run) (substring-no-properties text) errorp))
 
 (defun lispm-lisp--step (run)
@@ -698,9 +726,15 @@ program's errors are signaled."
   (when (lispm-lisp--live-p run)
     (pcase (condition-case err
                (lispm-tools--interruptibly #'lispm-lisp--pass (list run))
-             ((lispm-lisp-refused error) (list :error (lispm-lisp--error-text err)))
+             ((lispm-lisp-refused error)
+              (let ((orig (and (memq (car err) '(lispm-call-failed lispm-call-denied))
+                               (stringp (cadr err))
+                               (get-text-property 0 'lispm-call-index (cadr err)))))
+                (list :error (lispm-lisp--error-text err) orig)))
              (quit (list :quit)))
       (`(:value ,value)
+       (setf (lispm-lisp--run-log run)
+             (seq-take (lispm-lisp--run-log run) (lispm-lisp--run-index run)))
        (lispm-lisp--finish run (concat (lispm-lisp--calls-text run)
                                        (lispm-tools--eval-result
                                         (lispm-lisp--run-output run)
@@ -708,8 +742,11 @@ program's errors are signaled."
                            nil))
       (`(:ask ,index ,tool ,input ,reasons) (lispm-lisp--ask run index tool input reasons))
       (`(:wait))
-      (`(:error ,message)
-       (lispm-lisp--finish run (concat (lispm-lisp--calls-text run) message) t))
+      (`(:error ,message ,orig)
+       (setf (lispm-lisp--run-log run)
+             (seq-take (lispm-lisp--run-log run) (lispm-lisp--run-index run)))
+       (lispm-lisp--finish run (concat (lispm-lisp--calls-text run) message)
+                           t (lispm-lisp--saved-log run orig)))
       (_ (lispm-lisp--finish run lispm-tools--interrupted t)))))
 
 (defun lispm-lisp--again (run)
@@ -782,10 +819,12 @@ LispM Kernel; this tool does not time-slice Lisp loops."
     (condition-case err
         (let* ((tools (lispm-lisp--tool-names agent))
                (forms (let ((lispm-lisp--tools tools)) (lispm-lisp--prepare code)))
-               (id lispm-current-call))
+               (id lispm-current-call)
+               (call (and id (gethash id (lispm-agent-pending agent)))))
           (lispm-lisp--step
            (lispm-lisp--run-create
-            :agent agent :id id :call (and id (gethash id (lispm-agent-pending agent)))
+            :agent agent :id id :call call
+            :log (and call (plist-get call :lisp-log))
             :forms forms :tools tools :handlers file-name-handler-alist :done done)))
       (lispm-lisp-refused (funcall done (lispm-lisp--error-text err) t)))))
 

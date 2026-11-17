@@ -159,6 +159,8 @@
   ("at least %d argument" "至少 %d 個引數")
   ("%s is not defined in this Emacs" . "%s 在此 Emacs 中未定義")
   ("%s takes %s; %d given here" . "%s 接受 %s；此處給了 %d 個")
+  ("%s is internal; prefer public interface: %s" . "%s 是內部符號；請優先使用公開介面：%s")
+  ("%s is an internal symbol" . "%s 是內部符號")
   ("No such file: %s" . "沒有此檔案：%s")
   ("RET: visit %s at line %d" . "RET：打開 %s 並前往第 %d 行")
   ("RET: visit %s" . "RET：打開 %s")
