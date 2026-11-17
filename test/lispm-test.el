@@ -12689,17 +12689,22 @@ and warns when arity changes."
         (should-error (lispm-develop--index-path other-el))
         (should (equal (lispm-develop-who-calls 'idx-callee) '(idx-caller))))
       ;; Reindexing one file does not delete another file's caller edges for a same-named function,
-      ;; and a same-named `defvar'/`defvar-local'/`defcustom' does not overwrite a `defun' caller.
+      ;; a same-named `defvar'/`defvar-local'/`defcustom' does not overwrite a `defun' caller,
+      ;; `cl-defsubst' skips its arglist, and `defalias' indexes quoted/sharp-quoted targets.
       (let ((f1 (expand-file-name "f1.el" project))
             (f2 (expand-file-name "f2.el" project)))
         (lispm-test--write f1 "(defun shared-fn () (callee-a))\n")
-        (lispm-test--write f2 "(defun shared-fn () (callee-b))\n(defvar shared-fn nil)\n(defvar-local shared-fn nil)\n")
+        (lispm-test--write f2 (concat "(cl-defsubst shared-fn (subst-arg) (callee-b subst-arg))\n"
+                                      "(defvar shared-fn nil)\n"
+                                      "(defvar-local shared-fn nil)\n"
+                                      "(defalias 'alias-fn #'callee-b)\n"))
         (lispm-develop--index-path f1)
         (lispm-develop--index-path f2)
-        (should (equal (lispm-develop-who-calls 'callee-b) '(shared-fn)))
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn shared-fn)))
+        (should-not (memq 'subst-arg (lispm-develop-callees 'shared-fn)))
         (lispm-test--write f1 ";; empty\n")
         (lispm-develop--index-path f1)
-        (should (equal (lispm-develop-who-calls 'callee-b) '(shared-fn))))
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn shared-fn))))
       ;; Changing the arity of `lispm-test-dev-callee' triggers a Caller notice.
       (lispm-test--call agent "edit_definition"
                         '((name . "lispm-test-dev-callee")

@@ -134,7 +134,8 @@ Handles circular structures and special forms (`let', `lambda', `cond',
                 ((eq head 'lambda)
                  (when (consp rest)
                    (walk-list (cdr rest))))
-                ((memq head '(defun defmacro cl-defun defsubst))
+                ((memq head '(defun defmacro cl-defun cl-defmacro
+                              defsubst cl-defsubst ert-deftest lispm-deftool))
                  (when (and (consp rest) (consp (cdr rest)))
                    (walk-list (cddr rest))))
                 ((memq head '(let let* when-let* if-let* and-let*))
@@ -208,31 +209,47 @@ Handles circular structures and special forms (`let', `lambda', `cond',
 
 (defconst lispm-develop--callable-definers
   '(defun defmacro cl-defun cl-defmacro defsubst cl-defsubst
-    cl-defmethod cl-defgeneric defalias
-    define-derived-mode define-minor-mode define-globalized-minor-mode
     ert-deftest lispm-deftool)
-  "Top-level defining forms whose symbol is indexed in the `who-calls' graph.")
+  "Top-level `(DEFINER NAME ARGLIST . BODY)' forms indexed in `who-calls'.")
+
+(defun lispm-develop--defalias-symbol (arg)
+  "Symbol named by ARG in `(defalias ARG ...)', or nil."
+  (cond ((and (consp arg)
+              (memq (car arg) '(quote function))
+              (consp (cdr arg))
+              (null (cddr arg))
+              (symbolp (cadr arg)))
+         (cadr arg))
+        ((symbolp arg) arg)))
 
 (defun lispm-develop-index-form (form &optional caller file)
   "Update the in-memory `who-calls' database for the top-level FORM.
 CALLER, if not given, is taken from FORM when its head is in
-`lispm-develop--callable-definers' (so `defvar', `defvar-local', `defcustom',
-`defface', etc. never overwrite a same-named function); FILE is the source
-file (by default `buffer-file-name')."
+`lispm-develop--callable-definers' or `defalias' (so `defvar',
+`defvar-local', `defcustom', `defface', etc. never overwrite a
+same-named function); FILE is the source file (by default
+`buffer-file-name')."
   (let* ((file (or file buffer-file-name))
          (head (and (consp form) (symbolp (car form)) (car form)))
          (caller (or caller
-                     (and head
-                          (memq head lispm-develop--callable-definers)
-                          (consp (cdr form))
-                          (symbolp (cadr form))
-                          (cadr form)))))
+                     (and head (consp (cdr form))
+                          (cond
+                           ((and (memq head lispm-develop--callable-definers)
+                                 (symbolp (cadr form)))
+                            (cadr form))
+                           ((eq head 'defalias)
+                            (lispm-develop--defalias-symbol (cadr form))))))))
     (when (and caller (symbolp caller))
       (lispm-develop--remove-caller caller file)
       (let* ((body (cond
-                    ((memq head '(defun defmacro cl-defun defsubst))
+                    ((memq head lispm-develop--callable-definers)
                      (and (consp (cddr form)) (cdddr form)))
-                    ((and (consp (cddr form)))
+                    ((eq head 'defalias)
+                     (when (consp (cddr form))
+                       (let* ((def (caddr form))
+                              (sym (lispm-develop--defalias-symbol def)))
+                         (list (if sym (list 'function sym) def)))))
+                    ((consp (cddr form))
                      (cddr form))
                     (t (list form))))
              (callees (delq caller
