@@ -179,6 +179,9 @@ error if FILE is no character file."
                    (when-let* ((string (cdr (assoc keyword keywords))))
                      (and (not (string-empty-p string)) string))))
            (symbol (lambda (keyword) (when-let* ((string (funcall line keyword))) (intern string))))
+           (bool (lambda (keyword)
+                   (when-let* ((string (funcall line keyword)))
+                     (not (member (downcase string) '("no" "false" "nil" "0" "off"))))))
            (endpoint (when-let* ((string (funcall line "endpoint")))
                        (let ((read (condition-case nil
                                        (read-from-string string)
@@ -198,6 +201,8 @@ error if FILE is no character file."
         :description ,(funcall line "description")
         :soul ,(and (not (string-empty-p body)) body)
         :avatar ,(and avatar (file-exists-p avatar) avatar)
+        :rag ,(funcall bool "rag")
+        :comfyui ,(funcall bool "comfyui")
         :appearance ,(funcall line "appearance")
         :workflow ,(funcall line "workflow")
         :knowledge ,(funcall line "knowledge")
@@ -215,7 +220,7 @@ error if FILE is no character file."
 define them (see `lispm-define-app-character').")
 
 (defconst lispm-characters--properties
-  '(:title :description :soul :avatar :appearance :workflow :knowledge :embedding-model
+  '(:title :description :soul :avatar :rag :comfyui :appearance :workflow :knowledge :embedding-model
     :role :backend :endpoint :model :effort :skill :file)
   "The properties of a character, as `lispm-register-character' takes them.")
 
@@ -331,6 +336,8 @@ picture has a new name, and the one it replaces is deleted."
                 `(("title" . ,(lispm-characters--line (plist-get props :title)))
                   ("description" . ,(lispm-characters--line (plist-get props :description)))
                   ("avatar" . ,avatar)
+                  ("rag" . ,(and (plist-get props :rag) "yes"))
+                  ("comfyui" . ,(and (plist-get props :comfyui) "yes"))
                   ("appearance" . ,(lispm-characters--line (plist-get props :appearance)))
                   ("workflow" . ,(lispm-characters--line (plist-get props :workflow)))
                   ("knowledge" . ,(lispm-characters--line (plist-get props :knowledge)))
@@ -432,16 +439,42 @@ is one of its name already."
   "A :when of the form: non-nil while the character thinks with KIND."
   (lambda (values) (eq (alist-get 'thinks values) kind)))
 
+(defun lispm-characters--when-checked (key)
+  "A :when of the form: non-nil while check field KEY is checked."
+  (lambda (values) (and (alist-get key values) t)))
+
+(defun lispm-character-rag-enabled-p (character-or-agent)
+  "Non-nil when CHARACTER-OR-AGENT has its RAG knowledge base enabled."
+  (when-let* ((character (cond ((lispm-agent-p character-or-agent)
+                                (lispm-agent-character* character-or-agent))
+                               ((lispm-character-p character-or-agent)
+                                character-or-agent)
+                               (t (lispm-get-character character-or-agent t)))))
+    (and (or (lispm-character-rag character)
+             (lispm-character-knowledge character)
+             (lispm-character-embedding-model character)
+             (lispm-character-knowledge-files character))
+         t)))
+
+(defun lispm-character-comfyui-enabled-p (character-or-agent)
+  "Non-nil when CHARACTER-OR-AGENT has ComfyUI image generation enabled."
+  (when-let* ((character (cond ((lispm-agent-p character-or-agent)
+                                (lispm-agent-character* character-or-agent))
+                               ((lispm-character-p character-or-agent)
+                                character-or-agent)
+                               (t (lispm-get-character character-or-agent t)))))
+    (and (or (lispm-character-comfyui character)
+             (lispm-character-appearance character)
+             (lispm-character-workflow character))
+         t)))
+
 (defun lispm-characters--form-values (character)
   "The values of the form of CHARACTER, nil for a new one: an alist."
   (let ((endpoint (and character (lispm-character-endpoint character))))
     `((title . ,(and character (lispm-character-title* character)))
       (description . ,(and character (lispm-character-description character)))
       (avatar . ,(and character (lispm-character-avatar character)))
-      (appearance . ,(and character (lispm-character-appearance character)))
-      (workflow . ,(and character (lispm-character-workflow character)))
       (soul . ,(and character (lispm-character-soul character)))
-      (knowledge . ,(and character (lispm-character-knowledge character)))
       (role . ,(and character (lispm-character-role character)))
       (thinks . ,(cond (endpoint 'endpoint)
                        ((and character (lispm-character-backend character)) 'backend)
@@ -453,21 +486,25 @@ is one of its name already."
       (auth-source . ,(eq (plist-get endpoint :key) 'auth-source))
       (model . ,(and character (lispm-character-model character)))
       (effort . ,(and character (lispm-character-effort character)))
-      (embedding-model . ,(and character (lispm-character-embedding-model character))))))
+      (rag . ,(and character (lispm-character-rag-enabled-p character)))
+      (knowledge . ,(and character (lispm-character-knowledge character)))
+      (embedding-model . ,(and character (lispm-character-embedding-model character)))
+      (comfyui . ,(and character (lispm-character-comfyui-enabled-p character)))
+      (appearance . ,(and character (lispm-character-appearance character)))
+      (workflow . ,(and character (lispm-character-workflow character))))))
 
 (defun lispm-characters--form-props (values)
   "What the values of a character's form, an alist, make it: a plist.
 Those of who it is only if the form has them; an app's has not."
   (let* ((get (lambda (key) (alist-get key values)))
-         (thinks (funcall get 'thinks)))
+         (thinks (funcall get 'thinks))
+         (rag (and (funcall get 'rag) t))
+         (comfyui (and (funcall get 'comfyui) t)))
     (append
      (when (assq 'title values)
        (list :title (funcall get 'title) :description (funcall get 'description)
              :avatar (funcall get 'avatar)
-             :appearance (funcall get 'appearance)
-             :workflow (funcall get 'workflow)
              :soul (funcall get 'soul)
-             :knowledge (funcall get 'knowledge)
              :role (funcall get 'role)))
      (list :backend (and (eq thinks 'backend) (funcall get 'backend))
            :endpoint (and (eq thinks 'endpoint)
@@ -476,31 +513,35 @@ Those of who it is only if the form has them; an app's has not."
                             ,@(when (funcall get 'auth-source) (list :key 'auth-source))))
            :model (funcall get 'model)
            :effort (funcall get 'effort)
-           :embedding-model (funcall get 'embedding-model)))))
+           :rag rag
+           :knowledge (and rag (funcall get 'knowledge))
+           :embedding-model (and rag (funcall get 'embedding-model))
+           :comfyui comfyui
+           :appearance (and comfyui (funcall get 'appearance))
+           :workflow (and comfyui (funcall get 'workflow))))))
 
 (defun lispm-character-form (&optional character)
   "The form making a character, or changing CHARACTER; return its buffer.
-That of an app chooses its model alone: who it is, its skill says.
-Submitted, the character is made or changed (`lispm-save-character')."
+That of an app configures its model and optional capabilities: who it
+is, its skill says.  Submitted, the character is made or changed
+\(`lispm-save-character')."
   (let* ((character (and character (lispm-get-character character)))
          (app (and character (lispm-character-skill character))))
     (lispm-ui-form
      (if character (lispm-character-title* character) (lispm-tr "New Character"))
      (append
-      (unless app
+      (if app
+          `((who :type heading :label ,(lispm-tr "Character"))
+            (app-skill :type status :label ,(lispm-tr "Skill")
+                       :value ,(format "@%s · %s" (lispm-character-name character) app)
+                       :help ,(lispm-character-description character)))
         `((who :type heading :label ,(lispm-tr "Character"))
           (title :type text :label ,(lispm-tr "Name") :required t)
           (description :type text :label ,(lispm-tr "Description")
                        :help ,(lispm-tr "What other agents are told of it."))
           (avatar :type picture :label ,(lispm-tr "Picture"))
-          (appearance :type text :label ,(lispm-tr "Appearance")
-                      :help ,(lispm-tr "What it looks like, for ComfyUI."))
-          (workflow :type text :label ,(lispm-tr "ComfyUI workflow")
-                    :help ,(lispm-tr "Workflow name or file; empty for the open workflow."))
           (soul :type text-area :label ,(lispm-tr "Soul") :lines 7
-                :help ,(lispm-tr "Its nature, its voice, what it cares about."))
-          (knowledge :type text :label ,(lispm-tr "Knowledge")
-                     :help ,(lispm-tr "Files or folders of its knowledge base, separated by commas."))))
+                :help ,(lispm-tr "Its nature, its voice, what it cares about."))))
       `((thinking :type heading :label ,(lispm-tr "How it thinks"))
         ,@(unless app
             `((role :type choice :label ,(lispm-tr "Role") :choices lispm-characters--role-choices
@@ -525,8 +566,23 @@ Submitted, the character is made or changed (`lispm-save-character')."
         (model :type text :label ,(lispm-tr "Model name")
                :help ,(lispm-tr "Empty: the backend's own."))
         (effort :type choice :label ,(lispm-tr "Effort") :choices lispm-characters--effort-choices)
+        (capabilities :type heading :label ,(lispm-tr "Optional capabilities"))
+        (rag :type check :label ,(lispm-tr "Knowledge")
+             :text ,(lispm-tr "Use a knowledge base (RAG & Lorebook)"))
+        (knowledge :type text :label ,(lispm-tr "Knowledge files")
+                   :help ,(lispm-tr "Files or folders of its knowledge base, separated by commas.")
+                   :when ,(lispm-characters--when-checked 'rag))
         (embedding-model :type text :label ,(lispm-tr "Embedding model")
-                         :help ,(lispm-tr "For /v1/embeddings vector search; empty for local BM25."))))
+                         :help ,(lispm-tr "For /v1/embeddings vector search; empty for local BM25.")
+                         :when ,(lispm-characters--when-checked 'rag))
+        (comfyui :type check :label ,(lispm-tr "ComfyUI")
+                 :text ,(lispm-tr "Generate images and portraits with ComfyUI"))
+        (appearance :type text :label ,(lispm-tr "Appearance")
+                    :help ,(lispm-tr "What it looks like, for ComfyUI.")
+                    :when ,(lispm-characters--when-checked 'comfyui))
+        (workflow :type text :label ,(lispm-tr "ComfyUI workflow")
+                  :help ,(lispm-tr "Workflow name or file; empty for the open workflow.")
+                  :when ,(lispm-characters--when-checked 'comfyui))))
      :values (lispm-characters--form-values character)
      :submit (if character (lispm-tr "Save") (lispm-tr "Create"))
      :on-submit (lambda (values)
@@ -1206,6 +1262,7 @@ in CHARACTER's knowledge base."
 (defun lispm-characters--rag-prompt (agent)
   "System prompt section injecting relevant knowledge from a character's RAG store."
   (when-let* ((character (lispm-agent-character* agent))
+              ((lispm-character-rag-enabled-p character))
               (files (lispm-character-knowledge-files character)))
     (let* ((input (cdr (lispm-characters--last-input agent)))
            (hits (and input (not (string-empty-p input))
@@ -1227,7 +1284,7 @@ in CHARACTER's knowledge base."
   "Search your knowledge base (RAG lorebook and attached documents) using
 hybrid vector embeddings and BM25 keyword retrieval."
   :permission read
-  :for #'lispm-agent-character
+  :for #'lispm-character-rag-enabled-p
   (let* ((character (or (lispm-agent-character* lispm-current-agent)
                         (error "You are no character")))
          (hits (lispm-character-rag-search character query (or limit lispm-character-rag-top-k))))
@@ -1243,7 +1300,7 @@ hybrid vector embeddings and BM25 keyword retrieval."
      (keywords string "Comma-separated trigger keywords or tags for Lorebook matching." :optional t))
   "Add or update an entry in your personal RAG knowledge base (`knowledge/lorebook.org')."
   :permission memory
-  :for #'lispm-agent-character
+  :for #'lispm-character-rag-enabled-p
   (let ((character (or (lispm-agent-character* lispm-current-agent)
                        (error "You are no character"))))
     (lispm-character-rag-add character title content keywords)
@@ -1453,7 +1510,7 @@ SET-AVATAR is non-nil, saves the first generated image as CHARACTER's
 checkpoint) and return the generated image so the user sees it in the chat."
   :permission web
   :async t
-  :for #'lispm-agent-character
+  :for #'lispm-character-comfyui-enabled-p
   (let ((character (or (lispm-agent-character* lispm-current-agent)
                        (error "You are no character"))))
     (lispm-character-generate-image

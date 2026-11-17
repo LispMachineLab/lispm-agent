@@ -378,7 +378,9 @@ memory, its past and what it learned of itself are in its directory
   endpoint                   ; a model endpoint of its own, as an entry of `lispm-backends'
   model effort
   skill                      ; for an app: the name of its skill, which is what it is for
-  file)                      ; the file it was read from, if any
+  file                       ; the file it was read from, if any
+  rag                        ; non-nil when RAG knowledge base is enabled
+  comfyui)                   ; non-nil when ComfyUI image generation is enabled
 
 (defvar lispm--characters nil
   "Alist of (NAME . CHARACTER) in definition order.")
@@ -718,7 +720,9 @@ conversations take on the new definition at once."
           (lispm-character-model character) (plist-get props :model)
           (lispm-character-effort character) (plist-get props :effort)
           (lispm-character-skill character) (plist-get props :skill)
-          (lispm-character-file character) (plist-get props :file))
+          (lispm-character-file character) (plist-get props :file)
+          (lispm-character-rag character) (plist-get props :rag)
+          (lispm-character-comfyui character) (plist-get props :comfyui))
     (dolist (agent (lispm-agents))
       (when (eq (lispm-agent-character agent) name)
         (lispm--apply-role agent (lispm-get-role (lispm-agent-role agent)))))
