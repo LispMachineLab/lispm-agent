@@ -12688,11 +12688,12 @@ and warns when arity changes."
         (lispm-test--write other-el "(defun idx-caller () (idx-callee)\n")
         (should-error (lispm-develop--index-path other-el))
         (should (equal (lispm-develop-who-calls 'idx-callee) '(idx-caller))))
-      ;; Reindexing one file does not delete another file's caller edges for a same-named function.
+      ;; Reindexing one file does not delete another file's caller edges for a same-named function,
+      ;; and a same-named `defvar'/`defcustom' does not overwrite a `defun' caller in the same file.
       (let ((f1 (expand-file-name "f1.el" project))
             (f2 (expand-file-name "f2.el" project)))
         (lispm-test--write f1 "(defun shared-fn () (callee-a))\n")
-        (lispm-test--write f2 "(defun shared-fn () (callee-b))\n")
+        (lispm-test--write f2 "(defun shared-fn () (callee-b))\n(defvar shared-fn nil)\n")
         (lispm-develop--index-path f1)
         (lispm-develop--index-path f2)
         (should (equal (lispm-develop-who-calls 'callee-b) '(shared-fn)))

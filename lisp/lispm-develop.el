@@ -208,12 +208,15 @@ Handles circular structures and special forms (`let', `lambda', `cond',
 
 (defun lispm-develop-index-form (form &optional caller file)
   "Update the in-memory `who-calls' database for the top-level FORM.
-CALLER, if not given, is taken from FORM when it is a `defun'-like form;
-FILE is the source file (by default `buffer-file-name')."
+CALLER, if not given, is taken from FORM when it is a `defun'-like form
+\(excluding variable, face and group definitions so a `defvar' or
+`defcustom' never overwrites a same-named `defun'); FILE is the source
+file (by default `buffer-file-name')."
   (let* ((file (or file buffer-file-name))
          (head (and (consp form) (symbolp (car form)) (car form)))
          (caller (or caller
                      (and head
+                          (not (memq head '(defvar defcustom defconst defface defgroup)))
                           (consp (cdr form))
                           (symbolp (cadr form))
                           (string-match-p "def" (symbol-name head))
@@ -223,8 +226,6 @@ FILE is the source file (by default `buffer-file-name')."
       (let* ((body (cond
                     ((memq head '(defun defmacro cl-defun defsubst))
                      (and (consp (cddr form)) (cdddr form)))
-                    ((memq head '(defvar defcustom))
-                     (and (consp (cddr form)) (list (caddr form))))
                     ((and (consp (cddr form)))
                      (cddr form))
                     (t (list form))))
