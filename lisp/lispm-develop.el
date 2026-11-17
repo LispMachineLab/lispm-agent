@@ -206,20 +206,26 @@ Handles circular structures and special forms (`let', `lambda', `cond',
         (puthash old (delq caller (gethash old lispm-develop--callers))
                  lispm-develop--callers)))))
 
+(defconst lispm-develop--callable-definers
+  '(defun defmacro cl-defun cl-defmacro defsubst cl-defsubst
+    cl-defmethod cl-defgeneric defalias
+    define-derived-mode define-minor-mode define-globalized-minor-mode
+    ert-deftest lispm-deftool)
+  "Top-level defining forms whose symbol is indexed in the `who-calls' graph.")
+
 (defun lispm-develop-index-form (form &optional caller file)
   "Update the in-memory `who-calls' database for the top-level FORM.
-CALLER, if not given, is taken from FORM when it is a `defun'-like form
-\(excluding variable, face and group definitions so a `defvar' or
-`defcustom' never overwrites a same-named `defun'); FILE is the source
+CALLER, if not given, is taken from FORM when its head is in
+`lispm-develop--callable-definers' (so `defvar', `defvar-local', `defcustom',
+`defface', etc. never overwrite a same-named function); FILE is the source
 file (by default `buffer-file-name')."
   (let* ((file (or file buffer-file-name))
          (head (and (consp form) (symbolp (car form)) (car form)))
          (caller (or caller
                      (and head
-                          (not (memq head '(defvar defcustom defconst defface defgroup)))
+                          (memq head lispm-develop--callable-definers)
                           (consp (cdr form))
                           (symbolp (cadr form))
-                          (string-match-p "def" (symbol-name head))
                           (cadr form)))))
     (when (and caller (symbolp caller))
       (lispm-develop--remove-caller caller file)
