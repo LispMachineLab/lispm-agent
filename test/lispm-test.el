@@ -12697,14 +12697,17 @@ and warns when arity changes."
         (lispm-test--write f2 (concat "(cl-defsubst shared-fn (subst-arg) (callee-b subst-arg))\n"
                                       "(defvar shared-fn nil)\n"
                                       "(defvar-local shared-fn nil)\n"
-                                      "(defalias 'alias-fn #'callee-b)\n"))
+                                      "(defalias 'alias-fn #'callee-b)\n"
+                                      "(defalias 'qlambda-fn '(lambda (x) (callee-b x)))\n"
+                                      "(defalias 'var-target-fn some-var)\n"))
         (lispm-develop--index-path f1)
         (lispm-develop--index-path f2)
-        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn shared-fn)))
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn qlambda-fn shared-fn)))
+        (should-not (lispm-develop-who-calls 'some-var))
         (should-not (memq 'subst-arg (lispm-develop-callees 'shared-fn)))
         (lispm-test--write f1 ";; empty\n")
         (lispm-develop--index-path f1)
-        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn shared-fn))))
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn qlambda-fn shared-fn))))
       ;; Changing the arity of `lispm-test-dev-callee' triggers a Caller notice.
       (lispm-test--call agent "edit_definition"
                         '((name . "lispm-test-dev-callee")
