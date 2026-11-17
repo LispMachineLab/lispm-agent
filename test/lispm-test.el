@@ -12748,11 +12748,19 @@ preserves dynamic binding in patches."
         (should (string-search "Restored the definition of lispm-test-dev-f in dev.el" rev))
         (should (string-search "(1+ x)" (lispm-test--disk file)))
         (should (string-search "(* x 10)" (lispm-test--disk file))))
-      ;; Dynamic-binding patch quotes the form for `eval' and loads cleanly.
+      ;; Dynamic-binding patch quotes the form for `eval' and loads cleanly,
+      ;; and `defvar' edits reset already-bound variables.
       (let ((dyn-file (expand-file-name "dyn.el" project)))
         (lispm-test--write dyn-file
                            (concat ";;; dyn.el --- Dynamic fixture  -*- lexical-binding: nil; -*-\n"
+                                   "(defvar lispm-test-dev-var 1)\n"
                                    "(defun lispm-test-dyn-fn (x)\n  x)\n"))
+        (setq lispm-test-dev-var 1)
+        (lispm-test--call agent "edit_definition"
+                          '((name . "lispm-test-dev-var")
+                            (kind . "variable")
+                            (path . "dyn.el")
+                            (new_text . "(defvar lispm-test-dev-var 99)")))
         (lispm-test--call agent "edit_definition"
                           '((name . "lispm-test-dyn-fn")
                             (path . "dyn.el")
@@ -12762,7 +12770,8 @@ preserves dynamic binding in patches."
           (with-temp-buffer
             (insert patch)
             (eval-buffer))
-          (should (= (lispm-test-dyn-fn 3) 10)))))))
+          (should (= (lispm-test-dyn-fn 3) 10))
+          (should (= lispm-test-dev-var 99)))))))
 
 (ert-deftest lispm-test-genera-run-lisp-reinvoke ()
   "When run_lisp fails mid-script (even after a caught failure and a subsequent

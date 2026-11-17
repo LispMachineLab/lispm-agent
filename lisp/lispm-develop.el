@@ -1143,6 +1143,23 @@ each module has `:file', `:provides', `:requires' and `:loaded'."
                           lispm-develop--history)))))
       (list :root root :modules (nreverse modules) :modified modified))))
 
+(defun lispm-develop--patch-form (text lexical)
+  "Format definition TEXT for an incremental patch with LEXICAL binding.
+When TEXT defines a variable or face (`defvar', `defcustom', `defface'),
+applies `elisp--eval-defun-1' so loading the patch resets an already-bound
+definition just as `eval_definition' (`C-M-x') does."
+  (let* ((parsed (car (read-from-string text)))
+         (resetp (and (consp parsed)
+                      (memq (car parsed) '(defvar defcustom defface))))
+         (effective (if resetp
+                        (elisp--eval-defun-1 (macroexpand parsed))
+                      parsed)))
+    (cond ((not lexical)
+           (format "(eval '%S nil)" effective))
+          (resetp
+           (format "%S" effective))
+          (t text))))
+
 (defun lispm-develop-patch (&optional root agent)
   "Generate a Genera-style incremental code-object patch for ROOT (and AGENT).
 Includes the latest modified definition per `(FILE NAME TYPE)' from
@@ -1173,9 +1190,7 @@ binding semantics."
                                (file-relative-name (plist-get h :file) root)
                              (abbreviate-file-name (plist-get h :file)))
                            (if lexical "" ", lexical-binding: nil")
-                           (if lexical
-                               form
-                             (format "(eval '%S nil)" (car (read-from-string form)))))))
+                           (lispm-develop--patch-form form lexical))))
                entries
                "\n")))))
 

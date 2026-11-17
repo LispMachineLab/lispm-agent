@@ -203,15 +203,16 @@ a list of such symbols, or `t' for any presentation object."
 
 (defun lispm-accept-select (object)
   "Accept OBJECT for an active `lispm-accept' prompt and return its value.
-When the minibuffer is active, insert the value into the minibuffer and exit."
+When the minibuffer is active, select its window, insert the value and exit."
   (unless (lispm-object-acceptable-p object)
     (user-error "%s" (lispm-tr "Nothing to act on here")))
-  (let ((value (lispm-object-value object)))
-    (when (minibuffer-window-active-p (minibuffer-window))
-      (with-current-buffer (window-buffer (minibuffer-window))
+  (let ((value (lispm-object-value object))
+        (mini (active-minibuffer-window)))
+    (when mini
+      (with-selected-window mini
         (delete-minibuffer-contents)
-        (insert value))
-      (exit-minibuffer))
+        (insert value)
+        (exit-minibuffer)))
     value))
 
 (defun lispm-accept (type prompt &optional collection predicate require-match default)
