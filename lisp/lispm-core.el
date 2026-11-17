@@ -369,6 +369,10 @@ memory, its past and what it learned of itself are in its directory
   description                ; one line: what other agents are told of it
   soul                       ; who it is: nature, voice, values; the user's words
   avatar                     ; its picture, a file, or nil
+  appearance                 ; visual prompt prefix for ComfyUI image generation, or nil
+  workflow                   ; ComfyUI workflow name or file for image generation, or nil
+  knowledge                  ; extra RAG knowledge paths (comma-separated string or list), or nil
+  embedding-model            ; model name for /v1/embeddings vector retrieval, or nil
   role                       ; role whose instructions, tools and policy it works with
   backend                    ; a backend of `lispm-backends' it uses, or nil
   endpoint                   ; a model endpoint of its own, as an entry of `lispm-backends'
@@ -704,6 +708,10 @@ conversations take on the new definition at once."
           (lispm-character-description character) (plist-get props :description)
           (lispm-character-soul character) (plist-get props :soul)
           (lispm-character-avatar character) (plist-get props :avatar)
+          (lispm-character-appearance character) (plist-get props :appearance)
+          (lispm-character-workflow character) (plist-get props :workflow)
+          (lispm-character-knowledge character) (plist-get props :knowledge)
+          (lispm-character-embedding-model character) (plist-get props :embedding-model)
           (lispm-character-role character) (plist-get props :role)
           (lispm-character-backend character) (plist-get props :backend)
           (lispm-character-endpoint character) (plist-get props :endpoint)
