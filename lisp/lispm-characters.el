@@ -198,6 +198,10 @@ error if FILE is no character file."
         :description ,(funcall line "description")
         :soul ,(and (not (string-empty-p body)) body)
         :avatar ,(and avatar (file-exists-p avatar) avatar)
+        :appearance ,(funcall line "appearance")
+        :workflow ,(funcall line "workflow")
+        :knowledge ,(funcall line "knowledge")
+        :embedding-model ,(funcall line "embedding-model")
         :role ,(funcall symbol "role")
         :backend ,(funcall symbol "backend")
         :endpoint ,endpoint
@@ -211,7 +215,8 @@ error if FILE is no character file."
 define them (see `lispm-define-app-character').")
 
 (defconst lispm-characters--properties
-  '(:title :description :soul :avatar :role :backend :endpoint :model :effort :skill :file)
+  '(:title :description :soul :avatar :appearance :workflow :knowledge :embedding-model
+    :role :backend :endpoint :model :effort :skill :file)
   "The properties of a character, as `lispm-register-character' takes them.")
 
 (defun lispm-characters--define (name &optional props)
@@ -326,6 +331,10 @@ picture has a new name, and the one it replaces is deleted."
                 `(("title" . ,(lispm-characters--line (plist-get props :title)))
                   ("description" . ,(lispm-characters--line (plist-get props :description)))
                   ("avatar" . ,avatar)
+                  ("appearance" . ,(lispm-characters--line (plist-get props :appearance)))
+                  ("workflow" . ,(lispm-characters--line (plist-get props :workflow)))
+                  ("knowledge" . ,(lispm-characters--line (plist-get props :knowledge)))
+                  ("embedding-model" . ,(lispm-characters--line (plist-get props :embedding-model)))
                   ("role" . ,(plist-get props :role))
                   ("backend" . ,(plist-get props :backend))
                   ("endpoint" . ,(when-let* ((endpoint (plist-get props :endpoint)))
@@ -429,7 +438,10 @@ is one of its name already."
     `((title . ,(and character (lispm-character-title* character)))
       (description . ,(and character (lispm-character-description character)))
       (avatar . ,(and character (lispm-character-avatar character)))
+      (appearance . ,(and character (lispm-character-appearance character)))
+      (workflow . ,(and character (lispm-character-workflow character)))
       (soul . ,(and character (lispm-character-soul character)))
+      (knowledge . ,(and character (lispm-character-knowledge character)))
       (role . ,(and character (lispm-character-role character)))
       (thinks . ,(cond (endpoint 'endpoint)
                        ((and character (lispm-character-backend character)) 'backend)
@@ -440,7 +452,8 @@ is one of its name already."
       (key-env . ,(plist-get endpoint :key-env))
       (auth-source . ,(eq (plist-get endpoint :key) 'auth-source))
       (model . ,(and character (lispm-character-model character)))
-      (effort . ,(and character (lispm-character-effort character))))))
+      (effort . ,(and character (lispm-character-effort character)))
+      (embedding-model . ,(and character (lispm-character-embedding-model character))))))
 
 (defun lispm-characters--form-props (values)
   "What the values of a character's form, an alist, make it: a plist.
@@ -450,14 +463,20 @@ Those of who it is only if the form has them; an app's has not."
     (append
      (when (assq 'title values)
        (list :title (funcall get 'title) :description (funcall get 'description)
-             :avatar (funcall get 'avatar) :soul (funcall get 'soul) :role (funcall get 'role)))
+             :avatar (funcall get 'avatar)
+             :appearance (funcall get 'appearance)
+             :workflow (funcall get 'workflow)
+             :soul (funcall get 'soul)
+             :knowledge (funcall get 'knowledge)
+             :role (funcall get 'role)))
      (list :backend (and (eq thinks 'backend) (funcall get 'backend))
            :endpoint (and (eq thinks 'endpoint)
                           `(:api ,(funcall get 'api) :url ,(funcall get 'url)
                             ,@(when-let* ((variable (funcall get 'key-env))) (list :key-env variable))
                             ,@(when (funcall get 'auth-source) (list :key 'auth-source))))
            :model (funcall get 'model)
-           :effort (funcall get 'effort)))))
+           :effort (funcall get 'effort)
+           :embedding-model (funcall get 'embedding-model)))))
 
 (defun lispm-character-form (&optional character)
   "The form making a character, or changing CHARACTER; return its buffer.
@@ -474,8 +493,14 @@ Submitted, the character is made or changed (`lispm-save-character')."
           (description :type text :label ,(lispm-tr "Description")
                        :help ,(lispm-tr "What other agents are told of it."))
           (avatar :type picture :label ,(lispm-tr "Picture"))
+          (appearance :type text :label ,(lispm-tr "Appearance")
+                      :help ,(lispm-tr "What it looks like, for ComfyUI."))
+          (workflow :type text :label ,(lispm-tr "ComfyUI workflow")
+                    :help ,(lispm-tr "Workflow name or file; empty for the open workflow."))
           (soul :type text-area :label ,(lispm-tr "Soul") :lines 7
-                :help ,(lispm-tr "Its nature, its voice, what it cares about."))))
+                :help ,(lispm-tr "Its nature, its voice, what it cares about."))
+          (knowledge :type text :label ,(lispm-tr "Knowledge")
+                     :help ,(lispm-tr "Files or folders of its knowledge base, separated by commas."))))
       `((thinking :type heading :label ,(lispm-tr "How it thinks"))
         ,@(unless app
             `((role :type choice :label ,(lispm-tr "Role") :choices lispm-characters--role-choices
@@ -499,7 +524,9 @@ Submitted, the character is made or changed (`lispm-save-character')."
                      :when ,(lispm-characters--thinking 'endpoint))
         (model :type text :label ,(lispm-tr "Model name")
                :help ,(lispm-tr "Empty: the backend's own."))
-        (effort :type choice :label ,(lispm-tr "Effort") :choices lispm-characters--effort-choices)))
+        (effort :type choice :label ,(lispm-tr "Effort") :choices lispm-characters--effort-choices)
+        (embedding-model :type text :label ,(lispm-tr "Embedding model")
+                         :help ,(lispm-tr "For /v1/embeddings vector search; empty for local BM25."))))
      :values (lispm-characters--form-values character)
      :submit (if character (lispm-tr "Save") (lispm-tr "Create"))
      :on-submit (lambda (values)
@@ -824,6 +851,625 @@ of all its conversations, rolled up by week and month."
                             "diary")))))
 
 (add-hook 'lispm-turn-end-functions #'lispm-characters--write-diary)
+
+;;;; Hybrid RAG knowledge base (Embeddings /v1/embeddings + local BM25 + Lorebook triggers)
+
+(defcustom lispm-embedding-model nil
+  "Default embedding model name for `/v1/embeddings' vector search, or nil.
+When nil, character RAG uses local BM25 and Lorebook keyword matching
+alone unless a character sets its own `#+embedding-model:'."
+  :type '(choice (const :tag "Local BM25 only" nil) string)
+  :group 'lispm)
+
+(defcustom lispm-character-rag-top-k 4
+  "How many knowledge chunks a character's conversation injects by default."
+  :type 'integer
+  :group 'lispm)
+
+(defcustom lispm-character-rag-chunk-size 1000
+  "Maximum characters per knowledge chunk before splitting by paragraphs."
+  :type 'integer
+  :group 'lispm)
+
+(defvar lispm-embedding-function #'lispm-characters--fetch-embeddings
+  "Function fetching embedding vectors for `(BACKEND MODEL TEXTS)'.
+Returns a list of float vectors, one per string in TEXTS, or nil on failure.")
+
+(defun lispm-character-knowledge-directory (character)
+  "The `knowledge/' directory of CHARACTER, where its lorebook and documents live."
+  (let ((name (lispm-character-name (lispm-get-character character))))
+    (expand-file-name "knowledge/" (lispm-character-directory name))))
+
+(defun lispm-characters--knowledge-paths (character)
+  "Extra knowledge paths configured on CHARACTER via `#+knowledge:'."
+  (let ((raw (lispm-character-knowledge (lispm-get-character character)))
+        (base (file-name-directory
+               (or (lispm-character-file (lispm-get-character character))
+                   (expand-file-name "character.org"
+                                     (lispm-character-directory
+                                      (lispm-character-name (lispm-get-character character))))))))
+    (cond ((null raw) nil)
+          ((listp raw) (mapcar (lambda (p) (expand-file-name p base)) raw))
+          ((stringp raw)
+           (mapcar (lambda (part) (expand-file-name (string-trim part) base))
+                   (split-string raw "," t "[ \t\n]+"))))))
+
+(defun lispm-character-knowledge-files (character)
+  "All readable `.org', `.md' and `.txt' knowledge files of CHARACTER."
+  (let* ((character (lispm-get-character character))
+         (dir (lispm-character-knowledge-directory character))
+         (sources (append (and (file-directory-p dir) (list dir))
+                          (lispm-characters--knowledge-paths character)))
+         files)
+    (dolist (source sources)
+      (cond ((and (file-regular-p source) (file-readable-p source))
+             (push (expand-file-name source) files))
+            ((file-directory-p source)
+             (dolist (file (directory-files-recursively
+                            source "\\.\\(?:org\\|md\\|txt\\)\\'" nil))
+               (when (and (file-regular-p file) (file-readable-p file)
+                          (not (string-prefix-p "." (file-name-nondirectory file))))
+                 (push (expand-file-name file) files))))))
+    (delete-dups (nreverse files))))
+
+(defun lispm-characters--rag-tokenize (text)
+  "Tokenize TEXT into lowercase ASCII words and CJK character bigrams/unigrams."
+  (let ((lower (downcase (or text "")))
+        tokens)
+    (save-match-data
+      (let ((pos 0))
+        (while (string-match "[a-z0-9_]+\\|[^[:ascii:] \t\n\r.,;:!?()\\[\\]{}\"'`~@#$%^&*+=<>|/\\-]+" lower pos)
+          (let ((seg (match-string 0 lower)))
+            (setq pos (match-end 0))
+            (if (string-match-p "\\`[a-z0-9_]+\\'" seg)
+                (when (> (length seg) 1)
+                  (push seg tokens))
+              (let ((len (length seg)))
+                (dotimes (i len)
+                  (push (substring seg i (1+ i)) tokens)
+                  (when (< (1+ i) len)
+                    (push (substring seg i (+ i 2)) tokens)))))))))
+    (nreverse tokens)))
+
+(defun lispm-characters--split-paragraphs (text max-size)
+  "Split TEXT into pieces of at most MAX-SIZE characters along paragraphs."
+  (let ((paras (split-string (string-trim (or text "")) "\n[ \t]*\n+" t))
+        chunks current)
+    (dolist (para paras)
+      (setq para (string-trim para))
+      (cond ((string-empty-p para) nil)
+            ((null current) (setq current para))
+            ((<= (+ (length current) 2 (length para)) max-size)
+             (setq current (concat current "\n\n" para)))
+            (t (push current chunks)
+               (setq current para))))
+    (when (and current (not (string-empty-p current)))
+      (push current chunks))
+    (nreverse chunks)))
+
+(defun lispm-characters--file-chunks (file)
+  "Split knowledge FILE into chunks: plists with :id, :file, :title,
+:keywords, :text and :tokens."
+  (let ((text (lispm--file-text file))
+        (org-p (string-suffix-p ".org" (downcase file)))
+        sections chunks)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (while (looking-at "#\\+\\([[:alnum:]_-]+\\):[ \t]*\\(.*\\)$")
+        (forward-line 1))
+      (let ((heading-re (if org-p "^\\(\\*+\\)[ \t]+\\(.*\\)$" "^\\(#+\\)[ \t]+\\(.*\\)$"))
+            (start (point))
+            (title (file-name-base file))
+            (keywords nil))
+        (while (re-search-forward heading-re nil t)
+          (let ((body (string-trim (buffer-substring-no-properties start (match-beginning 0))))
+                (next-line (match-string 2)))
+            (when (not (string-empty-p body))
+              (push (list title keywords body) sections))
+            (if (and org-p (string-match "\\(.*?\\)[ \t]+:\\([[:alnum:]_@#%:]+\\):[ \t]*\\'" next-line))
+                (setq title (string-trim (match-string 1 next-line))
+                      keywords (split-string (match-string 2 next-line) ":" t))
+              (setq title (string-trim next-line)
+                    keywords nil))
+            (forward-line 1)
+            (when org-p
+              (while (looking-at "^[ \t]*:\\([[:alnum:]_-]+\\):[ \t]*\\(.*\\)$")
+                (when (string-equal-ignore-case (match-string 1) "KEYWORDS")
+                  (setq keywords (append keywords
+                                         (split-string (match-string 2) "[, \t]+" t))))
+                (forward-line 1)))
+            (setq start (point))))
+        (let ((body (string-trim (buffer-substring-no-properties start (point-max)))))
+          (when (not (string-empty-p body))
+            (push (list title keywords body) sections)))))
+    (pcase-dolist (`(,title ,keywords ,body) (nreverse sections))
+      (dolist (piece (lispm-characters--split-paragraphs body lispm-character-rag-chunk-size))
+        (let* ((full (concat title "\n" piece))
+               (id (substring (secure-hash 'sha1 (concat file "\0" full)) 0 16)))
+          (push (list :id id
+                      :file file
+                      :title title
+                      :keywords (mapcar #'downcase keywords)
+                      :text piece
+                      :tokens (lispm-characters--rag-tokenize full))
+                chunks))))
+    (nreverse chunks)))
+
+(defun lispm-character-rag-chunks (character)
+  "All RAG chunks across CHARACTER's knowledge files."
+  (mapcan #'lispm-characters--file-chunks (lispm-character-knowledge-files character)))
+
+(defun lispm-characters--rag-bm25-scores (query chunks)
+  "Return an alist of (CHUNK-ID . SCORE) for CHUNKS against QUERY
+using BM25 and Lorebook keyword triggers."
+  (let* ((q-tokens (delete-dups (lispm-characters--rag-tokenize query)))
+         (q-lower (downcase (or query "")))
+         (n (max 1 (length chunks)))
+         (avgdl (/ (float (max 1 (cl-loop for c in chunks sum (length (plist-get c :tokens))))) n))
+         (df (make-hash-table :test #'equal))
+         (k1 1.5)
+         (b 0.75))
+    (dolist (c chunks)
+      (dolist (tok (delete-dups (copy-sequence (plist-get c :tokens))))
+        (puthash tok (1+ (gethash tok df 0)) df)))
+    (mapcar
+     (lambda (c)
+       (let* ((tokens (plist-get c :tokens))
+              (dl (length tokens))
+              (tf (make-hash-table :test #'equal))
+              (score 0.0))
+         (dolist (tok tokens)
+           (puthash tok (1+ (gethash tok tf 0)) tf))
+         (dolist (qt q-tokens)
+           (let ((f (gethash qt tf 0)))
+             (when (> f 0)
+               (let* ((doc-freq (gethash qt df 0))
+                      (idf (log (+ 1.0 (/ (+ (- n doc-freq) 0.5) (+ doc-freq 0.5)))))
+                      (num (* f (+ k1 1.0)))
+                      (den (+ f (* k1 (+ (- 1.0 b) (* b (/ (float dl) avgdl)))))))
+                 (setq score (+ score (* idf (/ num den))))))))
+         ;; SillyTavern Lorebook / World Info keyword and title trigger boost.
+         (dolist (kw (plist-get c :keywords))
+           (when (and (not (string-empty-p kw)) (string-search kw q-lower))
+             (setq score (+ score 5.0))))
+         (let ((title-lower (downcase (or (plist-get c :title) ""))))
+           (when (and (not (string-empty-p title-lower))
+                      (or (string-search title-lower q-lower)
+                          (string-search q-lower title-lower)))
+             (setq score (+ score 2.0))))
+         (cons (plist-get c :id) score)))
+     chunks)))
+
+(defun lispm-characters--cosine-similarity (v1 v2)
+  "Cosine similarity between numeric sequences V1 and V2."
+  (let ((dot 0.0) (n1 0.0) (n2 0.0)
+        (len (min (length v1) (length v2))))
+    (when (> len 0)
+      (dotimes (i len)
+        (let ((a (float (elt v1 i)))
+              (b (float (elt v2 i))))
+          (setq dot (+ dot (* a b))
+                n1 (+ n1 (* a a))
+                n2 (+ n2 (* b b)))))
+      (if (or (zerop n1) (zerop n2))
+          0.0
+        (/ dot (* (sqrt n1) (sqrt n2)))))))
+
+(defun lispm-characters--character-backend (character)
+  "Backend plist for CHARACTER, falling back to `lispm-backend'."
+  (let ((character (lispm-get-character character)))
+    (or (lispm-character-endpoint character)
+        (and (lispm-character-backend character)
+             (cdr (assq (lispm-character-backend character) lispm-backends)))
+        (cdr (assq lispm-backend lispm-backends)))))
+
+(defun lispm-characters--fetch-embeddings (backend model texts)
+  "Fetch embeddings from BACKEND's `/embeddings' endpoint for MODEL and TEXTS."
+  (when-let* ((url (plist-get backend :url))
+              (endpoint (concat (string-remove-suffix "/" url) "/embeddings"))
+              (body (json-serialize `((model . ,model)
+                                      (input . ,(vconcat texts))))))
+    (let ((key (ignore-errors (lispm-api--key backend))))
+      (with-temp-buffer
+        (let* ((args (append (list "-sS" "--max-time" "15"
+                                   "-H" "Content-Type: application/json")
+                             (when key (list "-H" (concat "Authorization: Bearer " key)))
+                             (list "-d" body endpoint)))
+               (status (apply #'call-process lispm-curl-program nil t nil args)))
+          (when (eq status 0)
+            (goto-char (point-min))
+            (when-let* ((json (ignore-errors
+                                (json-parse-buffer :object-type 'alist :array-type 'list)))
+                        (data (alist-get 'data json)))
+              (mapcar (lambda (item) (alist-get 'embedding item))
+                      (sort (copy-sequence data)
+                            (lambda (a b) (< (or (alist-get 'index a) 0)
+                                             (or (alist-get 'index b) 0))))))))))))
+
+(defun lispm-characters--rag-index-file (character)
+  "File caching embedding vectors for CHARACTER."
+  (expand-file-name ".rag-index.eld"
+                    (lispm-character-directory (lispm-character-name (lispm-get-character character)))))
+
+(defun lispm-characters--rag-embedding-scores (character query chunks)
+  "Return an alist of (CHUNK-ID . COSINE-SCORE) when an embedding model
+is set, or nil."
+  (let* ((character (lispm-get-character character))
+         (model (or (lispm-character-embedding-model character) lispm-embedding-model))
+         (backend (and model (lispm-characters--character-backend character))))
+    (when (and model backend chunks)
+      (let* ((index-file (lispm-characters--rag-index-file character))
+             (cache (or (and (file-readable-p index-file)
+                             (ignore-errors
+                               (with-temp-buffer
+                                 (insert-file-contents index-file)
+                                 (read (current-buffer)))))
+                        (make-hash-table :test #'equal)))
+             (missing (seq-filter (lambda (c)
+                                    (not (gethash (concat model ":" (plist-get c :id)) cache)))
+                                  chunks))
+             (dirty nil))
+        (when missing
+          (when-let* ((vecs (funcall lispm-embedding-function
+                                     backend model
+                                     (mapcar (lambda (c)
+                                               (concat (plist-get c :title) "\n" (plist-get c :text)))
+                                             missing))))
+            (cl-loop for c in missing
+                     for v in vecs
+                     when v
+                     do (puthash (concat model ":" (plist-get c :id)) v cache)
+                        (setq dirty t))))
+        (when dirty
+          (ignore-errors
+            (let ((print-length nil) (print-level nil))
+              (with-temp-file index-file
+                (prin1 cache (current-buffer))))))
+        (when-let* ((q-vec (car (funcall lispm-embedding-function backend model (list query)))))
+          (cl-loop for c in chunks
+                   for v = (gethash (concat model ":" (plist-get c :id)) cache)
+                   when v
+                   collect (cons (plist-get c :id)
+                                 (max 0.0 (lispm-characters--cosine-similarity q-vec v)))))))))
+
+(defun lispm-character-rag-search (character query &optional limit)
+  "Search CHARACTER's knowledge base for QUERY using hybrid RAG.
+Return at most LIMIT (default `lispm-character-rag-top-k') matching
+chunk plists, each with `:score'."
+  (let* ((character (lispm-get-character character))
+         (chunks (lispm-character-rag-chunks character))
+         (limit (or limit lispm-character-rag-top-k)))
+    (when chunks
+      (let* ((bm25 (lispm-characters--rag-bm25-scores query chunks))
+             (max-bm25 (max 1.0 (apply #'max 0.0 (mapcar #'cdr bm25))))
+             (emb (lispm-characters--rag-embedding-scores character query chunks))
+             (scored
+              (cl-loop for c in chunks
+                       for id = (plist-get c :id)
+                       for b-score = (or (cdr (assoc id bm25)) 0.0)
+                       for e-score = (cdr (assoc id emb))
+                       for total = (if e-score
+                                       (+ (* 0.6 e-score) (* 0.4 (/ b-score max-bm25)))
+                                     b-score)
+                       when (> total 0.0)
+                       collect (plist-put (copy-sequence c) :score total))))
+        (seq-take (sort scored (lambda (a b) (> (plist-get a :score) (plist-get b :score))))
+                  limit)))))
+
+(defun lispm-character-rag-add (character title content &optional keywords)
+  "Add or update a lorebook entry TITLE with CONTENT and KEYWORDS
+in CHARACTER's knowledge base."
+  (let* ((character (lispm-get-character character))
+         (dir (lispm-character-knowledge-directory character))
+         (file (expand-file-name "lorebook.org" dir))
+         (tags (and keywords
+                    (if (listp keywords)
+                        keywords
+                      (split-string keywords "[, \t:]+" t))))
+         (tag-str (if tags (concat "  :" (string-join tags ":") ":") ""))
+         (clean-title (lispm--oneline title 120)))
+    (make-directory dir t)
+    (let ((buffer (lispm-memory--visit
+                   file (format "#+title: Knowledge of %s\n" (lispm-character-title* character))
+                   t)))
+      (with-current-buffer buffer
+        (save-excursion
+          (save-restriction
+            (widen)
+            (goto-char (point-min))
+            (let ((re (concat "^\\*+ +\\(?:" (regexp-quote clean-title) "\\)\\(?:[ \t]+:.*:\\)?[ \t]*$")))
+              (if (re-search-forward re nil t)
+                  (let ((beg (line-beginning-position))
+                        (end (if (re-search-forward "^\\*+ " nil t)
+                                 (line-beginning-position)
+                               (point-max))))
+                    (delete-region beg end)
+                    (goto-char beg))
+                (goto-char (point-max))
+                (unless (bolp) (insert "\n"))))
+            (insert "* " clean-title tag-str "\n" (string-trim content) "\n")))
+        (lispm-memory--save buffer)))
+    (lispm-git-commit (symbol-name (lispm-character-name character))
+                      (format "%s: knowledge: %s" (lispm-character-name character) clean-title))
+    file))
+
+(defun lispm-characters--rag-format (chunks)
+  "Format RAG CHUNKS for display in a prompt or tool result."
+  (mapconcat (lambda (c)
+               (format "[%s · %s]\n%s"
+                       (file-name-nondirectory (plist-get c :file))
+                       (plist-get c :title)
+                       (plist-get c :text)))
+             chunks "\n\n"))
+
+(defun lispm-characters--rag-prompt (agent)
+  "System prompt section injecting relevant knowledge from a character's RAG store."
+  (when-let* ((character (lispm-agent-character* agent))
+              (files (lispm-character-knowledge-files character)))
+    (let* ((input (cdr (lispm-characters--last-input agent)))
+           (hits (and input (not (string-empty-p input))
+                      (lispm-character-rag-search character input lispm-character-rag-top-k))))
+      (concat "# Your knowledge base (RAG)\n"
+              (format "Sources (%d): %s. Use `rag_search' to query your knowledge base and `knowledge_add' to record new lorebook entries.\n"
+                      (length files)
+                      (mapconcat #'file-name-nondirectory (seq-take files 10) ", "))
+              (if hits
+                  (concat "\nRelevant passages for this turn:\n"
+                          (lispm--truncate (lispm-characters--rag-format hits) 6000))
+                "")))))
+
+(add-hook 'lispm-system-prompt-functions #'lispm-characters--rag-prompt t)
+
+(lispm-deftool rag_search
+    ((query string "Words, concepts or names to look up in your knowledge base.")
+     (limit integer "Maximum passages to return, 4 by default." :optional t))
+  "Search your knowledge base (RAG lorebook and attached documents) using
+hybrid vector embeddings and BM25 keyword retrieval."
+  :permission read
+  :for #'lispm-agent-character
+  (let* ((character (or (lispm-agent-character* lispm-current-agent)
+                        (error "You are no character")))
+         (hits (lispm-character-rag-search character query (or limit lispm-character-rag-top-k))))
+    (if hits
+        (lispm-characters--rag-format hits)
+      (if (lispm-character-knowledge-files character)
+          "No matching passages found in your knowledge base."
+        "Your knowledge base is empty; add entries with knowledge_add or place files in your knowledge/ directory."))))
+
+(lispm-deftool knowledge_add
+    ((title string "Heading of the knowledge or lorebook entry.")
+     (content string "The knowledge content to store for RAG retrieval.")
+     (keywords string "Comma-separated trigger keywords or tags for Lorebook matching." :optional t))
+  "Add or update an entry in your personal RAG knowledge base (`knowledge/lorebook.org')."
+  :permission memory
+  :for #'lispm-agent-character
+  (let ((character (or (lispm-agent-character* lispm-current-agent)
+                       (error "You are no character"))))
+    (lispm-character-rag-add character title content keywords)
+    (format "Saved \"%s\" in your knowledge base." title)))
+
+;;;; ComfyUI image generation for characters
+
+(declare-function lispm-comfyui--canvas-buffers "lispm-comfyui" ())
+(declare-function lispm-comfyui--need-types "lispm-comfyui" ())
+(declare-function lispm-comfyui-open "lispm-comfyui" (name))
+(declare-function lispm-comfyui-run "lispm-comfyui" (&optional callback))
+(declare-function lispm-comfyui-graph-nodes "lispm-comfyui-graph" (graph))
+(declare-function lispm-comfyui-node-type "lispm-comfyui-graph" (node))
+(declare-function lispm-comfyui-node-title "lispm-comfyui-graph" (node))
+(declare-function lispm-comfyui-set-widget "lispm-comfyui-graph" (node types name value))
+(declare-function lispm-comfyui-types-of-server "lispm-comfyui-client" (callback &optional again))
+(declare-function lispm-comfyui-queue "lispm-comfyui-client" (prompt workflow callback))
+(declare-function lispm-comfyui-history "lispm-comfyui-client" (prompt-id callback))
+(declare-function lispm-comfyui-fetch-image "lispm-comfyui-client" (image callback))
+
+(defvar lispm-comfyui-generate-function #'lispm-characters--comfyui-generate
+  "Function running a ComfyUI image generation request.
+Called as `(FUNC PROMPT &key NEGATIVE-PROMPT WORKFLOW CALLBACK)' where
+CALLBACK receives `(FILES ERROR)'.")
+
+(defun lispm-characters--comfyui-set-prompts (buffer positive &optional negative)
+  "Set POSITIVE and optional NEGATIVE prompt texts in ComfyUI canvas BUFFER."
+  (with-current-buffer buffer
+    (when (and (boundp 'lispm-comfyui--root) lispm-comfyui--root)
+      (let* ((types (lispm-comfyui--need-types))
+             (nodes (lispm-comfyui-graph-nodes lispm-comfyui--root))
+             (encoders (seq-filter (lambda (n)
+                                     (member (lispm-comfyui-node-type n)
+                                             '("CLIPTextEncode" "CLIPTextEncodeSDXL"
+                                               "CLIPTextEncodeFlux" "PrimitiveStringMultiline")))
+                                   nodes))
+             (neg-node (seq-find (lambda (n)
+                                   (string-match-p "neg" (downcase (or (lispm-comfyui-node-title n) ""))))
+                                 encoders))
+             (pos-node (or (seq-find (lambda (n) (not (eq n neg-node))) encoders)
+                           (car encoders))))
+        (when pos-node
+          (ignore-errors (lispm-comfyui-set-widget pos-node types "text" positive)))
+        (when (and negative (or neg-node (cadr encoders)))
+          (ignore-errors (lispm-comfyui-set-widget (or neg-node (cadr encoders))
+                                                   types "text" negative)))))))
+
+(defun lispm-characters--comfyui-default-prompt (checkpoint positive negative &optional seed)
+  "Build a 7-node ComfyUI API prompt alist using CHECKPOINT, POSITIVE and NEGATIVE."
+  (let ((seed (or seed (random 1000000000))))
+    `((1 . ((class_type . "CheckpointLoaderSimple")
+            (inputs . ((ckpt_name . ,checkpoint)))))
+      (2 . ((class_type . "CLIPTextEncode")
+            (inputs . ((text . ,positive)
+                       (clip . ["1" 1])))))
+      (3 . ((class_type . "CLIPTextEncode")
+            (inputs . ((text . ,(or negative "low quality, blurry, deformed"))
+                       (clip . ["1" 1])))))
+      (4 . ((class_type . "EmptyLatentImage")
+            (inputs . ((width . 512) (height . 512) (batch_size . 1)))))
+      (5 . ((class_type . "KSampler")
+            (inputs . ((seed . ,seed)
+                       (steps . 20)
+                       (cfg . 7.0)
+                       (sampler_name . "euler")
+                       (scheduler . "normal")
+                       (denoise . 1.0)
+                       (model . ["1" 0])
+                       (positive . ["2" 0])
+                       (negative . ["3" 0])
+                       (latent_image . ["4" 0])))))
+      (6 . ((class_type . "VAEDecode")
+            (inputs . ((samples . ["5" 0])
+                       (vae . ["1" 2])))))
+      (7 . ((class_type . "SaveImage")
+            (inputs . ((filename_prefix . "lispm_character")
+                       (images . ["6" 0]))))))))
+
+(defun lispm-characters--comfyui-First-checkpoint (types)
+  "First checkpoint filename offered by the ComfyUI server's TYPES hash table."
+  (when (hash-table-p types)
+    (when-let* ((def (gethash "CheckpointLoaderSimple" types))
+                (input (alist-get 'input def))
+                (req (alist-get 'required input))
+                (ckpt (alist-get 'ckpt_name req))
+                (choices (car ckpt)))
+      (cond ((vectorp choices) (and (> (length choices) 0) (aref choices 0)))
+            ((listp choices) (car choices))))))
+
+(defun lispm-characters--comfyui-poll-history (prompt-id attempts callback)
+  "Poll ComfyUI `/history/PROMPT-ID' up to ATTEMPTS times, then call
+CALLBACK with `(FILES ERROR)'."
+  (if (<= attempts 0)
+      (funcall callback nil "ComfyUI timed out waiting for image generation")
+    (lispm-comfyui-history
+     prompt-id
+     (lambda (entry error)
+       (cond
+        (error (funcall callback nil error))
+        ((null entry)
+         (run-at-time 0.5 nil #'lispm-characters--comfyui-poll-history
+                      prompt-id (1- attempts) callback))
+        (t
+         (let (images)
+           (pcase-dolist (`(,_node . ,out) (alist-get 'outputs entry))
+             (let ((imgs (alist-get 'images out)))
+               (dolist (img (if (vectorp imgs) (append imgs nil) imgs))
+                 (push img images))))
+           (setq images (nreverse images))
+           (if (null images)
+               (funcall callback nil "ComfyUI finished without producing an image")
+             (let ((pending (length images))
+                   files failed)
+               (dolist (img images)
+                 (lispm-comfyui-fetch-image
+                  img
+                  (lambda (file err)
+                    (if err (setq failed err) (push file files))
+                    (when (zerop (cl-decf pending))
+                      (if failed
+                          (funcall callback nil failed)
+                        (funcall callback (nreverse files) nil)))))))))))))))
+
+(cl-defun lispm-characters--comfyui-generate (prompt &key negative-prompt workflow callback)
+  "Generate an image with ComfyUI for PROMPT; call CALLBACK with `(FILES ERROR)'."
+  (unless (require 'lispm-comfyui nil t)
+    (funcall callback nil "LispM-ComfyUI (`lispm-comfyui') is not installed")
+    (cl-return-from lispm-characters--comfyui-generate nil))
+  (condition-case err
+      (let ((buffer (car (lispm-comfyui--canvas-buffers))))
+        (when (and workflow (not (string-empty-p workflow)) (not buffer))
+          (save-window-excursion (lispm-comfyui-open workflow))
+          (setq buffer (car (lispm-comfyui--canvas-buffers))))
+        (if buffer
+            (progn
+              (lispm-characters--comfyui-set-prompts buffer prompt negative-prompt)
+              (with-current-buffer buffer
+                (lispm-comfyui-run
+                 (lambda (run)
+                   (if (eq (plist-get run :status) 'done)
+                       (funcall callback (plist-get run :files) nil)
+                     (funcall callback nil (or (plist-get run :message) "ComfyUI workflow run failed")))))))
+          (lispm-comfyui-types-of-server
+           (lambda (types error)
+             (if error
+                 (funcall callback nil error)
+               (let ((ckpt (lispm-characters--comfyui-First-checkpoint types)))
+                 (if (not ckpt)
+                     (funcall callback nil "No checkpoint model found on the ComfyUI server")
+                   (lispm-comfyui-queue
+                    (lispm-characters--comfyui-default-prompt ckpt prompt negative-prompt)
+                    nil
+                    (lambda (answer q-err)
+                      (if q-err
+                          (funcall callback nil q-err)
+                        (lispm-characters--comfyui-poll-history
+                         (alist-get 'prompt_id answer) 120 callback)))))))))))
+    (error (funcall callback nil (error-message-string err)))))
+
+(cl-defun lispm-character-generate-image (character prompt &key negative-prompt set-avatar callback)
+  "Generate an image for CHARACTER via ComfyUI with PROMPT.
+Combines CHARACTER's `#+appearance:' with PROMPT when present.  When
+SET-AVATAR is non-nil, saves the first generated image as CHARACTER's
+`:avatar'.  Calls CALLBACK with `(FILES ERROR)'."
+  (let* ((character (lispm-get-character character))
+         (name (lispm-character-name character))
+         (appearance (lispm-character-appearance character))
+         (full-prompt (if (and appearance (not (string-empty-p appearance)))
+                          (if (and prompt (not (string-empty-p prompt)))
+                              (concat appearance ", " prompt)
+                            appearance)
+                        (or prompt (lispm-character-description character)
+                            (lispm-character-title* character))))
+         (workflow (lispm-character-workflow character)))
+    (funcall lispm-comfyui-generate-function
+             full-prompt
+             :negative-prompt negative-prompt
+             :workflow workflow
+             :callback
+             (lambda (files error)
+               (when (and (not error) set-avatar (car files) (file-readable-p (car files)))
+                 (lispm-save-character name :avatar (car files)))
+               (when callback
+                 (funcall callback files error))))))
+
+;;;###autoload
+(defun lispm-character-generate-avatar (character &optional prompt callback)
+  "Generate a new avatar picture for CHARACTER with ComfyUI, and save it."
+  (interactive (list (lispm-read-character (lispm-tr "Change the character: "))))
+  (let* ((character (lispm-get-character character))
+         (title (lispm-character-title* character)))
+    (lispm-character-generate-image
+     character
+     (or prompt "portrait avatar, centered face, clean background")
+     :set-avatar t
+     :callback (lambda (files error)
+                 (if error
+                     (message "ComfyUI: %s" error)
+                   (message "Updated avatar of %s." title))
+                 (when callback (funcall callback files error))))))
+
+(lispm-deftool generate_image
+    ((prompt string "What to draw: scene, expression, or subject. Your `#+appearance:' is automatically prepended.")
+     (negative_prompt string "What to avoid in the image." :optional t)
+     (set_avatar boolean "If true, also set the generated image as your avatar." :optional t))
+  "Generate an image with ComfyUI using your ComfyUI workflow (or the server's
+checkpoint) and return the generated image so the user sees it in the chat."
+  :permission web
+  :async t
+  :for #'lispm-agent-character
+  (let ((character (or (lispm-agent-character* lispm-current-agent)
+                       (error "You are no character"))))
+    (lispm-character-generate-image
+     character prompt
+     :negative-prompt negative_prompt
+     :set-avatar set_avatar
+     :callback (lambda (files error)
+                 (if error
+                     (funcall done (format "ComfyUI image generation failed: %s" error) t)
+                   (funcall done
+                            (format "Generated %d image%s%s: %s"
+                                    (length files)
+                                    (if (= (length files) 1) "" "s")
+                                    (if set_avatar " (and updated your avatar)" "")
+                                    (mapconcat #'file-name-nondirectory files ", "))
+                            nil files))))))
 
 (provide 'lispm-characters)
 ;;; lispm-characters.el ends here

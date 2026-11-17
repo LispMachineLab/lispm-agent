@@ -7337,6 +7337,67 @@ when LispM starts without a model."
             (should-not (lispm-get-character "notes" t)))
         (remhash "note_add" lispm-tools--registry)))))
 
+(ert-deftest lispm-test-character-rag-and-comfyui ()
+  "A character searches its hybrid RAG knowledge base (BM25, Lorebook
+triggers and `/v1/embeddings' vectors) and generates images via ComfyUI."
+  (lispm-test-env
+    (let* ((ext-doc (expand-file-name "handbook.md" project))
+           (_ (lispm-test--write ext-doc "# Style Guide\n\nAlways write ERT tests before merging.\n"))
+           (ada (lispm-create-character
+                 "Ada"
+                 :description "Reviews changes."
+                 :appearance "1girl, pixel art portrait, glasses"
+                 :workflow "portrait.json"
+                 :knowledge ext-doc))
+           (agent (lispm-character-agent ada)))
+      ;; 1. Knowledge addition and BM25 + Lorebook trigger search.
+      (should (member "rag_search" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
+      (should (member "knowledge_add" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
+      (should (member "generate_image" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
+      (lispm-test--call agent "knowledge_add"
+                        '((title . "Rings Architecture")
+                          (content . "Rings uses WebRTC and DHT for peer-to-peer transport.")
+                          (keywords . "rings, webrtc, p2p")))
+      (let ((res (car (lispm-test--call agent "rag_search" '((query . "webrtc transport"))))))
+        (should (string-match-p "Rings Architecture" res))
+        (should (string-match-p "peer-to-peer transport" res)))
+      (let ((res2 (car (lispm-test--call agent "rag_search" '((query . "ERT tests"))))))
+        (should (string-match-p "Style Guide" res2)))
+      ;; 2. Hybrid vector embedding search + caching in .rag-index.eld.
+      (lispm-save-character 'ada :embedding-model "text-embedding-3-small")
+      (let* ((embed-calls 0)
+             (lispm-embedding-function
+              (lambda (_backend _model texts)
+                (cl-incf embed-calls)
+                (mapcar (lambda (txt)
+                          (if (string-match-p "webrtc\\|Rings" txt)
+                              [1.0 0.0 0.0]
+                            [0.0 1.0 0.0]))
+                        texts))))
+        (let ((hits (lispm-character-rag-search 'ada "webrtc" 1)))
+          (should (= (length hits) 1))
+          (should (equal (plist-get (car hits) :title) "Rings Architecture"))
+          (should (= embed-calls 2)))
+        ;; Second search reuses cached chunk vectors from .rag-index.eld (only 1 call for query).
+        (let ((hits (lispm-character-rag-search 'ada "webrtc" 1)))
+          (should (= (length hits) 1))
+          (should (= embed-calls 3)))
+        (should (file-exists-p (lispm-characters--rag-index-file 'ada))))
+      ;; 3. System prompt includes knowledge base summary.
+      (should (string-match-p "# Your knowledge base (RAG)" (lispm-system-prompt agent)))
+      ;; 4. ComfyUI image generation prepends appearance, passes workflow, and updates avatar.
+      (let* ((pic (lispm-test--png (expand-file-name "gen.png" project)))
+             (seen nil)
+             (lispm-comfyui-generate-function
+              (lambda (prompt &rest args)
+                (setq seen (cons prompt args))
+                (funcall (plist-get args :callback) (list pic) nil))))
+        (lispm-character-generate-avatar 'ada "smiling at desk")
+        (should (equal (car seen) "1girl, pixel art portrait, glasses, smiling at desk"))
+        (should (equal (plist-get (cdr seen) :workflow) "portrait.json"))
+        (should (lispm-character-avatar (lispm-get-character 'ada)))
+        (should (file-exists-p (lispm-character-avatar (lispm-get-character 'ada))))))))
+
 (ert-deftest lispm-test-ask-agents-in-parallel ()
   "Parallel requests return as messages, including a request back to the caller."
   (lispm-test-env
