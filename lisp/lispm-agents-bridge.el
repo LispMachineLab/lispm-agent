@@ -722,7 +722,9 @@ your directory.%s"
                 (concat " The characters now: "
                         (mapconcat #'lispm-character-title* characters ", ")
                         "; apps are characters too, which list_agents names.")
-              ""))))
+              (if (seq-some #'lispm-character-skill (lispm-characters))
+                  " Apps are characters too, which list_agents names."
+                "")))))
 
 (setq lispm-agents-mcp-extra-tools
       (append (seq-remove (lambda (tool) (assoc (car tool) lispm-agents-bridge-tools))

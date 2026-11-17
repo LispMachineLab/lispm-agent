@@ -7305,6 +7305,10 @@ when LispM starts without a model."
             (let ((prompt (lispm-system-prompt boss)))
               (should (string-match-p "Apps are characters too, of two faces" prompt))
               (should (string-match-p "^- and 1 apps, which list_agents names$" prompt)))
+            (cl-letf (((symbol-function 'lispm-agents-context-terminal) (lambda (_s) (current-buffer)))
+                      ((symbol-function 'lispm-agents-bridge-name) (lambda (_b) "claude-1")))
+              (should (string-match-p "Apps are characters too, which list_agents names\\."
+                                      (lispm-agents-context-instructions (lispm-agents-codex-mcp--make)))))
             (should (string-match-p "^- Notes (app): Keeps notes\\.$"
                                     (car (lispm-test--call boss "list_agents" nil))))
             (lispm-tell boss "note it")
