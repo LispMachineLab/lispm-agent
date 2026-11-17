@@ -6884,12 +6884,29 @@ not with LispM's welcome; its replies are marked as its."
         (lispm-define-app-character 'notes :title "Notes" :skill "notes")
         (with-current-buffer (lispm-character-form "Notes")
           (should-not (alist-get 'title (lispm-ui-form-widgets)))
+          ;; Optional RAG and ComfyUI fields are hidden until their checkboxes are ticked.
+          (should-not (assq 'knowledge (lispm-ui-form-values)))
+          (should-not (assq 'appearance (lispm-ui-form-values)))
           (lispm-test--form-type 'model "small-model")
           (lispm-ui-form-submit))
         (should (equal (lispm-character-model (lispm-get-character "notes")) "small-model"))
+        (should-not (lispm-character-rag-enabled-p "notes"))
+        (should-not (lispm-character-comfyui-enabled-p "notes"))
         (should (equal (lispm--file-text (expand-file-name "characters/notes/character.org"
                                                            lispm-directory))
-                       "#+model: small-model\n"))))))
+                       "#+model: small-model\n"))
+        ;; Ticking the optional capabilities in an app character's form enables them.
+        (with-current-buffer (lispm-character-form "Notes")
+          (lispm-test--form-press 'rag)
+          (lispm-test--form-press 'comfyui)
+          (should (assq 'knowledge (lispm-ui-form-values)))
+          (should (assq 'appearance (lispm-ui-form-values)))
+          (lispm-test--form-type 'appearance "pixel art notebook icon")
+          (lispm-ui-form-submit))
+        (should (lispm-character-rag-enabled-p "notes"))
+        (should (lispm-character-comfyui-enabled-p "notes"))
+        (should (equal (lispm-character-appearance (lispm-get-character "notes"))
+                       "pixel art notebook icon"))))))
 
 (ert-deftest lispm-test-backend-form ()
   "A backend is added and changed in its form: the API it speaks, where
@@ -7341,7 +7358,9 @@ when LispM starts without a model."
   "A character searches its hybrid RAG knowledge base (BM25, Lorebook
 triggers and `/v1/embeddings' vectors) and generates images via ComfyUI."
   (lispm-test-env
-    (let* ((ext-doc (expand-file-name "handbook.md" project))
+    (let* ((plain (lispm-create-character "Bob" :description "Plain character."))
+           (plain-agent (lispm-character-agent plain))
+           (ext-doc (expand-file-name "handbook.md" project))
            (_ (lispm-test--write ext-doc "# Style Guide\n\nAlways write ERT tests before merging.\n"))
            (ada (lispm-create-character
                  "Ada"
@@ -7350,6 +7369,12 @@ triggers and `/v1/embeddings' vectors) and generates images via ComfyUI."
                  :workflow "portrait.json"
                  :knowledge ext-doc))
            (agent (lispm-character-agent ada)))
+      ;; 0. Without RAG or ComfyUI enabled, neither tool set is exposed.
+      (should-not (lispm-character-rag-enabled-p plain))
+      (should-not (lispm-character-comfyui-enabled-p plain))
+      (should-not (member "rag_search" (mapcar #'lispm-tool-name (lispm-agent-tools* plain-agent))))
+      (should-not (member "knowledge_add" (mapcar #'lispm-tool-name (lispm-agent-tools* plain-agent))))
+      (should-not (member "generate_image" (mapcar #'lispm-tool-name (lispm-agent-tools* plain-agent))))
       ;; 1. Knowledge addition and BM25 + Lorebook trigger search.
       (should (member "rag_search" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
       (should (member "knowledge_add" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
