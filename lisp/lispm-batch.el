@@ -599,7 +599,7 @@ is a zero-argument thunk returning the chronological list of call records."
                  usage-path
                  (lispm-batch-summarize-calls (reverse call-records))))))
           (lambda ()
-            (nreverse call-records)))))
+            (reverse call-records)))))
 
 (defun lispm-batch--format-result (agent backend-spec root started-time call-records outcome)
   "Construct the batch result alist for AGENT from CALL-RECORDS and OUTCOME."

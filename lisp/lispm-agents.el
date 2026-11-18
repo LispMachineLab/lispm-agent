@@ -1422,7 +1422,8 @@ INITIAL is pre-filled in the directory field."
          (depth (recursion-depth))
          (exit-with (lambda (ok &optional val)
                       (when (<= (recursion-depth) (1+ depth))
-                        (setq submitted ok
+                        (setq closing t
+                              submitted ok
                               result val)
                         (when (= (recursion-depth) (1+ depth))
                           (exit-recursive-edit)))))
