@@ -8548,7 +8548,8 @@ Tools take the places and buffers agents name as org links."
                       "- **解压界限**：`crates/core/src/message/payload/wire.rs:499–539` 使用固定上限。\n"
                       "- **内存计费**：`link_stage.rs:77–99,135,169` 将解压长度传递；`inbound.rs:310` 申请容量。\n"
                       "- **分片预留**：`inbound/reassembly.rs:188–195` 检查长度。\n"
-                      "位置： [crates/tui/src/executor.rs:79](https://github.com/RingsNetwork/rings/blob/8fcfac36864ba0ef1424b8fd9a6825c54cdcd8d3/crates/tui/src/executor.rs#L79)")))
+                      "位置： [crates/tui/src/executor.rs:79](https://github.com/RingsNetwork/rings/blob/8fcfac36864ba0ef1424b8fd9a6825c54cdcd8d3/crates/tui/src/executor.rs#L79)\n"
+                      "  [查看 GitHub 评论](https://github.com/RingsNetwork/rings/pull/1285#issuecomment-6972925951)")))
         (setq lispm-test--scripts
               `((assistant@project
                  ,(lispm-test--msg "tool_use"
@@ -8594,7 +8595,31 @@ Tools take the places and buffers agents name as org links."
           (should (equal (lispm-object-at (match-beginning 0)) (list 'file reassembly 188)))
           ;; 3. Markdown link [crates/tui/src/executor.rs:79](https://github.com/...#L79).
           (search-forward "[crates/tui/src/executor.rs:79]")
-          (should (equal (lispm-object-at (match-beginning 0)) (list 'file executor 79))))))))
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file executor 79)))
+          ;; 4. Markdown URL link opens in lispm-browser on click/RET and in default browser on Command-click.
+          (search-forward "[查看 GitHub 评论]")
+          (let* ((pos (match-beginning 0))
+                 (url "https://github.com/RingsNetwork/rings/pull/1285#issuecomment-6972925951")
+                 (map (get-text-property pos 'keymap))
+                 (opened nil))
+            (should (equal (lispm-object-at pos) (list 'url url)))
+            (cl-letf (((symbol-function 'lispm-browser-available-p) (lambda () t))
+                      ((symbol-function 'lispm-browser-open-url)
+                       (lambda (u &optional _) (push (cons 'lispm-browser u) opened)))
+                      ((symbol-function 'browse-url-default-browser)
+                       (lambda (u &rest _) (push (cons 'default-browser u) opened))))
+              (save-window-excursion
+                (pop-to-buffer chat)
+                (funcall (keymap-lookup map "<mouse-1>")
+                         (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))
+                (funcall (keymap-lookup map "M-<mouse-1>")
+                         (list 'M-mouse-1 (list (selected-window) pos '(0 . 0) 0)))
+                (funcall (keymap-lookup map "s-<mouse-1>")
+                         (list 's-mouse-1 (list (selected-window) pos '(0 . 0) 0))))
+              (should (equal (nreverse opened)
+                             (list (cons 'lispm-browser url)
+                                   (cons 'default-browser url)
+                                   (cons 'default-browser url)))))))))))
 
 (ert-deftest lispm-test-ground ()
   "Code in replies is checked against this Emacs, as PceEmacs checks a

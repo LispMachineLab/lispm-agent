@@ -57,6 +57,9 @@
 
 (declare-function lispm-show "lispm" (agent))
 (declare-function lispm-chat-transcript "lispm-chat" (agent &optional argument))
+(declare-function lispm-browser-available-p "lispm-browser" ())
+(declare-function lispm-browser-open-url "lispm-browser" (url &optional new-tab))
+(declare-function lispm-browser-normalize-url "lispm-browser" (url))
 (declare-function lispm-agents-roster-buffer "lispm-agents-roster" (key))
 (declare-function lispm-agents-roster-waits "lispm-agents-roster" (buffer))
 (declare-function lispm-agents-bridge-mailbox "lispm-agents-bridge" (terminal))
@@ -91,6 +94,10 @@ When `t', any presentation object is acceptable.")
   :doc "Keymap of presentations: act on the object with a click or RET."
   "<mouse-1>" #'lispm-act-at-mouse
   "<mouse-2>" #'lispm-act-at-mouse
+  "M-<down-mouse-1>" #'ignore
+  "M-<mouse-1>" #'lispm-act-secondary-at-mouse
+  "s-<down-mouse-1>" #'ignore
+  "s-<mouse-1>" #'lispm-act-secondary-at-mouse
   "<follow-link>" 'mouse-face)
 
 (defun lispm-present (string object)
@@ -278,8 +285,25 @@ or pressing RET on one supplies its `lispm-object-value' directly."
         agent)
       (lispm-get-agent name)))
 
-(defun lispm-act (object)
+(defun lispm-open-url (url &optional external)
+  "Open URL in `lispm-browser' when available, else with `browse-url'.
+With EXTERNAL non-nil (Command-click or prefix arg), open URL in the
+system's default browser."
+  (cond (external
+         (browse-url-default-browser url))
+        ((and (fboundp 'lispm-browser-available-p)
+              (lispm-browser-available-p)
+              (fboundp 'lispm-browser-open-url))
+         (lispm-browser-open-url
+          (if (fboundp 'lispm-browser-normalize-url)
+              (lispm-browser-normalize-url url)
+            url)))
+        (t
+         (browse-url url))))
+
+(defun lispm-act (object &optional external)
   "Act on OBJECT as its type says, or supply it to `lispm-accept'.
+With EXTERNAL non-nil, open a `url' object in the default browser.
 See `lispm-inspect.el' for presentation types."
   (if lispm-accept-types
       (lispm-accept-select object)
@@ -303,7 +327,7 @@ See `lispm-inspect.el' for presentation types."
       (`(symbol ,symbol) (describe-symbol symbol))
       (`(tool ,name) (lispm-inspect--visit-tool name))
       (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-resolve-agent agent) id))
-      (`(url ,url) (browse-url url))
+      (`(url ,url) (lispm-open-url url external))
       (_ (user-error "%s" (lispm-tr "Nothing to act on here"))))))
 
 (defvar lispm-act-functions nil
@@ -312,22 +336,33 @@ Each is called with no argument and returns non-nil if it acted; RET in
 the inspector and the chat tries them in turn.  lispm-hyperbole.el adds
 Hyperbole's implicit buttons, once Hyperbole is loaded.")
 
-(defun lispm-act-at-point ()
-  "Act on the object presented at point.
+(defun lispm-act-at-point (&optional arg)
+  "Act on the object presented at point; with ARG, use secondary action.
 Where none is, act as one of `lispm-act-functions' does."
-  (interactive)
+  (interactive "P")
   (if-let* ((object (lispm-object-at)))
-      (lispm-act object)
+      (lispm-act object (or arg current-prefix-arg))
     (or (run-hook-with-args-until-success 'lispm-act-functions)
         (user-error "%s" (lispm-tr "Nothing to act on here")))))
 
 (defun lispm-act-at-mouse (event)
   "Act on the object presented where EVENT, a click, happened."
   (interactive "e")
+  (let ((position (event-start event))
+        (external (and (seq-intersection '(meta super) (event-modifiers event)) t)))
+    (with-current-buffer (window-buffer (posn-window position))
+      (lispm-act (or (lispm-object-at (posn-point position))
+                     (user-error "%s" (lispm-tr "Nothing to act on here")))
+                 external))))
+
+(defun lispm-act-secondary-at-mouse (event)
+  "Act on the object where Command-click EVENT happened, externally for URLs."
+  (interactive "e")
   (let ((position (event-start event)))
     (with-current-buffer (window-buffer (posn-window position))
       (lispm-act (or (lispm-object-at (posn-point position))
-                     (user-error "%s" (lispm-tr "Nothing to act on here")))))))
+                     (user-error "%s" (lispm-tr "Nothing to act on here")))
+                 t))))
 
 (defun lispm-inspect--visit-tool (name)
   "Show where the tool NAME is defined: its file, or its skill's."
