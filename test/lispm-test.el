@@ -10029,6 +10029,83 @@ last, once, and taken out, LispM's own told from the others."
     (should (lispm-skill-directory-builtin-p lispm-skills--builtin))
     (should-not (lispm-skill-directory-builtin-p "~/.lispm/skills/"))))
 
+(ert-deftest lispm-test-settings-mcp-servers ()
+  "MCP servers are added, changed, queried for status and removed; skills
+report their kind, tools and code, and new skills are created."
+  (lispm-test--with-settings
+    (let ((lispm-mcp-servers nil)
+          (lispm-mcp-autostart t)
+          (user-dir (file-name-as-directory (make-temp-file "lispm-user-skills-" t))))
+      (unwind-protect
+          (let ((lispm-write-skill-directory user-dir)
+                (lispm-skill-directories (list lispm-skills--builtin user-dir)))
+            (lispm-mcp-server-add "peekaboo"
+                                  '(:command " npx " :args ("-y" "@steipete/peekaboo" "mcp")
+                                             :description " Screen tools " :sandbox none)
+                                  t)
+            (let ((config (lispm-mcp-server-get "peekaboo")))
+              (should (equal (plist-get config :command) "npx"))
+              (should (equal (plist-get config :description) "Screen tools"))
+              (should (eq (plist-get config :sandbox) 'none)))
+            (should (equal (lispm-mcp-server-status "peekaboo")
+                           '(:state stopped :tools 0 :tool-names nil)))
+            (should-error (lispm-mcp-server-add "peekaboo" '(:command "npx")) :type 'user-error)
+            (should-error (lispm-mcp-server-add "bad name" '(:command "npx")) :type 'user-error)
+            (should-error (lispm-mcp-server-add "empty" '(:description "none")) :type 'user-error)
+            (lispm-mcp-server-change "peekaboo"
+                                     '(:url " https://mcp.example/sse " :description "HTTP MCP" :defer nil)
+                                     t)
+            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :url)
+                           "https://mcp.example/sse"))
+            (lispm-mcp-server-remove "peekaboo" t)
+            (should-not (lispm-mcp-server-get "peekaboo"))
+            (should (memq 'lispm-mcp-servers saved))
+            ;; Creating a skill in the user's directory and inspecting it.
+            (let ((file (lispm-create-skill "my-helper" "Help with notes." "* Steps\n\nDo it." "My Helper" t)))
+              (should (file-regular-p file))
+              (let ((skill (lispm-skills--find "my-helper" nil)))
+                (should (eq (lispm-skill-kind skill) 'user))
+                (should (equal (plist-get skill :title) "My Helper"))
+                (should-not (lispm-skill-has-code-p skill))
+                (should-not (lispm-skill-tools skill)))
+              (lispm-delete-skill "my-helper")
+              (should-not (file-exists-p file))))
+        (delete-directory user-dir t)))))
+
+(ert-deftest lispm-test-mcp-and-skill-forms ()
+  "The MCP server form adds and changes stdio and HTTP servers, with presets;
+the skill form creates a new skill file."
+  (lispm-test--with-settings
+    (let ((lispm-mcp-servers nil)
+          (user-dir (file-name-as-directory (make-temp-file "lispm-form-skills-" t))))
+      (unwind-protect
+          (let ((lispm-write-skill-directory user-dir)
+                (lispm-skill-directories (list lispm-skills--builtin user-dir)))
+            (with-current-buffer (lispm-mcp-form)
+              (should (equal (lispm-ui-form-title) (lispm-tr "Add MCP Server")))
+              (lispm-mcp-form--apply-preset 'peekaboo)
+              (should (equal (lispm-ui-form-value 'name) "peekaboo"))
+              (should (equal (lispm-ui-form-value 'command) "npx"))
+              (should (eq (lispm-ui-form-value 'sandbox) 'none))
+              (lispm-ui-form-submit))
+            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :command) "npx"))
+            (with-current-buffer (lispm-mcp-form "peekaboo")
+              (should (equal (lispm-ui-form-title) (lispm-tr "MCP Server %s" "peekaboo")))
+              (lispm-ui-form-set 'transport 'http 'url "https://mcp.example/v1")
+              (lispm-ui-form-submit))
+            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :url)
+                           "https://mcp.example/v1"))
+            (with-current-buffer (lispm-skill-form)
+              (should (equal (lispm-ui-form-title) (lispm-tr "New Skill")))
+              (lispm-ui-form-set 'name "note-taker"
+                                 'title "Note Taker"
+                                 'description "Take structured notes."
+                                 'instructions "* Notes\n\nWrite them down.")
+              (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+                (lispm-ui-form-submit)))
+            (should (file-regular-p (expand-file-name "note-taker.org" user-dir))))
+        (delete-directory user-dir t)))))
+
 ;;;; The language LispM speaks
 
 (defun lispm-test--source-files ()
