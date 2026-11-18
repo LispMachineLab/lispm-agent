@@ -1,10 +1,8 @@
 EMACS ?= emacs
-# LispM Kit, whose engine translates LispM's words, LispM UI, which
-# draws LispM's forms, and LispM Auth, which keeps its secrets encrypted,
+# LispM UI (including Kit and Finder), which draws LispM's forms and
+# translates its words, and LispM Auth, which keeps its secrets encrypted,
 # libraries only git holds: checkouts beside this one by default.
-LISPM_KIT ?= ../lispm-kit
 LISPM_UI ?= ../lispm-ui
-LISPM_FINDER ?= ../lispm-finder
 LISPM_AUTH ?= ../lispm-auth
 # Optional kernel checkout for the real worker integration tests.
 LISPM_KERNEL ?= ../lispm-kernel
@@ -18,7 +16,7 @@ ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-we
       lispm-chat.el lispm-bar.el lispm-batch.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))" \
-       -L $(LISPM_KIT) -L $(LISPM_UI) -L $(LISPM_FINDER) -L $(LISPM_AUTH)
+       -L $(LISPM_UI) -L $(LISPM_AUTH)
 
 .PHONY: all deps compile test test-kernel i18n demo clean
 
@@ -27,7 +25,7 @@ all: compile test
 deps: .deps/.installed
 
 .deps/.installed: lisp/lispm.el test/install-deps.el
-	$(EMACS) -Q --batch -L $(LISPM_KIT) -L $(LISPM_UI) -L $(LISPM_FINDER) -L $(LISPM_AUTH) -l test/install-deps.el
+	$(EMACS) -Q --batch -L $(LISPM_UI) -L $(LISPM_AUTH) -l test/install-deps.el
 	touch $@
 
 # Warnings are errors: CI compiles with every supported Emacs.

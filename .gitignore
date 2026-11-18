@@ -2,5 +2,5 @@
 /test/*.elc
 __pycache__/
 /.deps/
-/.lispm-kit/
 /.lispm-ui/
+/.lispm-auth/
