@@ -13043,6 +13043,18 @@ are flagged with public interface suggestions and translated via `lispm-tr'."
     (should-error (lispm-tools--arguments tool '((path . 123)))
                   :type 'lispm-tool-argument-error)))
 
+(ert-deftest lispm-test-dispatching-macro-hygiene-and-unwind ()
+  "`lispm--dispatching' evaluates its agent form once and clears `dispatching' on non-local exit."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          (eval-count 0))
+      (catch 'abort
+        (lispm--dispatching (progn (cl-incf eval-count) agent)
+          (should (lispm-agent-dispatching agent))
+          (throw 'abort nil)))
+      (should (= eval-count 1))
+      (should-not (lispm-agent-dispatching agent)))))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

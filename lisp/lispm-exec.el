@@ -94,23 +94,29 @@ when the connection closes or the process is signalled."
     (when (and (integerp pid) (> pid 0))
       (ignore-errors (signal-process (- pid) signal)))))
 
-(defun lispm-exec--with-held-sentinel (process body)
-  "Call BODY with PROCESS's sentinel held, running queued events after BODY.
+(defmacro lispm-exec--with-held-sentinel (process &rest body)
+  "Run BODY with PROCESS's sentinel held, running queued events after BODY.
 `tramp-signal-process' waits for its remote command inside a locked TRAMP
 connection; holding PROCESS's sentinel until that lock is released keeps
 the sentinel from re-entering TRAMP on the same connection."
-  (let ((sentinel (process-sentinel process))
-        events)
-    (unwind-protect
-        (progn
-          (when (functionp sentinel)
-            (set-process-sentinel
-             process (lambda (_proc event) (push event events))))
-          (funcall body))
-      (when (functionp sentinel)
-        (ignore-errors (set-process-sentinel process sentinel))
-        (dolist (event (nreverse events))
-          (funcall sentinel process event))))))
+  (declare (indent 1) (debug t))
+  (let ((proc (make-symbol "process"))
+        (sentinel (make-symbol "sentinel"))
+        (events (make-symbol "events"))
+        (event (make-symbol "event")))
+    `(let* ((,proc ,process)
+            (,sentinel (process-sentinel ,proc))
+            ,events)
+       (unwind-protect
+           (progn
+             (when (functionp ,sentinel)
+               (set-process-sentinel
+                ,proc (lambda (_p ,event) (push ,event ,events))))
+             ,@body)
+         (when (functionp ,sentinel)
+           (ignore-errors (set-process-sentinel ,proc ,sentinel))
+           (dolist (,event (nreverse ,events))
+             (funcall ,sentinel ,proc ,event)))))))
 
 (defun lispm-exec-kill (process)
   "Stop PROCESS and the process group it started, locally or on a remote host.
@@ -121,14 +127,12 @@ returns), call it."
     (ignore-errors (funcall process)))
    ((processp process)
     (let ((inhibit-quit t))
-      (lispm-exec--with-held-sentinel
-       process
-       (lambda ()
-         (when (process-live-p process)
-           (ignore-errors (process-send-eof process))
-           (lispm-exec--signal-tree process 'SIGKILL))
-         (when (process-live-p process)
-           (ignore-errors (kill-process process)))))))))
+      (lispm-exec--with-held-sentinel process
+        (when (process-live-p process)
+          (ignore-errors (process-send-eof process))
+          (lispm-exec--signal-tree process 'SIGKILL))
+        (when (process-live-p process)
+          (ignore-errors (kill-process process))))))))
 
 (defun lispm-exec-delete (process)
   "Delete PROCESS after stopping the process group it started.
@@ -139,13 +143,11 @@ returns), call it."
     (ignore-errors (funcall process)))
    ((processp process)
     (let ((inhibit-quit t))
-      (lispm-exec--with-held-sentinel
-       process
-       (lambda ()
-         (when (process-live-p process)
-           (ignore-errors (process-send-eof process))
-           (lispm-exec--signal-tree process 'SIGKILL))
-         (ignore-errors (delete-process process))))))))
+      (lispm-exec--with-held-sentinel process
+        (when (process-live-p process)
+          (ignore-errors (process-send-eof process))
+          (lispm-exec--signal-tree process 'SIGKILL))
+        (ignore-errors (delete-process process)))))))
 
 (cl-defun lispm-exec (program args callback &key input timeout)
   "Run PROGRAM with ARGS in the background, then call CALLBACK with how it went.
