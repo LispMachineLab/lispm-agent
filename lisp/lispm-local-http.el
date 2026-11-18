@@ -44,11 +44,12 @@ handler that answers later keeps it and returns `deferred'.")
 
 (defun lispm-local-http-headers (head)
   "Return the headers of the HTTP request HEAD as an alist of downcased names."
-  (let (headers)
-    (dolist (line (cdr (split-string head "\r\n" t)))
-      (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*?\\)[ \t]*\\'" line)
-        (push (cons (downcase (match-string 1 line)) (match-string 2 line)) headers)))
-    headers))
+  (save-match-data
+    (let (headers)
+      (dolist (line (cdr (split-string head "\r\n" t)))
+        (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*?\\)[ \t]*\\'" line)
+          (push (cons (downcase (match-string 1 line)) (match-string 2 line)) headers)))
+      headers)))
 
 (defun lispm-local-http-serve (name authorize handler)
   "Start an HTTP server called NAME on a free local port; return it.
@@ -75,36 +76,37 @@ is `(process-contact SERVER :service)'."
 
 (defun lispm-local-http--filter (connection bytes)
   "Accumulate BYTES from CONNECTION and answer the request once complete."
-  (let* ((input (concat (process-get connection :input) bytes))
-         (end (string-search "\r\n\r\n" input)))
-    (process-put connection :input input)
-    (cond
-     (end
-      (let* ((head (substring input 0 end))
-             (headers (lispm-local-http-headers head))
-             (length (string-to-number (or (cdr (assoc "content-length" headers)) "0")))
-             (handler (plist-get (process-plist (process-get connection :server)) :handler))
-             (authorize (plist-get (process-plist (process-get connection :server)) :authorize)))
-        (cond
-         ((> length lispm-local-http-max-request)
-          (lispm-local-http--reply connection '("413 Content Too Large")))
-         ((>= (length input) (+ end 4 length))
-          (process-put connection :input nil)
-          (pcase-let ((`(,method ,path) (split-string (car (split-string head "\r\n")) " ")))
-            (let* ((lispm-local-http-respond
-                    (lambda (response)
-                      (when (process-live-p connection)
-                        (lispm-local-http--reply connection response))))
-                   (response
-                    (if (funcall authorize headers)
-                        (funcall handler method path headers
-                                 (decode-coding-string (substring input (+ end 4) (+ end 4 length))
-                                                       'utf-8))
-                      '("401 Unauthorized"))))
-              (unless (eq response 'deferred)
-                (lispm-local-http--reply connection response))))))))
-     ((> (length input) 16384)
-      (lispm-local-http--reply connection '("431 Request Header Fields Too Large"))))))
+  (save-match-data
+    (let* ((input (concat (process-get connection :input) bytes))
+           (end (string-search "\r\n\r\n" input)))
+      (process-put connection :input input)
+      (cond
+       (end
+        (let* ((head (substring input 0 end))
+               (headers (lispm-local-http-headers head))
+               (length (string-to-number (or (cdr (assoc "content-length" headers)) "0")))
+               (handler (plist-get (process-plist (process-get connection :server)) :handler))
+               (authorize (plist-get (process-plist (process-get connection :server)) :authorize)))
+          (cond
+           ((> length lispm-local-http-max-request)
+            (lispm-local-http--reply connection '("413 Content Too Large")))
+           ((>= (length input) (+ end 4 length))
+            (process-put connection :input nil)
+            (pcase-let ((`(,method ,path) (split-string (car (split-string head "\r\n")) " ")))
+              (let* ((lispm-local-http-respond
+                      (lambda (response)
+                        (when (process-live-p connection)
+                          (lispm-local-http--reply connection response))))
+                     (response
+                      (if (funcall authorize headers)
+                          (funcall handler method path headers
+                                   (decode-coding-string (substring input (+ end 4) (+ end 4 length))
+                                                         'utf-8))
+                        '("401 Unauthorized"))))
+                (unless (eq response 'deferred)
+                  (lispm-local-http--reply connection response))))))))
+       ((> (length input) 16384)
+        (lispm-local-http--reply connection '("431 Request Header Fields Too Large")))))))
 
 (defun lispm-local-http--reply (connection response)
   "Send CONNECTION the (STATUS BODY TYPE HEADERS) RESPONSE and close it."

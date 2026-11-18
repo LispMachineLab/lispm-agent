@@ -73,7 +73,10 @@
   :type 'boolean
   :group 'lispm)
 
-(defcustom lispm-compact-threshold 120000
+(defconst lispm--default-compact-threshold 120000
+  "Default size, in tokens, for `lispm-compact-threshold'.")
+
+(defcustom lispm-compact-threshold lispm--default-compact-threshold
   "Size, in tokens, past which a session makes room or is handed over.
 The size is the one the model's latest response reported, plus an
 estimate of what was written since.  Past it, the output of older
@@ -117,7 +120,10 @@ at least one turn is always left to the summary.  0 keeps none."
   :type 'integer
   :group 'lispm)
 
-(defcustom lispm-compact-idle 0.75
+(defconst lispm--default-compact-idle 0.75
+  "Default fraction for `lispm-compact-idle'.")
+
+(defcustom lispm-compact-idle lispm--default-compact-idle
   "Fraction of `lispm-compact-threshold' past which a session is compacted at idle.
 When a turn ends with the session past it, LispM makes room once Emacs
 has been idle for `lispm-idle-delay' seconds, rather than when the
@@ -1344,7 +1350,8 @@ what a session opened again after Emacs stopped takes up."
   (let ((modified (make-symbol "modified")))
     `(let ((,modified (buffer-modified-p))
            (create-lockfiles nil))
-       (prog1 (progn ,@body)
+       (unwind-protect
+           (progn ,@body)
          (restore-buffer-modified-p ,modified)))))
 
 (defun lispm--live-begin (agent)
@@ -3215,7 +3222,7 @@ out, and the beginning of the input the first of them handled.  See
                                sections))
            ;; A quarter of the threshold, in bytes; with none, of its default.
            (limit (* 3 (/ (or lispm-compact-threshold
-                              (eval (car (get 'lispm-compact-threshold 'standard-value)) t))
+                              lispm--default-compact-threshold)
                           4))))
       ;; The turn that saved memory for this handover goes with the rest.
       (when-let* ((last (car (last inputs)))

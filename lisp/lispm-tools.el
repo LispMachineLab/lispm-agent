@@ -118,57 +118,24 @@ a list of strings; they do not change the tool's name or schema."
 
 (defmacro lispm-deftool (name params docstring &rest body)
   "Define a tool NAME that agents can call.
-NAME's symbol name is what the model sees.  PARAMS is a list of
-\(ARG TYPE DESCRIPTION . OPTIONS), TYPE being string, integer,
-number, boolean, array or object, and OPTIONS among :optional t,
-:enum LIST and :items SCHEMA.  The model sees ARG with dashes
-turned into underscores.  DOCSTRING is the description the model
-reads to decide when to call the tool.
+PARAMS is a list of (ARG TYPE DESCRIPTION . OPTIONS), TYPE among
+`string', `integer', `number', `boolean', `array' or `object', and
+OPTIONS among `:optional t', `:enum LIST' and `:items SCHEMA'.
+DOCSTRING is the description the model reads to decide when to call it.
 
-BODY may start with keyword options:
-  :permission CLASS  read (the default), memory, comm, write, shell or exec
-  :async t           BODY gets a function `done' to call later with
-                     the result (and non-nil as second argument on
-                     failure); its own value is ignored
-  :preview FUNCTION  called with the same arguments; returns a string
-                     shown while the call awaits approval
-  :diff FUNCTION     instead of :preview, for a call that changes a file
-                     or buffer: called with the same arguments, returns
-                     (OLD NEW LABEL), the text there now and the text
-                     the call would leave, whose diff, LABEL naming the
-                     file, is the preview; it is made in the background
-  :changes FUNCTION  for a tool that changes a buffer: called with the
-                     same arguments, returns (BUFFER . TEXT), the buffer
-                     the call would change and the text it would leave
-                     there; the change is then shown in BUFFER while the
-                     call is written and while it awaits approval
-  :targets FUNCTION  for a tool of class write whose `path' or `buffer'
-                     argument does not name what it writes: called with
-                     the same arguments before the call runs, returns the
-                     files it would change, for the rule that writes
-                     outside the agent's root always ask (see
-                     `lispm-tool-action'); it changes nothing
-  :deferred t        offered only once search_tools finds it (see
-                     `lispm-tool-sources'): for tools seldom needed
-  :always-ask t      every call awaits the user's approval, whatever
-                     the policy says (one that denies the class still
-                     denies it): for calls whose effects outlast the
-                     session, such as saving code later sessions run
-  :for FUNCTION      called with an agent: the tool is that agent's
-                     only if it returns non-nil, as a character's own
-                     tools are only characters'
-  :class FUNCTION    called with the same arguments before the call is
-                     decided: returns the permission class of this call
-                     when it does less than the tool can, as a shell
-                     command that only reads does, or nil for the tool's
-                     own; it changes nothing (see
-                     `lispm-tool-call-permission')
-  :keywords LIST     explicit search terms, a list of strings; these
-                     aid discovery without adding callable aliases
-
-Otherwise BODY's value is the result: a string, or any object, which
-is printed; or a `lispm-tool-result', text with image or video files
-the model sees too.  Signal an error to report a failure to the model."
+Leading keyword options in BODY:
+  :permission CLASS  `read' (default), `memory', `comm', `write', `shell'
+  :async t           BODY receives `done' taking (RESULT &optional ERRORP)
+  :preview FUNCTION  returns a preview string while awaiting approval
+  :diff FUNCTION     returns (OLD NEW LABEL) for a background diff preview
+  :changes FUNCTION  returns (BUFFER . TEXT) for live buffer preview
+  :targets FUNCTION  returns files a `write' tool would modify
+  :deferred t        offered only once `search_tools' loads it
+  :always-ask t      always awaits user approval unless denied by policy
+  :for FUNCTION      predicate on an agent restricting who sees the tool
+  :class FUNCTION    dynamic permission-class downgrade function
+  :keywords LIST     explicit search terms (list of strings)
+Otherwise BODY's value (or `lispm-tool-result') is the tool result."
   (declare (indent 3) (doc-string 3))
   (let ((permission 'read) async preview diff changes targets deferred always-ask for class keywords
         (args (mapcar #'car params)))
@@ -279,6 +246,8 @@ search_tools itself is there when there is anything to find."
              lispm-tools--registry)
     (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
 
+(define-error 'lispm-tool-argument-error "Invalid tool argument")
+
 (defun lispm-tools--argument (key type value opts)
   "Check VALUE of parameter KEY against TYPE and OPTS; return it for Lisp."
   (let ((ok (pcase type
@@ -290,17 +259,19 @@ search_tools itself is there when there is anything to find."
               ('object (listp value))
               (_ t))))
     (unless ok
-      (error "Parameter `%s' must be of type %s" key type))
+      (signal 'lispm-tool-argument-error
+              (list (format "Parameter `%s' must be of type %s" key type))))
     (when-let* ((enum (plist-get opts :enum)))
       (unless (member value enum)
-        (error "Parameter `%s' must be one of %s" key (string-join enum ", "))))
+        (signal 'lispm-tool-argument-error
+                (list (format "Parameter `%s' must be one of %s" key (string-join enum ", "))))))
     (if (eq value :false) nil value)))
 
 (defun lispm-tools--arguments (tool input)
   "Validate INPUT against TOOL's parameters; return the argument list.
 A tool with a schema of its own gets INPUT whole."
   (unless (listp input)
-    (error "Input must be a JSON object"))
+    (signal 'lispm-tool-argument-error '("Input must be a JSON object")))
   (if (lispm-tool-input-schema tool)
       (list input)
     (lispm-tools--param-arguments tool input)))
@@ -314,7 +285,8 @@ A tool with a schema of its own gets INPUT whole."
               (if (memq value '(nil :null))
                   (if (plist-get opts :optional)
                       nil
-                    (error "Missing required parameter `%s'" key))
+                    (signal 'lispm-tool-argument-error
+                            (list (format "Missing required parameter `%s'" key))))
                 (lispm-tools--argument key type value opts))))
           (lispm-tool-params tool)))
 
@@ -1797,6 +1769,62 @@ Each is a string LABEL:LINE:TEXT, TEXT cut at 300 characters."
             (forward-line 1)))
         (nreverse matches)))))
 
+(defun lispm-tools--relative-labeler (root)
+  "Return a curried function mapping a file path to its display label under ROOT."
+  (lambda (file)
+    (if (file-in-directory-p file root)
+        (file-relative-name file root)
+      (abbreviate-file-name file))))
+
+(defun lispm-tools--format-search-matches (matches count large truncated)
+  "Format search MATCHES, COUNT, LARGE skipped count and TRUNCATED flag."
+  (if (null matches)
+      (concat "No matches."
+              (if (> large 0)
+                  (format " (%d files over %d bytes were not searched)"
+                          large lispm-search-max-file-size)
+                ""))
+    (concat (string-join (nreverse matches) "\n")
+            (if truncated
+                (format "\n[stopped after %d matches; narrow the search with path or glob]"
+                        count)
+              "")
+            (if (> large 0)
+                (format "\n[%d files over %d bytes were not searched]"
+                        large lispm-search-max-file-size)
+              ""))))
+
+(defun lispm-tools--file-searcher (regexp case-fold visiting buffer label-fn)
+  "Return a curried function (FILE LIMIT) searching FILE for REGEXP.
+Returns `large' when FILE exceeds `lispm-search-max-file-size' and is
+non-binary, or the list of match lines (at most LIMIT)."
+  (lambda (file limit)
+    (let ((open (gethash file visiting))
+          (label (funcall label-fn file)))
+      (if (and (buffer-live-p open) (lispm--buffer-current-p open))
+          (with-current-buffer open
+            (let ((case-fold-search case-fold))
+              (lispm-tools--matches regexp label limit)))
+        (with-current-buffer buffer
+          (let* ((size (or (file-attribute-size (file-attributes file)) 0))
+                 (small (<= size lispm-search-max-file-size))
+                 (file-name-handler-alist (and (file-remote-p file) file-name-handler-alist))
+                 (inhibit-file-name-handlers (append '(jka-compr-handler epa-file-handler)
+                                                     inhibit-file-name-handlers))
+                 (inhibit-file-name-operation 'insert-file-contents)
+                 (coding-system-for-read 'utf-8))
+            (erase-buffer)
+            (when (and (ignore-errors
+                         (insert-file-contents file nil 0 (if small size 8000))
+                         t)
+                       (not (save-excursion
+                              (goto-char (point-min))
+                              (search-forward "\0" (min (point-max) 8000) t))))
+              (if (not small)
+                  'large
+                (let ((case-fold-search case-fold))
+                  (lispm-tools--matches regexp label limit))))))))))
+
 (defun lispm-tools--search (agent regexp case-fold files done &optional glob-predicate)
   "Search FILES for REGEXP in slices, and call DONE with what is found.
 Directory entries in FILES (ending in `/') are expanded one directory at
@@ -1804,19 +1832,17 @@ a time within the slices, descending into subdirectories that satisfy
 `lispm-tools--searchable-directory-p' and keeping files that satisfy
 GLOB-PREDICATE, if given.  CASE-FOLD non-nil ignores case.  The search
 is abandoned if the turn of AGENT in which it started ends meanwhile."
-  (let ((root (lispm-tools--root))
-        (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
-        (buffer (generate-new-buffer " *lispm-search*" t))
-        (visiting (make-hash-table :test #'equal))
-        (matches nil) (count 0) (large 0) (truncated nil))
+  (let* ((label-fn (lispm-tools--relative-labeler (lispm-tools--root)))
+         (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
+         (buffer (generate-new-buffer " *lispm-search*" t))
+         (visiting (make-hash-table :test #'equal))
+         (search-file (lispm-tools--file-searcher regexp case-fold visiting buffer label-fn))
+         (matches nil) (count 0) (large 0) (truncated nil))
     (dolist (b (buffer-list))
       (when-let* ((file (buffer-file-name b)))
         (puthash (expand-file-name file) b visiting)))
     (cl-labels
-        ((label (file)
-           (if (file-in-directory-p file root) (file-relative-name file root)
-             (abbreviate-file-name file)))
-         (expand-directory (dir)
+        ((expand-directory (dir)
            (dolist (entry (nreverse (ignore-errors
                                       (directory-files-and-attributes
                                        dir t directory-files-no-dot-files-regexp))))
@@ -1828,75 +1854,28 @@ is abandoned if the turn of AGENT in which it started ends meanwhile."
                      ((or (null type) (and (stringp type) (file-regular-p path)))
                       (when (or (null glob-predicate) (funcall glob-predicate path))
                         (push path files)))))))
-         (search-file (file)
-           (let ((open (gethash file visiting))
-                 (limit (- lispm-search-max-matches count)))
-             ;; A buffer is searched for its unsaved changes, unless it
-             ;; is out of date: then the file is.
-             (if (and (buffer-live-p open) (lispm--buffer-current-p open))
-                 (with-current-buffer open
-                   (let ((case-fold-search case-fold))
-                     (lispm-tools--matches regexp (label file) limit)))
-               (with-current-buffer buffer
-                 (let* ((size (or (file-attribute-size (file-attributes file)) 0))
-                        (small (<= size lispm-search-max-file-size))
-                        ;; Read files as they are, no decompression or
-                        ;; decryption, and as UTF-8: detecting each file's
-                        ;; coding system would double the time.  A remote
-                        ;; file is read through TRAMP's handler still.
-                        (file-name-handler-alist (and (file-remote-p file) file-name-handler-alist))
-                        (inhibit-file-name-handlers (append '(jka-compr-handler epa-file-handler)
-                                                            inhibit-file-name-handlers))
-                        (inhibit-file-name-operation 'insert-file-contents)
-                        (coding-system-for-read 'utf-8))
-                   (erase-buffer)
-                   ;; Binary files are skipped; of a large one only the
-                   ;; head is read, to tell whether it is.
-                   (when (and (ignore-errors
-                                (insert-file-contents file nil 0 (if small size 8000))
-                                t)
-                              (not (save-excursion
-                                     (goto-char (point-min))
-                                     (search-forward "\0" (min (point-max) 8000) t)))
-                              (or small (progn (cl-incf large) nil)))
-                     (let ((case-fold-search case-fold))
-                       (lispm-tools--matches regexp (label file) limit))))))))
-         (finish ()
-           (kill-buffer buffer)
-           (funcall done
-                    (if (null matches)
-                        (concat "No matches."
-                                (if (> large 0) (format " (%d files over %d bytes were not searched)"
-                                                        large lispm-search-max-file-size)
-                                  ""))
-                      (concat (string-join (nreverse matches) "\n")
-                              (if truncated
-                                  (format "\n[stopped after %d matches; narrow the search with path or glob]"
-                                          count)
-                                "")
-                              (if (> large 0)
-                                  (format "\n[%d files over %d bytes were not searched]"
-                                          large lispm-search-max-file-size)
-                                "")))))
          (step ()
            (condition-case err
                (if (and turn (or (not (lispm-agent-busy-p agent))
                                  (/= turn (lispm-agent-turn agent))))
                    (kill-buffer buffer)
                  (let ((deadline (+ (float-time) lispm-tools--search-slice)))
-                   ;; At least one file per slice, however short the slice.
                    (while (progn
                             (when-let* ((next (pop files)))
                               (if (directory-name-p next)
                                   (expand-directory next)
-                                (let ((found (search-file next)))
-                                  (setq matches (nconc (nreverse found) matches)
-                                        count (+ count (length found))
-                                        truncated (>= count lispm-search-max-matches)))))
+                                (let ((found (funcall search-file next (- lispm-search-max-matches count))))
+                                  (if (eq found 'large)
+                                      (cl-incf large)
+                                    (setq matches (nconc (nreverse found) matches)
+                                          count (+ count (length found))
+                                          truncated (>= count lispm-search-max-matches))))))
                             (and files (not truncated) (< (float-time) deadline))))
                    (if (and files (not truncated))
                        (run-at-time 0 nil #'step)
-                     (finish))))
+                     (kill-buffer buffer)
+                     (funcall done (lispm-tools--format-search-matches
+                                    matches count large truncated)))))
              (error (when (buffer-live-p buffer) (kill-buffer buffer))
                     (funcall done (error-message-string err) t)))))
       (step))))
@@ -1916,7 +1895,7 @@ Return non-nil when the kernel took the search, or nil to fall back."
              (not (string-search "\\n" clean-pat)))
     (let ((host (file-remote-p (car files))))
       (when (cl-every (lambda (f) (and (stringp f) (equal (file-remote-p f) host))) files)
-        (let ((root (lispm-tools--root))
+        (let ((label-fn (lispm-tools--relative-labeler (lispm-tools--root)))
               (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
               (visiting (make-hash-table :test #'equal))
               (open-files nil))
@@ -1935,21 +1914,14 @@ Return non-nil when the kernel took the search, or nil to fall back."
                (unless (and turn (or (not (lispm-agent-busy-p agent))
                                      (/= turn (lispm-agent-turn agent))))
                  (condition-case err
-                     (let ((matches nil)
-                           (count 0)
-                           (large 0)
-                           (truncated nil))
+                     (let ((matches nil) (count 0) (large 0) (truncated nil))
                        (dolist (item (plist-get res :items))
                          (unless truncated
                            (let* ((file (plist-get item :file))
-                                  (label (and file
-                                              (if (file-in-directory-p file root)
-                                                  (file-relative-name file root)
-                                                (abbreviate-file-name file))))
+                                  (label (and file (funcall label-fn file)))
                                   (limit (- lispm-search-max-matches count)))
                              (cond
-                              ((plist-get item :large)
-                               (cl-incf large))
+                              ((plist-get item :large) (cl-incf large))
                               ((plist-get item :open)
                                (let ((open (gethash file visiting)))
                                  (when (and (buffer-live-p open) (lispm--buffer-current-p open))
@@ -1966,22 +1938,8 @@ Return non-nil when the kernel took the search, or nil to fall back."
                                    (cl-incf count)
                                    (when (>= count lispm-search-max-matches)
                                      (setq truncated t)))))))))
-                       (funcall done
-                                (if (null matches)
-                                    (concat "No matches."
-                                            (if (> large 0)
-                                                (format " (%d files over %d bytes were not searched)"
-                                                        large lispm-search-max-file-size)
-                                              ""))
-                                  (concat (string-join (nreverse matches) "\n")
-                                          (if truncated
-                                              (format "\n[stopped after %d matches; narrow the search with path or glob]"
-                                                      count)
-                                            "")
-                                          (if (> large 0)
-                                              (format "\n[%d files over %d bytes were not searched]"
-                                                      large lispm-search-max-file-size)
-                                            "")))))
+                       (funcall done (lispm-tools--format-search-matches
+                                      matches count large truncated)))
                    (error (funcall done (error-message-string err) t))))))
            :glob glob
            :glob-dir (and glob-dir (or (file-remote-p glob-dir 'localname) glob-dir))
@@ -2298,20 +2256,43 @@ is named without a directory: a command naming one by its path asks."
                 :value-type (choice (const :tag "Always" t) (function :tag "When")))
   :group 'lispm)
 
+(defun lispm-shell--scan-redirection (command i length)
+  "Scan a shell redirection in COMMAND starting at I (of LENGTH).
+Return the new index after the redirection target, or throw `unsure'."
+  (let ((start i))
+    (while (and (< i length) (memq (aref command i) '(?< ?> ?&)))
+      (cl-incf i))
+    (let ((op (substring command start i)))
+      (while (and (< i length) (memq (aref command i) '(?\s ?\t)))
+        (cl-incf i))
+      (let ((target-start i))
+        (while (and (< i length)
+                    (not (memq (aref command i) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
+          (cl-incf i))
+        (let ((target (substring command target-start i)))
+          (when (seq-some (lambda (c)
+                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~ ?\( ?\) ?{ ?} ?\[ ?\])))
+                          target)
+            (throw 'unsure 'unsure))
+          (pcase op
+            ((or ">" ">>" "&>")
+             (unless (equal target "/dev/null") (throw 'unsure 'unsure)))
+            (">&"
+             (unless (string-match-p "\\`[0-9]+\\'" target) (throw 'unsure 'unsure)))
+            ("<"
+             (when (or (string-empty-p target) (string-prefix-p "(" target))
+               (throw 'unsure 'unsure)))
+            (_ (throw 'unsure 'unsure)))
+          i)))))
+
 (defun lispm-shell--words (command)
   "COMMAND's simple commands, each a list of words, or `unsure'.
 Words are split as the shell splits them, quotes and backslashes
 undone, at spaces, newlines, |, ||, && and ;.  Comments end at the
 next newline; escaped newlines elsewhere join lines.  Anything that
-would have the shell do more than run programs on words is `unsure': a
-redirection other than to /dev/null, from a file or of one descriptor
-to another; a command or process substitution, backquotes included; a
-subshell, group or function; a job put in the background; a here
-document; an environment assignment before a program.  So
-is an empty command."
+would have the shell do more than run programs on words is `unsure'."
   (let ((length (length command))
-        (i 0)
-        commands words word (in-word nil) quote)
+        (i 0) commands words word (in-word nil) quote)
     (cl-labels ((char () (and (< i length) (aref command i)))
                 (end-word () (when in-word (push (apply #'string (nreverse word)) words))
                            (setq word nil in-word nil))
@@ -2319,38 +2300,13 @@ is an empty command."
                              (when words (push (nreverse words) commands))
                              (setq words nil))
                 (add (c) (push c word) (setq in-word t))
-                (unsure () (throw 'unsure 'unsure))
-                (redirection ()
-                  ;; At a <, > or &>, any descriptor before it dropped.
-                  (let ((start i))
-                    (while (memq (char) '(?< ?> ?&)) (cl-incf i))
-                    (let ((op (substring command start i)))
-                      (while (memq (char) '(?\s ?\t)) (cl-incf i))
-                      (let ((target-start i))
-                        (while (and (char) (not (memq (char) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
-                          (cl-incf i))
-                        (let ((target (substring command target-start i)))
-                          ;; Only literal targets: quoting or expansion can
-                          ;; hide a word boundary, including a later #.
-                          (when (seq-some (lambda (c)
-                                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~
-                                                      ?\( ?\) ?{ ?} ?\[ ?\])))
-                                          target)
-                            (unsure))
-                          (pcase op
-                            ((or ">" ">>" "&>")
-                             (unless (equal target "/dev/null") (unsure)))
-                            (">&" (unless (string-match-p "\\`[0-9]+\\'" target) (unsure)))
-                            ("<" (when (or (string-empty-p target) (string-prefix-p "(" target))
-                                   (unsure)))
-                            (_ (unsure)))))))))
+                (unsure () (throw 'unsure 'unsure)))
       (catch 'unsure
         (while (< i length)
           (let ((c (aref command i)))
             (cond
              ((eq quote ?')
-              (if (eq c ?') (setq quote nil) (add c))
-              (cl-incf i))
+              (if (eq c ?') (setq quote nil) (add c)) (cl-incf i))
              ((eq quote ?\")
               (cond ((eq c ?\") (setq quote nil) (cl-incf i))
                     ((eq c ?\\)
@@ -2360,43 +2316,31 @@ is an empty command."
                          (unless (memq (char) '(?$ ?` ?\" ?\\)) (add ?\\))
                          (add (char)))
                        (cl-incf i)))
-                    ((eq c ?`) (unsure))
-                    ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
+                    ((or (eq c ?`)
+                         (and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\()))
                      (unsure))
                     (t (add c) (cl-incf i))))
-             ((memq c '(?' ?\"))
-              (setq quote c in-word t)
-              (cl-incf i))
+             ((memq c '(?' ?\")) (setq quote c in-word t) (cl-incf i))
              ((eq c ?\\)
               (cl-incf i)
-              (when (char)
-                (unless (eq (char) ?\n) (add (char)))
-                (cl-incf i)))
-             ((memq c '(?\s ?\t))
-              (end-word)
-              (cl-incf i))
-             ((memq c '(?\n ?\;))
-              (end-command)
-              (cl-incf i))
+              (when (char) (unless (eq (char) ?\n) (add (char))) (cl-incf i)))
+             ((memq c '(?\s ?\t)) (end-word) (cl-incf i))
+             ((memq c '(?\n ?\;)) (end-command) (cl-incf i))
              ((eq c ?|)
-              (end-command)
-              (cl-incf i)
-              (when (eq (char) ?|) (cl-incf i)))
+              (end-command) (cl-incf i) (when (eq (char) ?|) (cl-incf i)))
              ((eq c ?&)
-              (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?&)
-                  (progn (end-command) (cl-incf i 2))
-                (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?>)
-                    (progn (end-word) (redirection))
-                  (unsure))))
+              (cond ((eq (and (< (1+ i) length) (aref command (1+ i))) ?&)
+                     (end-command) (cl-incf i 2))
+                    ((eq (and (< (1+ i) length) (aref command (1+ i))) ?>)
+                     (end-word) (setq i (lispm-shell--scan-redirection command i length)))
+                    (t (unsure))))
              ((memq c '(?< ?>))
-              ;; 2>&1: the digits so far are the descriptor, not a word.
               (if (and in-word word (seq-every-p (lambda (d) (<= ?0 d ?9)) word))
                   (setq word nil in-word nil)
                 (end-word))
-              (redirection))
-             ((memq c '(?` ?\( ?\)))
-              (unsure))
-             ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
+              (setq i (lispm-shell--scan-redirection command i length)))
+             ((or (memq c '(?` ?\( ?\)))
+                  (and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\()))
               (unsure))
              ((and (eq c ?#) (not in-word))
               (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))

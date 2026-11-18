@@ -13012,6 +13012,37 @@ are flagged with public interface suggestions and translated via `lispm-tr'."
     ;; Defined in the reply itself, it passes.
     (should-not (lispm-ground-check "lispm-ground--read" nil '("lispm-ground--read")))))
 
+(ert-deftest lispm-test-unsaved-restores-modified-on-nonlocal-exit ()
+  "Non-local exits inside `lispm--unsaved' still restore `buffer-modified-p'."
+  (with-temp-buffer
+    (set-buffer-modified-p nil)
+    (catch 'abort
+      (lispm--unsaved
+        (insert "streaming chunk")
+        (should (buffer-modified-p))
+        (throw 'abort nil)))
+    (should-not (buffer-modified-p))))
+
+(ert-deftest lispm-test-local-http-headers-preserves-match-data ()
+  "`lispm-local-http-headers' preserves caller `match-data' across regex parsing."
+  (let ((sample "alpha:42"))
+    (should (string-match "\\([a-z]+\\):\\([0-9]+\\)" sample))
+    (let ((headers (lispm-local-http-headers "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Token: secret")))
+      (should (equal (cdr (assoc "host" headers)) "127.0.0.1"))
+      (should (equal (cdr (assoc "x-token" headers)) "secret")))
+    (should (equal (match-string 1 sample) "alpha"))
+    (should (equal (match-string 2 sample) "42"))))
+
+(ert-deftest lispm-test-tool-argument-error-condition ()
+  "`lispm-tools--arguments' signals structured `lispm-tool-argument-error' on invalid input."
+  (let ((tool (lispm-get-tool "read_file")))
+    (should-error (lispm-tools--arguments tool "not-an-alist")
+                  :type 'lispm-tool-argument-error)
+    (should-error (lispm-tools--arguments tool nil)
+                  :type 'lispm-tool-argument-error)
+    (should-error (lispm-tools--arguments tool '((path . 123)))
+                  :type 'lispm-tool-argument-error)))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

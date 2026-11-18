@@ -228,100 +228,24 @@ Each agent adds the key starting it, see `lispm-agents-define'."
 
 (defun lispm-agents-define (agent &rest properties)
   "Make AGENT, a symbol, one of the editor's agents, as PROPERTIES say.
-Every agent has these:
+Every agent has:
+  :name       its name, \"Claude Code\"
+  :icon       (FUNCTION ICON FACE) making a one-line icon
+  :text-icon  one-cell string for text terminals (default first letter)
+  :command    command starting a session at the current project root
+  :key        key of :command in `lispm-agents-key-maps'
+  :sessions   function returning recorded session plists
+              (:agent :id :cwd :title :started :time :file :parent)
+  :rename     function of a session and a title
+and optional properties:
+  :built-in, :files, :delete, :transcript, :resumable, :worktree,
+  :chats, :short-id, :work-details (:turn :pending-calls :recent-calls).
 
-  :name        its name, \"Claude Code\"
-  :icon        (FUNCTION ICON FACE): FUNCTION makes a one-line icon of
-               ICON, as `nerd-icons-codicon' or `lispm-agents-image-icon'
-               do; FACE, when non-nil, is layered under it
-  :text-icon   a string one cell wide standing for the icon on a text
-               terminal, in FACE; by default the first letter of :name
-  :command     the command starting a session at the current project root
-  :key         the key of :command in the keymaps of `lispm-agents-key-maps'
-  :sessions    function returning its recorded sessions, as plists
-               (:agent :id :cwd :title :started :time :file), :started
-               the creation time and :time transcript freshness, both
-               float seconds; :started also ties new terminals to ids,
-               see `lispm-agents-claim-sessions'; a session another of
-               the agent's sessions started, as its subagent's, adds
-               :parent, that session's id, and lists of the sessions
-               draw it under its parent, see
-               `lispm-agents-session-tree'
-  :rename      function of a session and a title
-
-and these when they apply:
-
-  :built-in    non-nil for an agent the editor ships with; those come
-               first wherever agents are offered
-  :files       function of a session returning the files and directories
-               recording it, which deleting it moves to the Trash
-  :delete      function deleting a session from the agent's own store,
-               for an agent whose sessions have no files of their own
-  :transcript  function of a session returning a file of its transcript;
-               by default, its :file
-  :resumable   predicate on a session: whether it can be resumed, which
-               every session can without one; one that cannot is opened
-               as its transcript instead, see
-               `lispm-agents-resume-session'
-  :worktree    function of a directory returning nil, or where that
-               worktree of the agent's belongs: (:root REPOSITORY :label
-               LABEL), or (:name NAME :label LABEL) when only the
-               repository's name is known; LABEL is shown as it is,
-               in the language spoken
-  :chats      directories whose sessions are chats, not project work
-  :short-id    function of a session's id returning the short form that
-               tells it from others; by default its first eight characters
-  :work-details function of a live buffer returning a lazy work plist
-                (:turn :pending-calls :recent-calls :files); calls have
-                :id, :name, :input-summary and :status.  Unknown fields
-                are nil.  Never called by `lispm-agents-roster'
-
-An agent run as a CLI in a terminal has these:
-
-  :program     its executable; while it is not on PATH, the agent takes
-               part nowhere
-  :new-arguments     function of no argument returning (ID . ARGUMENTS)
-                     starting a new session; ID is the session's id when
-                     the agent takes one it is given, else nil
-  :resume-arguments  function of a session's id returning ARGUMENTS
-                     resuming it
-  :model-arguments   optional function of a model name returning arguments
-                     selecting it; enables resuming with a chosen model
-  :arguments   function of a directory returning the arguments of every
-               run there
-  :context     function of a directory returning a server showing the
-               agent Emacs's state, see `lispm-agents-context', a list
-               of servers, or nil; one taking a second argument gets
-               the session's id too, nil for a fresh session whose
-               agent assigns its own
-  :ready       function of the agent's terminal returning non-nil when
-               the agent waits for its user's next message: its session
-               has begun and its latest turn has ended, so what is typed
-               goes to its composer, not to a dialog.  Other agents'
-               messages wait for it; an agent without one is given none,
-               unless it has a :deliver
-  :deliver     function of the agent's terminal and a text giving the
-               agent the text as its user's next message through its
-               own program, rather than its composer: the program takes
-               it at once or keeps it until the agent is free.  It
-               returns non-nil if the agent took it at once.  Other
-               agents' messages then go this way, the agent free or not
-  :answer      function of the agent's terminal, a text and a function
-               of a text: it gives the agent the text as :deliver does,
-               and calls the function with the agent's final reply to
-               it once its turn ends.  For an agent served no tools of
-               LispM's (see lispm-agents-bridge.el), whose reply to a
-               request is then its answer
-
-An agent running inside Emacs has these instead:
-
-  :new         function of a directory starting a session there; returns
-               its buffer
-  :resume      function of a session resuming it; returns its buffer
-  :buffer-p    predicate on buffers holding one of its sessions
-  :send        function of a buffer and text putting the text into the
-               session's input, without sending it
-
+A CLI terminal agent specifies:
+  :program, :new-arguments, :resume-arguments, :model-arguments,
+  :arguments, :context, :ready, :deliver, :answer.
+An in-Emacs agent specifies:
+  :new, :resume, :buffer-p, :send.
 Defining AGENT again replaces what it was.  Return AGENT."
   (if-let* ((entry (assq agent lispm-agents-defined)))
       (progn (lispm-agents--unbind-key agent (cdr entry))
@@ -1365,103 +1289,102 @@ chosen directory.")
            (format "%s (%s)" name trimmed))
           (t directory))))
 
+(defun lispm-agents--directory-resolver (base-dir)
+  "Return a function resolving a user input string relative to BASE-DIR."
+  (lambda (val)
+    (when (and (stringp val) (not (string-empty-p (string-trim val))))
+      (let ((raw (expand-file-name val base-dir))
+            (trimmed (expand-file-name (string-trim val) base-dir)))
+        (if (file-directory-p raw) raw trimmed)))))
+
+(defun lispm-agents--directory-validator (resolve)
+  "Return a field validation function composed with RESOLVE."
+  (lambda (val)
+    (let ((expanded (funcall resolve val)))
+      (unless (and expanded (file-directory-p expanded))
+        (lispm-tr "Working directory no longer exists: %s" (or val ""))))))
+
+(defun lispm-agents--directory-chooser (initial base-dir resolve choice-pairs)
+  "Return a curried callback (BUFFER-FN) -> thunk for the Choose button.
+INITIAL, BASE-DIR, RESOLVE and CHOICE-PAIRS configure the file chooser."
+  (lambda (buffer-fn)
+    (lambda ()
+      (let ((buffer (funcall buffer-fn)))
+        (when (buffer-live-p buffer)
+          (let* ((current (with-current-buffer buffer
+                            (or (lispm-ui-form-value :directory) initial)))
+                 (start (or (funcall resolve current)
+                            (expand-file-name initial base-dir)))
+                 (modal-frame (selected-frame))
+                 (chosen (condition-case nil
+                             (unwind-protect
+                                 (lispm-ui-choose-file
+                                  :title (lispm-tr "Directory")
+                                  :directory (file-name-as-directory
+                                              (if (file-directory-p start) start (expand-file-name "~")))
+                                  :predicate #'file-directory-p)
+                               (when (frame-live-p modal-frame)
+                                 (select-frame-set-input-focus modal-frame)))
+                           (quit nil))))
+            (when (and chosen (buffer-live-p buffer))
+              (let ((abbr (abbreviate-file-name
+                           (file-name-as-directory (expand-file-name chosen base-dir)))))
+                (with-current-buffer buffer
+                  (lispm-ui-form-set
+                   :directory abbr
+                   :preset (and (assoc abbr choice-pairs) abbr)))))))))))
+
 (defun lispm-agents--read-directory-form (title initial)
   "Ask for a session directory in a modal form titled TITLE.
 INITIAL is pre-filled in the directory field."
   (let* ((base-dir (file-name-as-directory (expand-file-name default-directory)))
-         (resolve (lambda (val)
-                    (when (and (stringp val) (not (string-empty-p (string-trim val))))
-                      (let ((raw (expand-file-name val base-dir))
-                            (trimmed (expand-file-name (string-trim val) base-dir)))
-                        (if (file-directory-p raw) raw trimmed)))))
-         (choices (lispm-agents-known-directories initial))
+         (resolve (lispm-agents--directory-resolver base-dir))
+         (validate (lispm-agents--directory-validator resolve))
          (choice-pairs (mapcar (lambda (dir)
                                  (cons dir (lispm-agents--directory-choice-label dir)))
-                               choices))
-         (submitted nil)
-         (closing nil)
-         (result nil)
-         (buffer nil)
-         (cleanup nil)
+                               (lispm-agents-known-directories initial)))
+         (submitted nil) (closing nil) (result nil) (buffer nil) (cleanup nil)
          (depth (recursion-depth))
+         (exit-with (lambda (ok &optional val)
+                      (when (<= (recursion-depth) (1+ depth))
+                        (setq submitted ok result val)
+                        (when (= (recursion-depth) (1+ depth))
+                          (exit-recursive-edit)))))
          (browse-buttons
           `((,(lispm-ui-tr "Choose…") .
-             ,(lambda ()
-                (when (buffer-live-p buffer)
-                  (let* ((current (with-current-buffer buffer
-                                    (or (lispm-ui-form-value :directory) initial)))
-                         (start (or (funcall resolve current)
-                                    (expand-file-name initial base-dir)))
-                         (modal-frame (selected-frame))
-                         (chosen (condition-case nil
-                                     (unwind-protect
-                                         (lispm-ui-choose-file
-                                          :title (lispm-tr "Directory")
-                                          :directory (if (file-directory-p start)
-                                                         (file-name-as-directory start)
-                                                       (file-name-as-directory (expand-file-name "~")))
-                                          :predicate #'file-directory-p)
-                                       (when (frame-live-p modal-frame)
-                                         (select-frame-set-input-focus modal-frame)))
-                                   (quit nil))))
-                    (when (and chosen (buffer-live-p buffer))
-                      (let ((abbr (abbreviate-file-name
-                                   (file-name-as-directory (expand-file-name chosen base-dir)))))
-                        (with-current-buffer buffer
-                          (lispm-ui-form-set
-                           :directory abbr
-                           :preset (and (assoc abbr choice-pairs) abbr)))))))))))
-         (validate (lambda (val)
-                     (let ((expanded (funcall resolve val)))
-                       (unless (and expanded (file-directory-p expanded))
-                         (lispm-tr "Working directory no longer exists: %s" (or val ""))))))
+             ,(funcall (lispm-agents--directory-chooser initial base-dir resolve choice-pairs)
+                       (lambda () buffer)))))
          (fields
           `((:directory :type text :label ,(lispm-tr "Directory")
-                        :value ,initial :required t :submit t
-                        :validate ,validate)
-             ,@(when choice-pairs
-                 `((:preset :type choice :label ,(lispm-tr "Project")
-                            :value ,(and (assoc initial choice-pairs) initial)
-                            :choices ,choice-pairs
-                            ,@(when (bound-and-true-p lispm-ui-form-choice-buttons-supported)
-                                `(:buttons ,browse-buttons :buttons-key :browse))
-                            :on-change ,(lambda (val)
-                                          (when (and val (buffer-live-p buffer))
-                                            (with-current-buffer buffer
-                                              (lispm-ui-form-set :directory val)))))))
-             ,@(when (or (not choice-pairs)
-                         (not (bound-and-true-p lispm-ui-form-choice-buttons-supported)))
-                 `((:browse :type buttons :buttons ,browse-buttons))))))
+                        :value ,initial :required t :submit t :validate ,validate)
+            ,@(when choice-pairs
+                `((:preset :type choice :label ,(lispm-tr "Project")
+                           :value ,(and (assoc initial choice-pairs) initial)
+                           :choices ,choice-pairs
+                           ,@(when (bound-and-true-p lispm-ui-form-choice-buttons-supported)
+                               `(:buttons ,browse-buttons :buttons-key :browse))
+                           :on-change ,(lambda (val)
+                                         (when (and val (buffer-live-p buffer))
+                                           (with-current-buffer buffer
+                                             (lispm-ui-form-set :directory val)))))))
+            ,@(when (or (not choice-pairs)
+                        (not (bound-and-true-p lispm-ui-form-choice-buttons-supported)))
+                `((:browse :type buttons :buttons ,browse-buttons))))))
     (setq buffer
           (lispm-ui-form
            title fields
            :on-submit (lambda (values)
-                        (when (<= (recursion-depth) (1+ depth))
-                          (setq submitted t
-                                result (or (alist-get :directory values) initial))
-                          (when (= (recursion-depth) (1+ depth))
-                            (exit-recursive-edit))))
-           :on-cancel (lambda ()
-                        (when (<= (recursion-depth) (1+ depth))
-                          (setq submitted nil)
-                          (when (= (recursion-depth) (1+ depth))
-                            (exit-recursive-edit))))
+                        (funcall exit-with t (or (alist-get :directory values) initial)))
+           :on-cancel (apply-partially exit-with nil)
            :setup (lambda ()
                     (when (boundp 'lispm-ui-form--props)
                       (set 'lispm-ui-form--props
                            (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
                     (use-local-map (copy-keymap (current-local-map)))
-                    (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
-                    (local-set-key (kbd "ESC") #'lispm-ui-form-cancel)
-                    (local-set-key (kbd "<escape>") #'lispm-ui-form-cancel))))
+                    (dolist (key (list [remap keyboard-quit] (kbd "ESC") (kbd "<escape>")))
+                      (local-set-key key #'lispm-ui-form-cancel)))))
     (with-current-buffer buffer
-      (add-hook 'kill-buffer-hook
-                (lambda ()
-                  (unless closing
-                    (setq submitted nil)
-                    (when (= (recursion-depth) (1+ depth))
-                      (exit-recursive-edit))))
-                nil t))
+      (add-hook 'kill-buffer-hook (lambda () (unless closing (funcall exit-with nil))) nil t))
     (unwind-protect
         (progn
           (setq cleanup (funcall lispm-ui-form-modal-show-function buffer))
@@ -1469,16 +1392,12 @@ INITIAL is pre-filled in the directory field."
             (if (fboundp 'lispm-ui-form-first-field)
                 (lispm-ui-form-first-field)
               (lispm-ui-form--first-field)))
-          (let ((lispm-ui-in-gui-action nil)
-                (lispm-ui--command-from-mouse nil))
+          (let ((lispm-ui-in-gui-action nil) (lispm-ui--command-from-mouse nil))
             (recursive-edit)))
       (setq closing t)
-      (when (functionp cleanup)
-        (ignore-errors (funcall cleanup)))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))
-    (unless submitted
-      (signal 'quit nil))
+      (when (functionp cleanup) (ignore-errors (funcall cleanup)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))
+    (unless submitted (signal 'quit nil))
     (file-name-as-directory (or (funcall resolve result)
                                 (expand-file-name result base-dir)))))
 

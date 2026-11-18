@@ -251,18 +251,15 @@ asked once `lispm-bar-model-ready' is called.")
 Without asking it, that is: a backend of `lispm-backends' (see
 `lispm-backend'), whose key, when it reads one from an environment
 variable or the secret store, is set there."
-  (condition-case nil
-      (let* ((backend (lispm-agent-backend* agent))
-             (variable (plist-get backend :key-env))
-             (key (plist-get backend :key)))
-        (cond (variable (not (string-empty-p (or (getenv variable) ""))))
-              ((and (consp key) (eq (car key) 'secret))
-               (let ((secret (condition-case nil
-                                 (lispm-secret-get (cdr key) t)
-                               (error nil))))
-                 (and secret (not (string-empty-p secret)) t)))
-              (t t)))
-    (error nil)))
+  (when-let* ((name (lispm-backend-name agent))
+              (backend (alist-get name lispm-backends)))
+    (let ((variable (plist-get backend :key-env))
+          (key (plist-get backend :key)))
+      (cond (variable (not (string-empty-p (or (getenv variable) ""))))
+            ((and (consp key) (eq (car key) 'secret))
+             (let ((secret (ignore-errors (lispm-secret-get (cdr key) t))))
+               (and (stringp secret) (not (string-empty-p secret)))))
+            (t t)))))
 
 (defun lispm-bar-setup-model ()
   "Open the form setting up a model backend for LispM."
