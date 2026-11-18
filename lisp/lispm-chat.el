@@ -795,9 +795,10 @@ else nil.  See `lispm-transcript-media-link'."
             (shown (propertize (lispm-chat--prompted (concat prefix (lispm-chat--with-media
                                                                      (plist-get item :text))))
                                'face 'lispm-chat-user)))
-       (when (and from (lispm-get-agent from t))
-         (let ((at (+ (string-search prefix shown) (string-search from prefix))))
-           (lispm-present-in shown at (+ at (length from)) (list 'agent from))))
+       (when (and from (not (equal from "LispM")) (lispm-known-agent-p from))
+         (let ((at (string-search prefix shown))
+               (len (length (string-trim-right prefix))))
+           (lispm-present-in shown at (+ at len) (list 'agent from))))
        (concat "\n" (lispm-chat--present shown) "\n")))
     ('text
      (let ((text (plist-get item :text)))

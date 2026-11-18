@@ -8530,6 +8530,72 @@ Tools take the places and buffers agents name as org links."
           (should (eq (window-buffer (selected-window)) target))
           (should-not (eq (window-buffer (selected-window)) (lispm-agent-buffer other))))))))
 
+(ert-deftest lispm-test-chat-subagent-and-place-links ()
+  "Retired subagent headers, file line ranges/lists, suffix paths and Markdown links are clickable."
+  (lispm-test-env
+    (let ((wire (expand-file-name "crates/core/src/message/payload/wire.rs" project))
+          (link-stage (expand-file-name "crates/core/src/swarm/callback/link_stage.rs" project))
+          (inbound (expand-file-name "crates/core/src/swarm/callback/inbound.rs" project))
+          (reassembly (expand-file-name "crates/core/src/swarm/callback/inbound/reassembly.rs" project))
+          (executor (expand-file-name "crates/tui/src/executor.rs" project)))
+      (dolist (f (list wire link-stage inbound reassembly executor))
+        (lispm-test--write f "line1\nline2\nline3\n"))
+      (clrhash lispm-present--project-cache)
+      (let* ((boss (lispm-start 'assistant project))
+             (chat (lispm-chat boss))
+             (reply-body
+              (concat "## 独立审查结论\n\n"
+                      "- **解压界限**：`crates/core/src/message/payload/wire.rs:499–539` 使用固定上限。\n"
+                      "- **内存计费**：`link_stage.rs:77–99,135,169` 将解压长度传递；`inbound.rs:310` 申请容量。\n"
+                      "- **分片预留**：`inbound/reassembly.rs:188–195` 检查长度。\n"
+                      "位置： [crates/tui/src/executor.rs:79](https://github.com/RingsNetwork/rings/blob/8fcfac36864ba0ef1424b8fd9a6825c54cdcd8d3/crates/tui/src/executor.rs#L79)")))
+        (setq lispm-test--scripts
+              `((assistant@project
+                 ,(lispm-test--msg "tool_use"
+                                   (lispm-test--tool "t1" "ask_agent"
+                                                     '((agent . "assistant")
+                                                       (request . "Review PR"))))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text "Waiting for helper."))
+                 ,(lispm-test--msg "end_turn" (lispm-test--text reply-body)))
+                (assistant@project<2>
+                 ,(lispm-test--msg "end_turn" (lispm-test--text reply-body)))))
+        (lispm-test--chat-type chat "Run review")
+        (should (lispm-test--wait (lambda ()
+                                    (and (funcall (lispm-test--idle-p boss))
+                                         (null (lispm-get-agent "assistant@project<2>" t))))))
+        (lispm-chat-redraw chat)
+        (with-current-buffer chat
+          ;; 1. `[from assistant@project<2>]' is clickable even after retirement and jumps to subagent.
+          (goto-char (point-min))
+          (search-forward "[from assistant@project<2>]")
+          (let ((pos (match-beginning 0)))
+            (should (equal (lispm-object-at pos) '(agent "assistant@project<2>")))
+            (save-window-excursion
+              (pop-to-buffer chat)
+              (goto-char pos)
+              (lispm-chat-return)
+              (should (eq (window-buffer (selected-window))
+                          (lispm-chat (lispm-get-agent "assistant@project<2>"))))))
+          ;; 2. Line ranges and comma-separated line lists on suffix/basename paths.
+          (goto-char (point-min))
+          (search-forward "crates/core/src/message/payload/wire.rs:499–539")
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file wire 499)))
+          (search-forward "link_stage.rs:77–99,135,169")
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file link-stage 77)))
+          (save-excursion
+            (goto-char (match-beginning 0))
+            (search-forward "135")
+            (should (equal (lispm-object-at (match-beginning 0)) (list 'file link-stage 135)))
+            (search-forward "169")
+            (should (equal (lispm-object-at (match-beginning 0)) (list 'file link-stage 169))))
+          (search-forward "inbound.rs:310")
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file inbound 310)))
+          (search-forward "inbound/reassembly.rs:188–195")
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file reassembly 188)))
+          ;; 3. Markdown link [crates/tui/src/executor.rs:79](https://github.com/...#L79).
+          (search-forward "[crates/tui/src/executor.rs:79]")
+          (should (equal (lispm-object-at (match-beginning 0)) (list 'file executor 79))))))))
+
 (ert-deftest lispm-test-ground ()
   "Code in replies is checked against this Emacs, as PceEmacs checks a
 Prolog program: symbols nothing defines, calls with the wrong number of
