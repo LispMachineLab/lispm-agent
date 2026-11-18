@@ -235,5 +235,47 @@ Archives are absent; snapshots neither scan transcripts nor expose strings."
           (should (lispm-test--wait (lambda () changes)))
           (should (member key (caar changes))))))))
 
+(ert-deftest lispm-test-roster-chat-interface-and-background-helpers ()
+  "A host registering chat buffers as live views still resolves the agent's
+key, parent, mailbox and details, alongside background helpers without chats."
+  (lispm-test-env
+    (lispm-test--with-agents
+        `((lispm :name "LispM"
+                 :buffer-p ,(lambda (buffer)
+                              (and (buffer-live-p buffer)
+                                   (or (and (eq (buffer-local-value 'major-mode buffer) 'lispm-chat-mode)
+                                            (buffer-local-value 'lispm-chat-agent buffer))
+                                       (when-let* ((_ (buffer-local-value 'lispm-session-mode buffer))
+                                                   (agent (buffer-local-value 'lispm-session-agent buffer)))
+                                         (and (not (buffer-live-p (lispm-agent-view agent)))
+                                              agent)))
+                                   t))))
+      (let* ((boss (lispm-start 'assistant project))
+             (chat (lispm-chat boss))
+             (helper (lispm-start 'assistant project))
+             (boss-key (list 'lispm (lispm-agent-id boss)))
+             (helper-key (list 'lispm (lispm-agent-id helper))))
+        (lispm-set-parent helper (lispm-agent-id boss))
+        (setf (lispm-agent-inbox boss) '((:id "m1" :from "assistant@project<2>" :request-id "q1" :text "Done")))
+        (should (equal (lispm-agents-roster-key boss) boss-key))
+        (should (equal (lispm-agents-roster-key chat) boss-key))
+        (should (equal (lispm-agents-roster-key helper) helper-key))
+        (should (eq (lispm-agents-roster-buffer boss-key) chat))
+        (should (eq (lispm-agents-roster-buffer helper-key) (lispm-agent-buffer helper)))
+        (let* ((roster (lispm-agents-roster))
+               (boss-rec (seq-find (lambda (r) (equal (plist-get r :key) boss-key)) roster))
+               (helper-rec (seq-find (lambda (r) (equal (plist-get r :key) helper-key)) roster))
+               (details (lispm-agents-roster-details boss-key)))
+          (should (= (length roster) 2))
+          (should (eq (plist-get boss-rec :buffer) chat))
+          (should (equal (plist-get boss-rec :mailbox) '(:handling nil :queued 1)))
+          (should (equal (plist-get boss-rec :request-ids) '("q1")))
+          (should (memq 'approve-all (plist-get boss-rec :actions)))
+          (should (eq (plist-get helper-rec :buffer) (lispm-agent-buffer helper)))
+          (should (equal (plist-get helper-rec :parent) boss-key))
+          (should (equal (plist-get helper-rec :request-ids) '("q1")))
+          (should (equal (plist-get details :key) boss-key))
+          (should (= (length (plist-get (plist-get details :mailbox) :queued)) 1)))))))
+
 (provide 'lispm-roster-test)
 ;;; lispm-roster-test.el ends here
