@@ -208,7 +208,9 @@ That is, it starts at the home or the current or parent directory, at
 the root with a directory there is (on ROOT's machine when ROOT is
 remote), or with a directory, no dot in it, and ends with an extension;
 and it has no space, wildcard, variable, scheme or remote host."
-  (let ((path (if (string-match "\\`\\(.+\\):[0-9]+\\'" code) (match-string 1 code) code))
+  (let ((path (if (string-match "\\`\\(.+?\\)\\(?::L?\\|#L\\)[0-9]+\\(?:[-–—,:L0-9]*[0-9]\\)?\\'" code)
+                  (match-string 1 code)
+                code))
         (remote (file-remote-p (or root default-directory))))
     (and (not (string-match-p "[][ \t\n*?{}$<>:\"'`|;&=,()#%\\]" path))
          (cond ((string-match "\\`/\\([^/]+\\)/[^/]" path)

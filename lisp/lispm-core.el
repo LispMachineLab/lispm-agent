@@ -441,6 +441,9 @@ Each is called with the character's name and `defined' or `removed'.")
 (defvar lispm--agents nil
   "Alist of (NAME . AGENT) of the live agents, oldest first.")
 
+(defvar lispm--retired-agents nil
+  "Alist of (NAME . SESSION-ID) of retired agents, newest first.")
+
 (defun lispm-roles ()
   "Return all defined roles."
   (mapcar #'cdr lispm--roles))
@@ -596,6 +599,10 @@ conversation (see `lispm-character-agent')."
 
 (defun lispm-forget-agent (agent)
   "Remove AGENT from the live agents."
+  (when (and (lispm-agent-name agent) (lispm-agent-id agent))
+    (setf (alist-get (symbol-name (lispm-agent-name agent))
+                     lispm--retired-agents nil nil #'equal)
+          (lispm-agent-id agent)))
   (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents))
   (when (fboundp 'lispm-agents-roster-notify)
     (lispm-agents-roster-notify agent '(agents))))

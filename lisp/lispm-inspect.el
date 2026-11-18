@@ -89,6 +89,7 @@ When `t', any presentation object is acceptable.")
 
 (defvar-keymap lispm-presentation-map
   :doc "Keymap of presentations: act on the object with a click or RET."
+  "<mouse-1>" #'lispm-act-at-mouse
   "<mouse-2>" #'lispm-act-at-mouse
   "<follow-link>" 'mouse-face)
 
@@ -118,7 +119,8 @@ When `t', any presentation object is acceptable.")
     (`(agent ,name) (lispm-tr "RET: inspect %s" name))
     (`(symbol ,symbol) (lispm-tr "RET: describe %s" symbol))
     (`(tool ,name) (lispm-tr "RET: go to the definition of the tool %s" name))
-    (`(call ,_agent ,id) (lispm-tr "RET: show call %s in the transcript" id))))
+    (`(call ,_agent ,id) (lispm-tr "RET: show call %s in the transcript" id))
+    (`(url ,url) (lispm-tr "RET: visit %s" url))))
 
 (defcustom lispm-play-video-function #'lispm-open-with-system
   "How RET on a video in the chat plays it: a function of the file.
@@ -146,7 +148,8 @@ By default the system opens it with the program it has for videos."
     (`(agent ,name) name)
     (`(symbol ,symbol) (symbol-name symbol))
     (`(tool ,name) name)
-    (`(call ,_agent ,id) id)))
+    (`(call ,_agent ,id) id)
+    (`(url ,url) url)))
 
 (defun lispm-object-acceptable-p (object &optional types)
   "Non-nil if OBJECT matches TYPES and active `lispm-accept' constraints.
@@ -232,6 +235,49 @@ or pressing RET on one supplies its `lispm-object-value' directly."
             (read-string prompt nil nil default)))
       (lispm-accept--unhighlight))))
 
+(defun lispm-known-agent-id (name)
+  "Session id of the live or retired agent NAME, or nil."
+  (save-match-data
+    (cond ((when-let* ((live (lispm-get-agent name t)))
+             (lispm-agent-id live)))
+          ((when-let* ((id (and (stringp name)
+                                (alist-get name lispm--retired-agents nil nil #'equal)))
+                       ((lispm-session-files id)))
+             id))
+          ((when (stringp name)
+             (let ((re (format "accepted by %s (\\([0-9]\\{8\\}-[0-9]\\{6\\}-[0-9a-f]+\\))"
+                               (regexp-quote name))))
+               (cl-loop for agent in (lispm-agents)
+                        for buf = (lispm-agent-buffer agent)
+                        when (buffer-live-p buf)
+                        thereis (with-current-buffer buf
+                                  (save-excursion
+                                    (save-restriction
+                                      (widen)
+                                      (goto-char (point-min))
+                                      (when (re-search-forward re nil t)
+                                        (let ((id (match-string-no-properties 1)))
+                                          (when (lispm-session-files id)
+                                            (setf (alist-get name lispm--retired-agents nil nil #'equal) id)
+                                            id)))))))))))))
+
+(defun lispm-known-agent-p (name)
+  "Non-nil if NAME designates a live agent or a known retired session."
+  (and (or (lispm-get-agent name t) (lispm-known-agent-id name)) t))
+
+(defun lispm-resolve-agent (name)
+  "Return the live agent NAME, or resume its retired session."
+  (or (lispm-get-agent name t)
+      (when-let* ((id (lispm-known-agent-id name))
+                  (agent (lispm-resume-session id)))
+        (when (and (stringp name) (not (alist-get (intern name) lispm--agents)))
+          (let ((sym (intern name)))
+            (when-let* ((cell (rassq agent lispm--agents)))
+              (setcar cell sym))
+            (setf (lispm-agent-name agent) sym)))
+        agent)
+      (lispm-get-agent name)))
+
 (defun lispm-act (object)
   "Act on OBJECT as its type says, or supply it to `lispm-accept'.
 See `lispm-inspect.el' for presentation types."
@@ -246,10 +292,18 @@ See `lispm-inspect.el' for presentation types."
       (`(video ,file) (funcall lispm-play-video-function file))
       (`(buffer ,name)
        (pop-to-buffer (or (get-buffer name) (user-error "%s" (lispm-tr "No buffer named %s" name)))))
-      (`(agent ,name) (lispm-inspect (lispm-get-agent name)))
+      (`(agent ,name)
+       (let ((agent (lispm-resolve-agent name)))
+         (if (or (derived-mode-p 'lispm-inspect-mode)
+                 (eq agent (bound-and-true-p lispm-chat-agent))
+                 (eq agent (bound-and-true-p lispm-session-agent))
+                 (not (fboundp 'lispm-show)))
+             (lispm-inspect agent)
+           (lispm-show agent))))
       (`(symbol ,symbol) (describe-symbol symbol))
       (`(tool ,name) (lispm-inspect--visit-tool name))
-      (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-get-agent agent) id))
+      (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-resolve-agent agent) id))
+      (`(url ,url) (browse-url url))
       (_ (user-error "%s" (lispm-tr "Nothing to act on here"))))))
 
 (defvar lispm-act-functions nil
@@ -304,18 +358,114 @@ Where none is, act as one of `lispm-act-functions' does."
       (org-back-to-heading t)
       (ignore-errors (org-fold-show-subtree)))))
 
+(defvar lispm-present--project-cache (make-hash-table :test #'equal)
+  "Cache of (TIMESTAMP . BASENAME-HASH) per project root for `lispm-present--file'.")
+
+(defun lispm-present--project-index (root)
+  "Return a hash table mapping file basenames to relative paths under ROOT."
+  (let* ((dir (file-name-as-directory (expand-file-name root)))
+         (cached (gethash dir lispm-present--project-cache))
+         (now (float-time)))
+    (if (and cached (< (- now (car cached)) 15.0))
+        (cdr cached)
+      (let ((table (make-hash-table :test #'equal))
+            files)
+        (when (and (not (file-remote-p dir)) (file-directory-p dir))
+          (setq files
+                (or (and (locate-dominating-file dir ".git")
+                         (with-temp-buffer
+                           (let ((default-directory dir))
+                             (when (eq 0 (ignore-errors
+                                           (call-process "git" nil t nil
+                                                         "ls-files" "-z" "--cached"
+                                                         "--others" "--exclude-standard")))
+                               (split-string (buffer-string) "\0" t)))))
+                    (ignore-errors
+                      (mapcar (lambda (f) (file-relative-name f dir))
+                              (directory-files-recursively
+                               dir "\\`[^.]" nil
+                               (lambda (d)
+                                 (not (member (file-name-nondirectory (directory-file-name d))
+                                              '(".git" "node_modules" "target" ".deps" ".claude")))))))))
+          (dolist (rel files)
+            (let ((base (file-name-nondirectory rel)))
+              (puthash base (cons rel (gethash base table)) table))))
+        (puthash dir (cons now table) lispm-present--project-cache)
+        table))))
+
+(defun lispm-present--project-file (path root)
+  "Find a file under ROOT matching relative suffix PATH, or nil."
+  (when (and (stringp path)
+             (not (file-name-absolute-p path))
+             (not (string-prefix-p "~" path))
+             (not (string-prefix-p "." path))
+             (string-match-p "\\.[[:alnum:]]+\\'" path))
+    (let* ((dir (file-name-as-directory (expand-file-name root)))
+           (base (file-name-nondirectory path))
+           (suffix (concat "/" path))
+           (candidates (seq-filter (lambda (rel)
+                                     (or (equal rel path)
+                                         (string-suffix-p suffix rel)))
+                                   (gethash base (lispm-present--project-index dir)))))
+      (when candidates
+        (let* ((best (car (sort (copy-sequence candidates)
+                                (lambda (a b) (< (length a) (length b))))))
+               (full (expand-file-name best dir)))
+          (and (file-regular-p full) full))))))
+
 (defun lispm-present--file (path root)
   "The file PATH names, relative to ROOT, if it exists; else nil."
-  (let ((file (expand-file-name path root)))
-    (and (file-regular-p file) file)))
+  (save-match-data
+    (let ((file (expand-file-name path root)))
+      (if (file-regular-p file)
+          file
+        (lispm-present--project-file path root)))))
+
+(defun lispm-present--mark-extra-lines (string start end file)
+  "Mark comma-separated line numbers in STRING from START to END for FILE."
+  (save-match-data
+    (let ((pos start))
+      (while (and (< pos end)
+                  (string-match ",L?\\([0-9]+\\)" string pos)
+                  (<= (match-end 0) end))
+        (let ((nbeg (match-beginning 1))
+              (nend (match-end 1))
+              (nline (string-to-number (match-string 1 string))))
+          (lispm-present-in string nbeg nend (list 'file file nline))
+          (setq pos nend)))))
+  string)
+
+(defun lispm-present--parse-place (spec root)
+  "Resolve SPEC, a file path or URL with optional line, relative to ROOT.
+Return `(file FILE LINE)' or nil."
+  (save-match-data
+    (let ((spec (string-trim (substring-no-properties spec) "`+" "`+"))
+          path line)
+      (cond ((string-match "\\`https?://[^/]+/[^/]+/[^/]+/\\(?:blob\\|blame\\|tree\\)/[^/]+/\\([^?#\n]+\\)\\(?:#L\\([0-9]+\\).*\\)?\\'" spec)
+             (setq path (match-string 1 spec)
+                   line (and (match-string 2 spec) (string-to-number (match-string 2 spec)))))
+            ((string-match "\\`file://\\([^?#\n]+\\)\\(?:#L?\\([0-9]+\\).*\\)?\\'" spec)
+             (setq path (match-string 1 spec)
+                   line (and (match-string 2 spec) (string-to-number (match-string 2 spec)))))
+            ((string-match "\\`\\([^:#\n]+\\)\\(?:\\(?::L?\\|#L\\)\\([0-9]+\\)\\(?:[-–—,:L0-9]*[0-9]\\)?\\)?\\'" spec)
+             (setq path (match-string 1 spec)
+                   line (and (match-string 2 spec) (string-to-number (match-string 2 spec))))))
+      (when-let* ((path)
+                  ((or line (string-match-p "[./]" path)))
+                  (file (lispm-present--file path root)))
+        (list 'file file line)))))
 
 (defconst lispm-present--link-re
   "\\[\\[\\(file\\|buffer\\):\\([^]\n]+?\\)\\(?:::\\([0-9]+\\)\\)?\\]\\(?:\\[[^]\n]*\\]\\)?\\]"
   "Org links to files, with a line or not, and to buffers.")
 
+(defconst lispm-present--md-link-re
+  "\\(?:^\\|[^![\n]\\)\\(\\[\\([^]\n]+\\)\\](\\([^)\n]+\\))\\)"
+  "Markdown links [LABEL](TARGET), excluding images ![ALT](TARGET).")
+
 (defconst lispm-present--place-re
-  "\\(?:^\\|[ \t(\"'`]\\)\\(\\(?:~?/\\)?[[:alnum:]_.@+-]+\\(?:/[[:alnum:]_.@+-]+\\)*\\)\\(?::\\([0-9]+\\)\\)?"
-  "A file name, and a line after a colon, or not.")
+  "\\(?:^\\|[^[:alnum:]_./~+-]\\)\\(\\(?:~?/\\)?[[:alnum:]_.@+-]+\\(?:/[[:alnum:]_.@+-]+\\)*\\)\\(?:\\(:L?\\|#L\\)\\([0-9]+\\)\\(?:[-–—,:L0-9]*[0-9]\\)?\\)?"
+  "A file name, and a line or line range/list after a colon or #L, or not.")
 
 (defconst lispm-present--agent-re
   "\\_<\\([[:alnum:]_-]+@[[:alnum:]_.-]*[[:alnum:]_]\\(?:<[0-9]+>\\)?\\)"
@@ -323,11 +473,11 @@ Where none is, act as one of `lispm-act-functions' does."
 
 (defun lispm-present-text (text &optional root)
   "TEXT with the objects it names presented.
-Those are org links to files and buffers, file names (relative to
-ROOT, by default `default-directory') of files there are, with a
-directory, an extension or a line after a colon, and the names of
-live agents.  Text already
-presenting something is left as it is."
+Those are org links to files and buffers, Markdown links, file names
+\(relative to ROOT, by default `default-directory') of files there are,
+with a directory, an extension or a line after a colon, and the names
+of live or known retired agents.  Text already presenting something is
+left as it is."
   (let ((text (copy-sequence text))
         (root (or root default-directory))
         (case-fold-search nil))
@@ -345,9 +495,21 @@ presenting something is left as it is."
                 (mark beg end (list 'file file line))))
             (setq start end))))
       (let ((start 0))
+        (while (string-match lispm-present--md-link-re text start)
+          (let* ((beg (match-beginning 1)) (end (match-end 1))
+                 (label (match-string 2 text)) (target (match-string 3 text))
+                 (object (or (lispm-present--parse-place label root)
+                             (lispm-present--parse-place target root)
+                             (and (string-match-p "\\`https?://" target)
+                                  (list 'url target)))))
+            (when object
+              (lispm-present-in text beg end object))
+            (setq start end))))
+      (let ((start 0))
         (while (string-match lispm-present--place-re text start)
           (let* ((beg (match-beginning 1))
-                 (line (and (match-string 2 text) (string-to-number (match-string 2 text))))
+                 (suffix-beg (match-beginning 2))
+                 (line (and (match-string 3 text) (string-to-number (match-string 3 text))))
                  ;; Not the full stop of a sentence.
                  (path (if line (match-string 1 text) (string-trim-right (match-string 1 text) "[.]+")))
                  (end (if line (match-end 0) (+ beg (length path)))))
@@ -355,13 +517,18 @@ presenting something is left as it is."
             ;; or a line.
             (when-let* (((or line (string-match-p "[./]" path)))
                         (file (lispm-present--file path root)))
-              (mark beg end (list 'file file line)))
+              (unless (text-property-not-all beg end 'lispm-object nil text)
+                (lispm-present-in text beg end (list 'file file line))
+                (when suffix-beg
+                  (lispm-present--mark-extra-lines text suffix-beg end file))))
             (setq start (max end (1+ beg))))))
       (let ((start 0))
         (while (string-match lispm-present--agent-re text start)
-          (let ((beg (match-beginning 1)) (end (match-end 1)))
-            (when (lispm-get-agent (match-string 1 text) t)
-              (mark beg end (list 'agent (match-string 1 text))))
+          (let ((beg (match-beginning 1))
+                (end (match-end 1))
+                (name (match-string 1 text)))
+            (when (lispm-known-agent-p name)
+              (mark beg end (list 'agent name)))
             (setq start end)))))
     text))
 
@@ -376,18 +543,27 @@ the reply defines."
          (symbol (intern-soft (cond (call)
                                     ((string-match "\\`#?'\\([^']+\\)\\'" code) (match-string 1 code))
                                     (t code))))
+         suffix-beg
          (object
           (cond ((and symbol (if call
                                  (fboundp symbol)
                                (or (fboundp symbol) (boundp symbol) (facep symbol))))
                  (list 'symbol symbol))
-                ((string-match "\\`\\([^:\n]+\\)\\(?::\\([0-9]+\\)\\)?\\'" code)
+                ((string-match "\\`\\([^:#\n]+\\)\\(?:\\(:L?\\|#L\\)\\([0-9]+\\)\\(?:[-–—,:L0-9]*[0-9]\\)?\\)?\\'" code)
                  ;; The line first: looking for the file can change the
                  ;; match data, through a file name handler.
-                 (let* ((line (and (match-string 2 code) (string-to-number (match-string 2 code))))
+                 (let* ((sbeg (match-beginning 2))
+                        (line (and (match-string 3 code) (string-to-number (match-string 3 code))))
                         (file (lispm-present--file (match-string 1 code) (or root default-directory))))
-                   (and file (list 'file file line))))))
-         (presented (if object (lispm-present code object) code))
+                   (when file
+                     (setq suffix-beg sbeg)
+                     (list 'file file line))))))
+         (presented (if object
+                        (let ((s (lispm-present code object)))
+                          (when (and suffix-beg (eq (car object) 'file))
+                            (lispm-present--mark-extra-lines s suffix-beg (length s) (nth 1 object)))
+                          s)
+                      code))
          ;; A file presented is there to see.
          (finding (and lispm-ground-code (not (eq (car object) 'file))
                        (lispm-ground-check code root defined))))
