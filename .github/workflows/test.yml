@@ -21,22 +21,12 @@ jobs:
         emacs: ['30.1', '30.2', '31.1', 'snapshot']
     steps:
       - uses: actions/checkout@v7
-      # LispM Kit, whose engine translates LispM's words, from its own
+      # LispM UI (including Kit, Finder, and Prebuilt), from its own
       # repository; outside .deps/, which the cache keeps.
-      - uses: actions/checkout@v7
-        with:
-          repository: LispMachineLab/lispm-kit
-          path: .lispm-kit
-      # LispM UI, which draws LispM's forms, a library only git holds.
       - uses: actions/checkout@v7
         with:
           repository: LispMachineLab/lispm-ui
           path: .lispm-ui
-      # LispM Finder, the spatial file manager and file/folder chooser.
-      - uses: actions/checkout@v7
-        with:
-          repository: LispMachineLab/lispm-finder
-          path: .lispm-finder
       # LispM Auth, which keeps LispM's secrets encrypted, from its own repository.
       - uses: actions/checkout@v7
         with:
@@ -51,9 +41,9 @@ jobs:
           path: .deps
           key: deps-${{ matrix.emacs }}-${{ hashFiles('lisp/lispm.el', 'test/install-deps.el') }}
       - name: Byte-compile, warnings as errors
-        run: make compile LISPM_KIT=.lispm-kit LISPM_UI=.lispm-ui LISPM_FINDER=.lispm-finder LISPM_AUTH=.lispm-auth
+        run: make compile LISPM_UI=.lispm-ui LISPM_AUTH=.lispm-auth
       - name: Test
-        run: make test LISPM_KIT=.lispm-kit LISPM_UI=.lispm-ui LISPM_FINDER=.lispm-finder LISPM_AUTH=.lispm-auth
+        run: make test LISPM_UI=.lispm-ui LISPM_AUTH=.lispm-auth
 
   kernel-worker:
     name: Elisp workers through Kernel
@@ -62,16 +52,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
         with:
-          repository: LispMachineLab/lispm-kit
-          path: .lispm-kit
-      - uses: actions/checkout@v7
-        with:
           repository: LispMachineLab/lispm-ui
           path: .lispm-ui
-      - uses: actions/checkout@v7
-        with:
-          repository: LispMachineLab/lispm-finder
-          path: .lispm-finder
       - uses: actions/checkout@v7
         with:
           repository: LispMachineLab/lispm-auth
@@ -89,5 +71,5 @@ jobs:
           sudo apt-get install -y sbcl
           make -C .lispm-kernel
       - name: Test worker isolation and cancellation
-        run: make test-kernel LISPM_KERNEL=.lispm-kernel LISPM_KIT=.lispm-kit LISPM_UI=.lispm-ui LISPM_FINDER=.lispm-finder LISPM_AUTH=.lispm-auth
+        run: make test-kernel LISPM_KERNEL=.lispm-kernel LISPM_UI=.lispm-ui LISPM_AUTH=.lispm-auth
 

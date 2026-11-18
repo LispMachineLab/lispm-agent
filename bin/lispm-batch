@@ -62,7 +62,6 @@ if [ -z "${EMACS:-}" ]; then
   fi
 fi
 
-KIT_LISP=${KIT_LISP:-$parent_dir/lispm-kit}
 UI_LISP=${UI_LISP:-$parent_dir/lispm-ui}
 AUTH_LISP=${AUTH_LISP:-$parent_dir/lispm-auth}
 AGENTS_LISP=${AGENTS_LISP:-$parent_dir/lispm-agents/lisp}
@@ -75,7 +74,6 @@ fi
 
 exec "$EMACS" -Q --batch \
   --eval "(when (file-directory-p \"$root_dir/.deps\") (require 'package) (setq package-user-dir \"$root_dir/.deps\") (package-initialize))" \
-  -L "$KIT_LISP" \
   -L "$UI_LISP" \
   -L "$AUTH_LISP" \
   -L "$AGENTS_LISP" \
