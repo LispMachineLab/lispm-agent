@@ -94,23 +94,29 @@ when the connection closes or the process is signalled."
     (when (and (integerp pid) (> pid 0))
       (ignore-errors (signal-process (- pid) signal)))))
 
-(defun lispm-exec--with-held-sentinel (process body)
-  "Call BODY with PROCESS's sentinel held, running queued events after BODY.
+(defmacro lispm-exec--with-held-sentinel (process &rest body)
+  "Run BODY with PROCESS's sentinel held, running queued events after BODY.
 `tramp-signal-process' waits for its remote command inside a locked TRAMP
 connection; holding PROCESS's sentinel until that lock is released keeps
 the sentinel from re-entering TRAMP on the same connection."
-  (let ((sentinel (process-sentinel process))
-        events)
-    (unwind-protect
-        (progn
-          (when (functionp sentinel)
-            (set-process-sentinel
-             process (lambda (_proc event) (push event events))))
-          (funcall body))
-      (when (functionp sentinel)
-        (ignore-errors (set-process-sentinel process sentinel))
-        (dolist (event (nreverse events))
-          (funcall sentinel process event))))))
+  (declare (indent 1) (debug t))
+  (let ((proc (make-symbol "process"))
+        (sentinel (make-symbol "sentinel"))
+        (events (make-symbol "events"))
+        (event (make-symbol "event")))
+    `(let* ((,proc ,process)
+            (,sentinel (process-sentinel ,proc))
+            ,events)
+       (unwind-protect
+           (progn
+             (when (functionp ,sentinel)
+               (set-process-sentinel
+                ,proc (lambda (_p ,event) (push ,event ,events))))
+             ,@body)
+         (when (functionp ,sentinel)
+           (ignore-errors (set-process-sentinel ,proc ,sentinel))
+           (dolist (,event (nreverse ,events))
+             (funcall ,sentinel ,proc ,event)))))))
 
 (defun lispm-exec-kill (process)
   "Stop PROCESS and the process group it started, locally or on a remote host.
@@ -121,14 +127,12 @@ returns), call it."
     (ignore-errors (funcall process)))
    ((processp process)
     (let ((inhibit-quit t))
-      (lispm-exec--with-held-sentinel
-       process
-       (lambda ()
-         (when (process-live-p process)
-           (ignore-errors (process-send-eof process))
-           (lispm-exec--signal-tree process 'SIGKILL))
-         (when (process-live-p process)
-           (ignore-errors (kill-process process)))))))))
+      (lispm-exec--with-held-sentinel process
+        (when (process-live-p process)
+          (ignore-errors (process-send-eof process))
+          (lispm-exec--signal-tree process 'SIGKILL))
+        (when (process-live-p process)
+          (ignore-errors (kill-process process))))))))
 
 (defun lispm-exec-delete (process)
   "Delete PROCESS after stopping the process group it started.
@@ -139,13 +143,11 @@ returns), call it."
     (ignore-errors (funcall process)))
    ((processp process)
     (let ((inhibit-quit t))
-      (lispm-exec--with-held-sentinel
-       process
-       (lambda ()
-         (when (process-live-p process)
-           (ignore-errors (process-send-eof process))
-           (lispm-exec--signal-tree process 'SIGKILL))
-         (ignore-errors (delete-process process))))))))
+      (lispm-exec--with-held-sentinel process
+        (when (process-live-p process)
+          (ignore-errors (process-send-eof process))
+          (lispm-exec--signal-tree process 'SIGKILL))
+        (ignore-errors (delete-process process)))))))
 
 (cl-defun lispm-exec (program args callback &key input timeout)
   "Run PROGRAM with ARGS in the background, then call CALLBACK with how it went.
@@ -170,50 +172,55 @@ stop PROGRAM after TIMEOUT seconds.  See `lispm-exec-function'."
   "Run PROGRAM with ARGS as a process of Emacs's own, as `lispm-exec' says."
   (let ((output (generate-new-buffer " *lispm-exec*" t))
         (errors (generate-new-buffer " *lispm-exec errors*" t))
-        stderr timer)
-    (condition-case err
-        (let ((process
-               (make-process
-                :name program :buffer output :command (cons program args)
-                :connection-type 'pipe :noquery t :coding 'utf-8
-                :stderr (setq stderr (make-pipe-process :name (concat program " errors") :buffer errors
-                                                        :noquery t :coding 'utf-8 :sentinel #'ignore))
-                :sentinel
-                (lambda (process _event)
-                  (when (and (not (process-live-p process)) (buffer-live-p output))
-                    (when timer (cancel-timer timer))
-                    ;; What it said last, read before its pipe goes.
-                    (while (accept-process-output stderr 0 nil t))
-                    (delete-process stderr)
-                    (let ((exit (cond ((process-get process 'timed-out)
-                                       (format "%s timed out after %ss" program timeout))
-                                      ((eq (process-status process) 'exit)
-                                       (process-exit-status process))
-                                      (t (format "%s ended by signal %s" program (process-exit-status process)))))
-                          (printed (with-current-buffer output (buffer-string)))
-                          (said (with-current-buffer errors (buffer-string))))
-                      (kill-buffer output)
-                      (kill-buffer errors)
-                      (lispm-exec--call callback exit printed said)))))))
-          (when timeout
-            (setq timer
-                  (run-at-time timeout nil
-                               (lambda ()
-                                 (when (process-live-p process)
-                                   (process-put process 'timed-out t)
-                                   (lispm-exec-kill process))))))
-          ;; A program may be gone before it is sent its input, or the
-          ;; end of it, as one reading none, as diff, may be: its
-          ;; sentinel then says how it went, later.
-          (ignore-errors
-            (when input
-              (process-send-string process input))
-            (process-send-eof process)))
-      (error (when timer (cancel-timer timer))
-             (when (process-live-p stderr) (delete-process stderr))
-             (kill-buffer output)
-             (kill-buffer errors)
-             (run-at-time 0 nil #'lispm-exec--call callback (error-message-string err) "" "")))
+        stderr timer started)
+    (unwind-protect
+        (condition-case err
+            (let ((process
+                   (make-process
+                    :name program :buffer output :command (cons program args)
+                    :connection-type 'pipe :noquery t :coding 'utf-8
+                    :stderr (setq stderr (make-pipe-process :name (concat program " errors") :buffer errors
+                                                            :noquery t :coding 'utf-8 :sentinel #'ignore))
+                    :sentinel
+                    (lambda (process _event)
+                      (when (and (not (process-live-p process)) (buffer-live-p output))
+                        (when timer (cancel-timer timer))
+                        ;; What it said last, read before its pipe goes.
+                        (while (accept-process-output stderr 0 nil t))
+                        (delete-process stderr)
+                        (let ((exit (cond ((process-get process 'timed-out)
+                                           (format "%s timed out after %ss" program timeout))
+                                          ((eq (process-status process) 'exit)
+                                           (process-exit-status process))
+                                          (t (format "%s ended by signal %s" program (process-exit-status process)))))
+                              (printed (with-current-buffer output (buffer-string)))
+                              (said (with-current-buffer errors (buffer-string))))
+                          (kill-buffer output)
+                          (kill-buffer errors)
+                          (lispm-exec--call callback exit printed said)))))))
+              (setq started t)
+              (when timeout
+                (setq timer
+                      (run-at-time timeout nil
+                                   (lambda ()
+                                     (when (process-live-p process)
+                                       (process-put process 'timed-out t)
+                                       (lispm-exec-kill process))))))
+              ;; A program may be gone before it is sent its input, or the
+              ;; end of it, as one reading none, as diff, may be: its
+              ;; sentinel then says how it went, later.
+              (ignore-errors
+                (when input
+                  (process-send-string process input))
+                (process-send-eof process)))
+          (error
+           (setq started nil)
+           (run-at-time 0 nil #'lispm-exec--call callback (error-message-string err) "" "")))
+      (unless started
+        (when timer (cancel-timer timer))
+        (when (process-live-p stderr) (delete-process stderr))
+        (when (buffer-live-p output) (kill-buffer output))
+        (when (buffer-live-p errors) (kill-buffer errors))))
     nil))
 
 (provide 'lispm-exec)

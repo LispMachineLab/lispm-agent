@@ -13012,6 +13012,79 @@ are flagged with public interface suggestions and translated via `lispm-tr'."
     ;; Defined in the reply itself, it passes.
     (should-not (lispm-ground-check "lispm-ground--read" nil '("lispm-ground--read")))))
 
+(ert-deftest lispm-test-unsaved-restores-modified-on-nonlocal-exit ()
+  "Non-local exits inside `lispm--unsaved' still restore `buffer-modified-p'."
+  (with-temp-buffer
+    (set-buffer-modified-p nil)
+    (catch 'abort
+      (lispm--unsaved
+        (insert "streaming chunk")
+        (should (buffer-modified-p))
+        (throw 'abort nil)))
+    (should-not (buffer-modified-p))))
+
+(ert-deftest lispm-test-local-http-headers-preserves-match-data ()
+  "`lispm-local-http-headers' preserves caller `match-data' across regex parsing."
+  (let ((sample "alpha:42"))
+    (should (string-match "\\([a-z]+\\):\\([0-9]+\\)" sample))
+    (let ((headers (lispm-local-http-headers "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Token: secret")))
+      (should (equal (cdr (assoc "host" headers)) "127.0.0.1"))
+      (should (equal (cdr (assoc "x-token" headers)) "secret")))
+    (should (equal (match-string 1 sample) "alpha"))
+    (should (equal (match-string 2 sample) "42"))))
+
+(ert-deftest lispm-test-tool-argument-error-condition ()
+  "`lispm-tools--arguments' signals structured `lispm-tool-argument-error' on invalid input."
+  (let ((tool (lispm-get-tool "read_file")))
+    (should-error (lispm-tools--arguments tool "not-an-alist")
+                  :type 'lispm-tool-argument-error)
+    (should-error (lispm-tools--arguments tool nil)
+                  :type 'lispm-tool-argument-error)
+    (should-error (lispm-tools--arguments tool '((path . 123)))
+                  :type 'lispm-tool-argument-error)))
+
+(ert-deftest lispm-test-dispatching-macro-hygiene-and-unwind ()
+  "`lispm--dispatching' evaluates its agent form once and clears `dispatching' on non-local exit."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "Test agent." :root project))
+          (eval-count 0))
+      (catch 'abort
+        (lispm--dispatching (progn (cl-incf eval-count) agent)
+          (should (lispm-agent-dispatching agent))
+          (throw 'abort nil)))
+      (should (= eval-count 1))
+      (should-not (lispm-agent-dispatching agent)))))
+
+(ert-deftest lispm-test-character-endpoint-backend-resolution ()
+  "`lispm-bar-model-ready-p' and `lispm-inspect--model-summary' resolve `@character' endpoints."
+  (lispm-test-env
+    (let* ((lispm-backends nil)
+           (lispm-backend nil)
+           (lispm--characters
+            (list (cons 'ada (lispm-character--create
+                              :name 'ada
+                              :endpoint '(:api openai :model "gpt-4o" :key "sk-test")))))
+           (agent (lispm-defagent ada "Ada agent." :root project :backend '@ada)))
+      (should (lispm-bar-model-ready-p agent))
+      (should (string-match-p "gpt-4o via @ada" (lispm-inspect--model-summary agent))))))
+
+(ert-deftest lispm-test-batch-timeout-preserves-abort-callback-reply ()
+  "`lispm-batch--run-turns' preserves the callback reply invoked during `lispm-abort' on timeout."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent batch "Batch agent." :root project))
+           (active-cb nil))
+      (cl-letf (((symbol-function 'lispm-tell)
+                 (lambda (_ag _prompt &rest plist)
+                   (setq active-cb (plist-get plist :callback))))
+                ((symbol-function 'lispm-abort)
+                 (lambda (_ag)
+                   (when active-cb
+                     (funcall active-cb "Wrap-up latest reply")))))
+        (let ((outcome (lispm-batch--run-turns
+                        agent "go" project 0.01 (float-time) nil (lambda () 1))))
+          (should (plist-get outcome :timed-out))
+          (should (equal (plist-get outcome :reply) "Wrap-up latest reply")))))))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

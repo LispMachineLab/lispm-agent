@@ -185,6 +185,46 @@ Signal an error when the source needs something that is missing."
     (when (alist-get 'use values)
       (lispm-set-model name nil t))))
 
+(defun lispm-backend-form--validate-url (value)
+  "Validate that VALUE is an HTTP or HTTPS base address."
+  (unless (and (stringp value)
+               (string-match-p "\\`https?://[^/[:space:]]+" value))
+    (lispm-tr "Starts with http:// or https://")))
+
+(defun lispm-backend-form--key-help (stored-secret stored-key)
+  "Return a help function for `key-source' given STORED-SECRET and STORED-KEY."
+  (lambda (values)
+    (pcase (alist-get 'key-source values)
+      ('secret (if stored-secret
+                   (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
+                 (lispm-tr "LispM Auth keeps it encrypted.")))
+      ('typed (if stored-key
+                  (lispm-tr "A key is set; leave it empty to keep it, or type a new one.")
+                (lispm-tr "Saved in Customize in plain text.")))
+      ('env (lispm-tr "The variable holding the key."))
+      ('auth-source (lispm-tr "Looked up for the server's host as an agent first asks."))
+      (_ (lispm-tr "The server asks for no key.")))))
+
+(defun lispm-backend-form--new-fields ()
+  "Return the preset and name fields used when adding a new backend."
+  `((preset :type choice :label ,(lispm-tr "Preset")
+            :choices ,(lispm-backend-form--preset-choices)
+            :value custom
+            :on-change ,#'lispm-backend-form--apply-preset
+            :help ,(lispm-tr "Fill in the address and models of a known provider."))
+    (name :type text :label ,(lispm-tr "Name") :required t
+          :value ""
+          :validate ,(lambda (value)
+                       (when (stringp value)
+                         (let ((name (intern (string-trim value))))
+                           (cond ((assq name lispm-backends)
+                                  (lispm-tr "There is already a backend %s" name))
+                                 ((not (string-match-p
+                                        "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
+                                        (symbol-name name)))
+                                  (lispm-tr "Use letters, digits, `-', `_' or `.'"))))))
+          :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))))
+
 (defun lispm-backend-form (&optional name)
   "Make the form that adds a backend, or changes backend NAME; return its buffer.
 The form's window shows it; `lispm-backend-form--submit' keeps what it
@@ -195,9 +235,8 @@ says, once it is valid."
                    (if (lispm-secret-available-p) 'secret 'typed)))
          (stored-secret (and name
                              (eq source 'secret)
-                             (condition-case nil
-                                 (lispm-secret-get (lispm-backend-secret-id name) t)
-                               (error nil))))
+                             (ignore-errors
+                               (lispm-secret-get (lispm-backend-secret-id name) t))))
          (stored-key (and backend (stringp (plist-get backend :key))
                           (not (string-empty-p (plist-get backend :key)))))
          (variable (and backend (lispm--key-variable backend)))
@@ -205,23 +244,7 @@ says, once it is valid."
          (fields
           (append
            (unless name
-             `((preset :type choice :label ,(lispm-tr "Preset")
-                       :choices ,(lispm-backend-form--preset-choices)
-                       :value custom
-                       :on-change ,#'lispm-backend-form--apply-preset
-                       :help ,(lispm-tr "Fill in the address and models of a known provider."))
-               (name :type text :label ,(lispm-tr "Name") :required t
-                     :value ""
-                     :validate ,(lambda (value)
-                                  (when (stringp value)
-                                    (let ((name (intern (string-trim value))))
-                                      (cond ((assq name lispm-backends)
-                                             (lispm-tr "There is already a backend %s" name))
-                                            ((not (string-match-p
-                                                   "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
-                                                   (symbol-name name)))
-                                             (lispm-tr "Use letters, digits, `-', `_' or `.'"))))))
-                     :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))))
+             (lispm-backend-form--new-fields))
            `((api :type radio :label ,(lispm-tr "API")
                   :choices ,(mapcar (lambda (api)
                                       (cons (car api) (lispm-backend-api-name (car api))))
@@ -230,10 +253,7 @@ says, once it is valid."
                   :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
              (url :type text :label ,(lispm-tr "Address") :required t
                   :value ,(or (plist-get backend :url) "")
-                  :validate ,(lambda (value)
-                               (unless (and (stringp value)
-                                            (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                 (lispm-tr "Starts with http:// or https://")))
+                  :validate ,#'lispm-backend-form--validate-url
                   :help ,(lispm-tr "The server's base address, without the path LispM adds."))
              (model :type text :label ,(lispm-tr "Model") :required t
                     :value ,(or (plist-get backend :model) "")
@@ -241,17 +261,7 @@ says, once it is valid."
              (key-source :type choice :label ,(lispm-tr "Key") :required t
                          :choices ,(lispm-backend-form--key-source-choices source)
                          :value ,source
-                         :help ,(lambda (values)
-                                  (pcase (alist-get 'key-source values)
-                                    ('secret (if stored-secret
-                                                 (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
-                                               (lispm-tr "LispM Auth keeps it encrypted.")))
-                                    ('typed (if stored-key
-                                                (lispm-tr "A key is set; leave it empty to keep it, or type a new one.")
-                                              (lispm-tr "Saved in Customize in plain text.")))
-                                    ('env (lispm-tr "The variable holding the key."))
-                                    ('auth-source (lispm-tr "Looked up for the server's host as an agent first asks."))
-                                    (_ (lispm-tr "The server asks for no key.")))))
+                         :help ,(lispm-backend-form--key-help stored-secret stored-key))
              (key :type password :label ,(lispm-tr "The key")
                   :value ""
                   :when ,(lambda (values)
@@ -421,10 +431,7 @@ says, once it is valid."
             (url :type text :label ,(lispm-tr "Address") :required t
                  :value ,(or (plist-get props :url) "")
                  :when ,address-p
-                 :validate ,(lambda (value)
-                              (unless (and (stringp value)
-                                           (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                (lispm-tr "Starts with http:// or https://")))
+                 :validate ,#'lispm-backend-form--validate-url
                  :help ,(lispm-tr "The server's base address, without the path LispM adds."))
             (model :type text :label ,(lispm-tr "Model") :required t
                    :value ,active-model
@@ -603,6 +610,24 @@ says, once it is valid."
         (lispm-mcp-server-add name config t)
       (lispm-mcp-server-change name config t))))
 
+(defun lispm-mcp-form--new-fields ()
+  "Return the preset and name fields used when adding a new MCP server."
+  `((preset :type choice :label ,(lispm-tr "Preset")
+            :choices ,(lispm-mcp-form--preset-choices)
+            :value custom
+            :on-change ,#'lispm-mcp-form--apply-preset
+            :help ,(lispm-tr "Fill in the command and arguments of a known MCP server."))
+    (name :type text :label ,(lispm-tr "Name") :required t
+          :value ""
+          :validate ,(lambda (value)
+                       (when (stringp value)
+                         (let ((trimmed (string-trim value)))
+                           (cond ((assoc trimmed lispm-mcp-servers)
+                                  (lispm-tr "There is already an MCP server %s" trimmed))
+                                 ((not (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" trimmed))
+                                  (lispm-tr "Use letters, digits, `-', `_' or `.'"))))))
+          :help ,(lispm-tr "A short name for the server, as `peekaboo' or `github'."))))
+
 (defun lispm-mcp-form (&optional name)
   "Make the form that adds an MCP server, or changes MCP server NAME;
 return its buffer."
@@ -613,21 +638,7 @@ return its buffer."
          (fields
           (append
            (unless name
-             `((preset :type choice :label ,(lispm-tr "Preset")
-                       :choices ,(lispm-mcp-form--preset-choices)
-                       :value custom
-                       :on-change ,#'lispm-mcp-form--apply-preset
-                       :help ,(lispm-tr "Fill in the command and arguments of a known MCP server."))
-               (name :type text :label ,(lispm-tr "Name") :required t
-                     :value ""
-                     :validate ,(lambda (value)
-                                  (when (stringp value)
-                                    (let ((trimmed (string-trim value)))
-                                      (cond ((assoc trimmed lispm-mcp-servers)
-                                             (lispm-tr "There is already an MCP server %s" trimmed))
-                                            ((not (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" trimmed))
-                                             (lispm-tr "Use letters, digits, `-', `_' or `.'"))))))
-                     :help ,(lispm-tr "A short name for the server, as `peekaboo' or `github'."))))
+             (lispm-mcp-form--new-fields))
            `((transport :type radio :label ,(lispm-tr "Transport")
                         :choices ((stdio . ,(lispm-tr "Command (stdio)"))
                                   (http . ,(lispm-tr "HTTP")))
@@ -653,10 +664,7 @@ return its buffer."
              (url :type text :label ,(lispm-tr "Address") :required t
                   :value ,(or (plist-get config :url) "")
                   :when ,http-p
-                  :validate ,(lambda (value)
-                               (unless (and (stringp value)
-                                            (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                 (lispm-tr "Starts with http:// or https://")))
+                  :validate ,#'lispm-backend-form--validate-url
                   :help ,(lispm-tr "The HTTP address of the MCP server."))
              (token :type password :label ,(lispm-tr "The key")
                     :value ""

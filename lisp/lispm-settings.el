@@ -501,7 +501,7 @@ starts, and SAVE it.  See `lispm-compact-idle'."
   (lispm-settings-set 'lispm-compact-idle
                       (and on (if (numberp lispm-compact-idle)
                                   lispm-compact-idle
-                                (eval (car (get 'lispm-compact-idle 'standard-value)) t)))
+                                lispm--default-compact-idle))
                       save))
 
 (defconst lispm-memory-sizes

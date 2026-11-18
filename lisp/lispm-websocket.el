@@ -112,43 +112,44 @@ Before the handshake a unit is the HTTP request; after it, a frame."
   "Answer CONNECTION's HTTP upgrade request once it has fully arrived.
 A request that is not a WebSocket upgrade, or that the authorizer refuses,
 is answered with an HTTP error and the connection is dropped."
-  (let* ((input (process-get connection :input))
-         (end (string-search "\r\n\r\n" input)))
-    (cond
-     (end
-      (let* ((headers (lispm-local-http-headers (substring input 0 end)))
-             (key (cdr (assoc "sec-websocket-key" headers)))
-             (protocols (cdr (assoc "sec-websocket-protocol" headers))))
-        (process-put connection :input (substring input (+ end 4)))
-        (cond
-         ((not (and key
-                    (string-match-p "\\`GET " input)
-                    (string-equal-ignore-case
-                     (or (cdr (assoc "upgrade" headers)) "") "websocket")))
-          (lispm-websocket--refuse connection "400 Bad Request"))
-         ((not (funcall (lispm-websocket--server-get connection :authorize) headers))
-          (lispm-websocket--refuse connection "401 Unauthorized"))
-         (t
-          (process-send-string
-           connection
-           (concat "HTTP/1.1 101 Switching Protocols\r\n"
-                   "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                   "Sec-WebSocket-Accept: "
-                   (base64-encode-string
-                    (secure-hash 'sha1 (concat key lispm-websocket-guid) nil nil t))
-                   "\r\n"
-                   ;; The first subprotocol the client offers is accepted:
-                   ;; clients fail a handshake that selects none.
-                   (if protocols
-                       (format "Sec-WebSocket-Protocol: %s\r\n"
-                               (car (split-string protocols "[, ]+" t)))
-                     "")
-                   "\r\n"))
-          (process-put connection :open t)
-          (funcall (lispm-websocket--server-get connection :on-open) connection)
-          (lispm-websocket--read-frames connection)))))
-     ((> (length input) 16384)
-      (lispm-websocket--refuse connection "431 Request Header Fields Too Large")))))
+  (save-match-data
+    (let* ((input (process-get connection :input))
+           (end (string-search "\r\n\r\n" input)))
+      (cond
+       (end
+        (let* ((headers (lispm-local-http-headers (substring input 0 end)))
+               (key (cdr (assoc "sec-websocket-key" headers)))
+               (protocols (cdr (assoc "sec-websocket-protocol" headers))))
+          (process-put connection :input (substring input (+ end 4)))
+          (cond
+           ((not (and key
+                      (string-match-p "\\`GET " input)
+                      (string-equal-ignore-case
+                       (or (cdr (assoc "upgrade" headers)) "") "websocket")))
+            (lispm-websocket--refuse connection "400 Bad Request"))
+           ((not (funcall (lispm-websocket--server-get connection :authorize) headers))
+            (lispm-websocket--refuse connection "401 Unauthorized"))
+           (t
+            (process-send-string
+             connection
+             (concat "HTTP/1.1 101 Switching Protocols\r\n"
+                     "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                     "Sec-WebSocket-Accept: "
+                     (base64-encode-string
+                      (secure-hash 'sha1 (concat key lispm-websocket-guid) nil nil t))
+                     "\r\n"
+                     ;; The first subprotocol the client offers is accepted:
+                     ;; clients fail a handshake that selects none.
+                     (if protocols
+                         (format "Sec-WebSocket-Protocol: %s\r\n"
+                                 (car (split-string protocols "[, ]+" t)))
+                       "")
+                     "\r\n"))
+            (process-put connection :open t)
+            (funcall (lispm-websocket--server-get connection :on-open) connection)
+            (lispm-websocket--read-frames connection)))))
+       ((> (length input) 16384)
+        (lispm-websocket--refuse connection "431 Request Header Fields Too Large"))))))
 
 (defun lispm-websocket--refuse (connection status)
   "Answer CONNECTION with HTTP STATUS and drop it."

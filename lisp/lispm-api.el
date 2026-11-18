@@ -147,46 +147,50 @@ It is fed on stdin, so keys stay off the command line."
         (raw nil)
         (client-error nil)
         proc)
-    (let ((coding-system-for-write 'binary))
-      (with-temp-file file
-        (set-buffer-multibyte nil)
-        (insert (if (multibyte-string-p payload)
-                    (encode-coding-string payload 'utf-8)
-                  payload))))
-    (setq proc
-          (make-process
-           :name "lispm-api"
-           :buffer nil
-           :noquery t
-           :connection-type 'pipe
-           :coding '(utf-8-unix . utf-8-unix)
-           :command (list lispm-curl-program "--silent" "--show-error" "--no-buffer"
-                          "-H" "Expect:"
-                          "--connect-timeout" "30"
-                          "--speed-limit" "1" "--speed-time" "600"
-                          "--max-time" "900"
-                          "--config" "-"
-                          "--data-binary" (concat "@" file)
-                          "--write-out" (concat lispm-api--status-marker "%{http_code}\n")
-                          url)
-           :filter (lambda (_proc chunk)
-                     (push chunk raw)
-                     (unless client-error
-                       (condition-case err
-                           (funcall (plist-get shape :feed) state chunk on-delta)
-                         (error (setq client-error
-                                      `((type . "client_error")
-                                        (message . ,(error-message-string err))))))))
-           :sentinel (lambda (p _event)
-                       (unless (process-live-p p)
-                         (ignore-errors (delete-file file))
-                         (unless (process-get p 'lispm-aborted)
-                           (lispm-api--finish shape state client-error
-                                              (apply #'concat (nreverse raw))
-                                              on-done on-error))))))
-    (process-send-string proc (lispm-api--curl-config headers))
-    (process-send-eof proc)
-    proc))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'binary))
+            (with-temp-file file
+              (set-buffer-multibyte nil)
+              (insert (if (multibyte-string-p payload)
+                          (encode-coding-string payload 'utf-8)
+                        payload))))
+          (setq proc
+                (make-process
+                 :name "lispm-api"
+                 :buffer nil
+                 :noquery t
+                 :connection-type 'pipe
+                 :coding '(utf-8-unix . utf-8-unix)
+                 :command (list lispm-curl-program "--silent" "--show-error" "--no-buffer"
+                                "-H" "Expect:"
+                                "--connect-timeout" "30"
+                                "--speed-limit" "1" "--speed-time" "600"
+                                "--max-time" "900"
+                                "--config" "-"
+                                "--data-binary" (concat "@" file)
+                                "--write-out" (concat lispm-api--status-marker "%{http_code}\n")
+                                url)
+                 :filter (lambda (_proc chunk)
+                           (push chunk raw)
+                           (unless client-error
+                             (condition-case err
+                                 (funcall (plist-get shape :feed) state chunk on-delta)
+                               (error (setq client-error
+                                            `((type . "client_error")
+                                              (message . ,(error-message-string err))))))))
+                 :sentinel (lambda (p _event)
+                             (unless (process-live-p p)
+                               (ignore-errors (delete-file file))
+                               (unless (process-get p 'lispm-aborted)
+                                 (lispm-api--finish shape state client-error
+                                                    (apply #'concat (nreverse raw))
+                                                    on-done on-error))))))
+          (process-send-string proc (lispm-api--curl-config headers))
+          (process-send-eof proc)
+          proc)
+      (unless (processp proc)
+        (ignore-errors (delete-file file))))))
 
 (cl-defun lispm-api-stream (backend body betas &key on-delta on-done on-error)
   "POST BODY to BACKEND and stream the response.

@@ -73,7 +73,10 @@
   :type 'boolean
   :group 'lispm)
 
-(defcustom lispm-compact-threshold 120000
+(defconst lispm--default-compact-threshold 120000
+  "Default size, in tokens, for `lispm-compact-threshold'.")
+
+(defcustom lispm-compact-threshold lispm--default-compact-threshold
   "Size, in tokens, past which a session makes room or is handed over.
 The size is the one the model's latest response reported, plus an
 estimate of what was written since.  Past it, the output of older
@@ -117,7 +120,10 @@ at least one turn is always left to the summary.  0 keeps none."
   :type 'integer
   :group 'lispm)
 
-(defcustom lispm-compact-idle 0.75
+(defconst lispm--default-compact-idle 0.75
+  "Default fraction for `lispm-compact-idle'.")
+
+(defcustom lispm-compact-idle lispm--default-compact-idle
   "Fraction of `lispm-compact-threshold' past which a session is compacted at idle.
 When a turn ends with the session past it, LispM makes room once Emacs
 has been idle for `lispm-idle-delay' seconds, rather than when the
@@ -1344,7 +1350,8 @@ what a session opened again after Emacs stopped takes up."
   (let ((modified (make-symbol "modified")))
     `(let ((,modified (buffer-modified-p))
            (create-lockfiles nil))
-       (prog1 (progn ,@body)
+       (unwind-protect
+           (progn ,@body)
          (restore-buffer-modified-p ,modified)))))
 
 (defun lispm--live-begin (agent)
@@ -1523,39 +1530,48 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
             ('nil (lispm--finish-turn agent note))
             (type (lispm-signal agent type note))))))))
 
+(defmacro lispm--dispatching (agent &rest body)
+  "Run BODY with AGENT marked as dispatching tool calls.
+While dispatching, `lispm--tool-done' records results without
+requesting the next turn step until BODY finishes."
+  (declare (indent 1) (debug t))
+  (let ((ag (make-symbol "agent")))
+    `(let ((,ag ,agent))
+       (setf (lispm-agent-dispatching ,ag) t)
+       (unwind-protect
+           (progn ,@body)
+         (setf (lispm-agent-dispatching ,ag) nil)))))
+
 (defun lispm--dispatch (agent uses decisions calls proceed)
   "Act on the tool calls USES of AGENT per DECISIONS.
 CALLS locates their headings.  If PROCEED, request the next step
 once every call has a result."
   (let ((pending (lispm-agent-pending agent)))
-    (setf (lispm-agent-dispatching agent) t)
-    (unwind-protect
-        (progn
-          ;; Register every call before running any, so that the first
-          ;; result cannot resume the loop while others are unregistered.
-          (dolist (b uses)
-            (let ((id (alist-get 'id b)))
-              (pcase-let ((`(,_ ,status ,reasons) (alist-get id decisions nil nil #'equal)))
-                (puthash id (list :status status
-                                  :turn (lispm-agent-turn agent)
-                                  :name (alist-get 'name b)
-                                  :tool (lispm-get-tool (alist-get 'name b))
-                                  :input (alist-get 'input b)
-                                  :marker (alist-get id calls nil nil #'equal)
-                                  :reasons (and (eq status 'ask) reasons))
-                         pending))))
-          (lispm-set-state agent 'acting)
-          (dolist (b uses)
-            (let* ((id (alist-get 'id b))
-                   (decision (alist-get id decisions nil nil #'equal)))
-              (pcase (nth 1 decision)
-                ('run
-                 (if (lispm--running-tool-p agent)
-                     (plist-put (gethash id pending) :queued t)
-                   (lispm--run-tool agent id)))
-                ('ask (lispm--ask-approval agent id))
-                (_ (lispm--tool-done agent id (nth 2 decision) t (car decision)))))))
-      (setf (lispm-agent-dispatching agent) nil))
+    (lispm--dispatching agent
+      ;; Register every call before running any, so that the first
+      ;; result cannot resume the loop while others are unregistered.
+      (dolist (b uses)
+        (let ((id (alist-get 'id b)))
+          (pcase-let ((`(,_ ,status ,reasons) (alist-get id decisions nil nil #'equal)))
+            (puthash id (list :status status
+                              :turn (lispm-agent-turn agent)
+                              :name (alist-get 'name b)
+                              :tool (lispm-get-tool (alist-get 'name b))
+                              :input (alist-get 'input b)
+                              :marker (alist-get id calls nil nil #'equal)
+                              :reasons (and (eq status 'ask) reasons))
+                     pending))))
+      (lispm-set-state agent 'acting)
+      (dolist (b uses)
+        (let* ((id (alist-get 'id b))
+               (decision (alist-get id decisions nil nil #'equal)))
+          (pcase (nth 1 decision)
+            ('run
+             (if (lispm--running-tool-p agent)
+                 (plist-put (gethash id pending) :queued t)
+               (lispm--run-tool agent id)))
+            ('ask (lispm--ask-approval agent id))
+            (_ (lispm--tool-done agent id (nth 2 decision) t (car decision)))))))
     (lispm--run-next-queued-tool agent)
     (lispm--update-state agent)
     ;; The calls, awaiting approval or running, are on disk.
@@ -2180,24 +2196,22 @@ condition it waits at, if any; see `lispm--resume-calls'."
                        :reasons (plist-get call :reasons))
                  (lispm-agent-pending agent))))
     (lispm-set-state agent 'acting)
-    (setf (lispm-agent-dispatching agent) t)
-    (unwind-protect
-        (dolist (call calls)
-          (let ((id (plist-get call :id)))
-            (pcase (plist-get call :state)
-              ("WAITING"
-               (when (eq (plist-get (gethash id (lispm-agent-pending agent)) :status) 'ask)
-                 (lispm--approval-event agent id 'resumed)))
-              ;; Approved, but never run: ask again rather than run it
-              ;; while the session is being opened.
-              ("APPROVED"
-               (lispm--in-session agent
-                 (lispm-transcript-set-state
-                  (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING"))
-               (lispm--approval-event agent id 'resumed))
-              (_ (unless (run-hook-with-args-until-success 'lispm-resume-call-functions agent call)
-                   (lispm--tool-done agent id lispm--interrupted-result t))))))
-      (setf (lispm-agent-dispatching agent) nil))
+    (lispm--dispatching agent
+      (dolist (call calls)
+        (let ((id (plist-get call :id)))
+          (pcase (plist-get call :state)
+            ("WAITING"
+             (when (eq (plist-get (gethash id (lispm-agent-pending agent)) :status) 'ask)
+               (lispm--approval-event agent id 'resumed)))
+            ;; Approved, but never run: ask again rather than run it
+            ;; while the session is being opened.
+            ("APPROVED"
+             (lispm--in-session agent
+               (lispm-transcript-set-state
+                (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING"))
+             (lispm--approval-event agent id 'resumed))
+            (_ (unless (run-hook-with-args-until-success 'lispm-resume-call-functions agent call)
+                 (lispm--tool-done agent id lispm--interrupted-result t)))))))
     (lispm--update-state agent)
     ;; Calls stopped at an error wait for a restart again; the
     ;; handlers are asked afresh.
@@ -2968,11 +2982,9 @@ The call gets its error as its result, the other calls stop, and the
 turn ends with the error; inputs waiting for AGENT stay."
   (let ((id (plist-get condition :call)))
     ;; Its result must not ask the model again.
-    (setf (lispm-agent-dispatching agent) t)
-    (unwind-protect
-        (lispm--tool-done agent id (plist-get condition :error) t
-                          nil (plist-get condition :images))
-      (setf (lispm-agent-dispatching agent) nil))
+    (lispm--dispatching agent
+      (lispm--tool-done agent id (plist-get condition :error) t
+                        nil (plist-get condition :images)))
     (lispm--stop agent (plist-get condition :message) t)))
 
 (defun lispm--drop-response (agent condition)
@@ -3215,7 +3227,7 @@ out, and the beginning of the input the first of them handled.  See
                                sections))
            ;; A quarter of the threshold, in bytes; with none, of its default.
            (limit (* 3 (/ (or lispm-compact-threshold
-                              (eval (car (get 'lispm-compact-threshold 'standard-value)) t))
+                              lispm--default-compact-threshold)
                           4))))
       ;; The turn that saved memory for this handover goes with the rest.
       (when-let* ((last (car (last inputs)))

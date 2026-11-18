@@ -95,6 +95,15 @@ Each entry is a plist `(:agent AGENT :turn TURN :symbol SYMBOL :name NAME
 (defvar lispm-develop--file-callers (make-hash-table :test #'equal)
   "Maps source FILE to the list of CALLER symbols last indexed from it.")
 
+(defconst lispm-develop--non-callable-heads
+  '(nil t progn prog1 prog2 if when unless and or save-excursion save-restriction
+        save-current-buffer unwind-protect while catch defvar defcustom defface)
+  "Special forms and macros whose head symbol is not indexed as a function call.")
+
+(defconst lispm-develop--definers-with-arglist
+  '(defun defmacro cl-defun cl-defmacro defsubst cl-defsubst ert-deftest lispm-deftool)
+  "Top-level definers whose second element is a parameter list, not an expression.")
+
 (defun lispm-develop--extract-callees (form)
   "Symbols called or referenced as `#'SYMBOL' inside FORM.
 Handles circular structures and special forms (`let', `lambda', `cond',
@@ -102,23 +111,23 @@ Handles circular structures and special forms (`let', `lambda', `cond',
   (let ((seen (make-hash-table :test #'eq))
         callees)
     (cl-labels
-        ((walk-list (list)
+        ((walk-chain (list fn)
            (while (and (consp list) (not (gethash list seen)))
              (puthash list t seen)
-             (walk (car list))
+             (funcall fn (car list))
              (setq list (cdr list))))
+         (walk-list (list)
+           (walk-chain list #'walk))
          (walk-bindings (bindings single-ok)
            (if (and single-ok (consp bindings) (symbolp (car bindings))
                     (consp (cdr bindings)) (null (cddr bindings)))
                ;; Single-binding syntax: (when-let (x (car xs)) ...)
                (walk-list (cdr bindings))
-             (while (and (consp bindings) (not (gethash bindings seen)))
-               (puthash bindings t seen)
-               (let ((b (car bindings)))
-                 (when (and (consp b) (not (gethash b seen)))
-                   (puthash b t seen)
-                   (walk-list (cdr b))))
-               (setq bindings (cdr bindings)))))
+             (walk-chain bindings
+                         (lambda (b)
+                           (when (and (consp b) (not (gethash b seen)))
+                             (puthash b t seen)
+                             (walk-list (cdr b)))))))
          (walk (x)
            (when (and (consp x) (not (gethash x seen)))
              (puthash x t seen)
@@ -134,8 +143,7 @@ Handles circular structures and special forms (`let', `lambda', `cond',
                 ((eq head 'lambda)
                  (when (consp rest)
                    (walk-list (cdr rest))))
-                ((memq head '(defun defmacro cl-defun cl-defmacro
-                              defsubst cl-defsubst ert-deftest lispm-deftool))
+                ((memq head lispm-develop--definers-with-arglist)
                  (when (and (consp rest) (consp (cdr rest)))
                    (walk-list (cddr rest))))
                 ((memq head '(let let* when-let* if-let* and-let*))
@@ -153,35 +161,24 @@ Handles circular structures and special forms (`let', `lambda', `cond',
                      (walk-list (cdar rest)))
                    (walk-list (cdr rest))))
                 ((eq head 'cond)
-                 (while (and (consp rest) (not (gethash rest seen)))
-                   (puthash rest t seen)
-                   (walk-list (car rest))
-                   (setq rest (cdr rest))))
+                 (walk-chain rest #'walk-list))
                 ((eq head 'condition-case)
                  (when (and (consp rest) (consp (cdr rest)))
                    (walk (cadr rest))
-                   (let ((handlers (cddr rest)))
-                     (while (and (consp handlers) (not (gethash handlers seen)))
-                       (puthash handlers t seen)
-                       (when (consp (car handlers))
-                         (walk-list (cdar handlers)))
-                       (setq handlers (cdr handlers))))))
+                   (walk-chain (cddr rest)
+                               (lambda (handler)
+                                 (when (consp handler)
+                                   (walk-list (cdr handler)))))))
                 ((eq head 'setq)
-                 (let ((pairs rest))
-                   (while (and (consp pairs) (not (gethash pairs seen)))
-                     (puthash pairs t seen)
-                     (setq pairs (cdr pairs))
-                     (when (and (consp pairs) (not (gethash pairs seen)))
-                       (puthash pairs t seen)
-                       (walk (car pairs))
-                       (setq pairs (cdr pairs))))))
+                 (let ((val-p nil))
+                   (walk-chain rest
+                               (lambda (item)
+                                 (when val-p
+                                   (walk item))
+                                 (setq val-p (not val-p))))))
                 (t
-                 (if (and (symbolp head)
-                          (not (keywordp head)))
-                     (unless (memq head '(nil t progn prog1 prog2 if when unless
-                                              and or save-excursion save-restriction
-                                              save-current-buffer unwind-protect
-                                              while catch defvar defcustom defface))
+                 (if (and (symbolp head) (not (keywordp head)))
+                     (unless (memq head lispm-develop--non-callable-heads)
                        (push head callees))
                    (walk head))
                  (walk-list rest)))))))

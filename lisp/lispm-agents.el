@@ -1365,25 +1365,68 @@ chosen directory.")
            (format "%s (%s)" name trimmed))
           (t directory))))
 
+(defun lispm-agents--directory-resolver (base-dir)
+  "Return a function resolving a user input string relative to BASE-DIR."
+  (lambda (val)
+    (when (and (stringp val) (not (string-empty-p (string-trim val))))
+      (let ((raw (expand-file-name val base-dir))
+            (trimmed (expand-file-name (string-trim val) base-dir)))
+        (if (file-directory-p raw) raw trimmed)))))
+
+(defun lispm-agents--directory-validator (resolve)
+  "Return a field validation function composed with RESOLVE."
+  (lambda (val)
+    (let ((expanded (funcall resolve val)))
+      (unless (and expanded (file-directory-p expanded))
+        (lispm-tr "Working directory no longer exists: %s" (or val ""))))))
+
+(defun lispm-agents--choose-directory (start)
+  "Prompt for a directory starting at START, preserving the selected modal frame."
+  (let ((modal-frame (selected-frame)))
+    (condition-case nil
+        (unwind-protect
+            (lispm-ui-choose-file
+             :title (lispm-tr "Directory")
+             :directory (if (file-directory-p start)
+                            (file-name-as-directory start)
+                          (file-name-as-directory (expand-file-name "~")))
+             :predicate #'file-directory-p)
+          (when (frame-live-p modal-frame)
+            (select-frame-set-input-focus modal-frame)))
+      (quit nil))))
+
+(defun lispm-agents--setup-modal-form ()
+  "Configure the current `lispm-ui-form' buffer as a modal dialog."
+  (when (boundp 'lispm-ui-form--props)
+    (set 'lispm-ui-form--props
+         (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
+  (use-local-map (copy-keymap (current-local-map)))
+  (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
+  (local-set-key (kbd "ESC") #'lispm-ui-form-cancel)
+  (local-set-key (kbd "<escape>") #'lispm-ui-form-cancel))
+
 (defun lispm-agents--read-directory-form (title initial)
   "Ask for a session directory in a modal form titled TITLE.
 INITIAL is pre-filled in the directory field."
   (let* ((base-dir (file-name-as-directory (expand-file-name default-directory)))
-         (resolve (lambda (val)
-                    (when (and (stringp val) (not (string-empty-p (string-trim val))))
-                      (let ((raw (expand-file-name val base-dir))
-                            (trimmed (expand-file-name (string-trim val) base-dir)))
-                        (if (file-directory-p raw) raw trimmed)))))
-         (choices (lispm-agents-known-directories initial))
+         (resolve (lispm-agents--directory-resolver base-dir))
+         (validate (lispm-agents--directory-validator resolve))
          (choice-pairs (mapcar (lambda (dir)
                                  (cons dir (lispm-agents--directory-choice-label dir)))
-                               choices))
+                               (lispm-agents-known-directories initial)))
          (submitted nil)
          (closing nil)
          (result nil)
          (buffer nil)
          (cleanup nil)
          (depth (recursion-depth))
+         (exit-with (lambda (ok &optional val)
+                      (when (<= (recursion-depth) (1+ depth))
+                        (setq closing t
+                              submitted ok
+                              result val)
+                        (when (= (recursion-depth) (1+ depth))
+                          (exit-recursive-edit)))))
          (browse-buttons
           `((,(lispm-ui-tr "Choose…") .
              ,(lambda ()
@@ -1392,18 +1435,7 @@ INITIAL is pre-filled in the directory field."
                                     (or (lispm-ui-form-value :directory) initial)))
                          (start (or (funcall resolve current)
                                     (expand-file-name initial base-dir)))
-                         (modal-frame (selected-frame))
-                         (chosen (condition-case nil
-                                     (unwind-protect
-                                         (lispm-ui-choose-file
-                                          :title (lispm-tr "Directory")
-                                          :directory (if (file-directory-p start)
-                                                         (file-name-as-directory start)
-                                                       (file-name-as-directory (expand-file-name "~")))
-                                          :predicate #'file-directory-p)
-                                       (when (frame-live-p modal-frame)
-                                         (select-frame-set-input-focus modal-frame)))
-                                   (quit nil))))
+                         (chosen (lispm-agents--choose-directory start)))
                     (when (and chosen (buffer-live-p buffer))
                       (let ((abbr (abbreviate-file-name
                                    (file-name-as-directory (expand-file-name chosen base-dir)))))
@@ -1411,56 +1443,35 @@ INITIAL is pre-filled in the directory field."
                           (lispm-ui-form-set
                            :directory abbr
                            :preset (and (assoc abbr choice-pairs) abbr)))))))))))
-         (validate (lambda (val)
-                     (let ((expanded (funcall resolve val)))
-                       (unless (and expanded (file-directory-p expanded))
-                         (lispm-tr "Working directory no longer exists: %s" (or val ""))))))
          (fields
           `((:directory :type text :label ,(lispm-tr "Directory")
                         :value ,initial :required t :submit t
                         :validate ,validate)
-             ,@(when choice-pairs
-                 `((:preset :type choice :label ,(lispm-tr "Project")
-                            :value ,(and (assoc initial choice-pairs) initial)
-                            :choices ,choice-pairs
-                            ,@(when (bound-and-true-p lispm-ui-form-choice-buttons-supported)
-                                `(:buttons ,browse-buttons :buttons-key :browse))
-                            :on-change ,(lambda (val)
-                                          (when (and val (buffer-live-p buffer))
-                                            (with-current-buffer buffer
-                                              (lispm-ui-form-set :directory val)))))))
-             ,@(when (or (not choice-pairs)
-                         (not (bound-and-true-p lispm-ui-form-choice-buttons-supported)))
-                 `((:browse :type buttons :buttons ,browse-buttons))))))
+            ,@(when choice-pairs
+                `((:preset :type choice :label ,(lispm-tr "Project")
+                           :value ,(and (assoc initial choice-pairs) initial)
+                           :choices ,choice-pairs
+                           ,@(when (bound-and-true-p lispm-ui-form-choice-buttons-supported)
+                               `(:buttons ,browse-buttons :buttons-key :browse))
+                           :on-change ,(lambda (val)
+                                         (when (and val (buffer-live-p buffer))
+                                           (with-current-buffer buffer
+                                             (lispm-ui-form-set :directory val)))))))
+            ,@(when (or (not choice-pairs)
+                        (not (bound-and-true-p lispm-ui-form-choice-buttons-supported)))
+                `((:browse :type buttons :buttons ,browse-buttons))))))
     (setq buffer
           (lispm-ui-form
            title fields
            :on-submit (lambda (values)
-                        (when (<= (recursion-depth) (1+ depth))
-                          (setq submitted t
-                                result (or (alist-get :directory values) initial))
-                          (when (= (recursion-depth) (1+ depth))
-                            (exit-recursive-edit))))
-           :on-cancel (lambda ()
-                        (when (<= (recursion-depth) (1+ depth))
-                          (setq submitted nil)
-                          (when (= (recursion-depth) (1+ depth))
-                            (exit-recursive-edit))))
-           :setup (lambda ()
-                    (when (boundp 'lispm-ui-form--props)
-                      (set 'lispm-ui-form--props
-                           (plist-put (symbol-value 'lispm-ui-form--props) :modal t)))
-                    (use-local-map (copy-keymap (current-local-map)))
-                    (local-set-key [remap keyboard-quit] #'lispm-ui-form-cancel)
-                    (local-set-key (kbd "ESC") #'lispm-ui-form-cancel)
-                    (local-set-key (kbd "<escape>") #'lispm-ui-form-cancel))))
+                        (funcall exit-with t (or (alist-get :directory values) initial)))
+           :on-cancel (apply-partially exit-with nil)
+           :setup #'lispm-agents--setup-modal-form))
     (with-current-buffer buffer
       (add-hook 'kill-buffer-hook
                 (lambda ()
                   (unless closing
-                    (setq submitted nil)
-                    (when (= (recursion-depth) (1+ depth))
-                      (exit-recursive-edit))))
+                    (funcall exit-with nil)))
                 nil t))
     (unwind-protect
         (progn
