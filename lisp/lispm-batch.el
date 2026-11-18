@@ -122,36 +122,6 @@
   "First environment variable in NAMES that is set and non-empty."
   (seq-find #'lispm-batch--non-empty-env names))
 
-(defun lispm-batch--resolve-api (props route model)
-  "Resolve the backend API symbol for PROPS, ROUTE and MODEL."
-  (or (plist-get props :api)
-      (when-let* ((env-api (lispm-batch--non-empty-env "LISPM_API")))
-        (intern (downcase env-api)))
-      (plist-get route :api)
-      (if (or (string-prefix-p "claude-" model)
-              (and (not (lispm-batch--non-empty-env "OPENAI_API_KEY"))
-                   (not (lispm-batch--non-empty-env "OPENAI_BASE_URL"))
-                   (not (lispm-batch--non-empty-env "FIREWORKS_API_KEY"))
-                   (not (lispm-batch--non-empty-env "MOONSHOT_API_KEY"))
-                   (not (lispm-batch--non-empty-env "OPENROUTER_API_KEY"))
-                   (lispm-batch--non-empty-env "ANTHROPIC_API_KEY")))
-          'anthropic
-        'openai)))
-
-(defun lispm-batch--resolve-url (props route api)
-  "Resolve the base URL for PROPS, ROUTE and API."
-  (or (plist-get props :url)
-      (lispm-batch--non-empty-env "LISPM_API_URL")
-      (if (eq api 'anthropic)
-          (lispm-batch--non-empty-env "ANTHROPIC_BASE_URL")
-        (or (lispm-batch--non-empty-env "OPENAI_BASE_URL")
-            (and (equal (plist-get route :key-env) "MOONSHOT_API_KEY")
-                 (lispm-batch--non-empty-env "MOONSHOT_BASE_URL"))))
-      (plist-get route :url)
-      (if (eq api 'anthropic)
-          "https://api.anthropic.com"
-        "https://api.openai.com/v1")))
-
 (defun lispm-batch-resolve-backend (&rest props)
   "Resolve a backend plist from PROPS and environment variables.
 PROPS may specify `:model' (including LiteLLM strings such as
@@ -170,16 +140,38 @@ PROPS may specify `:model' (including LiteLLM strings such as
          (prefix (and slash (substring raw-model 0 slash)))
          (route (or (and provider (cdr (assoc (downcase (format "%s" provider))
                                               lispm-batch-provider-routes)))
-                    (and rotom-url-p (cdr (assoc "rotom" lispm-batch-provider-routes)))
-                    (and prefix (cdr (assoc (downcase prefix) lispm-batch-provider-routes)))))
+                    (and rotom-url-p
+                         (cdr (assoc "rotom" lispm-batch-provider-routes)))
+                    (and prefix (cdr (assoc (downcase prefix)
+                                            lispm-batch-provider-routes)))))
          (model (if (and prefix
                          (if rotom-url-p
                              (member (downcase prefix) '("rotom" "rotom-messages"))
                            (assoc (downcase prefix) lispm-batch-provider-routes)))
                     (substring raw-model (1+ slash))
                   raw-model))
-         (api (lispm-batch--resolve-api props route model))
-         (url (lispm-batch--resolve-url props route api))
+         (api (or (plist-get props :api)
+                  (when-let* ((env-api (lispm-batch--non-empty-env "LISPM_API")))
+                    (intern (downcase env-api)))
+                  (plist-get route :api)
+                  (if (or (string-prefix-p "claude-" model)
+                          (and (not (lispm-batch--first-env
+                                     '("OPENAI_API_KEY" "OPENAI_BASE_URL" "FIREWORKS_API_KEY"
+                                       "MOONSHOT_API_KEY" "OPENROUTER_API_KEY")))
+                               (lispm-batch--non-empty-env "ANTHROPIC_API_KEY")))
+                      'anthropic
+                    'openai)))
+         (url (or (plist-get props :url)
+                  (lispm-batch--non-empty-env "LISPM_API_URL")
+                  (if (eq api 'anthropic)
+                      (lispm-batch--non-empty-env "ANTHROPIC_BASE_URL")
+                    (or (lispm-batch--non-empty-env "OPENAI_BASE_URL")
+                        (and (equal (plist-get route :key-env) "MOONSHOT_API_KEY")
+                             (lispm-batch--non-empty-env "MOONSHOT_BASE_URL"))))
+                  (plist-get route :url)
+                  (if (eq api 'anthropic)
+                      "https://api.anthropic.com"
+                    "https://api.openai.com/v1")))
          (local-url-p (and (stringp url)
                            (string-match-p
                             "\\`https?://\\(?:127\\.0\\.0\\.1\\|localhost\\|host\\.docker\\.internal\\)\\(?::\\|/\\|\\'\\)"
@@ -204,7 +196,9 @@ PROPS may specify `:model' (including LiteLLM strings such as
                              '(streaming stream-usage))))))
          (max-tokens (plist-get props :max-tokens))
          (key (plist-get props :key)))
-    `(:api ,api :url ,url :model ,model
+    `(:api ,api
+      :url ,url
+      :model ,model
       ,@(cond (key `(:key ,key))
               (key-env `(:key-env ,key-env)))
       ,@(and max-tokens `(:max-tokens ,max-tokens))
@@ -480,7 +474,8 @@ NOTE-FN PUMP-P) and returns (DONE . REPLY)."
       (lispm-tell agent prompt :callback (lambda (r) (setq reply r done t)))
       (while (and (not done) (< (float-time) deadline))
         (accept-process-output nil 0.05)
-        (when pump-p (lispm-batch--pump-events))
+        (when pump-p
+          (lispm-batch--pump-events))
         (when kernel-rt
           (ignore-errors (lispm-kernel-dispatch kernel-rt))))
       (cons done reply))))
@@ -532,12 +527,17 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
   "Call BODY-FN inside the isolated batch dynamic environment for STATE-DIR."
   (let ((lispm-directory state-dir)
         (lispm-agents-state-file (expand-file-name "agent-sessions.eld" state-dir))
-        (create-lockfiles nil) (make-backup-files nil) (auto-save-default nil)
-        (lispm-auto-approve-all t) (select-safe-coding-system-function nil)
+        (create-lockfiles nil)
+        (make-backup-files nil)
+        (auto-save-default nil)
+        (lispm-auto-approve-all t)
+        (select-safe-coding-system-function nil)
         (lispm-default-policy lispm-batch-policy)
         (lispm-condition-handlers lispm-batch-condition-handlers)
         (lispm-unattended-condition-handlers lispm-batch-condition-handlers)
-        (lispm-auto-title nil) (lispm-git nil) (lispm-journal-git nil)
+        (lispm-auto-title nil)
+        (lispm-git nil)
+        (lispm-journal-git nil)
         (lispm-compact-idle nil)
         (lispm-sandbox-level (if-let* ((sb (plist-get options :sandbox)))
                                  (if (symbolp sb) sb 'low)
@@ -546,7 +546,9 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
         (lispm-context-images
          (cond ((lispm-batch--non-empty-env "LISPM_CONTEXT_IMAGES")
                 (string-to-number (getenv "LISPM_CONTEXT_IMAGES")))
-               ((string-match-p "deepseek" (downcase (or (plist-get backend-spec :model) ""))) 0)
+               ((string-match-p "deepseek"
+                                (downcase (or (plist-get backend-spec :model) "")))
+                0)
                (t lispm-context-images)))
         (lispm-max-steps (or (plist-get options :max-steps) 400))
         (lispm-max-tokens (or (plist-get options :max-tokens) lispm-max-tokens))
@@ -554,8 +556,10 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
         (lispm-backends (cons (cons 'batch backend-spec) lispm-backends))
         (lispm-backend 'batch)
         (lispm-kernel-exec-runtime-function
-         (if kernel-rt (lambda () kernel-rt)
-           (and (boundp 'lispm-kernel-exec-runtime-function) lispm-kernel-exec-runtime-function)))
+         (if kernel-rt
+             (lambda () kernel-rt)
+           (and (boundp 'lispm-kernel-exec-runtime-function)
+                lispm-kernel-exec-runtime-function)))
         (had-exec-mode (bound-and-true-p lispm-kernel-exec-mode)))
     (when (and kernel-rt (fboundp 'lispm-kernel-exec-mode))
       (lispm-kernel-exec-mode 1))
@@ -564,13 +568,32 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
       (when (and kernel-rt (fboundp 'lispm-kernel-exec-mode) (not had-exec-mode))
         (lispm-kernel-exec-mode -1)))))
 
-(defun lispm-batch--build-result (agent backend-spec root started-time call-records outcome)
-  "Build the batch result for AGENT from BACKEND-SPEC, ROOT and OUTCOME.
-STARTED-TIME and CALL-RECORDS provide timing and tool telemetry."
+(defun lispm-batch--make-recorder (agent calls-path usage-path)
+  "Return a curried telemetry recorder `(ON-RESPONSE . GET-RECORDS)' for AGENT.
+ON-RESPONSE is a `lispm-response-functions' hook callback that records each
+turn step and streams telemetry to CALLS-PATH and USAGE-PATH; GET-RECORDS
+is a zero-argument thunk returning the chronological list of call records."
+  (let ((call-records nil)
+        (call-count 0))
+    (cons (lambda (_ag message)
+            (cl-incf call-count)
+            (let ((rec (lispm-batch-call-record call-count agent message)))
+              (push rec call-records)
+              (when calls-path
+                (lispm-batch--append-jsonl calls-path rec))
+              (when usage-path
+                (lispm-batch--write-json
+                 usage-path
+                 (lispm-batch-summarize-calls (reverse call-records))))))
+          (lambda ()
+            (nreverse call-records)))))
+
+(defun lispm-batch--format-result (agent backend-spec root started-time call-records outcome)
+  "Construct the batch result alist for AGENT from CALL-RECORDS and OUTCOME."
   (let* ((finished-time (current-time))
-         (duration (float-time (time-subtract finished-time started-time)))
          (started-iso (lispm-batch--iso-timestamp started-time))
          (finished-iso (lispm-batch--iso-timestamp finished-time))
+         (duration (float-time (time-subtract finished-time started-time)))
          (summary (lispm-batch-summarize-calls call-records))
          (done (plist-get outcome :done))
          (timed-out (plist-get outcome :timed-out))
@@ -578,32 +601,49 @@ STARTED-TIME and CALL-RECORDS provide timing and tool telemetry."
                        ((and done (consp call-records)) "completed")
                        (done "completed_no_calls")
                        (t "failed"))))
-    (cons summary
-          `((status . ,status)
-            (timed_out . ,(if timed-out t :false))
-            (model . ,(plist-get backend-spec :model))
-            (api . ,(symbol-name (plist-get backend-spec :api)))
-            (url . ,(plist-get backend-spec :url))
-            (cwd . ,root)
-            (started_at . ,started-iso)
-            (finished_at . ,finished-iso)
-            (duration_seconds . ,duration)
-            (reply . ,(or (plist-get outcome :reply) (lispm-agent-last-reply agent) ""))
-            (agent_execution . ((started_at . ,started-iso)
-                                (finished_at . ,finished-iso)))
-            ,@summary))))
+    `((status . ,status)
+      (timed_out . ,(if timed-out t :false))
+      (model . ,(plist-get backend-spec :model))
+      (api . ,(symbol-name (plist-get backend-spec :api)))
+      (url . ,(plist-get backend-spec :url))
+      (cwd . ,root)
+      (started_at . ,started-iso)
+      (finished_at . ,finished-iso)
+      (duration_seconds . ,duration)
+      (reply . ,(or (plist-get outcome :reply) (lispm-agent-last-reply agent) ""))
+      (agent_execution . ((started_at . ,started-iso)
+                          (finished_at . ,finished-iso)))
+      ,@summary)))
 
 (cl-defun lispm-batch-run (prompt &rest options
                                   &key cwd model provider api url key key-env
-                                  max-tokens effort timeout
+                                  max-steps max-tokens effort timeout
                                   output-dir calls-file usage-file result-file
-                                  transcript-file role instructions
+                                  transcript-file role instructions sandbox
                                   &allow-other-keys)
   "Run PROMPT headlessly in LispM and return the result alist.
-OPTIONS accept `:cwd', `:model', `:provider', `:api', `:url', `:key',
-`:key-env', `:max-steps', `:max-tokens', `:effort', `:timeout',
-`:output-dir', `:calls-file', `:usage-file', `:result-file',
-`:transcript-file', `:role', `:instructions' and `:sandbox'."
+OPTIONS:
+  :cwd              Root directory for the agent (default `default-directory')
+  :model            Model identifier or LiteLLM `<provider>/<model>' string
+  :provider         Explicit provider name (`openai', `anthropic', ...)
+  :api              Backend protocol symbol (`openai' or `anthropic')
+  :url              Base URL of the API endpoint
+  :key              Literal API key (prefer `:key-env' in production)
+  :key-env          Environment variable holding the API key
+  :max-steps        Maximum LLM requests in the turn (default `lispm-max-steps')
+  :max-tokens       Max output tokens per response (`lispm-max-tokens')
+  :effort           Reasoning effort (`low', `medium', `high', `xhigh', `max')
+  :timeout          Wall-clock timeout in seconds for the turn (default 1800)
+  :output-dir       Directory where `lispm-calls.jsonl', `lispm-usage.json',
+                    `result.json' and `session.org' are written
+  :calls-file       Explicit path for per-call JSONL telemetry
+  :usage-file       Explicit path for incremental usage JSON
+  :result-file      Explicit path for final result JSON
+  :transcript-file  Explicit path to copy the `.org' session transcript to
+  :role             Agent role symbol (default `assistant')
+  :instructions     Extra instructions appended to the agent's system prompt
+  :sandbox          Whether to enable `lispm-sandbox' (default nil)"
+  (ignore max-steps sandbox)
   (when (and (stringp cwd) (string-prefix-p "/" cwd) (string-search ":" cwd))
     (require 'tramp)
     (require 'tramp-container nil t)
@@ -617,54 +657,63 @@ OPTIONS accept `:cwd', `:model', `:provider', `:api', `:url', `:key',
          (usage-path (funcall resolve-out usage-file "lispm-usage.json"))
          (result-path (funcall resolve-out result-file "result.json"))
          (transcript-path (funcall resolve-out transcript-file "session.org"))
-         (state-dir (if out-dir (expand-file-name ".lispm-state/" out-dir)
+         (state-dir (if out-dir
+                        (expand-file-name ".lispm-state/" out-dir)
                       (make-temp-file "lispm-batch-" t)))
          agent kernel-rt)
     (unwind-protect
-        (let* ((backend-spec (lispm-batch-resolve-backend
-                              :model model :provider provider :api api
-                              :url url :key key :key-env key-env :max-tokens max-tokens))
-               (started-time (current-time))
-               (call-records nil) (call-count 0))
+        (let ((backend-spec (lispm-batch-resolve-backend
+                             :model model :provider provider :api api
+                             :url url :key key :key-env key-env
+                             :max-tokens max-tokens))
+              (started-time (current-time)))
           (setq kernel-rt (lispm-batch--start-kernel))
-          (when (and calls-path (file-exists-p calls-path)) (delete-file calls-path))
+          (when (and calls-path (file-exists-p calls-path))
+            (delete-file calls-path))
           (lispm-batch--with-environment
            state-dir backend-spec options kernel-rt
            (lambda ()
-             (setq agent (lispm-register-agent
-                          'batch :role (or role lispm-default-role) :root root :backend 'batch
-                          :model (plist-get backend-spec :model) :effort (or effort lispm-effort)
-                          :policy lispm-batch-policy :instructions instructions))
-             (let ((on-response
-                    (lambda (_ag message)
-                      (cl-incf call-count)
-                      (let ((rec (lispm-batch-call-record call-count agent message)))
-                        (push rec call-records)
-                        (when calls-path (lispm-batch--append-jsonl calls-path rec))
-                        (when usage-path
-                          (lispm-batch--write-json
-                           usage-path (lispm-batch-summarize-calls (reverse call-records))))))))
+             (setq agent (lispm-register-agent 'batch
+                                               :role (or role lispm-default-role)
+                                               :root root
+                                               :backend 'batch
+                                               :model (plist-get backend-spec :model)
+                                               :effort (or effort lispm-effort)
+                                               :policy lispm-batch-policy
+                                               :instructions instructions))
+             (pcase-let ((`(,on-response . ,get-records)
+                          (lispm-batch--make-recorder agent calls-path usage-path)))
                (add-hook 'lispm-response-functions on-response)
                (let* ((outcome (unwind-protect
                                    (lispm-batch--run-turns
                                     agent prompt root (or timeout 1800) started-time
-                                    kernel-rt (lambda () call-count))
+                                    kernel-rt (lambda () (length (funcall get-records))))
                                  (remove-hook 'lispm-response-functions on-response)))
-                      (built (lispm-batch--build-result
-                              agent backend-spec root started-time (nreverse call-records) outcome)))
-                 (when usage-path (lispm-batch--write-json usage-path (car built)))
-                 (when-let* ((transcript-path) (buf (lispm-agent-buffer agent)) ((buffer-live-p buf)))
-                   (make-directory (file-name-directory transcript-path) t)
-                   (with-current-buffer buf
-                     (write-region (point-min) (point-max) transcript-path nil 'silent)))
-                 (when result-path (lispm-batch--write-json result-path (cdr built)))
-                 (when (fboundp 'lispm-web-close-session) (ignore-errors (lispm-web-close-session)))
-                 (cdr built))))))
-      (when kernel-rt (ignore-errors (lispm-kernel-stop kernel-rt)))
+                      (records (funcall get-records))
+                      (result (lispm-batch--format-result
+                               agent backend-spec root started-time records outcome)))
+                 (when usage-path
+                   (lispm-batch--write-json usage-path (lispm-batch-summarize-calls records)))
+                 (when transcript-path
+                   (when-let* ((buf (lispm-agent-buffer agent))
+                               ((buffer-live-p buf)))
+                     (make-directory (file-name-directory transcript-path) t)
+                     (with-current-buffer buf
+                       (write-region (point-min) (point-max) transcript-path nil 'silent))))
+                 (when result-path
+                   (lispm-batch--write-json result-path result))
+                 (when (fboundp 'lispm-web-close-session)
+                   (ignore-errors (lispm-web-close-session)))
+                 result)))))
+      (when kernel-rt
+        (ignore-errors (lispm-kernel-stop kernel-rt)))
       (unless out-dir
-        (when-let* ((buf (and agent (lispm-agent-buffer agent))) ((buffer-live-p buf)))
-          (with-current-buffer buf (set-buffer-modified-p nil) (setq buffer-file-name nil))
-          (kill-buffer buf))
+        (when-let* ((buf (and agent (lispm-agent-buffer agent))))
+          (when (buffer-live-p buf)
+            (with-current-buffer buf
+              (set-buffer-modified-p nil)
+              (setq buffer-file-name nil))
+            (kill-buffer buf)))
         (ignore-errors (delete-directory state-dir t))))))
 
 (defun lispm-batch-parse-args (args)

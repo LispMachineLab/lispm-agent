@@ -877,22 +877,6 @@ them are compared too."
       (setq buffer-read-only t))
     (display-buffer (current-buffer))))
 
-(defun lispm-skills--stage-directory (name source-dir entry-name text directory target)
-  "Stage SOURCE-DIR with ENTRY-NAME and TEXT into TARGET under DIRECTORY.
-Uses a temporary directory named after NAME for atomic replacement."
-  (let ((copy (file-name-as-directory
-               (make-temp-file (expand-file-name (concat "." name "-") directory) t))))
-    (condition-case err
-        (progn
-          (copy-directory source-dir copy nil nil t)
-          (write-region text nil (expand-file-name entry-name copy) nil 'silent)
-          (when (file-directory-p target)
-            (delete-directory target t))
-          (rename-file (directory-file-name copy) (directory-file-name target)))
-      (error (when (file-directory-p copy)
-               (delete-directory copy t))
-             (signal (car err) (cdr err))))))
-
 ;;;###autoload
 (defun lispm-install-skill (source &optional noconfirm)
   "Install the skill SOURCE among the user's skills, and return its name.
@@ -932,15 +916,16 @@ skill installed would not replace."
                                  name (abbreviate-file-name target))))
      (t
       (dolist (location (list target-file
-                              (if directory-p other
+                              (if directory-p
+                                  other
                                 (or (seq-find #'file-exists-p
                                               (list (expand-file-name "SKILL.org" other)
                                                     (expand-file-name "SKILL.md" other)))
                                     (expand-file-name "SKILL.org" other)))))
-        (when-let* ((open (find-buffer-visiting location))
-                    ((buffer-modified-p open)))
-          (user-error "%s" (lispm-tr "%s is open in Emacs with unsaved changes; save or discard them first"
-                                     (abbreviate-file-name location)))))
+        (when-let* ((open (find-buffer-visiting location)))
+          (when (buffer-modified-p open)
+            (user-error "%s" (lispm-tr "%s is open in Emacs with unsaved changes; save or discard them first"
+                                       (abbreviate-file-name location))))))
       (unless noconfirm
         (save-window-excursion
           (if installed
@@ -957,11 +942,25 @@ as it is now" name))))
       (let ((coding-system-for-write 'utf-8))
         (if (not directory-p)
             (write-region text nil target nil 'silent)
-          (lispm-skills--stage-directory name (file-name-directory file) entry-name text directory target)))
-      (cond ((and directory-p (file-regular-p other)) (delete-file other))
+          ;; Copied whole beside it first, then put in place.
+          (let ((copy (file-name-as-directory
+                       (make-temp-file (expand-file-name (concat "." name "-") directory) t))))
+            (condition-case err
+                (progn
+                  (copy-directory (file-name-directory file) copy nil nil t)
+                  (write-region text nil (expand-file-name entry-name copy) nil 'silent)
+                  (when (file-directory-p target)
+                    (delete-directory target t))
+                  (rename-file (directory-file-name copy) (directory-file-name target)))
+              (error (when (file-directory-p copy)
+                       (delete-directory copy t))
+                     (signal (car err) (cdr err)))))))
+      ;; The skill as it was, if it was the other kind.
+      (cond ((and directory-p (file-regular-p other))
+             (delete-file other))
             ((and (not directory-p)
-                  (seq-some (lambda (f) (file-exists-p (expand-file-name f other)))
-                            '("SKILL.org" "SKILL.md")))
+                  (or (file-exists-p (expand-file-name "SKILL.org" other))
+                      (file-exists-p (expand-file-name "SKILL.md" other))))
              (delete-directory other t)))
       (when-let* ((open (find-buffer-visiting target-file)))
         (lispm-tools--sync open))

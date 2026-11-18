@@ -185,18 +185,25 @@ Signal an error when the source needs something that is missing."
     (when (alist-get 'use values)
       (lispm-set-model name nil t))))
 
-(defun lispm-backend-form--key-help (stored-secret stored-key values)
-  "Return the key-source help string for STORED-SECRET, STORED-KEY and VALUES."
-  (pcase (alist-get 'key-source values)
-    ('secret (if stored-secret
-                 (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
-               (lispm-tr "LispM Auth keeps it encrypted.")))
-    ('typed (if stored-key
-                (lispm-tr "A key is set; leave it empty to keep it, or type a new one.")
-              (lispm-tr "Saved in Customize in plain text.")))
-    ('env (lispm-tr "The variable holding the key."))
-    ('auth-source (lispm-tr "Looked up for the server's host as an agent first asks."))
-    (_ (lispm-tr "The server asks for no key."))))
+(defun lispm-backend-form--validate-url (value)
+  "Validate that VALUE is an HTTP or HTTPS base address."
+  (unless (and (stringp value)
+               (string-match-p "\\`https?://[^/[:space:]]+" value))
+    (lispm-tr "Starts with http:// or https://")))
+
+(defun lispm-backend-form--key-help (stored-secret stored-key)
+  "Return a help function for `key-source' given STORED-SECRET and STORED-KEY."
+  (lambda (values)
+    (pcase (alist-get 'key-source values)
+      ('secret (if stored-secret
+                   (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
+                 (lispm-tr "LispM Auth keeps it encrypted.")))
+      ('typed (if stored-key
+                  (lispm-tr "A key is set; leave it empty to keep it, or type a new one.")
+                (lispm-tr "Saved in Customize in plain text.")))
+      ('env (lispm-tr "The variable holding the key."))
+      ('auth-source (lispm-tr "Looked up for the server's host as an agent first asks."))
+      (_ (lispm-tr "The server asks for no key.")))))
 
 (defun lispm-backend-form--new-fields ()
   "Return the preset and name fields used when adding a new backend."
@@ -226,7 +233,8 @@ says, once it is valid."
          (source (if backend
                      (lispm-backend-form--key-source backend)
                    (if (lispm-secret-available-p) 'secret 'typed)))
-         (stored-secret (and name (eq source 'secret)
+         (stored-secret (and name
+                             (eq source 'secret)
                              (ignore-errors
                                (lispm-secret-get (lispm-backend-secret-id name) t))))
          (stored-key (and backend (stringp (plist-get backend :key))
@@ -235,7 +243,8 @@ says, once it is valid."
          (use-p (or (null name) (not (eq name (lispm-backend-name)))))
          (fields
           (append
-           (unless name (lispm-backend-form--new-fields))
+           (unless name
+             (lispm-backend-form--new-fields))
            `((api :type radio :label ,(lispm-tr "API")
                   :choices ,(mapcar (lambda (api)
                                       (cons (car api) (lispm-backend-api-name (car api))))
@@ -244,10 +253,7 @@ says, once it is valid."
                   :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
              (url :type text :label ,(lispm-tr "Address") :required t
                   :value ,(or (plist-get backend :url) "")
-                  :validate ,(lambda (value)
-                               (unless (and (stringp value)
-                                            (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                 (lispm-tr "Starts with http:// or https://")))
+                  :validate ,#'lispm-backend-form--validate-url
                   :help ,(lispm-tr "The server's base address, without the path LispM adds."))
              (model :type text :label ,(lispm-tr "Model") :required t
                     :value ,(or (plist-get backend :model) "")
@@ -255,17 +261,21 @@ says, once it is valid."
              (key-source :type choice :label ,(lispm-tr "Key") :required t
                          :choices ,(lispm-backend-form--key-source-choices source)
                          :value ,source
-                         :help ,(lambda (values)
-                                  (lispm-backend-form--key-help stored-secret stored-key values)))
-             (key :type password :label ,(lispm-tr "The key") :value ""
-                  :when ,(lambda (values) (memq (alist-get 'key-source values) '(secret typed)))
+                         :help ,(lispm-backend-form--key-help stored-secret stored-key))
+             (key :type password :label ,(lispm-tr "The key")
+                  :value ""
+                  :when ,(lambda (values)
+                           (memq (alist-get 'key-source values) '(secret typed)))
                   :help ,(lispm-tr "Never shown again; leave it empty to keep the one there is."))
-             (key-env :type text :label ,(lispm-tr "Variable") :value ,(or variable "")
-                      :when ,(lambda (values) (eq (alist-get 'key-source values) 'env))
+             (key-env :type text :label ,(lispm-tr "Variable")
+                      :value ,(or variable "")
+                      :when ,(lambda (values)
+                               (eq (alist-get 'key-source values) 'env))
                       :required t
                       :validate ,(lambda (value)
                                    (unless (and (stringp value)
-                                                (string-match-p "\\`[[:alpha:]_][[:alnum:]_]*\\'" value))
+                                                (string-match-p
+                                                 "\\`[[:alpha:]_][[:alnum:]_]*\\'" value))
                                      (lispm-tr "A variable's name, as ANTHROPIC_API_KEY")))
                       :help ,(lispm-tr "The environment variable holding the key."))
              (use :type check :text ,(lispm-tr "Use this backend for agents that name no model")
@@ -374,70 +384,81 @@ says, once it is valid."
       (lispm-backend-add name backend t))
     (lispm-set-model name model t)))
 
-(defun lispm-model-setup-form--key-needed-p (values)
-  "Non-nil if the provider selected in VALUES takes an API key."
-  (let* ((prov (alist-get 'provider values))
-         (p (lispm-model-setup-form--props prov)))
-    (not (or (memq prov '(ollama lm-studio))
-             (eq (plist-get p :key-source) 'none)
-             (and (assq prov lispm-backends)
-                  (eq (lispm-backend-form--key-source p) 'none))))))
-
 (defun lispm-model-setup-form ()
   "Make the form that sets up LispM's model and provider; return its buffer."
   (let* ((choices (lispm-model-setup-form--provider-choices))
          (provider (or (lispm-backend-name) (caar choices) 'custom))
          (props (lispm-model-setup-form--props provider))
-         (active-model (or (and (eq provider (lispm-backend-name)) (lispm-default-model))
-                           (plist-get props :model) ""))
+         (active-model (or (and (eq provider (lispm-backend-name))
+                                (lispm-default-model))
+                           (plist-get props :model)
+                           ""))
          (custom-p (lambda (values) (eq (alist-get 'provider values) 'custom)))
-         (address-p (lambda (values) (memq (alist-get 'provider values) '(custom ollama lm-studio))))
+         (address-p (lambda (values)
+                      (memq (alist-get 'provider values) '(custom ollama lm-studio))))
+         (key-p (lambda (values)
+                  (let* ((prov (alist-get 'provider values))
+                         (p (lispm-model-setup-form--props prov)))
+                    (not (or (memq prov '(ollama lm-studio))
+                             (eq (plist-get p :key-source) 'none)
+                             (and (assq prov lispm-backends)
+                                  (eq (lispm-backend-form--key-source p) 'none)))))))
          (fields
           `((model-group :type heading :label ,(lispm-tr "Model Provider"))
             (provider :type choice :label ,(lispm-tr "Provider")
-                      :choices ,choices :value ,provider
+                      :choices ,choices
+                      :value ,provider
                       :on-change ,#'lispm-model-setup-form--select-provider
                       :help ,(lispm-tr "Choose the provider or server LispM's agents ask."))
-            (name :type text :label ,(lispm-tr "Name") :required t :value "" :when ,custom-p
+            (name :type text :label ,(lispm-tr "Name") :required t
+                  :value ""
+                  :when ,custom-p
                   :validate ,(lambda (value)
                                (when (stringp value)
                                  (let ((name (intern (string-trim value))))
-                                   (unless (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
-                                                           (symbol-name name))
+                                   (unless (string-match-p
+                                            "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
+                                            (symbol-name name))
                                      (lispm-tr "Use letters, digits, `-', `_' or `.'")))))
                   :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))
             (api :type radio :label ,(lispm-tr "API")
                  :choices ,(mapcar (lambda (api)
                                      (cons (car api) (lispm-backend-api-name (car api))))
                                    lispm-backend-apis)
-                 :value ,(or (plist-get props :api) 'openai) :when ,custom-p
+                 :value ,(or (plist-get props :api) 'openai)
+                 :when ,custom-p
                  :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
             (url :type text :label ,(lispm-tr "Address") :required t
-                 :value ,(or (plist-get props :url) "") :when ,address-p
-                 :validate ,(lambda (value)
-                              (unless (and (stringp value)
-                                           (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                (lispm-tr "Starts with http:// or https://")))
+                 :value ,(or (plist-get props :url) "")
+                 :when ,address-p
+                 :validate ,#'lispm-backend-form--validate-url
                  :help ,(lispm-tr "The server's base address, without the path LispM adds."))
-            (model :type text :label ,(lispm-tr "Model") :required t :value ,active-model
+            (model :type text :label ,(lispm-tr "Model") :required t
+                   :value ,active-model
                    :help ,(lispm-tr "The model agents use when they name none."))
-            (key :type password :label ,(lispm-tr "The key") :value ""
-                 :when ,#'lispm-model-setup-form--key-needed-p
+            (key :type password :label ,(lispm-tr "The key")
+                 :value ""
+                 :when ,key-p
                  :help ,(lambda (values)
                           (let* ((prov (alist-get 'provider values))
-                                 (back (and prov (not (eq prov 'custom)) (lispm-backend-get prov))))
+                                 (back (and prov (not (eq prov 'custom))
+                                            (lispm-backend-get prov))))
                             (if (and back (lispm--backend-key-at-hand-p back))
                                 (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
                               (lispm-tr "LispM Auth keeps it encrypted.")))))))
          (buffer
           (lispm-ui-form
-           (lispm-tr "Set Up a Model") fields
+           (lispm-tr "Set Up a Model")
+           fields
            :intro (lispm-tr "Choose a model provider and enter its API key, or choose a local server.")
-           :submit (lispm-tr "Use Model") :cancel (lispm-tr "Cancel")
-           :setup (lambda () (when lispm-ui-form-show-header (setq-local lispm-ui-form-width 28)))
+           :submit (lispm-tr "Use Model")
+           :cancel (lispm-tr "Cancel")
+           :setup (lambda ()
+                    (when lispm-ui-form-show-header
+                      (setq-local lispm-ui-form-width 28)))
            :on-submit #'lispm-model-setup-form--submit)))
     (with-current-buffer buffer
-      (let* ((need-key (and (lispm-model-setup-form--key-needed-p (list (cons 'provider provider)))
+      (let* ((need-key (and (funcall key-p (list (cons 'provider provider)))
                             (not (and props (lispm--backend-key-at-hand-p props)))))
              (target (if need-key 'key 'model)))
         (when-let* ((widget (alist-get target (lispm-ui-form-widgets buffer))))
@@ -616,7 +637,8 @@ return its buffer."
          (http-p (lambda (values) (eq (alist-get 'transport values) 'http)))
          (fields
           (append
-           (unless name (lispm-mcp-form--new-fields))
+           (unless name
+             (lispm-mcp-form--new-fields))
            `((transport :type radio :label ,(lispm-tr "Transport")
                         :choices ((stdio . ,(lispm-tr "Command (stdio)"))
                                   (http . ,(lispm-tr "HTTP")))
@@ -642,13 +664,11 @@ return its buffer."
              (url :type text :label ,(lispm-tr "Address") :required t
                   :value ,(or (plist-get config :url) "")
                   :when ,http-p
-                  :validate ,(lambda (value)
-                               (unless (and (stringp value)
-                                            (string-match-p "\\`https?://[^/[:space:]]+" value))
-                                 (lispm-tr "Starts with http:// or https://")))
+                  :validate ,#'lispm-backend-form--validate-url
                   :help ,(lispm-tr "The HTTP address of the MCP server."))
              (token :type password :label ,(lispm-tr "The key")
-                    :value "" :when ,http-p
+                    :value ""
+                    :when ,http-p
                     :help ,(lispm-tr "Never shown again; leave it empty to keep the one there is."))
              (description :type text :label ,(lispm-tr "Description")
                           :value ,(or (plist-get config :description) "")
@@ -662,7 +682,8 @@ return its buffer."
                                            lispm-permission-classes)
                          :value ,(or (plist-get config :permission) 'mcp)
                          :help ,(lispm-tr "The permission class of the server's tools."))
-             (sandbox :type choice :label ,(lispm-tr "Sandbox") :when ,stdio-p
+             (sandbox :type choice :label ,(lispm-tr "Sandbox")
+                      :when ,stdio-p
                       :choices ((default . ,(lispm-tr "Follow LispM's sandbox"))
                                 (none . ,(lispm-sandbox-level-name 'none))
                                 (low . ,(lispm-sandbox-level-name 'low))

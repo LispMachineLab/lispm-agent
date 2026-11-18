@@ -654,151 +654,101 @@ objects: readers must not change them.  No transcript or diary is read."
                                     (lispm-agents))
           :journal (lispm-agent-journal agent))))
 
+(defun lispm-inspect--section (title &rest lines)
+  "Return inspector section (TITLE . NON-NIL-LINES), or nil when empty."
+  (when-let* ((kept (delq nil lines)))
+    (cons title kept)))
+
+(defun lispm-inspect--model-summary (agent)
+  "Return AGENT's model summary line, or \"no backend\" when none is configured."
+  (if-let* ((backend (lispm-backend-name agent))
+            ((assq backend lispm-backends)))
+      (lispm-tr "%s via %s, effort %s"
+                (lispm-agent-model* agent)
+                backend
+                (lispm-agent-effort* agent))
+    (lispm-tr "no backend")))
+
+(defun lispm-inspect--pending-line (agent item)
+  "Format pending call ITEM `(ID . CALL)' of AGENT for the inspector."
+  (pcase-let* ((`(,id . ,call) item)
+               (asked (lispm-asked call))
+               (summary (lispm-transcript-summary (plist-get asked :input))))
+    (concat (lispm-present (plist-get call :name)
+                           (list 'call (symbol-name (lispm-agent-name agent)) id))
+            (if summary (concat " " summary) "")
+            (propertize (format "  %s%s" (plist-get call :status)
+                                (if (plist-get call :asking)
+                                    (concat ", " (lispm-tr "asks for %s" (plist-get asked :name)))
+                                  ""))
+                        'face 'shadow))))
+
+(defun lispm-inspect--journal-line (entry)
+  "Format journal ENTRY `(TURN . SNAPSHOTS)' for the inspector."
+  (pcase-let ((`(,turn . ,snapshots) entry))
+    (lispm-inspect--line
+     (lispm-tr "turn %d" turn)
+     (mapconcat (lambda (s)
+                  (let ((file (plist-get (cdr s) :file)))
+                    (if file
+                        (lispm-present (lispm-tools--label file) (list 'file file nil))
+                      (lispm-present (plist-get (cdr s) :name)
+                                     (list 'buffer (plist-get (cdr s) :name))))))
+                snapshots ", "))))
+
 (defun lispm-inspect--agent-section (agent summaryp)
-  "Return the \"Agent\" inspector section for AGENT; SUMMARYP omits detail lines."
+  "Return the \"Agent\" identity section for AGENT; SUMMARYP omits detail lines."
   (let* ((buffer (lispm-agent-buffer agent))
          (file (and (buffer-live-p buffer) (buffer-file-name buffer))))
-    (cons (lispm-tr "Agent")
-          (delq nil
-                (list (lispm-inspect--line (lispm-tr "name") (lispm-inspect--agent-name agent))
-                      (lispm-inspect--line (lispm-tr "role")
-                                           (format "%s%s" (lispm-agent-role agent)
-                                                   (if (lispm-agent-standing agent)
-                                                       (concat ", " (lispm-tr "standing"))
-                                                     "")))
-                      (lispm-inspect--line (lispm-tr "project")
-                                           (lispm-present
-                                            (abbreviate-file-name (lispm-agent-root agent))
-                                            (list 'file (lispm-agent-root agent) nil)))
-                      (and (not summaryp)
-                           (lispm-inspect--line (lispm-tr "session") (lispm-agent-id agent)))
-                      (and (not summaryp) file
-                           (lispm-inspect--line (lispm-tr "file")
-                                                (lispm-present
-                                                 (abbreviate-file-name file)
-                                                 (list 'file file nil))))
-                      (and (not summaryp) (lispm-agent-description agent)
-                           (lispm-inspect--line (lispm-tr "description")
-                                                (lispm-agent-description agent))))))))
+    (lispm-inspect--section
+     (lispm-tr "Agent")
+     (lispm-inspect--line (lispm-tr "name") (lispm-inspect--agent-name agent))
+     (lispm-inspect--line (lispm-tr "role")
+                          (format "%s%s" (lispm-agent-role agent)
+                                  (if (lispm-agent-standing agent)
+                                      (concat ", " (lispm-tr "standing"))
+                                    "")))
+     (lispm-inspect--line (lispm-tr "project")
+                          (lispm-present (abbreviate-file-name (lispm-agent-root agent))
+                                         (list 'file (lispm-agent-root agent) nil)))
+     (and (not summaryp)
+          (lispm-inspect--line (lispm-tr "session") (lispm-agent-id agent)))
+     (and (not summaryp) file
+          (lispm-inspect--line (lispm-tr "file")
+                               (lispm-present (abbreviate-file-name file)
+                                              (list 'file file nil))))
+     (and (not summaryp) (lispm-agent-description agent)
+          (lispm-inspect--line (lispm-tr "description") (lispm-agent-description agent))))))
 
 (defun lispm-inspect--state-section (agent summaryp)
-  "Return the \"State\" inspector section for AGENT; SUMMARYP omits detail lines."
+  "Return the \"State\" runtime section for AGENT; SUMMARYP omits detail lines."
   (let ((condition (lispm-agent-condition agent))
-        (usage (lispm-agent-usage agent))
-        (backend (lispm-backend-name agent)))
-    (cons (lispm-tr "State")
-          (delq nil
-                (list (lispm-inspect--line (lispm-tr "state")
-                                           (format "%s%s" (lispm--state-name (lispm-agent-state agent))
-                                                   (if (lispm-agent-status agent)
-                                                       (concat ": " (lispm-agent-status agent))
-                                                     "")))
-                      (lispm-inspect--line (lispm-tr "turn")
-                                           (lispm-tr-n "%d, %d request" "%d, %d requests"
-                                                       (lispm-agent-steps agent)
-                                                       (lispm-agent-turn agent)
-                                                       (lispm-agent-steps agent)))
-                      (and condition
-                           (lispm-inspect--line (lispm-tr "condition")
-                                                (lispm-tr "%s: %s (restarts: %s)"
-                                                          (lispm-tr (plist-get condition :title))
-                                                          (lispm--oneline (plist-get condition :message) 70)
-                                                          (mapconcat #'symbol-name
-                                                                     (plist-get condition :restarts) ", "))))
-                      (and (not summaryp)
-                           (lispm-inspect--line (lispm-tr "model")
-                                                (if (and backend (assq backend lispm-backends))
-                                                    (lispm-tr "%s via %s, effort %s"
-                                                              (lispm-agent-model* agent)
-                                                              backend
-                                                              (lispm-agent-effort* agent))
-                                                  (lispm-tr "no backend"))))
-                      (and (not summaryp)
-                           (lispm-inspect--line (lispm-tr "usage")
-                                                (lispm-tr "%d in, %d out, %d from cache"
-                                                          (nth 0 usage) (nth 1 usage) (nth 2 usage)))))))))
-
-(defun lispm-inspect--policy-and-calls-sections (agent pending fullp)
-  "Return the Policy and Pending calls sections for AGENT."
-  (list
-   (and fullp
-        (cons (lispm-tr "Policy")
-              (delq nil
-                    (list (lispm-inspect--line (lispm-tr "policy") (lispm-inspect--policy (lispm-policy agent)))
-                          (and (lispm-agent-ceiling agent)
-                               (lispm-inspect--line (lispm-tr "ceiling")
-                                                    (lispm-inspect--policy (lispm-agent-ceiling agent))))
-                          (and (lispm-agent-allowed agent)
-                               (lispm-inspect--line (lispm-tr "allowed")
-                                                    (mapconcat (lambda (a)
-                                                                 (if (consp a)
-                                                                     (lispm-tr "%s (that call)" (car a))
-                                                                   a))
-                                                               (lispm-agent-allowed agent) ", ")))))))
-   (and pending
-        (cons (lispm-tr "Pending calls")
-              (mapcar (pcase-lambda (`(,id . ,call))
-                        (let* ((asked (lispm-asked call))
-                               (summary (lispm-transcript-summary (plist-get asked :input))))
-                          (concat (lispm-present (plist-get call :name)
-                                                 (list 'call (symbol-name (lispm-agent-name agent)) id))
-                                  (if summary (concat " " summary) "")
-                                  (propertize (format "  %s%s" (plist-get call :status)
-                                                      (if (plist-get call :asking)
-                                                          (concat ", " (lispm-tr "asks for %s" (plist-get asked :name)))
-                                                        ""))
-                                              'face 'shadow))))
-                      pending)))))
-
-(defun lispm-inspect--activity-sections (agent data summaryp fullp)
-  "Return the Inbox, Delegation, Journal and Extensions sections for AGENT."
-  (let ((entry (plist-get data :entry))
-        (inbox (plist-get data :inbox))
-        (waiting-on (plist-get data :waiting-on))
-        (waited-by (plist-get data :waited-on-by))
-        (journal (plist-get data :journal)))
-    (list
-     (and (not summaryp) (or entry inbox)
-          (cons (lispm-tr "Inbox")
-                (append (and entry
-                             (list (lispm-inspect--line (lispm-tr "handling") (lispm-inspect--entry entry))))
-                        (mapcar (lambda (item)
-                                  (lispm-inspect--line (lispm-tr "queued") (lispm-inspect--entry item)))
-                                inbox))))
-     (and (not summaryp) (or waiting-on waited-by)
-          (cons (lispm-tr "Delegation")
-                (delq nil
-                      (list (and waiting-on
-                                 (lispm-inspect--line (lispm-tr "waits on")
-                                                      (mapconcat #'lispm-inspect--agent-name waiting-on ", ")))
-                            (and waited-by
-                                 (lispm-inspect--line (lispm-tr "waited on by")
-                                                      (mapconcat #'lispm-inspect--agent-name waited-by ", ")))))))
-     (and fullp (seq-some #'cdr journal)
-          (cons (lispm-tr "Journal")
-                (mapcar (pcase-lambda (`(,turn . ,snapshots))
-                          (lispm-inspect--line
-                           (lispm-tr "turn %d" turn)
-                           (mapconcat (lambda (s)
-                                        (let ((file (plist-get (cdr s) :file)))
-                                          (if file
-                                              (lispm-present (lispm-tools--label file) (list 'file file nil))
-                                            (lispm-present (plist-get (cdr s) :name)
-                                                           (list 'buffer (plist-get (cdr s) :name))))))
-                                      snapshots ", ")))
-                        (seq-filter #'cdr journal))))
-     (and fullp (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
-          (cons (lispm-tr "Extensions")
-                (delq nil
-                      (list (and (lispm-agent-loaded-tools agent)
-                                 (lispm-inspect--line (lispm-tr "tools loaded")
-                                                      (mapconcat (lambda (name)
-                                                                   (lispm-present name (list 'tool name)))
-                                                                 (lispm-agent-loaded-tools agent) ", ")))
-                            (and (lispm-agent-triggers agent)
-                                 (lispm-inspect--line (lispm-tr "triggers")
-                                                      (mapconcat (lambda (trigger) (plist-get trigger :name))
-                                                                 (lispm-agent-triggers agent) ", "))))))))))
+        (usage (lispm-agent-usage agent)))
+    (lispm-inspect--section
+     (lispm-tr "State")
+     (lispm-inspect--line (lispm-tr "state")
+                          (format "%s%s" (lispm--state-name (lispm-agent-state agent))
+                                  (if (lispm-agent-status agent)
+                                      (concat ": " (lispm-agent-status agent))
+                                    "")))
+     (lispm-inspect--line (lispm-tr "turn")
+                          (lispm-tr-n "%d, %d request" "%d, %d requests"
+                                      (lispm-agent-steps agent)
+                                      (lispm-agent-turn agent)
+                                      (lispm-agent-steps agent)))
+     (and condition
+          (lispm-inspect--line (lispm-tr "condition")
+                               (lispm-tr "%s: %s (restarts: %s)"
+                                         (lispm-tr (plist-get condition :title))
+                                         (lispm--oneline (plist-get condition :message) 70)
+                                         (mapconcat #'symbol-name
+                                                    (plist-get condition :restarts) ", "))))
+     (and (not summaryp)
+          (lispm-inspect--line (lispm-tr "model") (lispm-inspect--model-summary agent)))
+     (and (not summaryp)
+          (lispm-inspect--line (lispm-tr "usage")
+                               (lispm-tr "%d in, %d out, %d from cache"
+                                         (nth 0 usage) (nth 1 usage) (nth 2 usage)))))))
 
 (defun lispm-inspect-sections (agent &optional viewspec)
   "What the inspector shows of AGENT: a list of (TITLE . LINES).
@@ -808,13 +758,59 @@ LINES are strings, whose objects are presented."
   (let* ((viewspec (or viewspec (bound-and-true-p lispm-inspect-viewspec) 'full))
          (summaryp (eq viewspec 'summary))
          (fullp (eq viewspec 'full))
-         (data (lispm-inspect-data agent)))
+         (data (lispm-inspect-data agent))
+         (pending (plist-get data :pending))
+         (entry (plist-get data :entry))
+         (inbox (plist-get data :inbox))
+         (waiting-on (plist-get data :waiting-on))
+         (waited-by (plist-get data :waited-on-by))
+         (journal (plist-get data :journal)))
     (delq nil
-          (append (list (lispm-inspect--agent-section agent summaryp)
-                        (lispm-inspect--state-section agent summaryp))
-                  (lispm-inspect--policy-and-calls-sections
-                   agent (plist-get data :pending) fullp)
-                  (lispm-inspect--activity-sections agent data summaryp fullp)))))
+          (list
+           (lispm-inspect--agent-section agent summaryp)
+           (lispm-inspect--state-section agent summaryp)
+           (and fullp
+                (lispm-inspect--section
+                 (lispm-tr "Policy")
+                 (lispm-inspect--line (lispm-tr "policy") (lispm-inspect--policy (lispm-policy agent)))
+                 (and (lispm-agent-ceiling agent)
+                      (lispm-inspect--line (lispm-tr "ceiling") (lispm-inspect--policy (lispm-agent-ceiling agent))))
+                 (and (lispm-agent-allowed agent)
+                      (lispm-inspect--line (lispm-tr "allowed")
+                                           (mapconcat (lambda (a)
+                                                        (if (consp a) (lispm-tr "%s (that call)" (car a)) a))
+                                                      (lispm-agent-allowed agent) ", ")))))
+           (and pending
+                (cons (lispm-tr "Pending calls")
+                      (mapcar (apply-partially #'lispm-inspect--pending-line agent) pending)))
+           (and (not summaryp) (or entry inbox)
+                (apply #'lispm-inspect--section (lispm-tr "Inbox")
+                       (and entry (lispm-inspect--line (lispm-tr "handling") (lispm-inspect--entry entry)))
+                       (mapcar (lambda (item) (lispm-inspect--line (lispm-tr "queued") (lispm-inspect--entry item)))
+                               inbox)))
+           (and (not summaryp) (or waiting-on waited-by)
+                (lispm-inspect--section
+                 (lispm-tr "Delegation")
+                 (and waiting-on
+                      (lispm-inspect--line (lispm-tr "waits on")
+                                           (mapconcat #'lispm-inspect--agent-name waiting-on ", ")))
+                 (and waited-by
+                      (lispm-inspect--line (lispm-tr "waited on by")
+                                           (mapconcat #'lispm-inspect--agent-name waited-by ", ")))))
+           (and fullp (seq-some #'cdr journal)
+                (cons (lispm-tr "Journal")
+                      (mapcar #'lispm-inspect--journal-line (seq-filter #'cdr journal))))
+           (and fullp (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
+                (lispm-inspect--section
+                 (lispm-tr "Extensions")
+                 (and (lispm-agent-loaded-tools agent)
+                      (lispm-inspect--line (lispm-tr "tools loaded")
+                                           (mapconcat (lambda (name) (lispm-present name (list 'tool name)))
+                                                      (lispm-agent-loaded-tools agent) ", ")))
+                 (and (lispm-agent-triggers agent)
+                      (lispm-inspect--line (lispm-tr "triggers")
+                                           (mapconcat (lambda (tr) (plist-get tr :name))
+                                                      (lispm-agent-triggers agent) ", ")))))))))
 
 (defun lispm-inspect--copy-data (data)
   "Copy plain DATA, including the strings in its lists and vectors.

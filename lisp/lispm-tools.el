@@ -118,24 +118,57 @@ a list of strings; they do not change the tool's name or schema."
 
 (defmacro lispm-deftool (name params docstring &rest body)
   "Define a tool NAME that agents can call.
-PARAMS is a list of (ARG TYPE DESCRIPTION . OPTIONS), TYPE among
-`string', `integer', `number', `boolean', `array' or `object', and
-OPTIONS among `:optional t', `:enum LIST' and `:items SCHEMA'.
-DOCSTRING is the description the model reads to decide when to call it.
+NAME's symbol name is what the model sees.  PARAMS is a list of
+\(ARG TYPE DESCRIPTION . OPTIONS), TYPE being string, integer,
+number, boolean, array or object, and OPTIONS among :optional t,
+:enum LIST and :items SCHEMA.  The model sees ARG with dashes
+turned into underscores.  DOCSTRING is the description the model
+reads to decide when to call the tool.
 
-Leading keyword options in BODY:
-  :permission CLASS  `read' (default), `memory', `comm', `write', `shell'
-  :async t           BODY receives `done' taking (RESULT &optional ERRORP)
-  :preview FUNCTION  returns a preview string while awaiting approval
-  :diff FUNCTION     returns (OLD NEW LABEL) for a background diff preview
-  :changes FUNCTION  returns (BUFFER . TEXT) for live buffer preview
-  :targets FUNCTION  returns files a `write' tool would modify
-  :deferred t        offered only once `search_tools' loads it
-  :always-ask t      always awaits user approval unless denied by policy
-  :for FUNCTION      predicate on an agent restricting who sees the tool
-  :class FUNCTION    dynamic permission-class downgrade function
-  :keywords LIST     explicit search terms (list of strings)
-Otherwise BODY's value (or `lispm-tool-result') is the tool result."
+BODY may start with keyword options:
+  :permission CLASS  read (the default), memory, comm, write, shell or exec
+  :async t           BODY gets a function `done' to call later with
+                     the result (and non-nil as second argument on
+                     failure); its own value is ignored
+  :preview FUNCTION  called with the same arguments; returns a string
+                     shown while the call awaits approval
+  :diff FUNCTION     instead of :preview, for a call that changes a file
+                     or buffer: called with the same arguments, returns
+                     (OLD NEW LABEL), the text there now and the text
+                     the call would leave, whose diff, LABEL naming the
+                     file, is the preview; it is made in the background
+  :changes FUNCTION  for a tool that changes a buffer: called with the
+                     same arguments, returns (BUFFER . TEXT), the buffer
+                     the call would change and the text it would leave
+                     there; the change is then shown in BUFFER while the
+                     call is written and while it awaits approval
+  :targets FUNCTION  for a tool of class write whose `path' or `buffer'
+                     argument does not name what it writes: called with
+                     the same arguments before the call runs, returns the
+                     files it would change, for the rule that writes
+                     outside the agent's root always ask (see
+                     `lispm-tool-action'); it changes nothing
+  :deferred t        offered only once search_tools finds it (see
+                     `lispm-tool-sources'): for tools seldom needed
+  :always-ask t      every call awaits the user's approval, whatever
+                     the policy says (one that denies the class still
+                     denies it): for calls whose effects outlast the
+                     session, such as saving code later sessions run
+  :for FUNCTION      called with an agent: the tool is that agent's
+                     only if it returns non-nil, as a character's own
+                     tools are only characters'
+  :class FUNCTION    called with the same arguments before the call is
+                     decided: returns the permission class of this call
+                     when it does less than the tool can, as a shell
+                     command that only reads does, or nil for the tool's
+                     own; it changes nothing (see
+                     `lispm-tool-call-permission')
+  :keywords LIST     explicit search terms, a list of strings; these
+                     aid discovery without adding callable aliases
+
+Otherwise BODY's value is the result: a string, or any object, which
+is printed; or a `lispm-tool-result', text with image or video files
+the model sees too.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
   (let ((permission 'read) async preview diff changes targets deferred always-ask for class keywords
         (args (mapcar #'car params)))
@@ -1801,6 +1834,8 @@ non-binary, or the list of match lines (at most LIMIT)."
   (lambda (file limit)
     (let ((open (gethash file visiting))
           (label (funcall label-fn file)))
+      ;; A buffer is searched for its unsaved changes, unless it
+      ;; is out of date: then the file is.
       (if (and (buffer-live-p open) (lispm--buffer-current-p open))
           (with-current-buffer open
             (let ((case-fold-search case-fold))
@@ -1808,12 +1843,18 @@ non-binary, or the list of match lines (at most LIMIT)."
         (with-current-buffer buffer
           (let* ((size (or (file-attribute-size (file-attributes file)) 0))
                  (small (<= size lispm-search-max-file-size))
+                 ;; Read files as they are, no decompression or
+                 ;; decryption, and as UTF-8: detecting each file's
+                 ;; coding system would double the time.  A remote
+                 ;; file is read through TRAMP's handler still.
                  (file-name-handler-alist (and (file-remote-p file) file-name-handler-alist))
                  (inhibit-file-name-handlers (append '(jka-compr-handler epa-file-handler)
                                                      inhibit-file-name-handlers))
                  (inhibit-file-name-operation 'insert-file-contents)
                  (coding-system-for-read 'utf-8))
             (erase-buffer)
+            ;; Binary files are skipped; of a large one only the
+            ;; head is read, to tell whether it is.
             (when (and (ignore-errors
                          (insert-file-contents file nil 0 (if small size 8000))
                          t)
@@ -1860,6 +1901,7 @@ is abandoned if the turn of AGENT in which it started ends meanwhile."
                                  (/= turn (lispm-agent-turn agent))))
                    (kill-buffer buffer)
                  (let ((deadline (+ (float-time) lispm-tools--search-slice)))
+                   ;; At least one file per slice, however short the slice.
                    (while (progn
                             (when-let* ((next (pop files)))
                               (if (directory-name-p next)
@@ -1914,14 +1956,18 @@ Return non-nil when the kernel took the search, or nil to fall back."
                (unless (and turn (or (not (lispm-agent-busy-p agent))
                                      (/= turn (lispm-agent-turn agent))))
                  (condition-case err
-                     (let ((matches nil) (count 0) (large 0) (truncated nil))
+                     (let ((matches nil)
+                           (count 0)
+                           (large 0)
+                           (truncated nil))
                        (dolist (item (plist-get res :items))
                          (unless truncated
                            (let* ((file (plist-get item :file))
                                   (label (and file (funcall label-fn file)))
                                   (limit (- lispm-search-max-matches count)))
                              (cond
-                              ((plist-get item :large) (cl-incf large))
+                              ((plist-get item :large)
+                               (cl-incf large))
                               ((plist-get item :open)
                                (let ((open (gethash file visiting)))
                                  (when (and (buffer-live-p open) (lispm--buffer-current-p open))
@@ -2259,6 +2305,7 @@ is named without a directory: a command naming one by its path asks."
 (defun lispm-shell--scan-redirection (command i length)
   "Scan a shell redirection in COMMAND starting at I (of LENGTH).
 Return the new index after the redirection target, or throw `unsure'."
+  ;; At a <, > or &>, any descriptor before it dropped.
   (let ((start i))
     (while (and (< i length) (memq (aref command i) '(?< ?> ?&)))
       (cl-incf i))
@@ -2270,18 +2317,19 @@ Return the new index after the redirection target, or throw `unsure'."
                     (not (memq (aref command i) '(?\s ?\t ?\n ?| ?& ?\; ?< ?>))))
           (cl-incf i))
         (let ((target (substring command target-start i)))
+          ;; Only literal targets: quoting or expansion can
+          ;; hide a word boundary, including a later #.
           (when (seq-some (lambda (c)
-                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~ ?\( ?\) ?{ ?} ?\[ ?\])))
+                            (memq c '(?\\ ?' ?\" ?$ ?` ?* ?? ?~
+                                      ?\( ?\) ?{ ?} ?\[ ?\])))
                           target)
             (throw 'unsure 'unsure))
           (pcase op
             ((or ">" ">>" "&>")
              (unless (equal target "/dev/null") (throw 'unsure 'unsure)))
-            (">&"
-             (unless (string-match-p "\\`[0-9]+\\'" target) (throw 'unsure 'unsure)))
-            ("<"
-             (when (or (string-empty-p target) (string-prefix-p "(" target))
-               (throw 'unsure 'unsure)))
+            (">&" (unless (string-match-p "\\`[0-9]+\\'" target) (throw 'unsure 'unsure)))
+            ("<" (when (or (string-empty-p target) (string-prefix-p "(" target))
+                   (throw 'unsure 'unsure)))
             (_ (throw 'unsure 'unsure)))
           i)))))
 
@@ -2290,9 +2338,15 @@ Return the new index after the redirection target, or throw `unsure'."
 Words are split as the shell splits them, quotes and backslashes
 undone, at spaces, newlines, |, ||, && and ;.  Comments end at the
 next newline; escaped newlines elsewhere join lines.  Anything that
-would have the shell do more than run programs on words is `unsure'."
+would have the shell do more than run programs on words is `unsure': a
+redirection other than to /dev/null, from a file or of one descriptor
+to another; a command or process substitution, backquotes included; a
+subshell, group or function; a job put in the background; a here
+document; an environment assignment before a program.  So
+is an empty command."
   (let ((length (length command))
-        (i 0) commands words word (in-word nil) quote)
+        (i 0)
+        commands words word (in-word nil) quote)
     (cl-labels ((char () (and (< i length) (aref command i)))
                 (end-word () (when in-word (push (apply #'string (nreverse word)) words))
                            (setq word nil in-word nil))
@@ -2300,13 +2354,16 @@ would have the shell do more than run programs on words is `unsure'."
                              (when words (push (nreverse words) commands))
                              (setq words nil))
                 (add (c) (push c word) (setq in-word t))
-                (unsure () (throw 'unsure 'unsure)))
+                (unsure () (throw 'unsure 'unsure))
+                (redirection ()
+                  (setq i (lispm-shell--scan-redirection command i length))))
       (catch 'unsure
         (while (< i length)
           (let ((c (aref command i)))
             (cond
              ((eq quote ?')
-              (if (eq c ?') (setq quote nil) (add c)) (cl-incf i))
+              (if (eq c ?') (setq quote nil) (add c))
+              (cl-incf i))
              ((eq quote ?\")
               (cond ((eq c ?\") (setq quote nil) (cl-incf i))
                     ((eq c ?\\)
@@ -2316,31 +2373,43 @@ would have the shell do more than run programs on words is `unsure'."
                          (unless (memq (char) '(?$ ?` ?\" ?\\)) (add ?\\))
                          (add (char)))
                        (cl-incf i)))
-                    ((or (eq c ?`)
-                         (and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\()))
+                    ((eq c ?`) (unsure))
+                    ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
                      (unsure))
                     (t (add c) (cl-incf i))))
-             ((memq c '(?' ?\")) (setq quote c in-word t) (cl-incf i))
+             ((memq c '(?' ?\"))
+              (setq quote c in-word t)
+              (cl-incf i))
              ((eq c ?\\)
               (cl-incf i)
-              (when (char) (unless (eq (char) ?\n) (add (char))) (cl-incf i)))
-             ((memq c '(?\s ?\t)) (end-word) (cl-incf i))
-             ((memq c '(?\n ?\;)) (end-command) (cl-incf i))
+              (when (char)
+                (unless (eq (char) ?\n) (add (char)))
+                (cl-incf i)))
+             ((memq c '(?\s ?\t))
+              (end-word)
+              (cl-incf i))
+             ((memq c '(?\n ?\;))
+              (end-command)
+              (cl-incf i))
              ((eq c ?|)
-              (end-command) (cl-incf i) (when (eq (char) ?|) (cl-incf i)))
+              (end-command)
+              (cl-incf i)
+              (when (eq (char) ?|) (cl-incf i)))
              ((eq c ?&)
-              (cond ((eq (and (< (1+ i) length) (aref command (1+ i))) ?&)
-                     (end-command) (cl-incf i 2))
-                    ((eq (and (< (1+ i) length) (aref command (1+ i))) ?>)
-                     (end-word) (setq i (lispm-shell--scan-redirection command i length)))
-                    (t (unsure))))
+              (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?&)
+                  (progn (end-command) (cl-incf i 2))
+                (if (eq (and (< (1+ i) length) (aref command (1+ i))) ?>)
+                    (progn (end-word) (redirection))
+                  (unsure))))
              ((memq c '(?< ?>))
+              ;; 2>&1: the digits so far are the descriptor, not a word.
               (if (and in-word word (seq-every-p (lambda (d) (<= ?0 d ?9)) word))
                   (setq word nil in-word nil)
                 (end-word))
-              (setq i (lispm-shell--scan-redirection command i length)))
-             ((or (memq c '(?` ?\( ?\)))
-                  (and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\()))
+              (redirection))
+             ((memq c '(?` ?\( ?\)))
+              (unsure))
+             ((and (eq c ?$) (eq (and (< (1+ i) length) (aref command (1+ i))) ?\())
               (unsure))
              ((and (eq c ?#) (not in-word))
               (while (and (char) (not (eq (char) ?\n))) (cl-incf i)))
@@ -2352,10 +2421,11 @@ would have the shell do more than run programs on words is `unsure'."
         (end-command)
         (when quote (unsure))
         (let ((commands (nreverse commands)))
-          (unless commands (unsure))
-          (dolist (words commands)
-            (when (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" (car words))
-              (unsure)))
+          (when (or (null commands)
+                    (seq-some (lambda (w)
+                                (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" (car w)))
+                              commands))
+            (unsure))
           commands)))))
 
 (defun lispm-shell-read-only-p (command)
