@@ -676,7 +676,9 @@ roster this function may read one agent's current transcript and inbox.
 The returned lists and strings belong to the caller."
   (require 'lispm-agents-roster)
   (when-let* ((buffer (lispm-agents-roster-buffer key)))
-    (let* ((agent (buffer-local-value 'lispm-session-agent buffer))
+    (let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
+                      (and (boundp 'lispm-chat-agent)
+                           (buffer-local-value 'lispm-chat-agent buffer))))
            (data (and agent (lispm-inspect-data agent)))
            (work (if agent
                      (list :turn (lispm-agent-turn agent)
