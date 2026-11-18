@@ -71,6 +71,22 @@ By default they look as they would, and light up under the mouse, as
 Genera's did."
   :group 'lispm)
 
+(defface lispm-presentation-acceptable
+  '((((class color)) :box (:line-width (-1 . -1)))
+    (t :underline t))
+  "Face highlighting presentations acceptable to an active `lispm-accept'."
+  :group 'lispm)
+
+(defvar lispm-accept-types nil
+  "Presentation type or list of types currently accepted by `lispm-accept'.
+When `t', any presentation object is acceptable.")
+
+(defvar lispm-accept--constraints nil
+  "Active completion constraints `(:collection :predicate :require-match)'.")
+
+(defvar lispm-accept--overlays nil
+  "Temporary overlays highlighting acceptable presentations during `lispm-accept'.")
+
 (defvar-keymap lispm-presentation-map
   :doc "Keymap of presentations: act on the object with a click or RET."
   "<mouse-2>" #'lispm-act-at-mouse
@@ -121,22 +137,120 @@ By default the system opens it with the program it has for videos."
   "The object presented at POS (default: point), or nil."
   (get-text-property (or pos (point)) 'lispm-object))
 
-(defun lispm-act (object)
-  "Act on OBJECT as its type says; see lispm-inspect.el."
+(defun lispm-object-value (object)
+  "The input string OBJECT stands for when accepted by `lispm-accept'."
   (pcase object
-    (`(file ,file ,line)
-     (pop-to-buffer (find-file-noselect file))
-     (when line
-       (goto-char (point-min))
-       (forward-line (1- line))))
-    (`(video ,file) (funcall lispm-play-video-function file))
-    (`(buffer ,name)
-     (pop-to-buffer (or (get-buffer name) (user-error "%s" (lispm-tr "No buffer named %s" name)))))
-    (`(agent ,name) (lispm-inspect (lispm-get-agent name)))
-    (`(symbol ,symbol) (describe-symbol symbol))
-    (`(tool ,name) (lispm-inspect--visit-tool name))
-    (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-get-agent agent) id))
-    (_ (user-error "%s" (lispm-tr "Nothing to act on here")))))
+    (`(file ,file ,_line) file)
+    (`(video ,file) file)
+    (`(buffer ,name) name)
+    (`(agent ,name) name)
+    (`(symbol ,symbol) (symbol-name symbol))
+    (`(tool ,name) name)
+    (`(call ,_agent ,id) id)))
+
+(defun lispm-object-acceptable-p (object &optional types)
+  "Non-nil if OBJECT matches TYPES and active `lispm-accept' constraints.
+TYPES is a presentation type symbol (`file', `agent', `symbol', ...),
+a list of such symbols, or `t' for any presentation object."
+  (let ((types (or types lispm-accept-types)))
+    (and (consp object)
+         types
+         (or (eq types t)
+             (if (listp types)
+                 (memq (car object) types)
+               (eq (car object) types)))
+         (or (null lispm-accept--constraints)
+             (let ((value (lispm-object-value object))
+                   (collection (plist-get lispm-accept--constraints :collection))
+                   (predicate (plist-get lispm-accept--constraints :predicate))
+                   (require-match (plist-get lispm-accept--constraints :require-match)))
+               (and (stringp value)
+                    (cond (collection
+                           (if require-match
+                               (test-completion value collection predicate)
+                             (or (null predicate) (funcall predicate value))))
+                          (predicate (funcall predicate value))
+                          (t t)))))
+         t)))
+
+(defun lispm-accept--highlight (&optional types)
+  "Highlight presentations matching TYPES across visible windows."
+  (lispm-accept--unhighlight)
+  (let ((types (or types lispm-accept-types)))
+    (when types
+      (walk-windows
+       (lambda (window)
+         (with-current-buffer (window-buffer window)
+           (let ((pos (max (point-min) (window-start window)))
+                 (limit (min (point-max) (or (window-end window t) (point-max)))))
+             (while (< pos limit)
+               (let ((obj (get-text-property pos 'lispm-object))
+                     (next (min limit
+                                (or (next-single-property-change pos 'lispm-object nil limit)
+                                    limit))))
+                 (when (lispm-object-acceptable-p obj types)
+                   (let ((ov (make-overlay pos next)))
+                     (overlay-put ov 'face 'lispm-presentation-acceptable)
+                     (overlay-put ov 'help-echo (lispm-present--describe obj))
+                     (push ov lispm-accept--overlays)))
+                 (setq pos next))))))
+       'no-minibuf t))))
+
+(defun lispm-accept--unhighlight ()
+  "Remove overlays created by `lispm-accept--highlight'."
+  (mapc #'delete-overlay lispm-accept--overlays)
+  (setq lispm-accept--overlays nil))
+
+(defun lispm-accept-select (object)
+  "Accept OBJECT for an active `lispm-accept' prompt and return its value.
+When the minibuffer is active, select its window, insert the value and exit."
+  (unless (lispm-object-acceptable-p object)
+    (user-error "%s" (lispm-tr "Nothing to act on here")))
+  (let ((value (lispm-object-value object))
+        (mini (active-minibuffer-window)))
+    (when mini
+      (with-selected-window mini
+        (delete-minibuffer-contents)
+        (insert value)
+        (exit-minibuffer)))
+    value))
+
+(defun lispm-accept (type prompt &optional collection predicate require-match default)
+  "Read an input of presentation TYPE with PROMPT, as Genera's `accept' did.
+While the minibuffer awaits input, presentations matching TYPE in visible
+windows are highlighted in `lispm-presentation-acceptable' and clicking
+or pressing RET on one supplies its `lispm-object-value' directly."
+  (let ((lispm-accept-types type)
+        (lispm-accept--constraints (list :collection collection
+                                         :predicate predicate
+                                         :require-match require-match)))
+    (unwind-protect
+        (progn
+          (lispm-accept--highlight type)
+          (if collection
+              (completing-read prompt collection predicate require-match nil nil default)
+            (read-string prompt nil nil default)))
+      (lispm-accept--unhighlight))))
+
+(defun lispm-act (object)
+  "Act on OBJECT as its type says, or supply it to `lispm-accept'.
+See `lispm-inspect.el' for presentation types."
+  (if lispm-accept-types
+      (lispm-accept-select object)
+    (pcase object
+      (`(file ,file ,line)
+       (pop-to-buffer (find-file-noselect file))
+       (when line
+         (goto-char (point-min))
+         (forward-line (1- line))))
+      (`(video ,file) (funcall lispm-play-video-function file))
+      (`(buffer ,name)
+       (pop-to-buffer (or (get-buffer name) (user-error "%s" (lispm-tr "No buffer named %s" name)))))
+      (`(agent ,name) (lispm-inspect (lispm-get-agent name)))
+      (`(symbol ,symbol) (describe-symbol symbol))
+      (`(tool ,name) (lispm-inspect--visit-tool name))
+      (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-get-agent agent) id))
+      (_ (user-error "%s" (lispm-tr "Nothing to act on here"))))))
 
 (defvar lispm-act-functions nil
   "Functions acting on what is at point where no object is presented.
@@ -284,6 +398,11 @@ the reply defines."
 (defvar-local lispm-inspect-agent nil
   "The agent the inspector in this buffer shows.")
 
+(defvar-local lispm-inspect-viewspec 'full
+  "The viewspec controlling the level of detail in this inspector buffer.
+One of `full' (all sections), `compact' (identity, state, calls, inbox,
+delegation) or `summary' (identity, state and pending calls only).")
+
 (defun lispm-inspect--line (label value)
   "A line of the inspector: LABEL, then VALUE."
   (concat (propertize (truncate-string-to-width label 12 nil ?\s) 'face 'shadow) " " value))
@@ -324,10 +443,15 @@ objects: readers must not change them.  No transcript or diary is read."
                                     (lispm-agents))
           :journal (lispm-agent-journal agent))))
 
-(defun lispm-inspect-sections (agent)
+(defun lispm-inspect-sections (agent &optional viewspec)
   "What the inspector shows of AGENT: a list of (TITLE . LINES).
+VIEWSPEC controls the level of detail (`full', `compact' or `summary';
+by default `lispm-inspect-viewspec' or `full').
 LINES are strings, whose objects are presented."
-  (let* ((buffer (lispm-agent-buffer agent))
+  (let* ((viewspec (or viewspec (bound-and-true-p lispm-inspect-viewspec) 'full))
+         (summaryp (eq viewspec 'summary))
+         (fullp (eq viewspec 'full))
+         (buffer (lispm-agent-buffer agent))
          (file (and (buffer-live-p buffer) (buffer-file-name buffer)))
          (condition (lispm-agent-condition agent))
          (data (lispm-inspect-data agent))
@@ -350,11 +474,13 @@ LINES are strings, whose objects are presented."
                              (lispm-inspect--line (lispm-tr "project") (lispm-present
                                                              (abbreviate-file-name (lispm-agent-root agent))
                                                              (list 'file (lispm-agent-root agent) nil)))
-                             (lispm-inspect--line (lispm-tr "session") (lispm-agent-id agent))
-                             (and file (lispm-inspect--line (lispm-tr "file") (lispm-present
-                                                                    (abbreviate-file-name file)
-                                                                    (list 'file file nil))))
-                             (and (lispm-agent-description agent)
+                             (and (not summaryp)
+                                  (lispm-inspect--line (lispm-tr "session") (lispm-agent-id agent)))
+                             (and (not summaryp) file
+                                  (lispm-inspect--line (lispm-tr "file") (lispm-present
+                                                                          (abbreviate-file-name file)
+                                                                          (list 'file file nil))))
+                             (and (not summaryp) (lispm-agent-description agent)
                                   (lispm-inspect--line (lispm-tr "description") (lispm-agent-description agent))))))
            (cons (lispm-tr "State")
                  (delq nil
@@ -373,25 +499,28 @@ LINES are strings, whose objects are presented."
                                                                (lispm--oneline (plist-get condition :message) 70)
                                                                (mapconcat #'symbol-name
                                                                           (plist-get condition :restarts) ", "))))
-                             (lispm-inspect--line (lispm-tr "model") (or (ignore-errors
-                                                                (lispm-tr "%s via %s, effort %s"
-                                                                        (lispm-agent-model* agent)
-                                                                        (lispm-backend-name agent)
-                                                                        (lispm-agent-effort* agent)))
-                                                              (lispm-tr "no backend")))
-                             (lispm-inspect--line (lispm-tr "usage") (lispm-tr "%d in, %d out, %d from cache"
-                                                                  (nth 0 usage) (nth 1 usage) (nth 2 usage))))))
-           (cons (lispm-tr "Policy")
-                 (delq nil
-                       (list (lispm-inspect--line (lispm-tr "policy") (lispm-inspect--policy (lispm-policy agent)))
-                             (and (lispm-agent-ceiling agent)
-                                  (lispm-inspect--line (lispm-tr "ceiling") (lispm-inspect--policy (lispm-agent-ceiling agent))))
-                             (and (lispm-agent-allowed agent)
-                                  (lispm-inspect--line (lispm-tr "allowed")
-                                                       (mapconcat (lambda (a) (if (consp a)
-                                                                                  (lispm-tr "%s (that call)" (car a))
-                                                                                a))
-                                                                  (lispm-agent-allowed agent) ", "))))))
+                             (and (not summaryp)
+                                  (lispm-inspect--line (lispm-tr "model") (or (ignore-errors
+                                                                                (lispm-tr "%s via %s, effort %s"
+                                                                                          (lispm-agent-model* agent)
+                                                                                          (lispm-backend-name agent)
+                                                                                          (lispm-agent-effort* agent)))
+                                                                              (lispm-tr "no backend"))))
+                             (and (not summaryp)
+                                  (lispm-inspect--line (lispm-tr "usage") (lispm-tr "%d in, %d out, %d from cache"
+                                                                                    (nth 0 usage) (nth 1 usage) (nth 2 usage)))))))
+           (and fullp
+                (cons (lispm-tr "Policy")
+                      (delq nil
+                            (list (lispm-inspect--line (lispm-tr "policy") (lispm-inspect--policy (lispm-policy agent)))
+                                  (and (lispm-agent-ceiling agent)
+                                       (lispm-inspect--line (lispm-tr "ceiling") (lispm-inspect--policy (lispm-agent-ceiling agent))))
+                                  (and (lispm-agent-allowed agent)
+                                       (lispm-inspect--line (lispm-tr "allowed")
+                                                            (mapconcat (lambda (a) (if (consp a)
+                                                                                       (lispm-tr "%s (that call)" (car a))
+                                                                                     a))
+                                                                       (lispm-agent-allowed agent) ", ")))))))
            (and pending
                 (cons (lispm-tr "Pending calls")
                       (mapcar (pcase-lambda (`(,id . ,call))
@@ -406,14 +535,14 @@ LINES are strings, whose objects are presented."
                                                                 ""))
                                                       'face 'shadow))))
                               pending)))
-           (and (or entry inbox)
+           (and (not summaryp) (or entry inbox)
                 (cons (lispm-tr "Inbox")
                       (append (and entry
                                    (list (lispm-inspect--line (lispm-tr "handling")
                                                               (lispm-inspect--entry entry))))
                               (mapcar (lambda (entry) (lispm-inspect--line (lispm-tr "queued") (lispm-inspect--entry entry)))
                                       inbox))))
-           (and (or waiting-on waited-by)
+           (and (not summaryp) (or waiting-on waited-by)
                 (cons (lispm-tr "Delegation")
                       (delq nil
                             (list (and waiting-on
@@ -424,7 +553,7 @@ LINES are strings, whose objects are presented."
                                   (and waited-by
                                        (lispm-inspect--line (lispm-tr "waited on by")
                                                             (mapconcat #'lispm-inspect--agent-name waited-by ", ")))))))
-           (and (seq-some #'cdr journal)
+           (and fullp (seq-some #'cdr journal)
                 (cons (lispm-tr "Journal")
                       (mapcar (pcase-lambda (`(,turn . ,snapshots))
                                 (lispm-inspect--line
@@ -437,7 +566,7 @@ LINES are strings, whose objects are presented."
                                                                  (list 'buffer (plist-get (cdr s) :name))))))
                                             snapshots ", ")))
                               (seq-filter #'cdr journal))))
-           (and (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
+           (and fullp (or (lispm-agent-loaded-tools agent) (lispm-agent-triggers agent))
                 (cons (lispm-tr "Extensions")
                       (delq nil
                             (list (and (lispm-agent-loaded-tools agent)
@@ -569,13 +698,13 @@ The returned lists and strings belong to the caller."
        (append (list :key key :work work :mailbox mailbox)
                (lispm-agents-roster-waits buffer))))))
 
-(defun lispm-inspect-text (agent)
+(defun lispm-inspect-text (agent &optional viewspec)
   "What the inspector shows of AGENT, as plain text, in English: what an
-agent reads of it."
+agent reads of it.  VIEWSPEC is `full' (default), `compact' or `summary'."
   (lispm-in-english
     (mapconcat (pcase-lambda (`(,title . ,lines))
                  (concat "# " title "\n" (mapconcat #'substring-no-properties lines "\n")))
-               (lispm-inspect-sections agent) "\n\n")))
+               (lispm-inspect-sections agent viewspec) "\n\n")))
 
 (defun lispm-inspect--draw ()
   "Draw the inspector in the current buffer again."
@@ -646,11 +775,22 @@ agent reads of it."
   (interactive)
   (lispm-turn-diff lispm-inspect-agent))
 
+(defun lispm-inspect-cycle-viewspec ()
+  "Cycle the inspector's viewspec (`full' -> `compact' -> `summary' -> `full')."
+  (interactive)
+  (setq lispm-inspect-viewspec
+        (pcase lispm-inspect-viewspec
+          ('full 'compact)
+          ('compact 'summary)
+          (_ 'full)))
+  (lispm-inspect--draw))
+
 (defvar-keymap lispm-inspect-mode-map
   :doc "Keymap of `lispm-inspect-mode'."
   :parent special-mode-map
   "RET" #'lispm-act-at-point
   "g" #'lispm-inspect-refresh
+  "v" #'lispm-inspect-cycle-viewspec
   "c" #'lispm-inspect-chat
   "t" #'lispm-inspect-transcript
   "d" #'lispm-inspect-diff
@@ -689,13 +829,14 @@ call shown in the transcript.
 
 (defun lispm-inspect (agent)
   "Show the inspector of AGENT: the agent, whole, with its objects to act on.
-Interactively, the agent of the current session or chat, or one read."
+Interactively, the agent of the current session or chat, or one read
+with `lispm-accept' (click an agent presentation on screen or complete)."
   (interactive (list (or (bound-and-true-p lispm-inspect-agent)
                          lispm-session-agent (bound-and-true-p lispm-chat-agent)
                          (let ((names (mapcar (lambda (a) (symbol-name (lispm-agent-name a)))
                                               (lispm-agents))))
                            (unless names (user-error "%s" (lispm-tr "No agent is running")))
-                           (lispm-get-agent (completing-read (lispm-tr "Inspect agent: ") names nil t))))))
+                           (lispm-get-agent (lispm-accept 'agent (lispm-tr "Inspect agent: ") names nil t))))))
   (let ((buffer (get-buffer-create (format "*lispm inspect %s*" (lispm-agent-name agent)))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'lispm-inspect-mode) (lispm-inspect-mode))
@@ -706,7 +847,9 @@ Interactively, the agent of the current session or chat, or one read."
     buffer))
 
 (lispm-deftool inspect_agent
-    ((agent string "The agent to inspect (see list_agents); yourself if not given." :optional t))
+    ((agent string "The agent to inspect (see list_agents); yourself if not given." :optional t)
+     (viewspec string "Level of detail to display: full (default), compact or summary."
+               :optional t :enum ("full" "compact" "summary")))
   "Inspect a LispM agent's permissions, approval policy and pending requests.
 Read its state, the calls it has pending and
 what they wait for, its inbox, whom it waits on and who waits on it,
@@ -720,7 +863,8 @@ and does not inspect macOS privacy permissions."
   (lispm-inspect-text (if agent
                           (or (lispm-get-agent agent t)
                               (error "No agent named %s; list_agents shows them" agent))
-                        lispm-current-agent)))
+                        lispm-current-agent)
+                      (and viewspec (intern viewspec))))
 
 (provide 'lispm-inspect)
 

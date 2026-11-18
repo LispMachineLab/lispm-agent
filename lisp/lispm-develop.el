@@ -78,6 +78,260 @@
     "xref_definitions" "xref_references" "flymake_diagnostics")
   "The tools of this file.")
 
+;;;; Code-object history and in-memory caller database (Genera Figure A & SCT)
+
+(defvar lispm-develop--history nil
+  "Granular code-object edit history, newest first.
+Each entry is a plist `(:agent AGENT :turn TURN :symbol SYMBOL :name NAME
+:type TYPE :file FILE :old-form OLD-FORM :new-form NEW-FORM
+:lexical-binding BOOL)'.")
+
+(defvar lispm-develop--callers (make-hash-table :test #'eq)
+  "In-memory caller database: maps CALLEE symbol to a list of CALLER symbols.")
+
+(defvar lispm-develop--callees (make-hash-table :test #'equal)
+  "In-memory callee database: maps `(FILE . CALLER)' to the symbols it calls.")
+
+(defvar lispm-develop--file-callers (make-hash-table :test #'equal)
+  "Maps source FILE to the list of CALLER symbols last indexed from it.")
+
+(defun lispm-develop--extract-callees (form)
+  "Symbols called or referenced as `#'SYMBOL' inside FORM.
+Handles circular structures and special forms (`let', `lambda', `cond',
+`condition-case') without mistaking parameter lists or bindings for calls."
+  (let ((seen (make-hash-table :test #'eq))
+        callees)
+    (cl-labels
+        ((walk-list (list)
+           (while (and (consp list) (not (gethash list seen)))
+             (puthash list t seen)
+             (walk (car list))
+             (setq list (cdr list))))
+         (walk-bindings (bindings single-ok)
+           (if (and single-ok (consp bindings) (symbolp (car bindings))
+                    (consp (cdr bindings)) (null (cddr bindings)))
+               ;; Single-binding syntax: (when-let (x (car xs)) ...)
+               (walk-list (cdr bindings))
+             (while (and (consp bindings) (not (gethash bindings seen)))
+               (puthash bindings t seen)
+               (let ((b (car bindings)))
+                 (when (and (consp b) (not (gethash b seen)))
+                   (puthash b t seen)
+                   (walk-list (cdr b))))
+               (setq bindings (cdr bindings)))))
+         (walk (x)
+           (when (and (consp x) (not (gethash x seen)))
+             (puthash x t seen)
+             (let ((head (car x))
+                   (rest (cdr x)))
+               (cond
+                ((memq head '(quote declare interactive)) nil)
+                ((eq head 'function)
+                 (when (consp rest)
+                   (if (symbolp (car rest))
+                       (push (car rest) callees)
+                     (walk (car rest)))))
+                ((eq head 'lambda)
+                 (when (consp rest)
+                   (walk-list (cdr rest))))
+                ((memq head '(defun defmacro cl-defun cl-defmacro
+                              defsubst cl-defsubst ert-deftest lispm-deftool))
+                 (when (and (consp rest) (consp (cdr rest)))
+                   (walk-list (cddr rest))))
+                ((memq head '(let let* when-let* if-let* and-let*))
+                 (when (consp rest)
+                   (walk-bindings (car rest) nil)
+                   (walk-list (cdr rest))))
+                ((memq head '(when-let if-let while-let))
+                 (when (consp rest)
+                   (walk-bindings (car rest) t)
+                   (walk-list (cdr rest))))
+                ((memq head '(dolist dotimes cl-dolist cl-dotimes))
+                 (when (consp rest)
+                   (when (and (consp (car rest)) (not (gethash (car rest) seen)))
+                     (puthash (car rest) t seen)
+                     (walk-list (cdar rest)))
+                   (walk-list (cdr rest))))
+                ((eq head 'cond)
+                 (while (and (consp rest) (not (gethash rest seen)))
+                   (puthash rest t seen)
+                   (walk-list (car rest))
+                   (setq rest (cdr rest))))
+                ((eq head 'condition-case)
+                 (when (and (consp rest) (consp (cdr rest)))
+                   (walk (cadr rest))
+                   (let ((handlers (cddr rest)))
+                     (while (and (consp handlers) (not (gethash handlers seen)))
+                       (puthash handlers t seen)
+                       (when (consp (car handlers))
+                         (walk-list (cdar handlers)))
+                       (setq handlers (cdr handlers))))))
+                ((eq head 'setq)
+                 (let ((pairs rest))
+                   (while (and (consp pairs) (not (gethash pairs seen)))
+                     (puthash pairs t seen)
+                     (setq pairs (cdr pairs))
+                     (when (and (consp pairs) (not (gethash pairs seen)))
+                       (puthash pairs t seen)
+                       (walk (car pairs))
+                       (setq pairs (cdr pairs))))))
+                (t
+                 (if (and (symbolp head)
+                          (not (keywordp head)))
+                     (unless (memq head '(nil t progn prog1 prog2 if when unless
+                                              and or save-excursion save-restriction
+                                              save-current-buffer unwind-protect
+                                              while catch defvar defcustom defface))
+                       (push head callees))
+                   (walk head))
+                 (walk-list rest)))))))
+      (walk form)
+      (delete-dups (nreverse callees)))))
+
+(defun lispm-develop--caller-still-calls-p (caller callee)
+  "Non-nil if CALLER still calls CALLEE in any indexed file."
+  (let (found)
+    (maphash (lambda (key callees)
+               (when (and (eq (cdr key) caller) (memq callee callees))
+                 (setq found t)))
+             lispm-develop--callees)
+    found))
+
+(defun lispm-develop--remove-caller (caller &optional file)
+  "Remove CALLER's outgoing edges (from FILE) in the `who-calls' database."
+  (let* ((key (cons file caller))
+         (old-callees (gethash key lispm-develop--callees)))
+    (remhash key lispm-develop--callees)
+    (dolist (old old-callees)
+      (unless (lispm-develop--caller-still-calls-p caller old)
+        (puthash old (delq caller (gethash old lispm-develop--callers))
+                 lispm-develop--callers)))))
+
+(defconst lispm-develop--callable-definers
+  '(defun defmacro cl-defun cl-defmacro defsubst cl-defsubst
+    ert-deftest lispm-deftool)
+  "Top-level `(DEFINER NAME ARGLIST . BODY)' forms indexed in `who-calls'.")
+
+(defun lispm-develop--quoted-symbol (arg)
+  "Literal symbol quoted by ARG (`'SYM' or `#'SYM'), or nil."
+  (when (and (consp arg)
+             (memq (car arg) '(quote function))
+             (consp (cdr arg))
+             (null (cddr arg))
+             (symbolp (cadr arg))
+             (cadr arg))
+    (cadr arg)))
+
+(defun lispm-develop--defalias-body (def)
+  "Body forms to walk for the definition argument DEF of `defalias'."
+  (cond ((lispm-develop--quoted-symbol def)
+         (list (list 'function (lispm-develop--quoted-symbol def))))
+        ((and (consp def)
+              (memq (car def) '(quote function))
+              (consp (cdr def))
+              (null (cddr def))
+              (consp (cadr def))
+              (eq (caadr def) 'lambda))
+         (list (cadr def)))
+        (t (list def))))
+
+(defun lispm-develop-index-form (form &optional caller file)
+  "Update the in-memory `who-calls' database for the top-level FORM.
+CALLER, if not given, is taken from FORM when its head is in
+`lispm-develop--callable-definers' or `defalias' (so `defvar',
+`defvar-local', `defcustom', `defface', etc. never overwrite a
+same-named function); FILE is the source file (by default
+`buffer-file-name')."
+  (let* ((file (or file buffer-file-name))
+         (head (and (consp form) (symbolp (car form)) (car form)))
+         (caller (or caller
+                     (and head (consp (cdr form))
+                          (cond
+                           ((and (memq head lispm-develop--callable-definers)
+                                 (symbolp (cadr form)))
+                            (cadr form))
+                           ((eq head 'defalias)
+                            (lispm-develop--quoted-symbol (cadr form))))))))
+    (when (and caller (symbolp caller))
+      (lispm-develop--remove-caller caller file)
+      (let* ((body (cond
+                    ((memq head lispm-develop--callable-definers)
+                     (and (consp (cddr form)) (cdddr form)))
+                    ((eq head 'defalias)
+                     (and (consp (cddr form))
+                          (lispm-develop--defalias-body (caddr form))))
+                    ((consp (cddr form))
+                     (cddr form))
+                    (t (list form))))
+             (callees (delq caller
+                            (lispm-develop--extract-callees (cons 'progn body)))))
+        (puthash (cons file caller) callees lispm-develop--callees)
+        (when file
+          (let ((fcallers (gethash file lispm-develop--file-callers)))
+            (unless (memq caller fcallers)
+              (puthash file (cons caller fcallers) lispm-develop--file-callers))))
+        (dolist (callee callees)
+          (let ((existing (gethash callee lispm-develop--callers)))
+            (unless (memq caller existing)
+              (puthash callee (cons caller existing) lispm-develop--callers)))))
+      caller)))
+
+(defun lispm-develop-index-buffer (&optional buffer file)
+  "Index all top-level definitions in BUFFER into the `who-calls' database.
+When FILE (or `buffer-file-name') is known, replaces any previous caller
+definitions recorded for that file after reading the whole buffer."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((file (or file buffer-file-name))
+          forms indexed)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (with-syntax-table emacs-lisp-mode-syntax-table
+            (let ((parse-sexp-ignore-comments t))
+              (condition-case err
+                  (while (progn (forward-comment (buffer-size)) (not (eobp)))
+                    (push (read (current-buffer)) forms))
+                (error (error "Cannot read %s: %s"
+                              (if file (lispm-tools--label file) (buffer-name))
+                              (error-message-string err))))))))
+      (when file
+        (let ((old-callers (gethash file lispm-develop--file-callers)))
+          (remhash file lispm-develop--file-callers)
+          (dolist (old-caller old-callers)
+            (lispm-develop--remove-caller old-caller file))))
+      (dolist (form (nreverse forms))
+        (when-let* ((sym (lispm-develop-index-form form nil file)))
+          (push sym indexed)))
+      (setq indexed (delete-dups (nreverse indexed)))
+      (when file
+        (puthash file indexed lispm-develop--file-callers))
+      indexed)))
+
+(defun lispm-develop-callees (caller &optional file)
+  "Symbols recorded in the `who-calls' database as called by CALLER.
+When FILE is given, only edges from that file; otherwise across all files."
+  (let ((sym (if (symbolp caller) caller (intern-soft (format "%s" caller))))
+        result)
+    (when sym
+      (if file
+          (setq result (copy-sequence (gethash (cons file sym) lispm-develop--callees)))
+        (maphash (lambda (key callees)
+                   (when (eq (cdr key) sym)
+                     (dolist (c callees)
+                       (unless (memq c result)
+                         (push c result)))))
+                 lispm-develop--callees)
+        (setq result (nreverse result))))
+    result))
+
+(defun lispm-develop-who-calls (symbol)
+  "Symbols recorded in the in-memory `who-calls' database as calling SYMBOL."
+  (let ((sym (if (symbolp symbol) symbol (intern-soft (format "%s" symbol)))))
+    (and sym
+         (sort (copy-sequence (gethash sym lispm-develop--callers))
+               (lambda (a b) (string< (symbol-name a) (symbol-name b)))))))
+
 ;;;; Finding definitions
 ;;
 ;; A definition is found as `find-function' finds it: its file from
@@ -311,9 +565,21 @@ eval_definition; then run the tests with ert_run."
   (pcase-let* ((`(,symbol ,file ,types) (lispm-develop--definition name kind path))
                (buffer (lispm-tools--existing file)))
     (with-current-buffer buffer
-      (pcase-let ((`(,text ,beg ,end ,type) (lispm-develop--edit symbol types file new-text)))
-        (lispm-develop--new-form new-text symbol type)
+      (pcase-let* ((`(,_otype ,obeg . ,oend) (lispm-develop--located symbol types file))
+                   (old-form (save-restriction
+                               (widen)
+                               (buffer-substring-no-properties obeg oend)))
+                   (`(,text ,beg ,end ,type) (lispm-develop--edit symbol types file new-text))
+                   (clean-new (lispm-develop--new-form new-text symbol type))
+                   (canonical (intern (symbol-name symbol))))
         (lispm-tools--set-text buffer text)
+        (push (list :agent lispm-current-agent
+                    :turn (and lispm-current-agent (lispm-agent-turn lispm-current-agent))
+                    :symbol canonical :name (symbol-name canonical) :type type :file file
+                    :old-form old-form :new-form clean-new
+                    :lexical-binding (bound-and-true-p lexical-binding))
+              lispm-develop--history)
+        (setq lispm-develop--history (seq-take lispm-develop--history 100))
         (format "Replaced the definition of %s%s in %s, now lines %d-%d.  Emacs still runs \
 the old one: evaluate this one with eval_definition."
                 symbol
@@ -332,6 +598,7 @@ That is as `eval-defun' evaluates it, and by the same means: a
 `defvar', `defcustom' or `defface' is reset to what it says
 \(`elisp--eval-defun-1'), with the buffer's `lexical-binding', and
 `eval-region' records that the buffer's file defines what it defines.
+Also updates the in-memory `who-calls' database for the form.
 But the value is returned, not printed in the echo area."
   (unless (derived-mode-p 'emacs-lisp-mode)
     (error "%s is in %s, not in Emacs Lisp mode" (buffer-name) mode-name))
@@ -342,9 +609,10 @@ But the value is returned, not printed in the echo area."
       (end-of-defun)
       (beginning-of-defun)
       (let* ((start (point))
-             (form (funcall load-read-function (current-buffer)))
+             (raw-form (funcall load-read-function (current-buffer)))
              (end (point))
-             (form (eval-sexp-add-defvars (elisp--eval-defun-1 (macroexpand form)) start))
+             (_ (ignore-errors (lispm-develop-index-form raw-form)))
+             (form (eval-sexp-add-defvars (elisp--eval-defun-1 (macroexpand raw-form)) start))
              (lispm-develop--value nil))
         (eval-region start end nil (lambda (_stream)
                                      ;; Read once: at END, `eval-region' is done.
@@ -377,11 +645,22 @@ ert_run.  Returns the value: the name defined, or a variable's value."
     (lispm-develop--in-buffer
      file
      (lambda ()
-       (pcase-let* ((`(,_type ,beg . ,_end) (lispm-develop--located symbol types file))
-                    (value (lispm-develop--evaluate beg)))
-         (format "Evaluated the definition of %s in %s, line %d.\n%s"
-                 symbol (lispm-tools--label file) (lispm-develop--line beg)
-                 (lispm-tools--eval-result "" value)))))))
+       (pcase-let* ((`(,type ,beg . ,_end) (lispm-develop--located symbol types file))
+                    (old-arity (and (null type) (fboundp symbol)
+                                    (ignore-errors (func-arity (indirect-function symbol)))))
+                    (value (lispm-develop--evaluate beg))
+                    (new-arity (and (null type) (fboundp symbol)
+                                    (ignore-errors (func-arity (indirect-function symbol)))))
+                    (callers (and old-arity new-arity (not (equal old-arity new-arity))
+                                  (lispm-develop-who-calls symbol))))
+         (concat (format "Evaluated the definition of %s in %s, line %d.\n%s"
+                         symbol (lispm-tools--label file) (lispm-develop--line beg)
+                         (lispm-tools--eval-result "" value))
+                 (if callers
+                     (format "\nCaller notice: arity changed from %S to %S; called by: %s"
+                             old-arity new-arity
+                             (mapconcat #'symbol-name callers ", "))
+                   "")))))))
 
 ;;;; Tests
 
@@ -754,6 +1033,201 @@ language server.  Check code after changing it."
                      (visited (lispm-develop--buffer-of file)))
                 (lispm-develop--diagnose visited (not open) done)))
         (t (error "Give a path or a buffer to check"))))
+
+;;;; In-memory caller lookup, granular definition revert, and SCT system definition
+
+(defun lispm-develop--el-files (root)
+  "Emacs Lisp files under ROOT, pruning `.git', `.deps' and cache directories."
+  (directory-files-recursively
+   root "\\.el\\'" nil
+   (lambda (dir)
+     (not (member (file-name-nondirectory (directory-file-name dir))
+                  '(".git" ".deps" "eln-cache" "node_modules"))))))
+
+(defun lispm-develop--index-path (path)
+  "Index Emacs Lisp file or directory PATH into the `who-calls' database."
+  (let ((target (lispm-tools--file path)))
+    (cond
+     ((file-directory-p target)
+      (dolist (file (lispm-develop--el-files target))
+        (with-temp-buffer
+          (insert (lispm--file-text file))
+          (lispm-develop-index-buffer (current-buffer) file))))
+     ((file-regular-p target)
+      (with-temp-buffer
+        (insert (lispm--file-text target))
+        (lispm-develop-index-buffer (current-buffer) target)))
+     (t (error "No such file or directory: %s" (lispm-tools--label target))))))
+
+(defun lispm-develop--history-entry (name &optional kind path agent)
+  "Latest history entry for NAME (matching KIND, PATH and AGENT when given)."
+  (let* ((name-str (if (symbolp name) (symbol-name name) (format "%s" name)))
+         (target-type (and kind (cdr (assoc kind lispm-develop--kinds))))
+         (target-file (and path (lispm-tools--file path))))
+    (seq-find (lambda (h)
+                (and (equal (or (plist-get h :name)
+                                (symbol-name (plist-get h :symbol)))
+                            name-str)
+                     (or (null kind) (eq (plist-get h :type) target-type))
+                     (or (null target-file) (equal (plist-get h :file) target-file))
+                     (or (null agent) (eq (plist-get h :agent) agent))))
+              lispm-develop--history)))
+
+(defun lispm-develop--revert-latest-p (entry)
+  "Non-nil if ENTRY is still in history and is the latest edit for its target."
+  (and entry
+       (memq entry lispm-develop--history)
+       (eq entry
+           (lispm-develop--history-entry
+            (or (plist-get entry :name) (symbol-name (plist-get entry :symbol)))
+            (car (rassq (plist-get entry :type) lispm-develop--kinds))
+            (plist-get entry :file)
+            nil))))
+
+(defun lispm-revert-definition (name &optional kind path agent entry)
+  "Restore the previous code-object definition of NAME from history.
+Unlike full-file revert, this replaces only NAME's form in its file
+\(leaving concurrent edits to other definitions intact).  KIND and PATH
+disambiguate which definition of NAME to restore; AGENT filters history
+by agent; ENTRY, when given, is the exact pinned history record.
+Does not evaluate code: use `eval_definition' to load the restored
+definition into Emacs."
+  (let ((entry (or entry (lispm-develop--history-entry name kind path agent))))
+    (unless entry
+      (error "No recorded definition edit for %s%s"
+             name (if path (format " in %s" path) "")))
+    (unless (lispm-develop--revert-latest-p entry)
+      (error "The definition edit for %s was already reverted or superseded" name))
+    (let* ((symbol (plist-get entry :symbol))
+           (type (plist-get entry :type))
+           (file (plist-get entry :file))
+           (old-form (plist-get entry :old-form))
+           (new-form (plist-get entry :new-form))
+           (buffer (lispm-tools--existing file)))
+      (with-current-buffer buffer
+        (pcase-let* ((`(,_t ,cbeg . ,cend) (lispm-develop--located symbol (list type) file))
+                     (current (string-trim (save-restriction
+                                             (widen)
+                                             (buffer-substring-no-properties cbeg cend)))))
+          (when (and new-form (not (equal current (string-trim new-form))))
+            (error "The definition of %s in %s has changed since that edit"
+                   symbol (lispm-tools--label file)))
+          (pcase-let ((`(,text ,beg ,end ,_t)
+                       (lispm-develop--edit symbol (list type) file old-form)))
+            (lispm-tools--set-text buffer text)
+            (setq lispm-develop--history (delq entry lispm-develop--history))
+            (format "Restored the definition of %s in %s (lines %d-%d).  If the newer \
+definition was evaluated, evaluate this one with eval_definition."
+                    symbol (lispm-tools--label file)
+                    (lispm-develop--line beg) (lispm-develop--line (1- end)))))))))
+
+(defun lispm-develop--module-deps (text)
+  "Extract `(PROVIDES . REQUIRES)' from top-level Lisp forms in TEXT.
+Reads forms without evaluating them so strings and comments are ignored."
+  (let (provides requires)
+    (cl-labels
+        ((walk (form)
+           (when (consp form)
+             (pcase form
+               (`(require (quote ,(and feat (pred symbolp))) . ,_)
+                (push feat requires))
+               (`(provide (quote ,(and feat (pred symbolp))) . ,_)
+                (push feat provides))
+               (`(,(or 'progn 'eval-when-compile 'eval-and-compile
+                       'when 'unless 'if 'with-eval-after-load)
+                  . ,body)
+                (dolist (sub (if (proper-list-p body) body nil))
+                  (walk sub)))
+               (`(cond . ,clauses)
+                (dolist (clause (if (proper-list-p clauses) clauses nil))
+                  (when (proper-list-p clause)
+                    (mapc #'walk clause))))))))
+      (with-temp-buffer
+        (insert text)
+        (goto-char (point-min))
+        (condition-case nil
+            (while t
+              (walk (read (current-buffer))))
+          (end-of-file nil)
+          (error nil))))
+    (cons (nreverse (delete-dups provides))
+          (nreverse (delete-dups requires)))))
+
+(defun lispm-system-definition (&optional root)
+  "Inspect the Emacs Lisp system structure under ROOT (as Genera's SCT did).
+Return a plist `(:root ROOT :modules MODULES :modified MODIFIED)' where
+each module has `:file', `:provides', `:requires' and `:loaded'."
+  (let* ((root (file-name-as-directory
+                (if root (lispm-tools--file root) (lispm-tools--root))))
+         (files (lispm-develop--el-files root))
+         modules)
+    (dolist (file files)
+      (pcase-let ((`(,provides . ,requires)
+                   (lispm-develop--module-deps (lispm--file-text file))))
+        (push (list :file (file-relative-name file root)
+                    :provides provides
+                    :requires requires
+                    :loaded (and provides (seq-every-p #'featurep provides) t))
+              modules)))
+    (let ((modified
+           (delete-dups
+            (delq nil
+                  (mapcar (lambda (h)
+                            (and (file-in-directory-p (plist-get h :file) root)
+                                 (plist-get h :symbol)))
+                          lispm-develop--history)))))
+      (list :root root :modules (nreverse modules) :modified modified))))
+
+(defun lispm-develop--patch-form (text lexical)
+  "Format definition TEXT for an incremental patch with LEXICAL binding.
+When TEXT defines a variable or face (`defvar', `defcustom', `defface'),
+applies `elisp--eval-defun-1' so loading the patch resets an already-bound
+definition just as `eval_definition' (`C-M-x') does."
+  (let* ((parsed (car (read-from-string text)))
+         (resetp (and (consp parsed)
+                      (memq (car parsed) '(defvar defcustom defface))))
+         (effective (if resetp
+                        (elisp--eval-defun-1 (macroexpand parsed))
+                      parsed)))
+    (cond ((not lexical)
+           (format "(eval '%S nil)" effective))
+          (resetp
+           (format "%S" effective))
+          (t text))))
+
+(defun lispm-develop-patch (&optional root agent)
+  "Generate a Genera-style incremental code-object patch for ROOT (and AGENT).
+Includes the latest modified definition per `(FILE NAME TYPE)' from
+`lispm-develop--history', preserving each file's lexical or dynamic
+binding semantics."
+  (let* ((root (and root (file-name-as-directory (lispm-tools--file root))))
+         (seen (make-hash-table :test #'equal))
+         entries)
+    (dolist (h lispm-develop--history)
+      (let ((key (list (plist-get h :file)
+                       (or (plist-get h :name) (symbol-name (plist-get h :symbol)))
+                       (plist-get h :type))))
+        (when (and (not (gethash key seen))
+                   (or (null root) (file-in-directory-p (plist-get h :file) root))
+                   (or (null agent) (eq (plist-get h :agent) agent)))
+          (puthash key t seen)
+          (push h entries))))
+    (if (null entries)
+        ";;; Incremental patch: no modified definitions recorded.\n"
+      (concat ";;; Incremental Patch --- Code objects modified in image  -*- lexical-binding: t; -*-\n\n"
+              (mapconcat
+               (lambda (h)
+                 (let ((form (plist-get h :new-form))
+                       (lexical (plist-get h :lexical-binding)))
+                   (format ";; %s (%s%s)\n%s\n"
+                           (plist-get h :symbol)
+                           (if root
+                               (file-relative-name (plist-get h :file) root)
+                             (abbreviate-file-name (plist-get h :file)))
+                           (if lexical "" ", lexical-binding: nil")
+                           (lispm-develop--patch-form form lexical))))
+               entries
+               "\n")))))
 
 ;;;; The source of these tools
 

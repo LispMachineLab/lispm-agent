@@ -159,6 +159,8 @@
   ("at least %d argument" "至少 %d 个参数")
   ("%s is not defined in this Emacs" . "%s 在此 Emacs 中未定义")
   ("%s takes %s; %d given here" . "%s 接受 %s；此处给了 %d 个")
+  ("%s is internal; prefer public interface: %s" . "%s 是内部符号；请优先使用公开接口：%s")
+  ("%s is an internal symbol" . "%s 是内部符号")
   ("No such file: %s" . "没有此文件：%s")
   ("RET: visit %s at line %d" . "RET：打开 %s 第 %d 行")
   ("RET: visit %s" . "RET：打开 %s")

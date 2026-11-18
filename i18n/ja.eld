@@ -159,6 +159,8 @@
   ("at least %d argument" "引数%d個以上")
   ("%s is not defined in this Emacs" . "%sはこのEmacsで定義されていません")
   ("%s takes %s; %d given here" . "%sは%sを取りますが、ここでは%d個です")
+  ("%s is internal; prefer public interface: %s" . "%sは内部シンボルです。公開インターフェースを使用してください：%s")
+  ("%s is an internal symbol" . "%sは内部シンボルです")
   ("No such file: %s" . "ファイルがありません：%s")
   ("RET: visit %s at line %d" . "RET：%sの%d行目を開く")
   ("RET: visit %s" . "RET：%sを開く")

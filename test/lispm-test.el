@@ -12552,6 +12552,298 @@ inferred directory in both `M-x' (`read-directory-name') and the GUI modal form.
       (delete-directory repo t)
       (delete-directory other t))))
 
+(ert-deftest lispm-test-genera-accept-protocol ()
+  "Presentation `accept' highlights matching objects, enforces completion
+constraints, and accepts valid objects on act."
+  (with-temp-buffer
+    (set-window-buffer (selected-window) (current-buffer))
+    (insert (lispm-present "coder@lispm" '(agent "coder@lispm"))
+            " "
+            (lispm-present "stale@lispm" '(agent "stale@lispm"))
+            " "
+            (lispm-present "lisp/a.el" '(file "/tmp/a.el" 10)))
+    (should (equal (lispm-object-value '(agent "coder@lispm")) "coder@lispm"))
+    (should (equal (lispm-object-value '(file "/tmp/a.el" 10)) "/tmp/a.el"))
+    (should (equal (lispm-object-value '(symbol car)) "car"))
+    (let ((lispm-accept-types 'agent)
+          (lispm-accept--constraints (list :collection '("coder@lispm")
+                                           :predicate nil
+                                           :require-match t)))
+      (should (lispm-object-acceptable-p '(agent "coder@lispm")))
+      ;; Filtered out by completion collection when `require-match' is t.
+      (should-not (lispm-object-acceptable-p '(agent "stale@lispm")))
+      (should-not (lispm-object-acceptable-p '(file "/tmp/a.el" 10)))
+      (unwind-protect
+          (progn
+            (lispm-accept--highlight 'agent)
+            (should (= (length lispm-accept--overlays) 1))
+            (goto-char (point-min))
+            (should (equal (lispm-act (lispm-object-at)) "coder@lispm"))
+            ;; Clicking the excluded agent presentation signals user-error.
+            (goto-char 15)
+            (should-error (lispm-act (lispm-object-at)) :type 'user-error)
+            (goto-char (1- (point-max)))
+            (should-error (lispm-act (lispm-object-at)) :type 'user-error))
+        (lispm-accept--unhighlight))
+      (should-not lispm-accept--overlays))))
+
+(ert-deftest lispm-test-genera-viewspecs ()
+  "Inspector viewspecs control detail level; cleared results keep an outline viewspec
+and invalidate the transcript parse cache when toggled."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester "A test agent." :root project)))
+      ;; Inspector viewspecs: full, compact, summary.
+      (let ((full (mapcar #'car (lispm-inspect-sections agent 'full)))
+            (compact (mapcar #'car (lispm-inspect-sections agent 'compact)))
+            (summary (mapcar #'car (lispm-inspect-sections agent 'summary))))
+        (should (member "Policy" full))
+        (should-not (member "Policy" compact))
+        (should-not (member "Policy" summary))
+        (should (string-search "session" (lispm-inspect-text agent 'compact)))
+        (should-not (string-search "session" (lispm-inspect-text agent 'summary))))
+      (let ((res (lispm-test--call agent "inspect_agent" '((viewspec . "summary")))))
+        (should-not (cdr res))
+        (should (string-prefix-p "# Agent\n" (car res)))
+        (should-not (string-search "# Policy" (car res))))
+      (with-current-buffer (lispm-inspect agent)
+        (should (eq lispm-inspect-viewspec 'full))
+        (lispm-inspect-cycle-viewspec)
+        (should (eq lispm-inspect-viewspec 'compact))
+        (lispm-inspect-cycle-viewspec)
+        (should (eq lispm-inspect-viewspec 'summary))
+        (lispm-inspect-cycle-viewspec)
+        (should (eq lispm-inspect-viewspec 'full)))
+      ;; Context viewspec for cleared tool results with Lisp definitions,
+      ;; plus cache invalidation when `lispm-transcript-cleared-viewspec' changes.
+      (let* ((lispm-transcript-cleared-viewspec 'outline)
+             (el-text (concat (format "     1\t(defun alpha (x)\n     2\t  %s)\n"
+                                      (make-string 180 ?a))
+                              (format "     3\t(defvar beta 42\n     4\t  \"%s\")\n"
+                                      (make-string 180 ?b))))
+             (outline (lispm-transcript-outline-view el-text)))
+        (should (string-search "Outline viewspec:" outline))
+        (should (string-search "(defun alpha (x)" outline))
+        (should (string-search "(defvar beta 42" outline))
+        (should (< (length outline) (length el-text)))
+        (with-temp-buffer
+          (insert "* User\nHi\n* Assistant\n"
+                  "** DONE read_file\n:PROPERTIES:\n:TOOL_ID:  t1\n:TOOL:     read_file\n:END:\n"
+                  "*** Result :cleared:\n#+begin_example\n"
+                  el-text
+                  "#+end_example\n"
+                  "* User\nNext\n")
+          (let* ((lispm-transcript-cleared-viewspec 'outline)
+                 (p1 (lispm-transcript-parse))
+                 (lispm-transcript-cleared-viewspec nil)
+                 (p2 (lispm-transcript-parse)))
+            (should (string-search "Outline viewspec:"
+                                   (format "%S" (plist-get p1 :messages))))
+            (should-not (string-search "Outline viewspec:"
+                                       (format "%S" (plist-get p2 :messages))))))))))
+
+(ert-deftest lispm-test-genera-who-calls-and-caller-notice ()
+  "eval_definition indexes callees (ignoring arglists/let-vars, walking lambdas,
+surviving circular structures, and pruning removed functions on reindex)
+and warns when arity changes."
+  (lispm-test-with-dev
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto) (exec . auto)))))
+      (clrhash lispm-develop--callers)
+      (clrhash lispm-develop--callees)
+      (clrhash lispm-develop--file-callers)
+      ;; Circular structure does not hang `lispm-develop--extract-callees'.
+      (let ((circular (car (read-from-string "(defun circ (arg) #1=(lispm-test-dev-callee . #1#))"))))
+        (should (equal (lispm-develop--extract-callees circular) '(lispm-test-dev-callee))))
+      (lispm-test--write
+       file
+       (concat ";;; dev.el --- A fixture  -*- lexical-binding: t; -*-\n"
+               "(defun lispm-test-dev-callee (x)\n  (1+ x))\n"
+               "(defun lispm-test-dev-caller (param)\n"
+               "  (let ((local 1))\n"
+               "    (mapcar #'(lambda (item) (lispm-test-dev-callee (+ item local param))) '(1 2))))\n"))
+      (load file nil t t)
+      (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-callee")))
+      (lispm-test--call agent "eval_definition" '((name . "lispm-test-dev-caller")))
+      ;; Neither `param` nor `local` is mistaken for a callee; `lispm-test-dev-callee` inside lambda is found.
+      (let ((callees (lispm-develop-callees 'lispm-test-dev-caller)))
+        (should callees)
+        (should (memq 'lispm-test-dev-callee callees))
+        (should-not (memq 'param callees))
+        (should-not (memq 'local callees)))
+      (should (equal (lispm-develop-who-calls 'lispm-test-dev-callee)
+                     '(lispm-test-dev-caller)))
+      ;; Single-binding `when-let` is walked properly; ordinary `let` and `when-let*` with bare symbol do not treat next binding var as call; `dolist` skips loop variable.
+      (let ((single-let (car (read-from-string "(defun sl (xs) (when-let (x (car xs)) (message \"%s\" x)))")))
+            (bare-let (car (read-from-string "(defun bl (xs) (let (x (y (car xs))) y))")))
+            (star-let (car (read-from-string "(defun wl (xs) (when-let* (x (y (car xs))) y))")))
+            (loop-form (car (read-from-string "(defun dl (xs) (dolist (item (cdr xs)) (message \"%s\" item)))"))))
+        (should (equal (lispm-develop--extract-callees single-let) '(car message)))
+        (should (equal (lispm-develop--extract-callees bare-let) '(car)))
+        (should (equal (lispm-develop--extract-callees star-let) '(car)))
+        (should (equal (lispm-develop--extract-callees loop-form) '(cdr message))))
+      ;; Incomplete source signals an error without wiping existing file index.
+      (let ((other-el (expand-file-name "other-idx.el" project)))
+        (lispm-test--write other-el "(defun idx-caller () (idx-callee))\n")
+        (lispm-develop--index-path other-el)
+        (should (equal (lispm-develop-who-calls 'idx-callee) '(idx-caller)))
+        (lispm-test--write other-el "(defun idx-caller () (idx-callee)\n")
+        (should-error (lispm-develop--index-path other-el))
+        (should (equal (lispm-develop-who-calls 'idx-callee) '(idx-caller))))
+      ;; Reindexing one file does not delete another file's caller edges for a same-named function,
+      ;; a same-named `defvar'/`defvar-local'/`defcustom' does not overwrite a `defun' caller,
+      ;; `cl-defsubst' skips its arglist, and `defalias' indexes quoted/sharp-quoted targets.
+      (let ((f1 (expand-file-name "f1.el" project))
+            (f2 (expand-file-name "f2.el" project)))
+        (lispm-test--write f1 "(defun shared-fn () (callee-a))\n")
+        (lispm-test--write f2 (concat "(cl-defsubst shared-fn (subst-arg) (callee-b subst-arg))\n"
+                                      "(defvar shared-fn nil)\n"
+                                      "(defvar-local shared-fn nil)\n"
+                                      "(defalias 'alias-fn #'callee-b)\n"
+                                      "(defalias 'qlambda-fn '(lambda (x) (callee-b x)))\n"
+                                      "(defalias 'var-target-fn some-var)\n"))
+        (lispm-develop--index-path f1)
+        (lispm-develop--index-path f2)
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn qlambda-fn shared-fn)))
+        (should-not (lispm-develop-who-calls 'some-var))
+        (should-not (memq 'subst-arg (lispm-develop-callees 'shared-fn)))
+        (lispm-test--write f1 ";; empty\n")
+        (lispm-develop--index-path f1)
+        (should (equal (lispm-develop-who-calls 'callee-b) '(alias-fn qlambda-fn shared-fn))))
+      ;; Changing the arity of `lispm-test-dev-callee' triggers a Caller notice.
+      (lispm-test--call agent "edit_definition"
+                        '((name . "lispm-test-dev-callee")
+                          (new_text . "(defun lispm-test-dev-callee (x z)\n  (+ x z))")))
+      (let ((eval-res (lispm-test--call agent "eval_definition"
+                                        '((name . "lispm-test-dev-callee")))))
+        (should-not (cdr eval-res))
+        (should (string-search "Caller notice: arity changed from (1 . 1) to (2 . 2); called by: lispm-test-dev-caller"
+                               (car eval-res)))))))
+
+(ert-deftest lispm-test-genera-revert-definition-and-sct ()
+  "lispm-revert-definition restores a single definition without clobbering
+sibling edits or requiring eval; lispm-system-definition ignores strings and
+preserves dynamic binding in patches."
+  (lispm-test-with-dev
+    (let ((agent (lispm-defagent tester :root project :policy '((write . auto) (exec . deny))))
+          (lispm-develop--history nil))
+      (lispm-test--write
+       file
+       (concat ";;; dev.el --- A fixture  -*- lexical-binding: t; -*-\n"
+               "(require 'cl-lib)\n"
+               "(defun lispm-test-dev-f (x)\n  \"Doc mentioning\n(require 'fake-dep).\"\n  (1+ x))\n"
+               "(defun lispm-test-dev-g (x)\n  (* x 2))\n"
+               "(provide 'lispm-test-dev)\n"))
+      (load file nil t t)
+      (lispm-test--call agent "edit_definition"
+                        '((name . "lispm-test-dev-f")
+                          (new_text . "(defun lispm-test-dev-f (x)\n  (+ x 100))")))
+      ;; Another edit happens to `lispm-test-dev-g` in the same file.
+      (lispm-test--call agent "edit_definition"
+                        '((name . "lispm-test-dev-g")
+                          (new_text . "(defun lispm-test-dev-g (x)\n  (* x 10))")))
+      ;; SCT `lispm-system-definition` and incremental patch (ignores fake-dep in docstring).
+      (let* ((lispm-current-agent agent)
+             (sys (lispm-system-definition project))
+             (mod-entry (seq-find (lambda (m) (equal (plist-get m :file) "dev.el"))
+                                  (plist-get sys :modules)))
+             (patch (lispm-develop-patch project agent)))
+        (should (equal (plist-get sys :modified) '(lispm-test-dev-g lispm-test-dev-f)))
+        (should (equal (plist-get mod-entry :provides) '(lispm-test-dev)))
+        (should (equal (plist-get mod-entry :requires) '(cl-lib)))
+        (should-not (memq 'fake-dep (plist-get mod-entry :requires)))
+        (should (string-search ";;; Incremental Patch" patch)))
+      ;; Revert only `lispm-test-dev-f`; `lispm-test-dev-g` stays modified!
+      (let* ((lispm-current-agent agent)
+             (rev (lispm-revert-definition "lispm-test-dev-f" nil nil agent)))
+        (should (string-search "Restored the definition of lispm-test-dev-f in dev.el" rev))
+        (should (string-search "(1+ x)" (lispm-test--disk file)))
+        (should (string-search "(* x 10)" (lispm-test--disk file))))
+      ;; Dynamic-binding patch quotes the form for `eval' and loads cleanly,
+      ;; and `defvar' edits reset already-bound variables.
+      (let ((dyn-file (expand-file-name "dyn.el" project)))
+        (lispm-test--write dyn-file
+                           (concat ";;; dyn.el --- Dynamic fixture  -*- lexical-binding: nil; -*-\n"
+                                   "(defvar lispm-test-dev-var 1)\n"
+                                   "(defun lispm-test-dyn-fn (x)\n  x)\n"))
+        (setq lispm-test-dev-var 1)
+        (lispm-test--call agent "edit_definition"
+                          '((name . "lispm-test-dev-var")
+                            (kind . "variable")
+                            (path . "dyn.el")
+                            (new_text . "(defvar lispm-test-dev-var 99)")))
+        (lispm-test--call agent "edit_definition"
+                          '((name . "lispm-test-dyn-fn")
+                            (path . "dyn.el")
+                            (new_text . "(defun lispm-test-dyn-fn (x)\n  (+ x 7))")))
+        (let ((patch (lispm-develop-patch project agent)))
+          (should (string-search "(eval '(defun lispm-test-dyn-fn" patch))
+          (with-temp-buffer
+            (insert patch)
+            (eval-buffer))
+          (should (= (lispm-test-dyn-fn 3) 10))
+          (should (= lispm-test-dev-var 99)))))))
+
+(ert-deftest lispm-test-genera-run-lisp-reinvoke ()
+  "When run_lisp fails mid-script (even after a caught failure and a subsequent
+side-effecting call), retrying replays all completed/handled steps from
+`:lisp-log' without running them twice."
+  (lispm-test-env
+    (let ((agent (lispm-defagent tester :root project))
+          (step1-runs 0)
+          (step2-runs 0)
+          (step3-ok nil))
+      (lispm-deftool lispm_test_caught () "Caught failing step."
+        (cl-incf step1-runs)
+        (error "caught-error"))
+      (lispm-deftool lispm_test_side_effect () "Side-effecting step after caught error."
+        (cl-incf step2-runs)
+        "step2-done")
+      (lispm-deftool lispm_test_final () "Final step."
+        (if step3-ok "step3-done" (error "step3-boom")))
+      (unwind-protect
+          (let* ((call (list :id "c1" :name "run_lisp"))
+                 (code (concat "(list (condition-case nil (lispm_test_caught) (lispm-call-failed 'recovered)) "
+                               "(lispm_test_side_effect) "
+                               "(lispm_test_final))"))
+                 (lispm-current-agent agent)
+                 (lispm-current-call "c1")
+                 result1 result2)
+            (puthash "c1" call (lispm-agent-pending agent))
+            (lispm-tool-invoke (lispm-get-tool "run_lisp") `((code . ,code))
+                               (lambda (text errorp &rest _)
+                                 (setq result1 (cons text errorp))))
+            (should (lispm-test--wait (lambda () result1)))
+            (should (cdr result1))
+            (should (= step1-runs 1))
+            (should (= step2-runs 1))
+            (should (= (length (plist-get call :lisp-log)) 2))
+            ;; Fix step3 and reinvoke: neither step1 nor step2 runs again!
+            (setq step3-ok t)
+            (lispm-tool-invoke (lispm-get-tool "run_lisp") `((code . ,code))
+                               (lambda (text errorp &rest _)
+                                 (setq result2 (cons text errorp))))
+            (should (lispm-test--wait (lambda () result2)))
+            (should-not (cdr result2))
+            (should (= step1-runs 1))
+            (should (= step2-runs 1))
+            (should (string-search "(recovered \"step2-done\" \"step3-done\")" (car result2)))
+            (should-not (plist-get call :lisp-log)))
+        (remhash "lispm_test_caught" lispm-tools--registry)
+        (remhash "lispm_test_side_effect" lispm-tools--registry)
+        (remhash "lispm_test_final" lispm-tools--registry)))))
+
+(ert-deftest lispm-test-genera-layer-boundary-check ()
+  "With `lispm-ground-layer-check' enabled, internal `PKG--NAME' symbols
+are flagged with public interface suggestions and translated via `lispm-tr'."
+  (let ((lispm-ground-layer-check '("lispm")))
+    (let ((finding (lispm-ground-check "lispm-ground--read")))
+      (should (eq (car finding) 'internal))
+      (should (eq (cadr finding) 'lispm-ground--read))
+      (should (string-search "internal" (lispm-ground-describe finding)))
+      (let ((lispm-language 'zh-Hans))
+        (should (string-search "内部符号" (lispm-ground-describe finding)))))
+    ;; Defined in the reply itself, it passes.
+    (should-not (lispm-ground-check "lispm-ground--read" nil '("lispm-ground--read")))))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

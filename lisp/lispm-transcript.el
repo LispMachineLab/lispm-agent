@@ -740,6 +740,49 @@ it, and where the section ends."
   "[This output was cleared to save context. Make the call again if you need it.]"
   "What requests carry in place of a tool result tagged :cleared:.")
 
+(defcustom lispm-transcript-cleared-viewspec nil
+  "Viewspec for `:cleared:` tool results sent in model requests.
+When `outline', cleared results containing structural definitions or
+headings (`defun', `defvar', Org/Markdown headings) retain a compact
+signature/heading index so the model knows line numbers without
+re-reading the whole file; when nil (the default) or when no outline
+exists, only `lispm-transcript-cleared-text' is sent."
+  :type '(choice (const :tag "Cleared notice only" nil)
+                 (const :tag "Outline index when available" outline))
+  :group 'lispm)
+
+(defconst lispm-transcript--outline-line-re
+  "^\\(?:[ \t]*[0-9]+\t\\)?\\(?:(\\(?:[a-z0-9-]+-\\)?def[a-z-]*\\*?[ \t]+'?(?[[:alnum:]_:./+-]+\\|\\(?:#\\{1,6\\}\\|\\*\\{1,6\\}\\)[ \t]+[^ \t\n]\\)"
+  "A line in a tool result that starts a top-level Lisp definition or heading.")
+
+(defun lispm-transcript-outline-view (text)
+  "Compact outline viewspec of TEXT, or `lispm-transcript-cleared-text'.
+Extracts up to 40 definition or heading lines from TEXT when
+`lispm-transcript-cleared-viewspec' is `outline' and the outline is
+substantially smaller than TEXT."
+  (if (or (not (eq lispm-transcript-cleared-viewspec 'outline))
+          (not (stringp text))
+          (< (length text) 200))
+      lispm-transcript-cleared-text
+    (let ((case-fold-search nil)
+          lines)
+      (dolist (line (split-string text "\n" t))
+        (when (string-match-p lispm-transcript--outline-line-re line)
+          (push (lispm--oneline line 120) lines)))
+      (setq lines (nreverse lines))
+      (if (null lines)
+          lispm-transcript-cleared-text
+        (let ((outline (concat lispm-transcript-cleared-text
+                               "\nOutline viewspec:\n"
+                               (string-join (seq-take lines 40) "\n")
+                               (if (> (length lines) 40)
+                                   (format "\n[... %d more definitions/headings]"
+                                           (- (length lines) 40))
+                                 ""))))
+          (if (< (length outline) (/ (* (length text) 3) 4))
+              outline
+            lispm-transcript-cleared-text))))))
+
 (defun lispm-transcript--tool-result (id text errorp &optional images)
   "A tool_result block for the call ID with TEXT; ERRORP marks failure.
 IMAGES are files the result holds besides TEXT."
@@ -826,8 +869,9 @@ a call waiting at one (see `lispm-transcript-stopped')."
                  blocks)
            (cond ((plist-member part :result)
                   (push (if (plist-get part :cleared)
-                            (lispm-transcript--tool-result id lispm-transcript-cleared-text
-                                                           (plist-get part :error))
+                            (lispm-transcript--tool-result
+                             id (lispm-transcript-outline-view (plist-get part :result))
+                             (plist-get part :error))
                           (lispm-transcript--tool-result id (plist-get part :result)
                                                          (plist-get part :error)
                                                          (plist-get part :images)))
@@ -982,17 +1026,23 @@ Results in responses that are not sent (tagged :ignore:) are left out."
                 (pcase-dolist (`(,kbeg ,kbody ,kend) (lispm-transcript--sections 3 cbeg cend))
                   (let ((kid (lispm-transcript--heading kbeg)))
                     (when (member (plist-get kid :title) '("Result" "Error"))
-                      (push (list kbeg
-                                  (- (position-bytes kend) (position-bytes kbody))
-                                  (and (member "cleared" (plist-get kid :tags)) t))
-                            results))))))))
+                      (let* ((raw-bytes (- (position-bytes kend) (position-bytes kbody)))
+                             (retained (if (eq lispm-transcript-cleared-viewspec 'outline)
+                                           (let ((raw (or (lispm-transcript--block kbody kend) "")))
+                                             (- (string-bytes (lispm-transcript-outline-view raw))
+                                                (string-bytes lispm-transcript-cleared-text)))
+                                         0)))
+                        (push (list kbeg
+                                    (max 0 (- raw-bytes retained))
+                                    (and (member "cleared" (plist-get kid :tags)) t))
+                              results)))))))))
         (nreverse results)))))
 
 (defvar-local lispm-transcript--folded nil
   "What `lispm-transcript-parse' read of the sections before the last one,
-kept for the next parse while nothing before them changed: (END KINDS
+kept for the next parse while nothing before them changed: (END KEY
 SYSTEM MESSAGES PENDING CONDITION), END where the last section began,
-KINDS the `lispm-transcript-kinds' they were read with, and the rest as
+KEY the `(KINDS . VIEWSPEC)' they were read with, and the rest as
 the parse gathers them, MESSAGES newest first.  Nothing in them is
 changed in place: they are shared with what the parse returned.")
 
@@ -1024,9 +1074,10 @@ read it all at every step."
         (add-hook 'after-change-functions #'lispm-transcript--note-change nil t)
         (setq lispm-transcript--folded nil))
       (pcase-let* ((folded lispm-transcript--folded)
+                   (cache-key (cons lispm-transcript-kinds lispm-transcript-cleared-viewspec))
                    (`(,from ,_ ,system ,messages ,pending ,condition)
                     (if (and folded
-                             (eq (nth 1 folded) lispm-transcript-kinds)
+                             (equal (nth 1 folded) cache-key)
                              (or (null lispm-transcript--changed)
                                  (> lispm-transcript--changed (car folded))))
                         folded
@@ -1037,7 +1088,7 @@ read it all at every step."
         (dolist (section sections)
           (when (eq section last)
             (setq lispm-transcript--folded
-                  (list (plist-get section :start) lispm-transcript-kinds
+                  (list (plist-get section :start) cache-key
                         system messages pending condition)))
           (let ((role (and (not (plist-get section :ignore))
                            (lispm-transcript--role (cons (plist-get section :kind)

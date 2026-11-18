@@ -159,6 +159,8 @@
   ("at least %d argument" "au moins %d argument" "au moins %d arguments")
   ("%s is not defined in this Emacs" . "%s n'est pas défini dans cet Emacs")
   ("%s takes %s; %d given here" . "%s attend %s ; %d fournis ici")
+  ("%s is internal; prefer public interface: %s" . "%s est interne ; préférez l'interface publique : %s")
+  ("%s is an internal symbol" . "%s est un symbole interne")
   ("No such file: %s" . "Fichier introuvable : %s")
   ("RET: visit %s at line %d" . "RET : ouvrir %s à la ligne %d")
   ("RET: visit %s" . "RET : ouvrir %s")
