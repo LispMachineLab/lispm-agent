@@ -103,6 +103,9 @@ The first start of a server run with npx or uvx downloads it."
 (defvar lispm-mcp--origins (make-hash-table :test #'equal)
   "Where each tool registered comes from: LispM name -> (SERVER . NAME).")
 
+(defvar lispm-mcp-change-hook nil
+  "Normal hook run when an MCP server starts, registers tools, fails or stops.")
+
 (defvar lispm-mcp-register-functions nil
   "Functions that may keep an MCP server's tools back, or have their calls ask.
 Each is called with the name of a server and its tools, as the server
@@ -208,6 +211,7 @@ Those `lispm-mcp-register-functions' deny are kept back."
             :function (lambda (done input) (lispm-mcp--call server tool-name input done)))))))
     (puthash server (reverse names) lispm-mcp--tools)
     (remhash server lispm-mcp--starting)
+    (run-hooks 'lispm-mcp-change-hook)
     (message "%s" (if kept
                       (lispm-tr-n "LispM: %d tool from MCP server %s; kept back: %s"
                                   "LispM: %d tools from MCP server %s; kept back: %s"
@@ -286,6 +290,7 @@ Images are saved in AGENT's session."
   "Note that SERVER failed to start, because of WHY."
   (remhash server lispm-mcp--starting)
   (puthash server (float-time) lispm-mcp--failed)
+  (run-hooks 'lispm-mcp-change-hook)
   (message "%s" (lispm-tr "LispM: MCP server %s failed to start: %s" server why)))
 
 (defun lispm-mcp--connect (server config)
@@ -294,6 +299,7 @@ A server started over stdio runs in the sandbox, at its :sandbox
 level or at `lispm-sandbox-level'."
   (remhash server lispm-mcp--failed)
   (puthash server (float-time) lispm-mcp--starting)
+  (run-hooks 'lispm-mcp-change-hook)
   (let ((connection (gethash server mcp-server-connections))
         (started (gethash server lispm-mcp--starting)))
     (if (and connection (jsonrpc-running-p connection))
@@ -358,8 +364,10 @@ changed its tools, or what those functions go by changed."
     (when (or (null server) (equal server name))
       (lispm-mcp--unregister name)
       (remhash name lispm-mcp--starting)
+      (remhash name lispm-mcp--failed)
       (when (gethash name mcp-server-connections)
-        (mcp-stop-server name)))))
+        (mcp-stop-server name))))
+  (run-hooks 'lispm-mcp-change-hook))
 
 (defun lispm-mcp-status ()
   "Say which MCP servers run and how many tools each gives."

@@ -119,6 +119,9 @@ them is.  A skill of `lispm-skill-directories', of the directory
 write_skill saves in or of the agent's project replaces one of
 theirs of the same name.")
 
+(defvar lispm-skills-change-hook nil
+  "Normal hook run when a skill is installed, created or deleted.")
+
 (defun lispm-skills--sourced ()
   "The directories `lispm-skill-sources' names: (DIRECTORY . ORIGIN), in order."
   (let (directories)
@@ -806,6 +809,7 @@ write the skill again"
         (write-region text nil file nil 'silent))
       (when open
         (lispm-tools--sync open))
+      (run-hooks 'lispm-skills-change-hook)
       (concat (format "Skill %s loaded%s.\n" name
                       (if tools (format "; tools now available: %s" (string-join tools ", ")) ""))
               (format "Saved as %s: agents load it from now on, in later sessions too."
@@ -960,9 +964,39 @@ as it is now" name))))
              (delete-directory other t)))
       (when-let* ((open (find-buffer-visiting target-file)))
         (lispm-tools--sync open))
+      (run-hooks 'lispm-skills-change-hook)
       (when (called-interactively-p 'any)
         (message "%s" (lispm-tr "LispM: skill %s installed in %s" name (abbreviate-file-name directory))))))
     name))
+
+;;;###autoload
+(defun lispm-create-skill (name description &optional instructions title no-open)
+  "Create a new skill NAME in `lispm-write-skill-directory', and return its file.
+NAME is lowercase letters, digits, - and _; DESCRIPTION is one line
+saying what the skill is for; INSTRUCTIONS and TITLE are optional.
+Unless NO-OPEN is non-nil, open the skill file in a buffer for editing."
+  (interactive
+   (list (read-string "Skill name (lowercase letters, digits, - and _): ")
+         (read-string "Description: ")))
+  (let* ((name (string-trim (or name "")))
+         (file (lispm-skills--target name nil))
+         (instructions (if (and instructions (not (string-blank-p instructions)))
+                           instructions
+                         "* Instructions\n\nDescribe how to do the task and which tools or functions to use."))
+         (text (condition-case err
+                   (lispm-skills--compose name description instructions nil title)
+                 (error (user-error "%s" (error-message-string err))))))
+    (when (file-exists-p file)
+      (user-error "%s" (lispm-tr "Skill %s is in %s, not among the skills installed in %s; it is not deleted"
+                                 name (abbreviate-file-name (file-name-directory file))
+                                 (abbreviate-file-name (lispm-skills--write-directory)))))
+    (make-directory (file-name-directory file) t)
+    (let ((coding-system-for-write 'utf-8))
+      (write-region text nil file nil 'silent))
+    (run-hooks 'lispm-skills-change-hook)
+    (unless no-open
+      (pop-to-buffer (find-file-noselect file)))
+    file))
 
 ;;;###autoload
 (defun lispm-delete-skill (name)
@@ -1006,6 +1040,7 @@ exits.  Interactively, you are asked first."
       (delete-file file t))
     (when dir-p
       (delete-directory skill-directory t t))
+    (run-hooks 'lispm-skills-change-hook)
     name))
 
 ;;;; Resumed sessions

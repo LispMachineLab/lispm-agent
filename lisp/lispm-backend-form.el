@@ -494,5 +494,237 @@ says, once it is valid."
         (setq lispm--setup-offered t)
         (lispm-setup-model)))))
 
+;;;; MCP server form and skill form
+
+(defconst lispm-mcp-presets
+  `((custom :label ,(lispm-tr-noop "Custom"))
+    (peekaboo :label "Peekaboo"
+              :command "npx"
+              :args ("-y" "@steipete/peekaboo" "mcp")
+              :description "See the macOS screen and use its applications."
+              :sandbox none)
+    (filesystem :label "Filesystem"
+                :command "npx"
+                :args ("-y" "@modelcontextprotocol/server-filesystem" "~")
+                :description "Read, search and manage files in the allowed directories.")
+    (fetch :label "Fetch"
+           :command "uvx"
+           :args ("mcp-server-fetch")
+           :description "Fetch web pages and convert HTML to markdown.")
+    (github :label "GitHub"
+            :command "npx"
+            :args ("-y" "@modelcontextprotocol/server-github")
+            :description "Search repositories, issues, pull requests and code on GitHub.")
+    (memory :label "Memory"
+            :command "npx"
+            :args ("-y" "@modelcontextprotocol/server-memory")
+            :description "Keep a knowledge graph of entities and relations."))
+  "Presets offered when adding an MCP server in `lispm-mcp-form'.")
+
+(defun lispm-mcp-form--preset-choices ()
+  "The preset choices offered when adding an MCP server."
+  (mapcar (pcase-lambda (`(,key . ,props))
+            (cons key (lispm-tr (plist-get props :label))))
+          lispm-mcp-presets))
+
+(defun lispm-mcp-form--apply-preset (preset)
+  "Fill the current MCP server form from PRESET, a key of `lispm-mcp-presets'."
+  (when-let* ((props (cdr (assq preset lispm-mcp-presets)))
+              ((not (eq preset 'custom))))
+    (let ((name (symbol-name preset)))
+      (lispm-ui-form-set
+       'name (if (assoc name lispm-mcp-servers) "" name)
+       'transport (if (plist-get props :url) 'http 'stdio)
+       'command (or (plist-get props :command) "")
+       'args (string-join (plist-get props :args) " ")
+       'description (or (plist-get props :description) "")
+       'sandbox (or (plist-get props :sandbox) 'default)))))
+
+(defun lispm-mcp-form--env-text (env)
+  "Format ENV, a plist of environment variables, as KEY=VALUE words."
+  (string-join
+   (cl-loop for (key val) on env by #'cddr
+            collect (format "%s=%s" (string-trim-left (symbol-name key) ":") val))
+   " "))
+
+(defun lispm-mcp-form--parse-env (text)
+  "Parse TEXT, KEY=VALUE entries separated by spaces or commas, into a plist."
+  (let ((entries (split-string (string-trim (or text "")) "[, \t\n]+" t))
+        plist)
+    (dolist (entry entries)
+      (unless (string-match "\\`\\([[:alpha:]_][[:alnum:]_]*\\)=\\(.*\\)\\'" entry)
+        (user-error "Write environment variables as KEY=VALUE, not %s" entry))
+      (setq plist (plist-put plist (intern (concat ":" (match-string 1 entry)))
+                             (match-string 2 entry))))
+    plist))
+
+(defun lispm-mcp-form--submit (name values)
+  "Keep the MCP server VALUES describe; NAME nil adds one, else changes it."
+  (let* ((new (null name))
+         (name (or name (string-trim (or (alist-get 'name values) ""))))
+         (old (and (not new) (lispm-mcp-server-get name)))
+         (transport (or (alist-get 'transport values) 'stdio))
+         (command (string-trim (or (alist-get 'command values) "")))
+         (args (and (eq transport 'stdio)
+                    (split-string-and-unquote (string-trim (or (alist-get 'args values) "")))))
+         (env (and (eq transport 'stdio)
+                   (lispm-mcp-form--parse-env (alist-get 'env values))))
+         (url (string-trim (or (alist-get 'url values) "")))
+         (token (string-trim (or (alist-get 'token values) "")))
+         (description (string-trim (or (alist-get 'description values) "")))
+         (defer (alist-get 'defer values))
+         (permission (or (alist-get 'permission values) 'mcp))
+         (sandbox (alist-get 'sandbox values))
+         (config (copy-tree old)))
+    (dolist (key '(:command :args :env :url :token :description :defer :permission :sandbox))
+      (cl-remf config key))
+    (if (eq transport 'http)
+        (progn
+          (setq config (plist-put config :url url))
+          (let ((kept-token (if (not (string-empty-p token))
+                                token
+                              (plist-get old :token))))
+            (when (and (stringp kept-token) (not (string-empty-p kept-token)))
+              (setq config (plist-put config :token kept-token)))))
+      (setq config (plist-put config :command command))
+      (when args
+        (setq config (plist-put config :args args)))
+      (when env
+        (setq config (plist-put config :env env)))
+      (when (and sandbox (not (eq sandbox 'default)))
+        (setq config (plist-put config :sandbox sandbox))))
+    (unless (string-empty-p description)
+      (setq config (plist-put config :description description)))
+    (unless defer
+      (setq config (plist-put config :defer nil)))
+    (unless (eq permission 'mcp)
+      (setq config (plist-put config :permission permission)))
+    (if new
+        (lispm-mcp-server-add name config t)
+      (lispm-mcp-server-change name config t))))
+
+(defun lispm-mcp-form (&optional name)
+  "Make the form that adds an MCP server, or changes MCP server NAME;
+return its buffer."
+  (let* ((config (and name (lispm-mcp-server-get name)))
+         (transport (if (plist-get config :url) 'http 'stdio))
+         (stdio-p (lambda (values) (eq (alist-get 'transport values) 'stdio)))
+         (http-p (lambda (values) (eq (alist-get 'transport values) 'http)))
+         (fields
+          (append
+           (unless name
+             `((preset :type choice :label ,(lispm-tr "Preset")
+                       :choices ,(lispm-mcp-form--preset-choices)
+                       :value custom
+                       :on-change ,#'lispm-mcp-form--apply-preset
+                       :help ,(lispm-tr "Fill in the command and arguments of a known MCP server."))
+               (name :type text :label ,(lispm-tr "Name") :required t
+                     :value ""
+                     :validate ,(lambda (value)
+                                  (when (stringp value)
+                                    (let ((trimmed (string-trim value)))
+                                      (cond ((assoc trimmed lispm-mcp-servers)
+                                             (lispm-tr "There is already an MCP server %s" trimmed))
+                                            ((not (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" trimmed))
+                                             (lispm-tr "Use letters, digits, `-', `_' or `.'"))))))
+                     :help ,(lispm-tr "A short name for the server, as `peekaboo' or `github'."))))
+           `((transport :type radio :label ,(lispm-tr "Transport")
+                        :choices ((stdio . ,(lispm-tr "Command (stdio)"))
+                                  (http . ,(lispm-tr "HTTP")))
+                        :value ,transport
+                        :help ,(lispm-tr "How LispM connects to the MCP server."))
+             (command :type text :label ,(lispm-tr "Command") :required t
+                      :value ,(or (plist-get config :command) "")
+                      :when ,stdio-p
+                      :help ,(lispm-tr "The program to run, as `npx' or `uvx'."))
+             (args :type text :label ,(lispm-tr "Arguments")
+                   :value ,(string-join (plist-get config :args) " ")
+                   :when ,stdio-p
+                   :help ,(lispm-tr "Arguments passed to the command, separated by spaces."))
+             (env :type text :label ,(lispm-tr "Environment")
+                  :value ,(lispm-mcp-form--env-text (plist-get config :env))
+                  :when ,stdio-p
+                  :validate ,(lambda (value)
+                               (when (and (stringp value) (not (string-blank-p value)))
+                                 (condition-case err
+                                     (progn (lispm-mcp-form--parse-env value) nil)
+                                   (error (error-message-string err)))))
+                  :help ,(lispm-tr "Optional KEY=VALUE variables for the server's process."))
+             (url :type text :label ,(lispm-tr "Address") :required t
+                  :value ,(or (plist-get config :url) "")
+                  :when ,http-p
+                  :validate ,(lambda (value)
+                               (unless (and (stringp value)
+                                            (string-match-p "\\`https?://[^/[:space:]]+" value))
+                                 (lispm-tr "Starts with http:// or https://")))
+                  :help ,(lispm-tr "The HTTP address of the MCP server."))
+             (token :type password :label ,(lispm-tr "The key")
+                    :value ""
+                    :when ,http-p
+                    :help ,(lispm-tr "Never shown again; leave it empty to keep the one there is."))
+             (description :type text :label ,(lispm-tr "Description")
+                          :value ,(or (plist-get config :description) "")
+                          :help ,(lispm-tr "What the server's tools do; agents read this when searching tools."))
+             (defer :type check :text ,(lispm-tr "Load tools on demand with search_tools")
+                    :value ,(if (plist-member config :defer) (plist-get config :defer) t))
+             (permission :type choice :label ,(lispm-tr "Permission")
+                         :choices ,(mapcar (pcase-lambda (`(,class . ,_))
+                                             (cons class (format "%s — %s" class
+                                                                 (lispm-permission-class-description class))))
+                                           lispm-permission-classes)
+                         :value ,(or (plist-get config :permission) 'mcp)
+                         :help ,(lispm-tr "The permission class of the server's tools."))
+             (sandbox :type choice :label ,(lispm-tr "Sandbox")
+                      :when ,stdio-p
+                      :choices ((default . ,(lispm-tr "Follow LispM's sandbox"))
+                                (none . ,(lispm-sandbox-level-name 'none))
+                                (low . ,(lispm-sandbox-level-name 'low))
+                                (middle . ,(lispm-sandbox-level-name 'middle))
+                                (high . ,(lispm-sandbox-level-name 'high)))
+                      :value ,(or (plist-get config :sandbox) 'default)
+                      :help ,(lispm-tr "The sandbox level the server's process runs at."))))))
+    (lispm-ui-form
+     (if name (lispm-tr "MCP Server %s" name) (lispm-tr "Add MCP Server"))
+     fields
+     :intro (lispm-tr "A Model Context Protocol server whose tools agents can use.")
+     :submit (lispm-tr "Save")
+     :cancel (lispm-tr "Cancel")
+     :on-submit (lambda (values) (lispm-mcp-form--submit name values)))))
+
+(defun lispm-skill-form ()
+  "Make the form that creates a new skill in `lispm-write-skill-directory';
+return its buffer."
+  (lispm-ui-form
+   (lispm-tr "New Skill")
+   `((name :type text :label ,(lispm-tr "Name") :required t
+           :value ""
+           :validate ,(lambda (value)
+                        (when (stringp value)
+                          (let ((trimmed (string-trim value)))
+                            (cond ((not (let ((case-fold-search nil))
+                                          (string-match-p "\\`[a-z0-9][a-z0-9_-]\\{0,63\\}\\'" trimmed)))
+                                   (lispm-tr "Use lowercase letters, digits, `-' or `_'"))
+                                  ((lispm-skills--find trimmed nil)
+                                   (lispm-tr "There is already a skill %s" trimmed))))))
+           :help ,(lispm-tr "The skill's identifier, as `org-tables' or `deploy-check'."))
+     (title :type text :label ,(lispm-tr "Title")
+            :value ""
+            :help ,(lispm-tr "A short title shown for the skill (optional)."))
+     (description :type text :label ,(lispm-tr "Description") :required t
+                  :value ""
+                  :help ,(lispm-tr "One line saying what the skill is for: agents find it by this."))
+     (instructions :type text-area :label ,(lispm-tr "Instructions") :lines 6
+                   :value ""
+                   :help ,(lispm-tr "How to do the task, which functions or tools to use, and pitfalls to avoid.")))
+   :intro (lispm-tr "A manual in Org that teaches agents how to do a task in Emacs, saved in your skills directory and opened for editing.")
+   :submit (lispm-tr "Create")
+   :cancel (lispm-tr "Cancel")
+   :on-submit (lambda (values)
+                (lispm-create-skill
+                 (string-trim (alist-get 'name values))
+                 (string-trim (alist-get 'description values))
+                 (alist-get 'instructions values)
+                 (alist-get 'title values)))))
+
 (provide 'lispm-backend-form)
 ;;; lispm-backend-form.el ends here
