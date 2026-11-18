@@ -252,7 +252,7 @@ Without asking it, that is: a backend of `lispm-backends' (see
 `lispm-backend'), whose key, when it reads one from an environment
 variable or the secret store, is set there."
   (when-let* ((name (lispm-backend-name agent))
-              (backend (alist-get name lispm-backends)))
+              (backend (lispm-backend name)))
     (let ((variable (plist-get backend :key-env))
           (key (plist-get backend :key)))
       (cond (variable (not (string-empty-p (or (getenv variable) ""))))

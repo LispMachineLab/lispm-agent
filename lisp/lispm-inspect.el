@@ -662,7 +662,7 @@ objects: readers must not change them.  No transcript or diary is read."
 (defun lispm-inspect--model-summary (agent)
   "Return AGENT's model summary line, or \"no backend\" when none is configured."
   (if-let* ((backend (lispm-backend-name agent))
-            ((assq backend lispm-backends)))
+            ((lispm-backend backend)))
       (lispm-tr "%s via %s, effort %s"
                 (lispm-agent-model* agent)
                 backend

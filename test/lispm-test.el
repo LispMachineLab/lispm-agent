@@ -13055,6 +13055,36 @@ are flagged with public interface suggestions and translated via `lispm-tr'."
       (should (= eval-count 1))
       (should-not (lispm-agent-dispatching agent)))))
 
+(ert-deftest lispm-test-character-endpoint-backend-resolution ()
+  "`lispm-bar-model-ready-p' and `lispm-inspect--model-summary' resolve `@character' endpoints."
+  (lispm-test-env
+    (let* ((lispm-backends nil)
+           (lispm-backend nil)
+           (lispm--characters
+            (list (cons 'ada (lispm-character--create
+                              :name 'ada
+                              :endpoint '(:api openai :model "gpt-4o" :key "sk-test")))))
+           (agent (lispm-defagent ada "Ada agent." :root project :backend '@ada)))
+      (should (lispm-bar-model-ready-p agent))
+      (should (string-match-p "gpt-4o via @ada" (lispm-inspect--model-summary agent))))))
+
+(ert-deftest lispm-test-batch-timeout-preserves-abort-callback-reply ()
+  "`lispm-batch--run-turns' preserves the callback reply invoked during `lispm-abort' on timeout."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent batch "Batch agent." :root project))
+           (active-cb nil))
+      (cl-letf (((symbol-function 'lispm-tell)
+                 (lambda (_ag _prompt &rest plist)
+                   (setq active-cb (plist-get plist :callback))))
+                ((symbol-function 'lispm-abort)
+                 (lambda (_ag)
+                   (when active-cb
+                     (funcall active-cb "Wrap-up latest reply")))))
+        (let ((outcome (lispm-batch--run-turns
+                        agent "go" project 0.01 (float-time) nil (lambda () 1))))
+          (should (plist-get outcome :timed-out))
+          (should (equal (plist-get outcome :reply) "Wrap-up latest reply")))))))
+
 (require 'lispm-collab-async-test)
 (require 'lispm-roster-test)
 (require 'lispm-agents-work-test)

@@ -463,22 +463,26 @@ whether the 70%% (`1') or 85%% (`2') notice has already been emitted."
                 (/ rem 60) (mod rem 60)
                 steps (or max-steps 0)))))))
 
-(defun lispm-batch--turn-runner (agent kernel-rt)
-  "Return a curried turn runner for AGENT and KERNEL-RT.
+(defun lispm-batch--turn-runner (agent kernel-rt on-reply)
+  "Return a curried turn runner for AGENT, KERNEL-RT and ON-REPLY.
 The returned function takes (PROMPT DEADLINE &optional STEP-BUDGET
-NOTE-FN PUMP-P) and returns (DONE . REPLY)."
-  (lambda (prompt deadline &optional step-budget note-fn pump-p)
+NOTE-FN PUMP-P KEEP-PREV-P) and returns non-nil when the turn finished
+before DEADLINE."
+  (lambda (prompt deadline &optional step-budget note-fn pump-p keep-prev-p)
     (let ((lispm-max-steps (or step-budget lispm-max-steps))
           (lispm-tool-result-note-function note-fn)
-          done reply)
-      (lispm-tell agent prompt :callback (lambda (r) (setq reply r done t)))
+          done)
+      (lispm-tell agent prompt
+                  :callback (lambda (r)
+                              (funcall on-reply r keep-prev-p)
+                              (setq done t)))
       (while (and (not done) (< (float-time) deadline))
         (accept-process-output nil 0.05)
         (when pump-p
           (lispm-batch--pump-events))
         (when kernel-rt
           (ignore-errors (lispm-kernel-dispatch kernel-rt))))
-      (cons done reply))))
+      done)))
 
 (defun lispm-batch--run-turns (agent prompt root timeout-sec started-time kernel-rt call-count-fn)
   "Drive AGENT through PROMPT, wrap-up and hygiene turns up to TIMEOUT-SEC.
@@ -494,10 +498,13 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
                       (lispm-batch--budget-note
                        agent started-flt soft-deadline lispm-max-steps budget-stage))))
          (initial-files (lispm-batch--workspace-files root))
-         (run-turn (lispm-batch--turn-runner agent kernel-rt))
-         (main (funcall run-turn prompt soft-deadline lispm-max-steps note-fn t))
-         (done (car main))
-         (final-reply (cdr main))
+         (final-reply nil)
+         (on-reply (lambda (r &optional keep-prev-p)
+                     (when (or (not keep-prev-p)
+                               (and (stringp r) (not (string-empty-p (string-trim r)))))
+                       (setq final-reply r))))
+         (run-turn (lispm-batch--turn-runner agent kernel-rt on-reply))
+         (done (funcall run-turn prompt soft-deadline lispm-max-steps note-fn t nil))
          timed-out)
     (let ((hit-step-limit (and done (>= (lispm-agent-steps agent) lispm-max-steps)))
           (hit-soft-deadline (not done)))
@@ -505,19 +512,11 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
                  (> (- deadline (float-time)) 15))
         (when hit-soft-deadline
           (ignore-errors (lispm-abort agent)))
-        (pcase-let ((`(,w-done . ,w-reply)
-                     (funcall run-turn lispm-batch--wrapup-prompt deadline 6 nil nil)))
-          (setq done w-done)
-          (when (and (stringp w-reply) (not (string-empty-p (string-trim w-reply))))
-            (setq final-reply w-reply)))))
+        (setq done (funcall run-turn lispm-batch--wrapup-prompt deadline 6 nil nil t))))
     (when-let* (((and done (< (float-time) deadline)
                       (< (funcall call-count-fn) lispm-max-steps)))
                 (hygiene-prompt (lispm-batch--hygiene-prompt root initial-files agent)))
-      (pcase-let ((`(,h-done . ,h-reply)
-                   (funcall run-turn hygiene-prompt deadline 5 nil t)))
-        (setq done h-done)
-        (when (and (stringp h-reply) (not (string-empty-p (string-trim h-reply))))
-          (setq final-reply h-reply))))
+      (setq done (funcall run-turn hygiene-prompt deadline 5 nil t t)))
     (unless done
       (setq timed-out t)
       (ignore-errors (lispm-abort agent)))
