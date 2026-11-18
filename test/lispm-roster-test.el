@@ -275,7 +275,20 @@ key, parent, mailbox and details, alongside background helpers without chats."
           (should (equal (plist-get helper-rec :parent) boss-key))
           (should (equal (plist-get helper-rec :request-ids) '("q1")))
           (should (equal (plist-get details :key) boss-key))
-          (should (= (length (plist-get (plist-get details :mailbox) :queued)) 1)))))))
+          (should (= (length (plist-get (plist-get details :mailbox) :queued)) 1)))
+        ;; Even after a helper retires, it remains visible under its live parent in the roster.
+        (with-current-buffer (lispm-agent-buffer boss)
+          (goto-char (point-max))
+          (insert (format "\nRequest q2 accepted by assistant@project<3> (%s).\n"
+                          "20261118-143201-189d")))
+        (let* ((roster (lispm-agents-roster))
+               (retired (seq-find (lambda (r)
+                                    (equal (plist-get r :key) '(lispm "20261118-143201-189d")))
+                                  roster)))
+          (should retired)
+          (should (equal (plist-get retired :name) "assistant@project<3>"))
+          (should (equal (plist-get retired :parent) boss-key))
+          (should (equal (plist-get retired :status) '(:state done :msg nil))))))))
 
 (provide 'lispm-roster-test)
 ;;; lispm-roster-test.el ends here

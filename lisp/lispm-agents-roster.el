@@ -275,6 +275,49 @@ builds a fresh index so settled requests never remain cached."
                                 '(open-chat))))
        (lispm-agents-roster-waits buffer)))))
 
+(defun lispm-agents-roster--retired-children (index)
+  "Return records for retired child helpers of live sessions in INDEX."
+  (let ((by-key (lispm-agents-roster--index-by-key index))
+        (archived (lispm-agents-roster--index-archived index))
+        (seen (make-hash-table :test #'equal))
+        records)
+    (save-match-data
+      (dolist (buffer (lispm-agents-roster--index-buffers index))
+        (when-let* ((agent (lispm-agents-roster--buffer-agent buffer))
+                    (parent-key (gethash buffer (lispm-agents-roster--index-keys index)))
+                    (tbuf (lispm-agent-buffer agent))
+                    ((buffer-live-p tbuf)))
+          (with-current-buffer tbuf
+            (save-excursion
+              (save-restriction
+                (widen)
+                (goto-char (point-min))
+                (while (re-search-forward
+                        "accepted by \\([^ \t\n(]+\\) (\\([0-9]\\{8\\}-[0-9]\\{6\\}-[0-9a-f]+\\))"
+                        nil t)
+                  (let* ((child-name (match-string-no-properties 1))
+                         (child-id (match-string-no-properties 2))
+                         (child-key (list 'lispm child-id)))
+                    (unless (or (gethash child-key by-key)
+                                (gethash child-key seen)
+                                (gethash (lispm-agents--session-key
+                                          (list :agent 'lispm :id child-id))
+                                         archived))
+                      (puthash child-key t seen)
+                      (push (list :key child-key :buffer nil
+                                  :name child-name :kind 'lispm
+                                  :root (lispm-agent-root agent)
+                                  :parent parent-key
+                                  :alive nil :running nil
+                                  :status '(:state done :msg nil)
+                                  :character nil :character-name nil
+                                  :app-character nil :avatar nil
+                                  :mailbox '(:handling nil :queued 0)
+                                  :actions '(open-chat)
+                                  :waits-on nil :waited-on-by nil :request-ids nil)
+                            records))))))))))
+    (nreverse records)))
+
 (defun lispm-agents-roster ()
   "Return a plain snapshot of alive, unarchived agents, most recently used first.
 Each plist has :key (KIND SESSION-ID), :buffer, :name, :kind, :root,
@@ -290,8 +333,9 @@ with `lispm-agents-roster-details'.  Returned data may be changed by the
 caller without changing agents; buffer objects still identify live buffers."
   (let ((lispm-agents-roster--index (lispm-agents-roster--build-index (lispm-agents-live-buffers))))
     (lispm-inspect--copy-data
-     (delq nil (mapcar #'lispm-agents-roster--record
-                       (lispm-agents-roster--index-buffers lispm-agents-roster--index))))))
+     (append (delq nil (mapcar #'lispm-agents-roster--record
+                               (lispm-agents-roster--index-buffers lispm-agents-roster--index)))
+             (lispm-agents-roster--retired-children lispm-agents-roster--index)))))
 
 ;;;; Changes
 
