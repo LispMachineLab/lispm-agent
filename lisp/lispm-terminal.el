@@ -135,6 +135,8 @@ read them again.")
   "Timer drawing the terminal again every minute: the time, the ages.")
 
 (defvar lispm-terminal-mode)
+(defvar lispm-ui-in-gui-action)
+(defvar lispm-ui--command-from-mouse)
 
 ;;;; The listener
 
@@ -193,8 +195,7 @@ Return the chat."
       (lispm-terminal-keys-mode 1)
       ;; A column apart from the line beside it; set for the buffer, as
       ;; whatever shows it in the listener again keeps it so.
-      (setq-local left-margin-width 1
-                  right-margin-width 1))
+      (setq-local left-margin-width 1 right-margin-width 1))
     (set-window-dedicated-p window nil)
     (set-window-parameter window 'quit-restore nil)
     (set-window-buffer window chat)
@@ -251,12 +252,12 @@ when a project is opened from the dedicated Sessions pane."
 DIRECTORY defaults to the project of the agent the listener talks to.
 With a prefix argument, choose its ROLE as well."
   (interactive
-   (let ((agent (lispm-terminal-agent)))
+   (let ((agent (lispm-terminal-agent))
+         (lispm-ui-in-gui-action nil) (lispm-ui--command-from-mouse nil))
      (list (lispm-agents-read-directory
-            'lispm
-            (if (and agent (not (lispm-system-agent-p agent)))
-                (lispm-agent-root agent)
-              (lispm-agents-default-directory)))
+            'lispm (if (and agent (not (lispm-system-agent-p agent)))
+                       (lispm-agent-root agent)
+                     (lispm-agents-default-directory)))
            (and current-prefix-arg (lispm-read-role (lispm-tr "Role"))))))
   (lispm-terminal-show (lispm-start role (lispm--project-root directory))))
 
@@ -395,6 +396,18 @@ recorded session's age."
     (propertize (lispm--age (plist-get (plist-get entry :session) :time))
                 'face 'lispm-terminal-dim)))
 
+(defun lispm-terminal-activate ()
+  "Run the action of the button at point in the sessions."
+  (interactive)
+  (if-let* ((action (get-text-property (point) 'lispm-terminal-action)))
+      (call-interactively action)
+    (user-error "%s" (lispm-tr "No session here"))))
+
+(defvar-keymap lispm-terminal-action-map
+  :doc "Keymap of action buttons in the sessions."
+  "RET" #'lispm-terminal-activate
+  "SPC" #'lispm-terminal-activate)
+
 (defun lispm-terminal--entry-string (entry width current)
   "ENTRY as the sessions show it, WIDTH columns wide; CURRENT if the
 listener shows it."
@@ -406,18 +419,23 @@ listener shows it."
     (propertize
      (concat indent (if current (propertize "▸ " 'face 'lispm-chat-accent) "  ")
              (if current (propertize title 'face 'lispm-terminal-current) title)
-             (lispm-terminal--align-right mark)
-             mark "\n"
+             (lispm-terminal--align-right mark) mark "\n"
              (if (and detail (not (string-empty-p detail)))
                  (concat indent "    " (propertize (lispm--oneline detail (max 4 (- width 5 (length indent))))
-                                           'face 'lispm-terminal-dim)
+                                                   'face 'lispm-terminal-dim)
                          "\n")
                ""))
-     'lispm-terminal-entry entry)))
+     'lispm-terminal-entry entry 'mouse-face (list 'lispm-terminal-selected) 'pointer 'hand)))
 
 (defun lispm-terminal--heading (text)
   "A heading of the sessions saying TEXT."
   (concat "\n  " (propertize text 'face 'lispm-terminal-dim) "\n"))
+
+(defun lispm-terminal--action-button (label face action help)
+  "Return LABEL in FACE as a clickable sessions button calling ACTION with HELP."
+  (propertize label 'face face 'lispm-terminal-action action 'help-echo help
+              'mouse-face (list 'lispm-terminal-selected) 'pointer 'hand
+              'keymap lispm-terminal-action-map))
 
 (defun lispm-terminal--sessions-text (width)
   "The text of the sessions, WIDTH columns wide."
@@ -429,8 +447,14 @@ listener shows it."
          (others (cdr entries)))
     (concat (propertize (lispm-tr "Sessions") 'face 'bold)
             (lispm-terminal--align-right (lispm-tr "? keys"))
-            (propertize (lispm-tr "? keys") 'face 'lispm-terminal-dim)
-            "\n\n"
+            (lispm-terminal--action-button
+             (lispm-tr "? keys") 'lispm-terminal-dim
+             #'describe-mode (lispm-tr "List commands and keys"))
+            "\n"
+            (lispm-terminal--action-button
+             (concat "+ " (lispm-tr "New session") "\n")
+             'lispm-chat-accent #'lispm-terminal-new (lispm-tr "New session"))
+            "\n"
             (funcall string (car entries))
             (when others
               (concat (lispm-terminal--heading
@@ -595,20 +619,36 @@ on record."
   (setq lispm-terminal--recorded nil)
   (lispm-terminal-redraw))
 
+(defun lispm-terminal-click (event)
+  "Act on the session or button in the sessions that EVENT clicked."
+  (interactive "e")
+  (let* ((posn (event-end event))
+         (window (posn-window posn))
+         (pos (posn-point posn)))
+    (when (and (window-live-p window) (integer-or-marker-p pos))
+      (with-current-buffer (window-buffer window)
+        (goto-char pos)
+        (set-window-point window pos)
+        (if-let* ((action (get-text-property pos 'lispm-terminal-action)))
+            (with-selected-window window (call-interactively action))
+          (when-let* ((entry (lispm-terminal--entry-at pos)))
+            (let ((start (lispm-terminal--entry-start pos)))
+              (goto-char start)
+              (set-window-point window start))
+            (lispm-terminal-talk entry)))))))
+
 (defvar-keymap lispm-terminal-sessions-mode-map
   :doc "Keymap of `lispm-terminal-sessions-mode'."
-  "n" #'lispm-terminal-next-entry
-  "p" #'lispm-terminal-previous-entry
+  "n" #'lispm-terminal-next-entry "p" #'lispm-terminal-previous-entry
   "<remap> <next-line>" #'lispm-terminal-next-entry
   "<remap> <previous-line>" #'lispm-terminal-previous-entry
-  "RET" #'lispm-terminal-talk
-  "SPC" #'lispm-terminal-peek
-  "o" #'lispm-terminal-new
-  "k" #'lispm-terminal-end
-  "r" #'lispm-terminal-rename
-  "/" #'lispm-terminal-jump
-  "q" #'lispm-terminal-to-listener
-  "TAB" #'lispm-terminal-to-listener)
+  "RET" #'lispm-terminal-talk "SPC" #'lispm-terminal-peek
+  "o" #'lispm-terminal-new "k" #'lispm-terminal-end
+  "r" #'lispm-terminal-rename "/" #'lispm-terminal-jump
+  "q" #'lispm-terminal-to-listener "TAB" #'lispm-terminal-to-listener
+  "<down-mouse-1>" #'ignore "<mouse-1>" #'lispm-terminal-click
+  "<double-down-mouse-1>" #'ignore "<double-mouse-1>" #'lispm-terminal-click
+  "<mouse-2>" #'lispm-terminal-click)
 
 (define-derived-mode lispm-terminal-sessions-mode special-mode "LispM Sessions"
   "The sessions of LispM's terminal: LispM itself, the agents alive, the
