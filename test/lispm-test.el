@@ -12465,7 +12465,7 @@ sessions; RET on a recorded one resumes it in the listener."
            (alive (lispm-start nil project)))
       (setq lispm-terminal--recorded nil)
       (should (string-match-p
-               (concat "\\`Sessions \\? keys\n\n▸ λ LispM *\n\n"
+               (concat "\\`Sessions \\? keys\n\\+ New session\n\n▸ λ LispM *\n\n"
                        "  Agents\n  New session *\n    assistant@project\n"
                        "  Fix the build 0m\n    assistant@project\n\\'")
                (lispm-test--terminal-text)))
@@ -12487,6 +12487,43 @@ sessions; RET on a recorded one resumes it in the listener."
                                 (lispm-test--terminal-text)))
         (lispm-terminal-rename (list :kind 'agent :agent resumed) "Build fixed")
         (should (string-match-p "▸ Build fixed" (lispm-test--terminal-text)))))))
+
+(ert-deftest lispm-test-terminal-mouse-and-new-button ()
+  "Clicking a session in the sessions switches the listener to it, and
+clicking `+ New session' opens a new session."
+  (lispm-test-with-terminal
+    (let* ((first (lispm-start nil project))
+           (sessions-win (get-buffer-window lispm-terminal--sessions-name))
+           (click-at (lambda (pos)
+                       (lispm-terminal-click
+                        (list 'mouse-1 (list sessions-win pos '(0 . 0) 0))))))
+      (lispm-terminal-redraw)
+      (with-current-buffer lispm-terminal--sessions-name
+        (let ((first-pos (lispm-terminal--find (lispm-agent-id first)))
+              (sys-pos (lispm-terminal--find (lispm-agent-id (lispm-system-agent)))))
+          (should first-pos)
+          (should sys-pos)
+          ;; Each entry has its own mouse-face cons cell so hover does not bleed.
+          (should-not (eq (get-text-property first-pos 'mouse-face)
+                          (get-text-property sys-pos 'mouse-face)))
+          (funcall click-at first-pos)
+          (should (eq (lispm-terminal-agent) first))
+          (should (eq (window-buffer (selected-window)) (lispm-agent-view first)))
+          (funcall click-at sys-pos)
+          (should (eq (lispm-terminal-agent) (lispm-system-agent)))
+          (should (eq (window-buffer (selected-window))
+                      (lispm-agent-view (lispm-system-agent))))))
+      ;; Clicking `+ New session' creates a new session in the listener.
+      (cl-letf (((symbol-function 'lispm-agents-read-directory)
+                 (lambda (&rest _) project)))
+        (with-current-buffer lispm-terminal--sessions-name
+          (goto-char (point-min))
+          (should (search-forward "+ New session" nil t))
+          (funcall click-at (match-beginning 0))))
+      (should-not (eq (lispm-terminal-agent) (lispm-system-agent)))
+      (should-not (eq (lispm-terminal-agent) first))
+      (should (eq (window-buffer (selected-window))
+                  (lispm-agent-view (lispm-terminal-agent)))))))
 
 (ert-deftest lispm-test-terminal-next ()
   "C-c C-n and C-c C-p go round the agents alive, as the sessions list them."
