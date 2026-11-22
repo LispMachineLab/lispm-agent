@@ -705,13 +705,15 @@ sessions cannot be read lists none, and says so."
 (defun lispm-agents--sort-sessions (sessions)
   "Return SESSIONS, one transcript per id, most recently opened first.
 Transcript modification times select the freshest copy, never its position."
-  (sort (lispm-agents--newest-per-id sessions)
-        (lambda (a b)
-          (let ((ta (lispm-agents-session-opened-time a))
-                (tb (lispm-agents-session-opened-time b)))
-            (if (= ta tb)
-                (string< (lispm-agents--session-key a) (lispm-agents--session-key b))
-              (> ta tb))))))
+  (mapcar #'cddr
+          (sort (mapcar (lambda (s)
+                          (cons (lispm-agents-session-opened-time s)
+                                (cons (lispm-agents--session-key s) s)))
+                        (lispm-agents--newest-per-id sessions))
+                (lambda (a b)
+                  (if (= (car a) (car b))
+                      (string< (cadr a) (cadr b))
+                    (> (car a) (car b)))))))
 
 (defun lispm-agents-session-tree (sessions)
   "Return SESSIONS as a tree: a list of (SESSION . CHILDREN), SESSION

@@ -23,6 +23,10 @@
 (defvar lispm-process-tools--runs nil
   "Program calls that have not completed or been cancelled.")
 
+(defvar lispm-process-output-functions nil
+  "Abnormal hook run as `run_program' receives output chunks.
+Each is called with (AGENT ERRORP TEXT).")
+
 (defun lispm-process-tools--collect (run errorp text)
   "Collect TEXT from RUN's stdout, or stderr when ERRORP, up to its limit."
   (unless (lispm-process-tools--run-finished run)
@@ -35,7 +39,11 @@
           (if errorp
               (push part (lispm-process-tools--run-error-output run))
             (push part (lispm-process-tools--run-output run)))
-          (cl-incf (lispm-process-tools--run-size run) (length part)))))))
+          (cl-incf (lispm-process-tools--run-size run) (length part))))
+      (when (and lispm-process-output-functions (not (string-empty-p text)))
+        (with-demoted-errors "LispM: process output hook: %S"
+          (run-hook-with-args 'lispm-process-output-functions
+                              (lispm-process-tools--run-agent run) errorp text))))))
 
 (defun lispm-process-tools--cleanup (run)
   "Release RUN's resources, suppressing any late process callbacks."

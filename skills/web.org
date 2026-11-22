@@ -1197,8 +1197,32 @@ failed."
       if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
     }
   };
+  L.flash = function (x, y, label) {
+    try {
+      var old = document.getElementById('__lme_reticle');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      if (x == null || y == null || !document.body) return;
+      var wrap = document.createElement('div');
+      wrap.id = '__lme_reticle';
+      wrap.setAttribute('aria-hidden', 'true');
+      wrap.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;transition:opacity 0.35s ease;';
+      var ring = document.createElement('div');
+      ring.style.cssText = 'position:fixed;left:' + (x - 14) + 'px;top:' + (y - 14) + 'px;width:28px;height:28px;border-radius:50%;border:2.5px solid #f5a97f;background:rgba(245,169,127,0.18);box-shadow:0 0 0 4px rgba(30,30,46,0.45);pointer-events:none;';
+      wrap.appendChild(ring);
+      if (label) {
+        var tag = document.createElement('div');
+        tag.textContent = 'λ ' + String(label).slice(0, 64);
+        tag.style.cssText = 'position:fixed;left:' + Math.max(6, Math.min((window.innerWidth || 1280) - 260, x + 18)) + 'px;top:' + Math.max(6, y - 12) + 'px;padding:3px 8px;border-radius:5px;background:#1e1e2e;color:#f5a97f;font:600 12px/1.3 -apple-system,monospace;box-shadow:0 2px 8px rgba(0,0,0,0.35);white-space:nowrap;pointer-events:none;';
+        wrap.appendChild(tag);
+      }
+      document.body.appendChild(wrap);
+      setTimeout(function () { wrap.style.opacity = '0'; }, 750);
+      setTimeout(function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }, 1150);
+    } catch (e) {}
+  };
   L.act = function (action, target, value) {
     var p = L.prepare(action, target, value);
+    if (p.x != null && p.y != null) L.flash(p.x, p.y, p.note || action);
     if (p.kind === 'click') L.fireMouse(p.x, p.y, p.button, p.clicks);
     else if (p.kind === 'hover') L.fireMouse(p.x, p.y, 'left', 0);
     else if (p.kind === 'drag') { L.fireMouse(p.x, p.y, 'left', 1); L.fireMouse(p.x2, p.y2, 'left', 1); }
@@ -1235,20 +1259,46 @@ failed."
 
 (add-hook 'kill-emacs-hook #'lispm-web-close-session)
 
+(defun lispm-web--fit-xwidget (buf xw)
+  "Resize WebKit XW to fit any window currently displaying BUF."
+  (when (and (buffer-live-p buf) (fboundp 'xwidgetp) (xwidgetp xw)
+             (fboundp 'xwidget-resize))
+    (when-let* ((win (get-buffer-window buf 'visible)))
+      (let ((w (max 320 (window-body-width win t)))
+            (h (max 240 (window-body-height win t))))
+        (condition-case nil (xwidget-resize xw w h) (error nil))))))
+
 (defun lispm-web--ensure-webkit-session (&optional show)
   "Return the persistent WebKit xwidget for `lispm-web-act', creating it if needed."
   (let ((buf (plist-get lispm-web--webkit-session :buffer))
         (xw (plist-get lispm-web--webkit-session :xwidget)))
     (unless (and buf (buffer-live-p buf) xw)
-      (setq buf (generate-new-buffer " *lispm-web-session*" t)
+      (setq buf (generate-new-buffer "*lispm-web-session*" t)
             xw (make-xwidget 'webkit "lispm-web-session" 1280 900 nil buf)
             lispm-web--webkit-session (list :buffer buf :xwidget xw))
+      (when (and (fboundp 'xwidgetp) (xwidgetp xw))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert " ")
+            (put-text-property 1 2 'display (list 'xwidget :xwidget xw)))
+          (setq-local buffer-read-only t
+                      cursor-type nil)
+          (if (fboundp 'lispm-disable-line-numbers)
+              (lispm-disable-line-numbers)
+            (setq-local display-line-numbers nil)
+            (when (bound-and-true-p display-line-numbers-mode)
+              (display-line-numbers-mode -1)))
+          (add-hook 'window-size-change-functions
+                    (lambda (_frame) (lispm-web--fit-xwidget buf xw))
+                    nil t)))
       (xwidget-put xw 'callback
                    (lambda (_xwidget type)
                      (when (eq type 'javascript-callback)
                        (funcall (nth 3 last-input-event) (nth 4 last-input-event))))))
     (when (and show (buffer-live-p buf))
-      (display-buffer buf))
+      (display-buffer buf)
+      (lispm-web--fit-xwidget buf xw))
     xw))
 
 (defun lispm-web--ensure-cdp-session (initial-url callback &optional show)

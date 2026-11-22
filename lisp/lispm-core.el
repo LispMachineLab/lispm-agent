@@ -325,6 +325,12 @@ Each is called with the agent and the message alist.")
 Each is called with the buffer, its old text and its new text;
 `lispm-current-agent' is the agent that made the change, if any.")
 
+(defvar lispm-tool-call-functions nil
+  "Abnormal hook run when a tool call starts or finishes.
+Each is called with (AGENT PHASE TOOL INPUT RESULT ERRORP), where
+PHASE is `start' before TOOL runs (RESULT and ERRORP nil) or `finish'
+once TOOL has finished.")
+
 ;;;; Roles and agents
 ;;
 ;; A role is a kind of agent: instructions, tools, permission policy and
@@ -1212,6 +1218,19 @@ and a sentence saying why it did not: later, never before this returns."
         (unless later
           (delete-file a)
           (delete-file b))))))
+
+(defun lispm-disable-line-numbers ()
+  "Keep line numbers off in the current LispM buffer, even under
+`global-display-line-numbers-mode'."
+  (setq-local display-line-numbers nil)
+  (when (bound-and-true-p display-line-numbers-mode)
+    (display-line-numbers-mode -1))
+  (add-hook 'after-change-major-mode-hook
+            (lambda ()
+              (when (bound-and-true-p display-line-numbers-mode)
+                (display-line-numbers-mode -1))
+              (setq-local display-line-numbers nil))
+            90 t))
 
 (provide 'lispm-core)
 ;;; lispm-core.el ends here
