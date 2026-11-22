@@ -631,6 +631,11 @@ definition, this makes Emacs run the new code; then run its tests with
 ert_run.  Returns the value: the name defined, or a variable's value."
   :permission exec
   :deferred t
+  :spotlight (lambda (result name &optional _kind path)
+               (list :kind 'eval-definition
+                     :subject name
+                     :path path
+                     :result result))
   :preview (lambda (name &optional kind path)
              (pcase-let ((`(,symbol ,file ,types) (lispm-develop--definition name kind path)))
                (with-temp-buffer
@@ -873,6 +878,10 @@ functions, variables, faces and more; for another language, give a file
 of it as path: its xref backend answers, a language server's with eglot."
   :permission read
   :deferred t
+  :spotlight (lambda (result identifier &optional _path _line)
+               (list :kind 'xref-definitions
+                     :subject identifier
+                     :result result))
   (lispm-develop--xref identifier path line #'xref-backend-definitions))
 
 (lispm-deftool xref_references
@@ -890,6 +899,10 @@ project's files are searched; for another language, give a file of it
 as path: its xref backend answers, a language server's with eglot."
   :permission read
   :deferred t
+  :spotlight (lambda (result identifier &optional _path _line _everywhere)
+               (list :kind 'xref-references
+                     :subject identifier
+                     :result result))
   (lispm-develop--xref
    identifier path line
    (lambda (backend id)
@@ -1024,6 +1037,11 @@ compiler (in a file the user trusts) and checkdoc, with eglot the
 language server.  Check code after changing it."
   :async t
   :deferred t
+  :spotlight (lambda (result &optional path buffer)
+               (list :kind 'flymake-diagnostics
+                     :file (and path (lispm-tools--file path))
+                     :buffer (and buffer (lispm-tools--buffer buffer))
+                     :result result))
   (cond (buffer (lispm-develop--diagnose (lispm-tools--buffer buffer) nil done))
         (path (let* ((file (lispm-tools--file path))
                      (open (find-buffer-visiting file))

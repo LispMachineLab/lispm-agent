@@ -1247,6 +1247,15 @@ ITEMS are the session's items, where the call's preview is."
 
 ;;;; Drawing
 
+(defvar-local lispm-chat--jump-overlays nil
+  "Window-specific jump-to-bottom button overlays in this chat buffer.")
+
+(defvar-local lispm-chat--unseen-output nil
+  "Non-nil when new output arrived while the chat window was scrolled up.")
+
+(defvar-local lispm-chat--jump-timer nil
+  "Idle timer debouncing `lispm-chat--refresh-jump-bars' after commands.")
+
 (defun lispm-chat--redraw ()
   "Bring the current chat up to date, from the first string that changed."
   (let* ((strings (lispm-chat--strings lispm-chat-agent))
@@ -1260,8 +1269,16 @@ ITEMS are the session's items, where the call's preview is."
              (inhibit-modification-hooks t)
              (buffer-undo-list t)
              (windows (mapcar (lambda (w)
-                                (let ((p (window-point w)))
-                                  (list w (>= p lispm-chat--input-start) (- (point-max) p))))
+                                (let* ((p (window-point w))
+                                       (in-in (>= p lispm-chat--input-start))
+                                       (at-bot (and (not (and (eq w (selected-window))
+                                                              (region-active-p)))
+                                                    (or (pos-visible-in-window-p
+                                                         lispm-chat--prompt-start w)
+                                                        (>= (or (window-end w) 0)
+                                                            (marker-position
+                                                             lispm-chat--prompt-start))))))
+                                  (list w in-in at-bot (- (point-max) p))))
                               (get-buffer-window-list (current-buffer) nil t)))
              (in-input (>= (point) lispm-chat--input-start))
              (from-end (- (point-max) (point)))
@@ -1271,15 +1288,25 @@ ITEMS are the session's items, where the call's preview is."
           (goto-char pos)
           (apply #'insert new))
         (goto-char (if in-input (- (point-max) from-end) (min here lispm-chat--prompt-start)))
-        (pcase-dolist (`(,w ,input ,end) windows)
-          (if (not input)
-              (set-window-point w (min (window-point w) lispm-chat--prompt-start))
-            (set-window-point w (- (point-max) end))
-            (lispm-chat--follow w))))
+        (pcase-dolist (`(,w ,w-in ,w-bot ,end) windows)
+          (cond
+           (w-in
+            (let ((target (- (point-max) end)))
+              (set-window-point w target)
+              (when (eq w (selected-window)) (goto-char target))
+              (lispm-chat--follow w)))
+           (w-bot
+            (set-window-point w (point-max))
+            (when (eq w (selected-window)) (goto-char (point-max)))
+            (lispm-chat--follow w))
+           (t
+            (setq lispm-chat--unseen-output t)
+            (set-window-point w (min (window-point w) lispm-chat--prompt-start))))))
       ;; Positions recorded for undoing input edits are stale now.
       (setq buffer-undo-list nil))
     (setq lispm-chat--drawn strings)
     (lispm-chat--update-footer)
+    (lispm-chat--refresh-jump-bars)
     (lispm-chat--maybe-ask)))
 
 (defun lispm-chat--follow (window &optional lines)
@@ -1290,8 +1317,12 @@ the hints, or the menu of / commands."
     (when (or (null posn)
               (> (+ (cdr (posn-x-y posn)) (* lines (default-line-height)))
                  (window-body-height window t)))
-      (with-selected-window window
-        (recenter (- lines))))))
+      (with-selected-frame (window-frame window)
+        (with-selected-window window
+          (let ((saved (point)))
+            (goto-char (point-max))
+            (recenter (- lines))
+            (goto-char saved)))))))
 
 (defun lispm-chat--maybe-ask ()
   "Select the first answer of a newly shown prompt."
@@ -1884,9 +1915,107 @@ ARGUMENT edit edits the rules of the level Custom instead."
 
 ;;;; The mode
 
+(defun lispm-chat-scroll-to-bottom (&optional event)
+  "Scroll the chat window to the bottom input prompt and focus it.
+When invoked by mouse EVENT, select the clicked window first."
+  (interactive (list last-input-event))
+  (when (and event (mouse-event-p event))
+    (when-let* ((win (posn-window (event-start event))))
+      (when (window-live-p win)
+        (select-window win))))
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (setq lispm-chat--unseen-output nil)
+    (goto-char (point-max))
+    (when (window-live-p win)
+      (set-window-point win (point-max))
+      (lispm-chat--follow win))
+    (lispm-chat--refresh-jump-bars)))
+
+(defvar-keymap lispm-chat-jump-button-map
+  :doc "Keymap on the floating jump-to-bottom pill in `lispm-chat-mode'."
+  "<mouse-1>" #'lispm-chat-scroll-to-bottom
+  "RET" #'lispm-chat-scroll-to-bottom)
+
+(defun lispm-chat--jump-pill-string ()
+  "Build the clickable jump-to-bottom pill shown when scrolled up."
+  (let* ((keys "C-c C-b")
+         (label (if lispm-chat--unseen-output
+                    (lispm-tr "● New output · ↓ Jump to bottom (%s)" keys)
+                  (lispm-tr "↓ Jump to bottom (%s)" keys))))
+    (concat "  "
+            (propertize (concat " " label " ")
+                        'face (if lispm-chat--unseen-output
+                                  '(:inherit lispm-chat-accent :inverse-video t :weight bold)
+                                '(:inherit region :weight bold))
+                        'mouse-face 'highlight
+                        'pointer 'hand
+                        'keymap lispm-chat-jump-button-map)
+            "\n")))
+
+(defun lispm-chat--window-scrolled-up-p (window)
+  "Return non-nil if chat WINDOW is scrolled above its bottom prompt."
+  (and (window-live-p window)
+       (markerp lispm-chat--prompt-start)
+       (let ((prompt (marker-position lispm-chat--prompt-start)))
+         (and (> prompt (point-min))
+              (< (window-point window) prompt)
+              (if noninteractive
+                  (> (count-lines (window-start window) prompt)
+                     (max 1 (- (window-body-height window) 2)))
+                (not (pos-visible-in-window-p prompt window)))))))
+
+(defun lispm-chat--jump-pill-anchor (window)
+  "Return a visible line-start position near the bottom of chat WINDOW."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (if noninteractive
+          (progn
+            (goto-char (window-start window))
+            (forward-line (max 0 (- (window-body-height window) 3)))
+            (line-beginning-position))
+        (let ((wend (or (window-end window) (window-point window))))
+          (goto-char (max (point-min) (1- wend)))
+          (line-beginning-position))))))
+
+(defun lispm-chat--refresh-jump-bars (&optional _win _start)
+  "Show or hide the floating jump-to-bottom button across windows of this chat."
+  (setq lispm-chat--jump-timer nil)
+  (when (eq major-mode 'lispm-chat-mode)
+    (mapc #'delete-overlay lispm-chat--jump-overlays)
+    (setq lispm-chat--jump-overlays nil)
+    (let ((any-up nil))
+      (dolist (win (get-buffer-window-list (current-buffer) nil t))
+        (when (lispm-chat--window-scrolled-up-p win)
+          (setq any-up t)
+          (let* ((end-pos (lispm-chat--jump-pill-anchor win))
+                 (ov (make-overlay end-pos end-pos (current-buffer) t nil)))
+            (overlay-put ov 'window win)
+            (overlay-put ov 'priority 90)
+            (overlay-put ov 'before-string (lispm-chat--jump-pill-string))
+            (push ov lispm-chat--jump-overlays))))
+      (unless any-up
+        (setq lispm-chat--unseen-output nil)))))
+
+(defun lispm-chat--schedule-jump-bars (&optional win _start)
+  "Debounce jump-to-bottom overlay updates without forcing synchronous redisplay."
+  (let ((buf (if (window-live-p win) (window-buffer win) (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (eq major-mode 'lispm-chat-mode)
+                   (not (timerp lispm-chat--jump-timer)))
+          (setq lispm-chat--jump-timer
+                (run-with-idle-timer
+                 0.04 nil
+                 (lambda (b)
+                   (when (buffer-live-p b)
+                     (with-current-buffer b
+                       (lispm-chat--refresh-jump-bars))))
+                 buf)))))))
+
 (defvar-keymap lispm-chat-mode-map
   :doc "Keymap of `lispm-chat-mode'."
   "<remap> <self-insert-command>" #'lispm-chat-self-insert
+  "<remap> <end-of-buffer>" #'lispm-chat-scroll-to-bottom
   "RET" #'lispm-chat-return
   "S-<return>" #'lispm-chat-newline
   "M-RET" #'lispm-chat-newline
@@ -1898,6 +2027,7 @@ ARGUMENT edit edits the rules of the level Custom instead."
   "<remap> <next-line>" #'lispm-chat-next
   "M-p" #'lispm-chat-history-previous
   "M-n" #'lispm-chat-history-next
+  "C-c C-b" #'lispm-chat-scroll-to-bottom
   "C-c C-c" #'lispm-chat-interrupt
   "C-c C-k" #'lispm-chat-interrupt
   "C-c C-t" #'lispm-chat-transcript
@@ -1915,6 +2045,7 @@ Write at the bottom and press RET; / starts a command (/help lists them).
 
 \\{lispm-chat-mode-map}"
   :group 'lispm-chat
+  (lispm-disable-line-numbers)
   (setq-local word-wrap t
               truncate-lines nil
               lispm-chat--expanded (make-hash-table :test #'equal)
@@ -1926,6 +2057,8 @@ Write at the bottom and press RET; / starts a command (/help lists them).
   (add-hook 'completion-at-point-functions #'lispm-chat--complete nil t)
   (add-hook 'after-change-functions #'lispm-chat--update-footer nil t)
   (add-hook 'post-command-hook #'lispm-chat--show-menu nil t)
+  (add-hook 'post-command-hook #'lispm-chat--schedule-jump-bars nil t)
+  (add-hook 'window-scroll-functions #'lispm-chat--schedule-jump-bars nil t)
   (add-hook 'kill-buffer-hook #'lispm-chat--killed nil t)
   (add-hook 'window-size-change-functions #'lispm-chat--resized nil t)
   (add-hook 'display-line-numbers-mode-hook #'lispm-chat--resized nil t)

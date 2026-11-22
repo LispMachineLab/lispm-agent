@@ -102,7 +102,7 @@ a list of strings; they do not change the tool's name or schema."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff for class keywords)
+  diff for class keywords spotlight)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -165,12 +165,16 @@ BODY may start with keyword options:
                      `lispm-tool-call-permission')
   :keywords LIST     explicit search terms, a list of strings; these
                      aid discovery without adding callable aliases
+  :spotlight FN      for a tool that reads or looks up places: called
+                     with the result text and the call's arguments once
+                     the call succeeds, returns a spotlight plist or nil
 
 Otherwise BODY's value is the result: a string, or any object, which
 is printed; or a `lispm-tool-result', text with image or video files
 the model sees too.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview diff changes targets deferred always-ask for class keywords
+  (let ((permission 'read) async preview diff changes targets deferred always-ask for class
+        keywords spotlight
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (pcase (pop body)
@@ -184,7 +188,8 @@ the model sees too.  Signal an error to report a failure to the model."
         (:always-ask (setq always-ask (pop body)))
         (:for (setq for (pop body)))
         (:class (setq class (pop body)))
-        (:keywords (setq keywords (pop body)))))
+        (:keywords (setq keywords (pop body)))
+        (:spotlight (setq spotlight (pop body)))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
@@ -201,6 +206,7 @@ the model sees too.  Signal an error to report a failure to the model."
        :for ,for
        :class ,class
        :keywords ,keywords
+       :spotlight ,spotlight
        :file (or load-file-name
                  (and buffer-file-name (string-suffix-p ".el" buffer-file-name) buffer-file-name))
        :function ,(if async
@@ -358,8 +364,9 @@ around it either: that would leave the call without a result."
       (when pending
         (setq quit-flag pending)))))
 
-(defun lispm-tools--deliver (done agent tool text errorp images)
+(defun lispm-tools--deliver (done agent tool text errorp images &optional input)
   "Give DONE the result of AGENT's call of TOOL: TEXT, ERRORP and IMAGES.
+INPUT, when provided, is the call's decoded JSON input.
 First, if TOOL may have changed files, TRAMP forgets what it knew of
 those of a remote root (see `lispm-tools--flush-remote'), and the
 buffers of those under AGENT's root that changed on disk are reverted,
@@ -380,6 +387,11 @@ must not leave half done, so quitting is inhibited meanwhile."
             (quit nil)
             (error
              (message "LispM: reverting changed buffers: %S" err))))))
+    (with-demoted-errors "LispM: tool call hook: %S"
+      (let ((lispm-current-agent agent)
+            (default-directory (if agent (lispm-agent-root agent) default-directory)))
+        (run-hook-with-args 'lispm-tool-call-functions
+                            agent 'finish tool input text errorp)))
     (apply done text errorp (and images (list images)))))
 
 (declare-function tramp-dissect-file-name "tramp")
@@ -419,12 +431,14 @@ runs."
                      (when (lispm-tool-result-p value)
                        (setq images (append images (lispm-tool-result-images value))
                              value (lispm-tool-result-text value)))
-                     (let ((args (list (lispm-tools--result-text value) errorp images)))
+                     (let ((args (list (lispm-tools--result-text value) errorp images input)))
                        (setq called t)
                        (if running
                            (setq result args)
                          (run-at-time 0 nil #'apply #'lispm-tools--deliver
                                       done agent tool args)))))))
+    (with-demoted-errors "LispM: tool call hook: %S"
+      (run-hook-with-args 'lispm-tool-call-functions agent 'start tool input nil nil))
     (condition-case err
         ;; What the tool says is for the model: in English, though it
         ;; reach a function that speaks to the user too.
@@ -470,6 +484,12 @@ Nil for a tool that changes no buffer; an error if INPUT makes no
 valid call of TOOL."
   (when-let* ((changes (lispm-tool-changes tool)))
     (apply changes (lispm-tools--arguments tool input))))
+
+(defun lispm-tool-would-spotlight (tool input result)
+  "Return what calling TOOL with INPUT read in RESULT, or nil.
+Nil for a tool without `:spotlight'."
+  (when-let* ((spotlight (lispm-tool-spotlight tool)))
+    (apply spotlight result (lispm-tools--arguments tool input))))
 
 ;;;; Deferred tools
 ;;
@@ -1373,7 +1393,11 @@ remote: then those under it are checked through its connection."
                    (or (file-remote-p root) (not (file-remote-p file)))
                    (eq (lispm-tools--state buffer) 'stale))
           (with-demoted-errors "LispM: reverting a buffer: %S"
-            (lispm-tools--sync buffer)))))))
+            (let ((old (lispm-tools--buffer-text buffer)))
+              (lispm-tools--sync buffer)
+              (let ((new (lispm-tools--buffer-text buffer)))
+                (unless (equal old new)
+                  (run-hook-with-args 'lispm-buffer-change-functions buffer old new))))))))))
 
 (defun lispm-tools--set-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved.
@@ -1477,6 +1501,13 @@ you get the buffer's current contents, unsaved edits included: what
 the user sees.  Other agents name places as org links,
 [[file:PATH::LINE]]: pass one as the path to read there."
   :permission read
+  :spotlight (lambda (_result path &optional offset limit)
+               (let ((file (lispm-tools--file path)))
+                 (unless (or (lispm-media-kind file) (file-directory-p file))
+                   (list :kind 'read-file
+                         :file file
+                         :start-line (or offset (cdr (lispm-tools-reference path)) 1)
+                         :limit (or limit 2000)))))
   (let* ((file (lispm-tools--file path))
          (offset (or offset (cdr (lispm-tools-reference path))))
          (open (find-buffer-visiting file))
@@ -2002,6 +2033,10 @@ Return non-nil when the kernel took the search, or nil to fall back."
 Searches the project's files (a git project's .gitignore applies) and
 the unsaved contents of files open in Emacs."
   :async t
+  :spotlight (lambda (result pattern &optional _path _glob _ignore-case)
+               (list :kind 'search-files
+                     :subject (string-remove-prefix "(?i)" pattern)
+                     :result result))
   (let* ((agent lispm-current-agent)
          (case-fold (or ignore-case (string-prefix-p "(?i)" pattern)))
          (clean-pat (string-remove-prefix "(?i)" pattern))
@@ -2052,6 +2087,13 @@ logs and query to search buffer text without writing Elisp. A query searches
 from offset to the end, or within the tail window; limit caps returned lines.
 Reading preserves point, narrowing and unsaved edits. Output is bounded."
   :permission read
+  :spotlight (lambda (_result buffer &optional offset limit tail query)
+               (list :kind 'read-buffer
+                     :buffer (lispm-tools--buffer buffer)
+                     :start-line offset
+                     :limit (or limit 2000)
+                     :tail tail
+                     :query query))
   (let ((b (lispm-tools--buffer buffer))
         (limit (or limit 2000)))
     (unless (and (integerp limit) (<= 1 limit 2000))
