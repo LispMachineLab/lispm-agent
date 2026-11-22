@@ -6599,6 +6599,26 @@ handed over once nothing more can be."
           (should (lispm--clear-results agent)))
         (should (equal (mapcar #'caddr (lispm-transcript-results)) '(t nil)))))))
 
+(ert-deftest lispm-test-clear-bulky-results-preserves-small-reads ()
+  "Bulky older outputs clear first so smaller file reads stay in context."
+  (should (>= lispm-compact-keep-results 30))
+  (lispm-test-env
+    (let ((lispm-compact-keep-results 1)
+          (lispm-compact-clear-at-least 1000)
+          (lispm-compact-bulky-result-bytes 3000)
+          (agent (lispm-defagent tester "Test agent." :root project)))
+      (with-temp-buffer
+        (insert "* Assistant\n"
+                "** DONE read_file\n:PROPERTIES:\n:TOOL_ID:  t1\n:TOOL:     read_file\n:END:\n"
+                "*** Result\n#+begin_example\n" (make-string 400 ?a) "\n#+end_example\n"
+                "** DONE run_program\n:PROPERTIES:\n:TOOL_ID:  t2\n:TOOL:     run_program\n:END:\n"
+                "*** Result\n#+begin_example\n" (make-string 4500 ?b) "\n#+end_example\n"
+                "** DONE read_file\n:PROPERTIES:\n:TOOL_ID:  t3\n:TOOL:     read_file\n:END:\n"
+                "*** Result\n#+begin_example\nlatest\n#+end_example\n")
+        (setf (lispm-agent-buffer agent) (current-buffer))
+        (should (lispm--clear-results agent))
+        (should (equal (mapcar #'caddr (lispm-transcript-results)) '(nil t nil)))))))
+
 (ert-deftest lispm-test-transcript-tag ()
   "Tags are added to a heading's own, once."
   (with-temp-buffer

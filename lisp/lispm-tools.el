@@ -335,6 +335,20 @@ the image and video files the model sees with it, which the transcript
 links and the chat shows.  A tool returns one, or hands one to `done'."
   text images)
 
+(defconst lispm-tools--benign-stderr-regexp
+  (rx bol (* (not "\n"))
+      "Emacs[" (+ digit) ":" (+ digit) "] "
+      "Failed to initialize color list unarchiver: "
+      "Error Domain=NSCocoaErrorDomain Code=4864 "
+      (* (not "\n")) (? "\n"))
+  "Known benign macOS AppKit diagnostics emitted when child Emacs starts.")
+
+(defun lispm-tools-strip-benign-stderr (text)
+  "Return TEXT without known benign host startup diagnostics, or nil if nil."
+  (when (stringp text)
+    (save-match-data
+      (replace-regexp-in-string lispm-tools--benign-stderr-regexp "" text t t))))
+
 (defun lispm-tools--result-text (result)
   "RESULT of a tool as text for the model."
   (let ((text (cond ((stringp result) result)
@@ -2924,7 +2938,7 @@ allows."
                                      (timed-out (process-get p 'timed-out)))
                                  (run-at-time
                                   0 nil done
-                                  (concat output
+                                  (concat (lispm-tools-strip-benign-stderr output)
                                           "\n["
                                           (if timed-out
                                               "killed: timeout"

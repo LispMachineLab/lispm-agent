@@ -18,7 +18,7 @@
                (:constructor lispm-process-tools--run-create) (:copier nil))
   "An agent's process and the bounded output collected from its pipes."
   agent process errors timer sandbox done output error-output
-  (size 0) limit truncated finished)
+  (size 0) limit truncated output-truncated error-truncated finished)
 
 (defvar lispm-process-tools--runs nil
   "Program calls that have not completed or been cancelled.")
@@ -27,23 +27,72 @@
   "Abnormal hook run as `run_program' receives output chunks.
 Each is called with (AGENT ERRORP TEXT).")
 
+;;; Law: For budget B >= 0 and strings X, Y with (>= (length X) B),
+;;;      (equal (lispm-process-tools--window (concat (lispm-process-tools--window X B) Y) B)
+;;;             (lispm-process-tools--window (concat X Y) B)).
+(defun lispm-process-tools--window (text budget)
+  "Keep at most BUDGET characters of TEXT: 30% from the head and 70% from the tail."
+  (cond ((<= budget 0) "")
+        ((<= (length text) budget) text)
+        (t (let* ((head (/ (* budget 3) 10))
+                  (tail (- budget head)))
+             (concat (substring text 0 head)
+                     (substring text (- (length text) tail)))))))
+
+(defun lispm-process-tools--splice-marker (text budget marker)
+  "Bound TEXT to BUDGET, splicing MARKER between 30% head and 70% tail."
+  (cond ((<= budget 0) "")
+        ((< budget (+ (length marker) 2))
+         (lispm-process-tools--window text budget))
+        (t (let* ((kept (- budget (length marker)))
+                  (head (/ (* kept 3) 10))
+                  (tail (- kept head)))
+             (concat (substring text 0 head)
+                     marker
+                     (substring text (- (length text) tail)))))))
+
+(defun lispm-process-tools--budgets (stdout-len stderr-len limit)
+  "Partition LIMIT fairly as (OUT-CAP . ERR-CAP) for STDOUT-LEN and STDERR-LEN."
+  (let ((half (/ limit 2)))
+    (cond ((<= stderr-len half) (cons (- limit stderr-len) stderr-len))
+          ((<= stdout-len (- limit half)) (cons stdout-len (- limit stdout-len)))
+          (t (cons (- limit half) half)))))
+
 (defun lispm-process-tools--collect (run errorp text)
-  "Collect TEXT from RUN's stdout, or stderr when ERRORP, up to its limit."
-  (unless (lispm-process-tools--run-finished run)
-    (let ((room (max 0 (- (lispm-process-tools--run-limit run)
-                         (lispm-process-tools--run-size run)))))
-      (when (> (length text) room)
-        (setf (lispm-process-tools--run-truncated run) t))
-      (when (> room 0)
-        (let ((part (substring text 0 (min room (length text)))))
-          (if errorp
-              (push part (lispm-process-tools--run-error-output run))
-            (push part (lispm-process-tools--run-output run)))
-          (cl-incf (lispm-process-tools--run-size run) (length part))))
-      (when (and lispm-process-output-functions (not (string-empty-p text)))
-        (with-demoted-errors "LispM: process output hook: %S"
-          (run-hook-with-args 'lispm-process-output-functions
-                              (lispm-process-tools--run-agent run) errorp text))))))
+  "Collect TEXT from RUN's stdout, or stderr when ERRORP, up to its limit.
+Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
+  (unless (or (lispm-process-tools--run-finished run) (string-empty-p text))
+    (let ((limit (lispm-process-tools--run-limit run)))
+      (if (and (not (lispm-process-tools--run-truncated run))
+               (<= (+ (lispm-process-tools--run-size run) (length text)) limit))
+          (progn
+            (if errorp
+                (push text (lispm-process-tools--run-error-output run))
+              (push text (lispm-process-tools--run-output run)))
+            (cl-incf (lispm-process-tools--run-size run) (length text)))
+        (let* ((stdout (apply #'concat (nreverse (lispm-process-tools--run-output run))))
+               (stderr (apply #'concat (nreverse (lispm-process-tools--run-error-output run))))
+               (next-out (if errorp stdout (concat stdout text)))
+               (next-err (if errorp (concat stderr text) stderr)))
+          (setf (lispm-process-tools--run-truncated run) t)
+          (pcase-let ((`(,out-cap . ,err-cap)
+                       (lispm-process-tools--budgets (length next-out) (length next-err) limit)))
+            (when (> (length next-out) out-cap)
+              (setf (lispm-process-tools--run-output-truncated run) t)
+              (setq next-out (lispm-process-tools--window next-out out-cap)))
+            (when (> (length next-err) err-cap)
+              (setf (lispm-process-tools--run-error-truncated run) t)
+              (setq next-err (lispm-process-tools--window next-err err-cap)))
+            (setf (lispm-process-tools--run-output run)
+                  (and (not (string-empty-p next-out)) (list next-out))
+                  (lispm-process-tools--run-error-output run)
+                  (and (not (string-empty-p next-err)) (list next-err))
+                  (lispm-process-tools--run-size run)
+                  (+ (length next-out) (length next-err)))))))
+    (when lispm-process-output-functions
+      (with-demoted-errors "LispM: process output hook: %S"
+        (run-hook-with-args 'lispm-process-output-functions
+                            (lispm-process-tools--run-agent run) errorp text)))))
 
 (defun lispm-process-tools--cleanup (run)
   "Release RUN's resources, suppressing any late process callbacks."
@@ -62,26 +111,52 @@ Each is called with (AGENT ERRORP TEXT).")
     (remove-hook 'lispm-session-end-functions #'lispm-process-tools--session-ended)
     (remove-hook 'lispm-agents-context-release-functions #'lispm-process-tools--terminal-ended)))
 
+(defun lispm-process-tools--format-stream (raw budget truncatedp marker)
+  "Format RAW stream within BUDGET, adding MARKER when TRUNCATEDP or shrunk."
+  (if (or truncatedp (< budget (length raw)))
+      (lispm-process-tools--splice-marker raw (min (length raw) budget) marker)
+    raw))
+
+(defun lispm-process-tools--encode-envelope (fields limit)
+  "Encode alist FIELDS as multi-line JSON when within LIMIT, else compact JSON."
+  (let ((pretty (lispm--json-pretty fields)))
+    (if (<= (length pretty) limit) pretty (lispm--json-encode fields))))
+
+(defun lispm-process-tools--shrink-budget (budget)
+  "Reduce positive integer BUDGET conservatively so JSON escaping converges."
+  (if (<= budget 4) 0 (/ (* budget 3) 4)))
+
 (defun lispm-process-tools--result (run status exit signal)
   "RUN's STATUS, EXIT, SIGNAL and captured output as bounded JSON.
-Truncate strings before encoding, so the normal tool limit cannot cut JSON."
-  (let* ((output (apply #'concat (nreverse (lispm-process-tools--run-output run))))
-         (errors (apply #'concat (nreverse (lispm-process-tools--run-error-output run))))
+Truncate from the middle (30% head + 70% tail) before encoding, so the
+normal tool limit cannot cut JSON or discard trailing failure summaries."
+  (let* ((raw-out (apply #'concat (nreverse (lispm-process-tools--run-output run))))
+         (raw-err (or (lispm-tools-strip-benign-stderr
+                       (apply #'concat (nreverse (lispm-process-tools--run-error-output run))))
+                      ""))
          (limit (lispm-process-tools--run-limit run))
          (truncated (lispm-process-tools--run-truncated run))
+         (out-trunc (lispm-process-tools--run-output-truncated run))
+         (err-trunc (lispm-process-tools--run-error-truncated run))
+         (out-budget (length raw-out))
+         (err-budget (length raw-err))
          result)
     (while
-        (progn
+        (let ((output (lispm-process-tools--format-stream
+                       raw-out out-budget out-trunc "\n...[stdout truncated]...\n"))
+              (errors (lispm-process-tools--format-stream
+                       raw-err err-budget err-trunc "\n...[stderr truncated]...\n")))
           (setq result
-                (lispm--json-encode
+                (lispm-process-tools--encode-envelope
                  `((status . ,status) (exit_code . ,(or exit :null))
                    (signal . ,(or signal :null))
                    (stdout . ,output) (stderr . ,errors)
-                   (truncated . ,(if truncated t :false)))))
+                   (truncated . ,(if truncated t :false)))
+                 limit))
           (and (> (length result) limit)
-               (or (not (string-empty-p output)) (not (string-empty-p errors)))))
-      (setq output (substring output 0 (/ (length output) 2))
-            errors (substring errors 0 (/ (length errors) 2))
+               (or (> out-budget 0) (> err-budget 0))))
+      (setq out-budget (lispm-process-tools--shrink-budget out-budget)
+            err-budget (lispm-process-tools--shrink-budget err-budget)
             truncated t))
     (if (<= (length result) limit)
         result
@@ -101,9 +176,9 @@ Truncate strings before encoding, so the normal tool limit cannot cut JSON."
   "Complete RUN when PROCESS has exited, draining its bounded stderr first."
   (unless (or (process-live-p process) (lispm-process-tools--run-finished run))
     (let ((errors (lispm-process-tools--run-errors run)))
-      ;; Read once even at the cap, so unread diagnostics mark truncation.
-      (while (and (processp errors) (accept-process-output errors 0 nil t)
-                  (< (lispm-process-tools--run-size run) (lispm-process-tools--run-limit run)))))
+      ;; Bound drain iterations while allowing final stderr summaries into the tail window.
+      (cl-loop repeat 64
+               while (and (processp errors) (accept-process-output errors 0 nil t))))
     (if (eq (process-status process) 'exit)
         (lispm-process-tools--finish run "exited" (process-exit-status process))
       (lispm-process-tools--finish run "signalled" nil (process-exit-status process)))))

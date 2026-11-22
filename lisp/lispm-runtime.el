@@ -94,13 +94,21 @@ nil does neither, and hands over only on \\[lispm-compact]."
   :type 'boolean
   :group 'lispm)
 
-(defcustom lispm-compact-keep-results 10
+(defcustom lispm-compact-keep-results 30
   "How many of a session's latest tool results are never cleared.
 When a session grows past `lispm-compact-threshold', the output of
 older calls is cleared before the session is handed over: requests
 carry a line saying so in its place, and the result's heading is
 tagged :cleared: (remove the tag to send it again).  nil never clears."
   :type '(choice (const :tag "Never clear" nil) integer)
+  :group 'lispm)
+
+(defcustom lispm-compact-bulky-result-bytes 12000
+  "Byte size from which an older tool result counts as bulky during clearing.
+When clearing bulky older results alone frees at least
+`lispm-compact-clear-at-least' tokens, smaller older results such as
+modest file reads stay in context rather than being re-read repeatedly."
+  :type 'integer
   :group 'lispm)
 
 (defcustom lispm-compact-clear-at-least 10000
@@ -259,7 +267,9 @@ See `lispm-session-tools'.")
    " need the live editor's buffers, variables or loaded packages. Both run here"
    " and can block the UI; timers and promises do not offload computation. Find"
    " existing functions with apropos and describe_symbol. Keep file and buffer"
-   " changes in the edit tools.\n"
+   " changes in the edit tools; for multiple edits, issue direct edit_file tool"
+   " calls in parallel rather than chaining sequential edit_file calls inside"
+   " run_lisp, where a later mismatch leaves earlier edits applied.\n"
    "- Use run_shell for external CLIs, builds, tests, project runtimes or work that"
    " must run on a remote host. Follow the user's explicit choice of language or tool.\n"
    "- Keep durable knowledge (user preferences, project conventions, lessons) in"
@@ -3195,21 +3205,31 @@ takes three bytes."
         (+ (car known) (/ (max 0 (- bytes (cdr known))) 3))
       (/ bytes 3))))
 
+(defun lispm--result-bulky-p (result)
+  "Non-nil when transcript RESULT exceeds `lispm-compact-bulky-result-bytes'."
+  (>= (cadr result) lispm-compact-bulky-result-bytes))
+
 (defun lispm--clear-results (agent)
   "Clear the output of AGENT's older tool calls, if that frees enough.
-All results but the latest `lispm-compact-keep-results' are tagged
-:cleared:, provided that frees `lispm-compact-clear-at-least' tokens.
+Results older than the latest `lispm-compact-keep-results' are candidates:
+if clearing bulky ones alone frees at least `lispm-compact-clear-at-least'
+tokens, smaller older reads stay intact; otherwise all candidates clear.
 Return the number of tokens freed, or nil."
   (when lispm-compact-keep-results
     (let* ((old (seq-remove (lambda (result) (nth 2 result))
                             (butlast (lispm--in-session agent (lispm-transcript-results))
                                      lispm-compact-keep-results)))
-           (freed (/ (apply #'+ (mapcar #'cadr old)) 3)))
-      (when (and old (>= freed lispm-compact-clear-at-least))
+           (bulky (seq-filter #'lispm--result-bulky-p old))
+           (bulky-freed (/ (apply #'+ (mapcar #'cadr bulky)) 3))
+           (chosen (if (and bulky (>= bulky-freed (max 1 lispm-compact-clear-at-least)))
+                       bulky
+                     old))
+           (freed (/ (apply #'+ (mapcar #'cadr chosen)) 3)))
+      (when (and chosen (>= freed lispm-compact-clear-at-least))
         (let ((tokens (- (lispm--estimated-tokens agent) freed)))
           (lispm--in-session agent
             ;; The latest first: tags move what comes after them.
-            (dolist (result (reverse old))
+            (dolist (result (reverse chosen))
               (lispm-transcript-tag (car result) "cleared")))
           (setf (lispm-agent-context agent) (cons tokens (lispm--session-bytes agent)))
           freed)))))
