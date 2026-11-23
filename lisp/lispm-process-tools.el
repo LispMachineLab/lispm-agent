@@ -245,39 +245,32 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
               (append (list "/bin/sh" "-c" "cd -- \"$1\" || exit; shift; exec \"$@\""
                             "lispm-program-cwd" directory)
                       command)))
-      (condition-case err
-          (progn
-            (let ((inhibit-quit t))
-              (push run lispm-process-tools--runs)
-              (add-hook 'lispm-state-change-functions #'lispm-process-tools--state-changed)
-              (add-hook 'lispm-session-end-functions #'lispm-process-tools--session-ended)
-              (add-hook 'lispm-agents-context-release-functions #'lispm-process-tools--terminal-ended)
-              (setf (lispm-process-tools--run-sandbox run)
-                    (lispm-sandbox-prepare command nil
-                                           (format "the program %s" program)))
-              (setf (lispm-process-tools--run-errors run)
-                    (make-pipe-process
-                     :name "lispm-program-stderr" :buffer nil :noquery t :coding 'utf-8
-                     :filter (lambda (_process text) (lispm-process-tools--collect run t text))
-                     :sentinel #'ignore))
-              (setf (lispm-process-tools--run-process run)
-                    (make-process
-                     :name "lispm-program" :buffer nil :noquery t :coding 'utf-8
-                     :connection-type 'pipe :stderr (lispm-process-tools--run-errors run)
-                     :command (lispm-sandbox-run-command (lispm-process-tools--run-sandbox run))
-                     :filter (lambda (_process text) (lispm-process-tools--collect run nil text))
-                     :sentinel (lambda (process _event) (lispm-process-tools--sentinel run process))))
-              (process-put (lispm-process-tools--run-process run) 'lispm-agent agent)
-              (lispm-sandbox-attach (lispm-process-tools--run-sandbox run)
-                                    (lispm-process-tools--run-process run))
-              (unless (lispm-process-tools--run-finished run)
-                (setf (lispm-process-tools--run-timer run)
-                      (run-at-time timeout nil #'lispm-process-tools--finish run "timed_out")))
-              (ignore-errors (process-send-eof (lispm-process-tools--run-process run))))
-            (when quit-flag (signal 'quit nil)))
-        ((error quit)
-         (let ((inhibit-quit t)) (lispm-process-tools--cleanup run))
-         (signal (car err) (cdr err))))))
+      (lispm-tools-with-async-start (lispm-process-tools--cleanup run)
+        (push run lispm-process-tools--runs)
+        (add-hook 'lispm-state-change-functions #'lispm-process-tools--state-changed)
+        (add-hook 'lispm-session-end-functions #'lispm-process-tools--session-ended)
+        (add-hook 'lispm-agents-context-release-functions #'lispm-process-tools--terminal-ended)
+        (setf (lispm-process-tools--run-sandbox run)
+              (lispm-sandbox-prepare command nil (format "the program %s" program)))
+        (setf (lispm-process-tools--run-errors run)
+              (make-pipe-process
+               :name "lispm-program-stderr" :buffer nil :noquery t :coding 'utf-8
+               :filter (lambda (_process text) (lispm-process-tools--collect run t text))
+               :sentinel #'ignore))
+        (setf (lispm-process-tools--run-process run)
+              (make-process
+               :name "lispm-program" :buffer nil :noquery t :coding 'utf-8
+               :connection-type 'pipe :stderr (lispm-process-tools--run-errors run)
+               :command (lispm-sandbox-run-command (lispm-process-tools--run-sandbox run))
+               :filter (lambda (_process text) (lispm-process-tools--collect run nil text))
+               :sentinel (lambda (process _event) (lispm-process-tools--sentinel run process))))
+        (process-put (lispm-process-tools--run-process run) 'lispm-agent agent)
+        (lispm-sandbox-attach (lispm-process-tools--run-sandbox run)
+                              (lispm-process-tools--run-process run))
+        (unless (lispm-process-tools--run-finished run)
+          (setf (lispm-process-tools--run-timer run)
+                (run-at-time timeout nil #'lispm-process-tools--finish run "timed_out")))
+        (ignore-errors (process-send-eof (lispm-process-tools--run-process run))))))
   nil)
 
 (lispm-deftool run_program

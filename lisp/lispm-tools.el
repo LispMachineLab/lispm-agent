@@ -41,6 +41,7 @@
 (require 'lispm-core)
 (require 'lispm-transcript)
 (require 'lispm-sandbox)
+(require 'lispm-deftool-macros)
 
 ;; Only an Emacs built with image support has it.
 (declare-function image-size "image.c" (spec &optional pixels frame))
@@ -102,7 +103,7 @@ a list of strings; they do not change the tool's name or schema."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff for class keywords spotlight)
+  diff for class keywords spotlight param-schema)
 
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
@@ -142,6 +143,9 @@ BODY may start with keyword options:
                      the call would change and the text it would leave
                      there; the change is then shown in BUFFER while the
                      call is written and while it awaits approval
+  :edit SPEC         declarative file/buffer edit plist (:file or :buffer,
+                     :create, :transform (TEXT-VAR FORM), :bind VARS) that
+                     synthesizes :diff, :changes and atomic buffer write
   :targets FUNCTION  for a tool of class write whose `path' or `buffer'
                      argument does not name what it writes: called with
                      the same arguments before the call runs, returns the
@@ -172,29 +176,49 @@ BODY may start with keyword options:
 Otherwise BODY's value is the result: a string, or any object, which
 is printed; or a `lispm-tool-result', text with image or video files
 the model sees too.  Signal an error to report a failure to the model."
-  (declare (indent 3) (doc-string 3))
-  (let ((permission 'read) async preview diff changes targets deferred always-ask for class
+  (declare (indent 3) (doc-string 3)
+           (debug (&define name sexp stringp [&rest keywordp form] def-body)))
+  (let ((permission 'read) async preview diff changes edit targets deferred always-ask for class
         keywords spotlight
+        (compiled (lispm-tools--compile-params name params))
         (args (mapcar #'car params)))
     (while (keywordp (car body))
-      (pcase (pop body)
-        (:permission (setq permission (pop body)))
-        (:async (setq async (pop body)))
-        (:preview (setq preview (pop body)))
-        (:diff (setq diff (pop body)))
-        (:changes (setq changes (pop body)))
-        (:targets (setq targets (pop body)))
-        (:deferred (setq deferred (pop body)))
-        (:always-ask (setq always-ask (pop body)))
-        (:for (setq for (pop body)))
-        (:class (setq class (pop body)))
-        (:keywords (setq keywords (pop body)))
-        (:spotlight (setq spotlight (pop body)))))
+      (let ((opt (pop body)))
+        (unless body
+          (error "Missing value for %S in `lispm-deftool' %s" opt name))
+        (pcase opt
+          (:permission (setq permission (pop body)))
+          (:async (setq async (pop body)))
+          (:preview (setq preview (pop body)))
+          (:diff (setq diff (pop body)))
+          (:changes (setq changes (pop body)))
+          (:edit (setq edit (pop body)))
+          (:targets (setq targets (pop body)))
+          (:deferred (setq deferred (pop body)))
+          (:always-ask (setq always-ask (pop body)))
+          (:for (setq for (pop body)))
+          (:class (setq class (pop body)))
+          (:keywords (setq keywords (pop body)))
+          (:spotlight (setq spotlight (pop body)))
+          (_ (error "Unknown `lispm-deftool' option %S in %s" opt name)))))
+    (unless body
+      (error "Missing body in `lispm-deftool' %s" name))
+    (when edit
+      (when (or async diff changes)
+        (error "`:edit' in `lispm-deftool' %s cannot combine with `:async', `:diff' or `:changes'"
+               name))
+      (pcase-let ((`(,ediff ,echanges ,etargets ,ebody)
+                   (lispm-tools--expand-edit name args edit body)))
+        (setq diff ediff
+              changes echanges
+              targets (or targets etargets)
+              body (list ebody))))
     `(lispm-register-tool
       (lispm-tool--create
        :name ,(symbol-name name)
        :description ,docstring
        :params ',params
+       :param-schema ',compiled
        :permission ',permission
        :async ,async
        :preview ,preview
@@ -213,10 +237,6 @@ the model sees too.  Signal an error to report a failure to the model."
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
                     `(lambda ,args (ignore ,@args) ,@body))))))
 
-(defun lispm-tools--key (arg)
-  "JSON property name for the parameter ARG."
-  (intern (replace-regexp-in-string "-" "_" (symbol-name arg))))
-
 (defun lispm-tool-schema (tool)
   "The API definition of TOOL."
   (if-let* ((schema (lispm-tool-input-schema tool)))
@@ -228,26 +248,21 @@ the model sees too.  Signal an error to report a failure to the model."
 
 (defun lispm-tools--params-schema (tool)
   "The API definition of TOOL, made from its parameters."
-  (let (props required)
-    (when (memq (lispm-tool-permission tool) lispm-rationale-permissions)
-      (push '(why (type . "string")
-                  (description . "One short sentence for the human reviewing this call: why it is needed."))
-            props)
-      (push "why" required))
-    (pcase-dolist (`(,arg ,type ,doc . ,opts) (lispm-tool-params tool))
-      (push `(,(lispm-tools--key arg)
-              (type . ,(symbol-name type))
-              (description . ,doc)
-              ,@(when-let* ((enum (plist-get opts :enum))) `((enum . ,(vconcat enum))))
-              ,@(when-let* ((items (plist-get opts :items))) `((items . ,items))))
-            props)
-      (unless (plist-get opts :optional)
-        (push (symbol-name (lispm-tools--key arg)) required)))
+  (pcase-let* ((`(,base-props . ,base-req)
+                (or (condition-case nil (lispm-tool-param-schema tool) (args-out-of-range nil))
+                    (lispm-tools--compile-params (lispm-tool-name tool) (lispm-tool-params tool))))
+               (why-p (memq (lispm-tool-permission tool) lispm-rationale-permissions))
+               (props (if why-p
+                          (cons '(why (type . "string")
+                                      (description . "One short sentence for the human reviewing this call: why it is needed."))
+                                base-props)
+                        base-props))
+               (required (vconcat (if why-p (cons "why" base-req) base-req))))
     `((name . ,(lispm-tool-name tool))
       (description . ,(lispm-tool-description tool))
       (input_schema (type . "object")
-                    (properties . ,(nreverse props))
-                    (required . ,(vconcat (nreverse required)))))))
+                    (properties . ,props)
+                    (required . ,required)))))
 
 (defun lispm-tools-allowed-p (agent name)
   "Non-nil if AGENT's role gives it the tool NAME, offered or deferred.
@@ -2228,21 +2243,10 @@ OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
 as one undoable step and is then saved.  old_text must match the
 current contents exactly, so read the file first."
   :permission write
-  :diff #'lispm-tools--edit-diff
-  :changes (lambda (path old-text new-text &optional replace-all)
-             (let ((file (lispm-tools--file path)))
-               ;; No buffer is visited to show a file that cannot be written.
-               (lispm-tools--check-writable file)
-               (when-let* ((buffer (lispm-tools--to-show file)))
-                 (cons buffer (car (lispm-tools--replace (lispm-tools--buffer-text buffer)
-                                                         old-text new-text replace-all))))))
-  (let* ((file (lispm-tools--file path))
-         (buffer (lispm-tools--existing file))
-         (edit (lispm-tools--replace (lispm-tools--buffer-text buffer)
-                                     old-text new-text replace-all)))
-    (lispm-tools--set-text buffer (car edit))
-    (format "Replaced %d occurrence%s in %s." (cdr edit) (if (= (cdr edit) 1) "" "s")
-            (lispm-tools--label file))))
+  :edit (:file path
+         :transform (text (lispm-tools--replace text old-text new-text replace-all))
+         :bind (count label))
+  (format "Replaced %d occurrence%s in %s." count (if (= count 1) "" "s") label))
 
 (defun lispm-tools--check-new-file (file)
   "Signal an error if FILE is new and cannot be written; change nothing.
@@ -2274,27 +2278,10 @@ writable.  A missing directory that can be made is no error."
   "Create a file, or replace a file's entire contents.  Prefer edit_file
 for existing files; create new files only when required."
   :permission write
-  :diff (lambda (path content)
-          (let ((file (lispm-tools--file path)))
-            (list (lispm--file-text file) content (lispm-tools--label file))))
-  :changes (lambda (path content)
-             (let ((file (lispm-tools--file path)))
-               ;; No buffer is visited to show a file that cannot be written.
-               (lispm-tools--check-writable file)
-               (lispm-tools--check-new-file file)
-               (when-let* ((buffer (lispm-tools--to-show file t)))
-                 (cons buffer content))))
-  (let* ((file (lispm-tools--file path))
-         (directory (file-name-directory file))
-         (existed (file-exists-p file)))
-    (lispm-tools--check-writable file)
-    (lispm-tools--check-new-file file)
-    ;; Made before FILE is visited: Emacs makes the buffer of a file it
-    ;; cannot write read-only, in batch even for want of its directory.
-    (when (and lispm-save-edits (not (file-directory-p directory)))
-      (make-directory directory t))
-    (lispm-tools--set-text (lispm-tools--visit file) content)
-    (format "%s %s." (if existed "Overwrote" "Created") (lispm-tools--label file))))
+  :edit (:file path :create t
+         :transform (_text (cons content nil))
+         :bind (_meta label existed))
+  (format "%s %s." (if existed "Overwrote" "Created") label))
 
 (lispm-deftool edit_buffer
     ((buffer string "Buffer name.")
@@ -2304,21 +2291,10 @@ for existing files; create new files only when required."
   "Replace text in an Emacs buffer that is not a file, such as *scratch*.
 For files use edit_file."
   :permission write
-  :diff (lambda (buffer old-text new-text &optional replace-all)
-          (let ((old (lispm-tools--buffer-file-text (lispm-tools--buffer buffer))))
-            (list old (car (lispm-tools--replace old old-text new-text replace-all)) buffer)))
-  :changes (lambda (buffer old-text new-text &optional replace-all)
-             (let ((b (lispm-tools--buffer buffer)))
-               (when-let* ((file (buffer-file-name b)))
-                 (lispm-tools--check-writable file))
-               (when (eq (lispm-tools--state b) 'current)
-                 (cons b (car (lispm-tools--replace (lispm-tools--buffer-text b)
-                                                    old-text new-text replace-all))))))
-  (let* ((b (lispm-tools--buffer-to-change buffer))
-         (edit (lispm-tools--replace (lispm-tools--buffer-text b)
-                                     old-text new-text replace-all)))
-    (lispm-tools--set-text b (car edit))
-    (format "Replaced %d occurrence%s in %s." (cdr edit) (if (= (cdr edit) 1) "" "s") buffer)))
+  :edit (:buffer buffer
+         :transform (text (lispm-tools--replace text old-text new-text replace-all))
+         :bind (count label))
+  (format "Replaced %d occurrence%s in %s." count (if (= count 1) "" "s") label))
 
 ;;;; Shell commands that only read
 
@@ -2750,6 +2726,24 @@ nothing to send."
                            (member method '(nil "GET" "HEAD"))))))))))
 
 ;;;; Built-in tools: execution
+
+(defmacro lispm-tools-with-async-start (cleanup &rest body)
+  "Run BODY with quitting inhibited; run CLEANUP on any error or `quit'.
+If `C-g' was pressed while BODY registered an asynchronous job, signal
+`quit' once BODY finishes so CLEANUP cancels the job atomically."
+  (declare (indent 1) (debug (form body)))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err
+         (progn
+           (let ((inhibit-quit t))
+             ,@body)
+           (when quit-flag
+             (setq quit-flag nil)
+             (signal 'quit nil)))
+       ((error quit)
+        (let ((inhibit-quit t))
+          ,cleanup)
+        (signal (car ,err) (cdr ,err))))))
 
 (defvar lispm-tools--shell-seq 0
   "Monotonic counter for unique `run_shell' process names.")
