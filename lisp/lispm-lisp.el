@@ -811,6 +811,9 @@ not set global variables or change data in place, and changes only
 buffers it makes.  Use eval_elisp for anything else.  Returns the calls
 made, what the program printed and its last value.
 Computation still runs in the user's Emacs: keep it small and bounded.
+Prefer direct parallel edit_file tool calls over sequential edit_file
+calls in run_lisp when making multiple edits to one file, as run_lisp
+does not roll back earlier edits if a later call fails.
 Use run_elisp for standalone processing in a separate process launched by
 LispM Kernel; this tool does not time-slice Lisp loops."
   :permission lisp

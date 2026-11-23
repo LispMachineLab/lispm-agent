@@ -445,11 +445,20 @@ about its calls.")
 (defun lispm-agents-bridge--tool-ask-agent (server arguments _id)
   "Ask what ARGUMENTS give for SERVER's agent; the reply comes as a message."
   (let* ((terminal (lispm-agents-bridge--terminal server))
+         (caller (lispm-agents-bridge-agent terminal))
          (target (lispm-agents-bridge--string arguments 'agent))
-         (id (lispm-collab-ask-for-peer (lispm-agents-bridge-agent terminal)
+         (project (alist-get 'project arguments))
+         (root (when (and (stringp project) (not (string-empty-p project)))
+                 (let ((resolved (lispm-collab-resolve-project caller project)))
+                   (unless (file-in-directory-p resolved (lispm-agent-root caller))
+                     (error "Project %s is outside %s; use call_tool with start_agent"
+                            project (abbreviate-file-name (lispm-agent-root caller))))
+                   resolved)))
+         (id (lispm-collab-ask-for-peer caller
                                         (lispm-agents-bridge--peer terminal)
                                         target
-                                        (lispm-agents-bridge--string arguments 'request))))
+                                        (lispm-agents-bridge--string arguments 'request)
+                                        root)))
     (list (format "Asked %s (request %s). The reply will come to you as a message: \
 [Reply from %s to request %s]. Go on meanwhile, or end your turn to wait."
                   target id target id))))
@@ -668,11 +677,13 @@ as they are free.  Use ask_agent when you need an answer.")
 start a helper from: list_agents shows them.")))
       (request . ((type . "string")
                   (description . "What you need, self-contained: they cannot see your conversation. \
-Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))))
+Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]].")))
+      (project . ((type . "string")
+                  (description . "Optional subdirectory within your workspace root for a helper started from a role."))))
      ["agent" "request"]
      "Ask another agent for something.  Its reply comes to you later as a message, \
 [Reply from NAME to request ID].  Naming a role starts a LispM helper of that role in your \
-project, which retires once it has replied.")
+project (or PROJECT subdirectory), which retires once it has replied.")
     ("reply" lispm-agents-bridge--tool-reply
      ((request . ((type . "string") (description . "The request's id, as R1.")))
       (text . ((type . "string") (description . "Your answer, self-contained."))))

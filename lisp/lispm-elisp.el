@@ -116,7 +116,8 @@ No worker is started in Emacs when the kernel is unavailable."
               (cl-incf (lispm-elisp--job-size job) (length text)))))
       (lispm-elisp--forget job)
       (let* ((output (apply #'concat (nreverse (lispm-elisp--job-chunks job))))
-             (errors (and (eq kind 'success) (plist-get value :stderr)))
+             (errors (and (eq kind 'success)
+                          (lispm-tools-strip-benign-stderr (plist-get value :stderr))))
              (ok (and (eq kind 'success) (eql (plist-get value :exit) 0)))
              (status (unless ok
                        (if (eq kind 'success)

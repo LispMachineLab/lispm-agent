@@ -248,9 +248,10 @@ gets TEXT.  Return what the sender is told."
         (format "%s is busy: it gets your message as soon as it is free." to)))
      (t (error "No agent named %s; list_agents, which search_tools finds, shows them" to)))))
 
-(defun lispm-collab-ask-for-peer (caller peer target request)
+(defun lispm-collab-ask-for-peer (caller peer target request &optional root)
   "Ask TARGET REQUEST for PEER, acting in LispM as CALLER; return its id.
-TARGET is an agent, a role or a peer, by name.  The reply comes to PEER
+TARGET is an agent, a role or a peer, by name; ROOT is an optional
+subdirectory for a helper started from a role.  The reply comes to PEER
 as a message: [Reply from X to request ID]."
   (let* ((id (lispm-collab-new-request-id))
          (answer (lambda (from reply)
@@ -268,7 +269,7 @@ as a message: [Reply from X to request ID]."
      (t (lispm-delegate caller target request
                         (lambda (agent reply)
                           (funcall answer (symbol-name (lispm-agent-name agent)) reply))
-                        :request-id id)))
+                        :root root :request-id id)))
     id))
 
 (defun lispm-collab--peer-lines (&optional self)
@@ -330,14 +331,20 @@ TARGET's reverse wait, as well as their request ids."
     (lispm-agents-roster-notify caller '(waits-on request-ids) event)
     (lispm-agents-roster-notify target '(waited-on-by request-ids))))
 
+(defun lispm-collab--starts-role-p (agent)
+  "Non-nil when AGENT designates a role that starts a new helper."
+  (cond ((lispm-role-p agent) t)
+        ((and (stringp agent)
+              (not (lispm-get-agent agent t))
+              (not (lispm-get-character agent t)))
+         (and (lispm-get-role agent t) t))))
+
 (defun lispm-collab--recipient (caller agent &optional root)
   "Resolve AGENT for CALLER; return (TARGET . HELPER-P).
 A role starts a helper in ROOT or CALLER's root, bounded by CALLER.
 An existing agent or character keeps its own conversation."
-  (let* ((role (cond ((lispm-role-p agent) agent)
-                     ((and (stringp agent) (not (lispm-get-agent agent t))
-                           (not (lispm-get-character agent t)))
-                      (lispm-get-role agent t))))
+  (let* ((role (and (lispm-collab--starts-role-p agent)
+                    (if (lispm-role-p agent) agent (lispm-get-role agent t))))
          (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
          (target (or helper (lispm-collab--target agent caller))))
     (when helper
@@ -382,10 +389,13 @@ Return the agent asked."
                             (funcall callback target reply)))
     target))
 
-(defun lispm-collab--accepted (id name &optional session)
-  "Receipt for the request ID accepted by NAME, optionally SESSION."
-  (format "Request %s accepted by %s%s. Its final reply will arrive as a message. Continue other work, or end this turn if you have nothing else to do; do not poll for the reply."
-          id name (if session (format " (%s)" session) "")))
+(defun lispm-collab--accepted (id name &optional session helper-p)
+  "Receipt for the request ID accepted by NAME, optionally SESSION.
+When HELPER-P is non-nil, note that the helper retires once it replies."
+  (format "Request %s accepted by %s%s%s. Its final reply will arrive as a message. Continue other work, or end this turn if you have nothing else to do; do not poll for the reply."
+          id name
+          (if session (format " (%s)" session) "")
+          (if helper-p ", which retires once it has replied" "")))
 
 (defun lispm-collab--reply-message (caller-id id from text)
   "Deliver request ID's reply TEXT from FROM to session CALLER-ID once.
@@ -396,9 +406,10 @@ between delivering the answer and finishing the recipient's turn."
     (lispm-tell caller (format "[Reply to request %s]\n%s" id text)
                 :from from :request-id id :answer-to id :id (concat "reply-" id))))
 
-(defun lispm-collab-request (caller agent request &optional call)
+(defun lispm-collab-request (caller agent request &optional call root)
   "Ask AGENT REQUEST for CALLER in the background; return an acceptance.
-AGENT is a native agent, character, role or peer.  The final reply is
+AGENT is a native agent, character, role or peer; ROOT is an optional
+directory for a helper started from a role.  The final reply is
 a new input to CALLER, never a pending tool result.  CALL, when given,
 records a native recipient on the originating tool call for inspection.
 Native requests and replies survive Emacs through the inbox; peer
@@ -421,7 +432,7 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
            :id id)
           (lispm--await-reply caller id (lispm-peer-name peer))
           (lispm-collab--accepted id (lispm-peer-name peer)))
-      (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent))
+      (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root))
                    (route (concat caller-id " " id " inbox" (if helper-p " retire" ""))))
         (lispm-tell target request :from (lispm-agent-name caller)
                     :request-id id :reply-to route
@@ -429,7 +440,7 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
         (lispm--await-reply caller id)
         (when call
           (lispm-collab--record-asked caller call target))
-        (lispm-collab--accepted id (lispm-agent-name target) (lispm-agent-id target))))))
+        (lispm-collab--accepted id (lispm-agent-name target) (lispm-agent-id target) helper-p)))))
 
 (defun lispm-collab--replied (agent reply)
   "The text delivered when AGENT replied REPLY.
@@ -471,12 +482,26 @@ policy, for the rest of its life."
     (lispm-tell agent request :from (lispm-agent-name caller))
     agent))
 
+(defun lispm-collab-resolve-project (caller project)
+  "Resolve optional PROJECT directory for CALLER, or signal an error."
+  (and project
+       (or (lispm-collab-root caller project)
+           (error "No directory %s" project))))
+
+(defun lispm-collab--starts-elsewhere-call-p (tool input)
+  "Non-nil when TOOL on INPUT starts a role agent or helper in a project."
+  (let ((name (lispm-tool-name tool)))
+    (or (equal name "start_agent")
+        (and (equal name "ask_agent")
+             (listp input)
+             (lispm-collab--starts-role-p (alist-get 'agent input))))))
+
 (defun lispm-collab--start-elsewhere (agent tool input)
   "Make AGENT's call of TOOL on INPUT ask if it starts an agent elsewhere.
 That is outside AGENT's project, where the agent started may do what
 AGENT may do in its own, as AGENT's writes there, which always ask
 \(see `lispm-tool-action'), could not."
-  (when-let* (((equal (lispm-tool-name tool) "start_agent"))
+  (when-let* (((lispm-collab--starts-elsewhere-call-p tool input))
               (project (and (listp input) (alist-get 'project input)))
               ((stringp project))
               (root (lispm-collab-root agent project))
@@ -592,10 +617,16 @@ says how many there are."
   (let ((others (remq agent (lispm-agents))))
     (concat "# Other agents\n"
             "ask_agent delegates to a running agent, or to a helper it starts from a"
-            " role, returning a request id immediately; its final reply arrives as a new message."
-            " Continue other work, or end your turn to await it; do not poll."
-            " send_message notifies a running agent; start_agent, which"
-            " search_tools finds, starts an agent of a role that works on its own and stays.\n"
+            " role (pass `project' to root the helper in a sub-repository), returning a"
+            " request id immediately; its final reply arrives as a new message, and a"
+            " helper retires once it has replied. Continue other work, or end your turn"
+            " to await it; do not poll. send_message notifies a LIVE agent; for multi-turn"
+            " collaboration with an agent that stays alive, use start_agent (which"
+            " search_tools finds) rather than send_message to a retiring helper."
+            " When answering a delegated `[Message from ...]' request yourself, deliver"
+            " your complete result in your final reply (and `return_value' if requested)"
+            " rather than sending routine progress updates with `send_message'; message"
+            " mid-task only when blocked or coordinating shared files.\n"
             (if others
                 (concat "Running:\n"
                         (mapconcat (lambda (a)
@@ -645,18 +676,22 @@ when you need a final reply delivered back automatically."
 
 (lispm-deftool ask_agent
     ((agent string "A running agent, a character (by its name, as Ada), or a role to start a helper from (list_agents, which search_tools finds, shows them).")
-     (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))
+     (request string "What you need, self-contained: they cannot see your transcript.  Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]].")
+     (project string "Directory for a helper started from a role, relative to your root by default." :optional t))
   "Delegate a request in the background and immediately receive its
 request id.  The final reply arrives as a new message with that id;
 you remain free to work and answer the user.  Continue other work, or
 end your turn if none remains; do not poll for the reply.
 Ask a running agent better placed for it, or
-name a role to start a helper of that role in your project; the
-helper retires once it has replied.  When you need data back, such
+name a role to start a helper of that role in your project (or in
+PROJECT, such as a sub-repository under your workspace); the helper
+retires once it has replied, so use start_agent instead when you need
+an ongoing multi-turn collaborator.  When you need data back, such
 as a list of places, ask for it: they can return a value with their
 reply (return_value), which follows it as JSON."
   :permission comm
-  (lispm-collab-request lispm-current-agent agent request lispm-current-call))
+  (lispm-collab-request lispm-current-agent agent request lispm-current-call
+                        (lispm-collab-resolve-project lispm-current-agent project)))
 
 (lispm-deftool start_agent
     ((role string "The role to start the agent from (list_agents, which search_tools finds, shows the roles).")
@@ -674,9 +709,7 @@ more than you."
   :deferred t
   (let ((agent (lispm-collab-start
                 lispm-current-agent role request
-                (and project
-                     (or (lispm-collab-root lispm-current-agent project)
-                         (error "No directory %s" project))))))
+                (lispm-collab-resolve-project lispm-current-agent project))))
     (format "Started %s (%s, in %s).  It works on its own and stays once it has replied: send_message and ask_agent reach it."
             (lispm-agent-name agent) (lispm-agent-role agent)
             (abbreviate-file-name (lispm-agent-root agent)))))

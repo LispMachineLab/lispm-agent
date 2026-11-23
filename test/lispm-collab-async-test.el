@@ -530,5 +530,44 @@ async reply during that cleanup could also reopen its caller's buffer."
                               (equal (lispm-agent-last-reply revived) "Failure received.")))))
         (should-not (lispm-get-agent "middle@project" t))))))
 
+(ert-deftest lispm-test-async-ask-agent-project-scope ()
+  "ask_agent roots role helpers in a subproject and asks before leaving the caller's root."
+  (lispm-test-env
+    (lispm-defrole reviewer "Reviews changes.")
+    (let* ((subrepo (expand-file-name "subrepo/" project))
+           (outside (make-temp-file "lispm-outside-" t))
+           (boss (lispm-defagent boss :root project :policy '((comm . auto))))
+           (tool (lispm-get-tool "ask_agent")))
+      (unwind-protect
+          (progn
+            (make-directory (expand-file-name ".git" subrepo) t)
+            (make-directory (expand-file-name ".git" outside) t)
+            (should (eq (lispm-tool-action boss tool '((agent . "reviewer") (request . "r") (project . "subrepo")))
+                        'auto))
+            (pcase-let ((`(,action . ,reasons)
+                         (lispm-tool-decision boss tool
+                                              `((agent . "reviewer") (request . "r") (project . ,outside)))))
+              (should (eq action 'ask))
+              (should (string-match-p "outside the project of boss" (car reasons))))
+            (should (string-match-p "No directory"
+                                    (car (lispm-test--call boss "ask_agent"
+                                                           '((agent . "reviewer") (request . "r")
+                                                             (project . "missing-subrepo"))))))
+            (setq lispm-test--scripts
+                  `((reviewer@subrepo ,(lispm-test--msg "end_turn" (lispm-test--text "Subrepo checked.")))
+                    (boss ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
+            (pcase-let ((`(,receipt . ,errorp)
+                         (lispm-test--call boss "ask_agent"
+                                           '((agent . "reviewer") (request . "Check subrepo")
+                                             (project . "subrepo")))))
+              (should-not errorp)
+              (should (string-search "retires once it has replied" receipt)))
+            (should (lispm-test--wait
+                     (lambda () (and (funcall (lispm-test--idle-p boss))
+                                     (equal (lispm-agent-last-reply boss) "Done.")
+                                     (not (lispm-get-agent "reviewer@subrepo" t))))))
+            (should (string-search "Subrepo checked." (lispm-test--transcript boss))))
+        (delete-directory outside t)))))
+
 (provide 'lispm-collab-async-test)
 ;;; lispm-collab-async-test.el ends here

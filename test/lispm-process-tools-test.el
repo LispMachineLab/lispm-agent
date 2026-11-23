@@ -300,5 +300,36 @@
         (should-not (cdr result))
         (should (string-match-p "0" (car result)))))))
 
+(ert-deftest lispm-process-tools-test-head-tail-window-and-benign-stderr ()
+  "Streaming windowing obeys its homomorphism law, keeps head and tail,
+formats multi-line JSON, and strips benign macOS color-list unarchiver lines."
+  (let ((x (mapconcat (lambda (i) (format "row-%03d;" i)) (number-sequence 1 40) ""))
+        (y (mapconcat (lambda (i) (format "tail-%03d;" i)) (number-sequence 1 15) "")))
+    (dolist (budget '(40 80 120))
+      (should (equal (lispm-process-tools--window
+                      (concat (lispm-process-tools--window x budget) y) budget)
+                     (lispm-process-tools--window (concat x y) budget)))))
+  (lispm-test-env
+    (lispm-process-tools-test--with-runs
+      (let* ((agent (lispm-defagent tester :root project))
+             (lispm-tool-output-limit 600)
+             (cocoa "2026-11-23 02:51:19.118 Emacs[53809:141723815] Failed to initialize color list unarchiver: Error Domain=NSCocoaErrorDomain Code=4864 \"non-keyed archive\"")
+             (script (concat "printf 'HEADER_START\\n'; "
+                             "i=0; while [ $i -lt 80 ]; do printf 'middle-filler-%03d\\n' $i; i=$((i+1)); done; "
+                             "printf 'FINAL_SUMMARY_OK\\n'; "
+                             "printf '%s\\nreal-warning\\n' \"$1\" >&2")))
+        (pcase-let* ((`(,text . ,errorp)
+                      (lispm-process-tools-test--call
+                       agent `((program . "/bin/sh") (args . ["-c" ,script "sh" ,cocoa]))))
+                     (result (lispm--json-decode text)))
+          (should-not errorp)
+          (should (<= (length text) 600))
+          (should (> (cl-count ?\n text) 1))
+          (should (eq (alist-get 'truncated result) t))
+          (should (string-prefix-p "HEADER_START\n" (alist-get 'stdout result)))
+          (should (string-search "...[stdout truncated]..." (alist-get 'stdout result)))
+          (should (string-suffix-p "FINAL_SUMMARY_OK\n" (alist-get 'stdout result)))
+          (should (equal (alist-get 'stderr result) "real-warning\n")))))))
+
 (provide 'lispm-process-tools-test)
 ;;; lispm-process-tools-test.el ends here

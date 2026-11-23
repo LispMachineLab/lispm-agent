@@ -399,5 +399,29 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (should (string-match-p "changes buffers or files" preview)))
       (should-not (file-exists-p (expand-file-name "probe" project))))))
 
+(ert-deftest lispm-elisp-test-strips-benign-macos-stderr ()
+  "Benign macOS AppKit color-list unarchiver stderr lines are removed cleanly."
+  (lispm-test-env
+    (lispm-elisp-test--with-kernel
+      (let ((agent (lispm-defagent tester :root project))
+            (noise (concat "2026-11-23 02:51:19.118 Emacs[53809:141723815] "
+                           "Failed to initialize color list unarchiver: "
+                           "Error Domain=NSCocoaErrorDomain Code=4864 \"legacy\"\n"))
+            results)
+        (lispm-elisp--start agent "(+ 1 2)" 1
+                            (lambda (text errorp) (push (list text errorp) results)))
+        (let ((callback (alist-get 1 kernel-callbacks)))
+          (funcall callback 'chunk "=> 3\n")
+          (funcall callback 'success (list :exit 0 :stderr noise)))
+        (should (equal results '(("=> 3\n" nil))))
+        (setq results nil)
+        (lispm-elisp--start agent "(error \"boom\")" 1
+                            (lambda (text errorp) (push (list text errorp) results)))
+        (let ((callback (alist-get 2 kernel-callbacks)))
+          (funcall callback 'success (list :exit 1 :stderr (concat noise "Elisp worker: boom\n"))))
+        (should (cadar results))
+        (should-not (string-search "Code=4864" (caar results)))
+        (should (string-search "Elisp worker: boom" (caar results)))))))
+
 (provide 'lispm-elisp-test)
 ;;; lispm-elisp-test.el ends here
