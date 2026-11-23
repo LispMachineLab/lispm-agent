@@ -74,6 +74,8 @@
 
 (define-error 'lispm-call-failed "Tool call failed")
 (define-error 'lispm-call-denied "Tool call denied" 'lispm-call-failed)
+(define-error 'lispm-lisp-serialization-error "Cannot serialize value for tool")
+(define-error 'lispm-lisp-type-error "Invalid value returned to macro tool")
 
 ;; Not an `error': a program cannot handle it, and goes no further.
 (put 'lispm-lisp-refused 'error-conditions '(lispm-lisp-refused))
@@ -99,7 +101,7 @@ BUFFERS are those it made in the pass under way; STOPPING is how the
 pass under way ends, once it stops at a call; OUTPUT is what its last
 pass printed; DONE gets its result, once it is FINISHED."
   agent id call forms tools log (index 0) handlers buffers output done finished
-  stopping)
+  stopping unwound-from)
 
 ;;;; What a program may do
 
@@ -110,10 +112,10 @@ pass printed; DONE gets its result, once it is FINISHED."
     cl-incf cl-decf setf ignore-errors ignore-error save-match-data
     with-temp-buffer with-current-buffer let-alist thread-first thread-last
     cl-loop cl-case cl-ecase cl-dolist cl-dotimes cl-block cl-return cl-return-from
-    cl-destructuring-bind cl-flet cl-flet* cl-labels named-let rx)
+    cl-destructuring-bind cl-function cl-flet cl-flet* cl-labels named-let rx)
   "Macros a program may use.  Their expansions are checked in turn.")
 
-(defconst lispm-lisp--early-macros '(cl-flet cl-flet* cl-labels rx)
+(defconst lispm-lisp--early-macros '(cl-function cl-flet cl-flet* cl-labels rx)
   "Macros of `lispm-lisp--macros' that expand the forms in them while expanding.
 Before one is expanded, its forms are searched for macros a program
 may not use, which would run then, unchecked.")
@@ -247,6 +249,80 @@ Each entry is (FUNCTION . PROPS):
 (defvar lispm-lisp--tools nil
   "Names of the tools the program being checked, or run, may call, as symbols.")
 
+(defconst lispm-lisp--internal (make-symbol "lispm-lisp-internal")
+  "Unforgeable head marking runtime helper calls emitted by `lispm-lisp-defmacro'.")
+
+(defvar lispm-lisp--macro-tools (make-hash-table :test #'eq)
+  "Macro tools in `run_lisp': symbol -> pure syntax expander `(ARGS -> FORM)'.")
+
+(defmacro lispm-lisp-defmacro (name arglist docstring &rest body)
+  "Define a macro tool NAME for `run_lisp' with ARGLIST `(ARGS)' and BODY."
+  (declare (indent 2) (doc-string 3)
+           (debug (&define name sexp stringp def-body)))
+  `(puthash ',name (lambda ,arglist ,docstring ,@body) lispm-lisp--macro-tools))
+
+(defun lispm-lisp--null-form-p (form)
+  "Non-nil if FORM is literally `nil' or `(quote nil)'."
+  (or (null form) (equal form '(quote nil))))
+
+(defun lispm-lisp--constant-p (form)
+  "Non-nil if FORM is a self-evaluating literal or a quoted datum."
+  (or (stringp form) (numberp form) (vectorp form) (memq form '(t :false nil))
+      (and (consp form) (eq (car form) 'quote) (consp (cdr form)) (null (cddr form)))))
+
+(defun lispm-lisp--check-tool-arg (head param key val-form)
+  "Validate literal VAL-FORM against PARAM (`( _ TYPE _ . OPTS)') of tool HEAD."
+  (when (and param (lispm-lisp--constant-p val-form))
+    (let ((lit (if (consp val-form) (cadr val-form) val-form)))
+      (when lit
+        (pcase-let ((`(,_arg ,type ,_doc . ,opts) param))
+          (condition-case err
+              (lispm-tools--argument key type (lispm-lisp--json lit head) opts)
+            (error (lispm-lisp--refuse "%s: %s" head (error-message-string err)))))))))
+
+(defun lispm-lisp--expand-tool-call (head args scope)
+  "Validate and rewrite a call `(HEAD . ARGS)' of tool HEAD in SCOPE."
+  (unless (and (proper-list-p args) (cl-evenp (length args)))
+    (lispm-lisp--refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
+                        head head))
+  (let* ((tool (lispm-get-tool head))
+         (schema-p (and tool (lispm-tool-input-schema tool)))
+         (params (and tool (not schema-p) (lispm-tool-params tool)))
+         (param-alist (mapcar (lambda (p) (cons (lispm-tools--key (car p)) p)) params))
+         (tail args)
+         given non-null pairs)
+    (while tail
+      (let ((kw (pop tail))
+            (val-form (pop tail)))
+        (unless (keywordp kw)
+          (lispm-lisp--refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
+                              head head))
+        (let* ((key (lispm-tools--key (intern (substring (symbol-name kw) 1))))
+               (param (assq key param-alist)))
+          (when (memq key given)
+            (lispm-lisp--refuse "%s: duplicate parameter %s" head kw))
+          (push key given)
+          (when (and tool (not schema-p) (not param) (not (eq key 'why)))
+            (lispm-lisp--refuse "%s has no parameter %s" head kw))
+          (lispm-lisp--check-tool-arg head (cdr param) key val-form)
+          (unless (lispm-lisp--null-form-p val-form)
+            (push key non-null))
+          (push `(cons ',key ,(lispm-lisp--check val-form scope)) pairs))))
+    (when (and tool (not schema-p))
+      (dolist (p params)
+        (unless (or (plist-get (cdddr p) :optional)
+                    (memq (lispm-tools--key (car p)) non-null))
+          (lispm-lisp--refuse "%s: missing required parameter :%s" head (car p)))))
+    `(lispm-lisp--call-pairs ',head (list ,@(nreverse pairs)))))
+
+(defun lispm-lisp--macro-env ()
+  "Return a `macroexpand-all-environment' alist for `lispm-lisp--macro-tools'."
+  (let (env)
+    (maphash (lambda (name expander)
+               (push (cons name (lambda (&rest args) (funcall expander args))) env))
+             lispm-lisp--macro-tools)
+    env))
+
 (defun lispm-lisp--scan (form)
   "Refuse FORM if a macro a program may not use is in it, anywhere.
 Quoted data too: FORM is about to be expanded by a macro that expands
@@ -261,12 +337,29 @@ what is in it, whatever it is."
                     (when (> (cl-incf count) 100000)
                       (lispm-lisp--refuse "a program this large"))
                     (let ((head (car x)))
-                      (when (and (symbolp head)
-                                 (or (memq head lispm-lisp--never)
-                                     (and (macrop head) (not (memq head lispm-lisp--macros)))))
-                        (lispm-lisp--refuse "%s" head))
-                      (walk head))
-                    (setq x (cdr x)))))
+                      (cond
+                       ((and (memq head '(cl-flet cl-flet* cl-labels))
+                             (consp (cdr x)) (proper-list-p (cadr x)))
+                        (dolist (def (cadr x))
+                          (when (and (consp def) (symbolp (car def))
+                                     (gethash (car def) lispm-lisp--macro-tools))
+                            (lispm-lisp--refuse "redefining macro %s" (car def))))
+                        (walk head)
+                        (setq x (cdr x)))
+                       ((and (memq head '(run_elisp_forms eval_elisp_forms))
+                             (proper-list-p x))
+                        ;; Skip the quoted worker body serialized for the child Emacs;
+                        ;; still scan any leading `:bind' / `:timeout' plist.
+                        (when (and (consp (cdr x)) (consp (cadr x)) (keywordp (caadr x)))
+                          (walk (cadr x)))
+                        (setq x nil))
+                       (t
+                        (when (and (symbolp head)
+                                   (or (memq head lispm-lisp--never)
+                                       (and (macrop head) (not (memq head lispm-lisp--macros)))))
+                          (lispm-lisp--refuse "%s" head))
+                        (walk head)
+                        (setq x (cdr x))))))))
       (walk form))))
 
 (defun lispm-lisp--binder (symbol)
@@ -381,14 +474,20 @@ SCOPE lists the variables the program bound around FORM."
              (catch ,tag
                (let ((lispm-lisp--tags (cons ,tag lispm-lisp--tags)))
                  ,@(lispm-lisp--check-body (cdr args) scope))))))
+       ((eq head lispm-lisp--internal)
+        (cons (car args) (lispm-lisp--check-body (cdr args) scope)))
+       ((gethash head lispm-lisp--macro-tools)
+        (lispm-lisp--check (funcall (gethash head lispm-lisp--macro-tools) args) scope))
        ((memq head lispm-lisp--tools)
-        `(lispm-lisp--call ',head ,@(lispm-lisp--check-body args scope)))
+        (lispm-lisp--expand-tool-call head args scope))
        ((macrop head)
         (unless (memq head lispm-lisp--macros)
           (lispm-lisp--refuse "the macro %s" head))
         (when (memq head lispm-lisp--early-macros)
           (lispm-lisp--scan form))
-        (let ((expansion (macroexpand-1 form)))
+        (let* ((env (and (memq head lispm-lisp--early-macros) (lispm-lisp--macro-env)))
+               (macroexpand-all-environment env)
+               (expansion (macroexpand-1 form env)))
           (when (eq expansion form)
             (lispm-lisp--refuse "%S" form))
           (lispm-lisp--check expansion scope)))
@@ -405,6 +504,7 @@ call a tool for that, or use eval_elisp" head)))))))
 
 (defun lispm-lisp--prepare (code)
   "The forms of the program CODE, checked and rewritten to run."
+  (require 'lispm-lisp-macros)
   (mapcar (lambda (form)
             (when (and (consp form) (memq (car form) lispm-lisp--never))
               (lispm-lisp--refuse "%s" (car form)))
@@ -598,18 +698,26 @@ The call runs as one the model made does, whatever the program bound."
   (setf (lispm-lisp--run-stopping run) how)
   (throw lispm-lisp--pass-tag how))
 
-(defun lispm-lisp--call (name &rest args)
-  "Call the tool NAME with the keyword ARGS, from the running program.
-Its result text is returned, or a failure signaled; a call made by
-the run before gets the result it had then."
+(defun lispm-lisp--stopping-p ()
+  "Non-nil when the current `run_lisp' pass is suspending for approval or wait."
+  (and lispm-lisp--run (lispm-lisp--run-stopping lispm-lisp--run) t))
+
+(defun lispm-lisp--current-index ()
+  "Return the current tool-call index in `lispm-lisp--run', or nil."
+  (and lispm-lisp--run (lispm-lisp--run-index lispm-lisp--run)))
+
+(defun lispm-lisp--note-unwind (from-index)
+  "Mark calls from FROM-INDEX on as unwound so retry re-enters the bracket."
+  (when (and lispm-lisp--run (integerp from-index))
+    (let ((prev (lispm-lisp--run-unwound-from lispm-lisp--run)))
+      (setf (lispm-lisp--run-unwound-from lispm-lisp--run)
+            (if prev (min prev from-index) from-index)))))
+
+(defun lispm-lisp--call-input (name tool input)
+  "Execute or replay call of TOOL (named NAME) with decoded JSON INPUT."
   (let* ((run (or lispm-lisp--run (error "No program is running")))
-         ;; Cleanups of the program, as its pass ends at a call, make
-         ;; no more calls.
          (_ (when-let* ((how (lispm-lisp--run-stopping run)))
               (throw lispm-lisp--pass-tag how)))
-         (tool (or (lispm-get-tool name) (error "No tool %s" name)))
-         (name (lispm-tool-name tool))
-         (input (lispm-lisp--input name args))
          (index (lispm-lisp--run-index run))
          (entry (nth index (lispm-lisp--run-log run))))
     (when (>= index lispm-lisp-max-calls)
@@ -641,6 +749,32 @@ the run before gets the result it had then."
            (lispm-lisp--record run index name input 'denied (lispm-tools-denial agent tool reasons))
            (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)) index)))))))
 
+(defun lispm-lisp--call-pairs (name pairs)
+  "Call tool NAME from precompiled `(JSON-KEY . VALUE)' PAIRS."
+  (let* ((run (or lispm-lisp--run (error "No program is running")))
+         (_ (when-let* ((how (lispm-lisp--run-stopping run)))
+              (throw lispm-lisp--pass-tag how)))
+         (tool (or (lispm-get-tool name) (error "No tool %s" name)))
+         (tname (lispm-tool-name tool))
+         input)
+    (dolist (pair pairs)
+      (when (cdr pair)
+        (push (cons (car pair) (lispm-lisp--json (cdr pair) tname)) input)))
+    (lispm-lisp--call-input tname tool (nreverse input))))
+
+(defun lispm-lisp--call (name &rest args)
+  "Call the tool NAME with the keyword ARGS, from the running program.
+Its result text is returned, or a failure signaled; a call made by
+the run before gets the result it had then."
+  (let* ((run (or lispm-lisp--run (error "No program is running")))
+         ;; Cleanups of the program, as its pass ends at a call, make
+         ;; no more calls.
+         (_ (when-let* ((how (lispm-lisp--run-stopping run)))
+              (throw lispm-lisp--pass-tag how)))
+         (tool (or (lispm-get-tool name) (error "No tool %s" name)))
+         (tname (lispm-tool-name tool)))
+    (lispm-lisp--call-input tname tool (lispm-lisp--input tname args))))
+
 ;;;; Running a program
 
 (defun lispm-lisp--pass (run)
@@ -653,7 +787,8 @@ program's errors are signaled."
         (tag (list 'lispm-lisp-pass)))
     (setf (lispm-lisp--run-index run) 0
           (lispm-lisp--run-buffers run) nil
-          (lispm-lisp--run-stopping run) nil)
+          (lispm-lisp--run-stopping run) nil
+          (lispm-lisp--run-unwound-from run) nil)
     (unwind-protect
         (catch tag
           (let ((lispm-lisp--run run)
@@ -699,11 +834,14 @@ program's errors are signaled."
 
 (defun lispm-lisp--saved-log (run orig-index)
   "Saved call log for RUN when an error originated at call ORIG-INDEX."
-  (let* ((log (mapcar #'copy-sequence
-                      (seq-take (lispm-lisp--run-log run)
-                                (lispm-lisp--run-index run))))
+  (let* ((unwound (lispm-lisp--run-unwound-from run))
+         (cap (if unwound
+                  (min unwound (lispm-lisp--run-index run))
+                (lispm-lisp--run-index run)))
+         (log (mapcar #'copy-sequence (seq-take (lispm-lisp--run-log run) cap)))
          (len (length log)))
     (cond
+     ((and unwound (or (null orig-index) (>= orig-index unwound))) log)
      ((null orig-index) log)
      ((= orig-index (1- len)) (butlast log))
      ((and (>= orig-index 0) (< orig-index len))
@@ -800,14 +938,21 @@ one step what takes many calls: read ten files, filter them, edit three.
 Call a tool with keyword arguments: (read_file :path \"a.el\"),
 \(edit_file :path \"a.el\" :old-text \"x\" :new-text \"y\").  It returns
 the tool's result text, or signals lispm-call-failed (lispm-call-denied
-when refused), which condition-case can handle.  Each call goes through
-your permission policy as if you made it: reads run at once, a write
-waits for the user's approval.  Otherwise a program only computes: the
-special forms, common macros (let, dolist, pcase, cl-loop, when-let*,
-with-temp-buffer), and functions free of side effects (strings, lists,
-regexps, seq-*, file names, reading buffers and directories).  Functions
-passed to mapcar and the like must be lambdas or such functions; it may
-not set global variables or change data in place, and changes only
+when refused), which condition-case can handle.  Tool macros handle
+scoped lifecycles, code quoting, fallbacks and edits:
+- (ignoring_call_denied BODY...) and (with_tool_fallback PRIMARY FALLBACK...)
+- (transform_file (TEXT PATH) BODY...): read PATH unnumbered into TEXT and
+  edit_file only when BODY returns changed text
+- (run_elisp_forms [(:bind (VAR (K EXPR)) :timeout SEC)] BODY...) and
+  (eval_elisp_forms [(:bind ...)] BODY...): pass S-expressions without string escaping
+- (with_terminal BODY...) and (with_worktree (VAR :role R :request Q ...) BODY...)
+Each call goes through your permission policy as if you made it: reads run
+at once, a write waits for the user's approval.  Otherwise a program only
+computes: the special forms, common macros (let, dolist, pcase, cl-loop,
+when-let*, with-temp-buffer), and functions free of side effects (strings,
+lists, regexps, seq-*, file names, reading buffers and directories).
+Functions passed to mapcar and the like must be lambdas or such functions;
+it may not set global variables or change data in place, and changes only
 buffers it makes.  Use eval_elisp for anything else.  Returns the calls
 made, what the program printed and its last value.
 Computation still runs in the user's Emacs: keep it small and bounded.

@@ -10,8 +10,8 @@ LISPM_KERNEL ?= ../lispm-kernel
 ELS = $(addprefix lisp/,lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
       lispm-core.el lispm-sandbox.el lispm-services.el lispm-roles.el lispm-transcript.el lispm-anthropic.el lispm-openai.el \
-      lispm-api.el lispm-tools.el lispm-elisp-worker.el lispm-elisp.el \
-      lispm-stage.el lispm-edits.el lispm-spotlight.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-characters.el lispm-agents-bridge.el lispm-mcp-server.el lispm-ground.el lispm-inspect.el lispm-hyperbole.el lispm-settings.el lispm-backend-form.el \
+      lispm-api.el lispm-deftool-macros.el lispm-tools.el lispm-elisp-worker.el lispm-elisp.el \
+      lispm-stage.el lispm-edits.el lispm-spotlight.el lispm-memory.el lispm-inbox.el lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-lisp-macros.el lispm-collab.el lispm-mcp.el lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el lispm-characters.el lispm-agents-bridge.el lispm-mcp-server.el lispm-ground.el lispm-inspect.el lispm-hyperbole.el lispm-settings.el lispm-backend-form.el \
       lispm-agents-roster.el lispm-agents-work.el lispm-runtime-tools.el lispm-session-tools.el lispm-process-tools.el lispm-shell-stage.el lispm-eval-stage.el \
       lispm-chat.el lispm-bar.el lispm-batch.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
@@ -37,6 +37,7 @@ compile: deps
 # changes syntax tables, keys and Org for the whole Emacs.
 test: deps
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-test.el -l test/lispm-elisp-test.el \
+	  -l test/lispm-lisp-macros-test.el \
 	  -l test/lispm-stage-test.el -l test/lispm-spotlight-test.el -l test/lispm-shell-stage-test.el -l test/lispm-eval-stage-test.el \
 	  -l test/lispm-runtime-tools-test.el -l test/lispm-session-tools-test.el \
 	  -l test/lispm-process-tools-test.el -l test/lispm-tool-search-test.el \

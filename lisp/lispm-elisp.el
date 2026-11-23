@@ -151,31 +151,25 @@ No worker is started in Emacs when the kernel is unavailable."
                                          :limit (max 0 lispm-tool-output-limit)))
            (print-escape-newlines t)
            (print-escape-control-characters t))
-      (condition-case err
-          (progn
-            ;; Keep the id before C-g can unwind a submission that reached
-            ;; the kernel.  The error/quit handler can then cancel it.
-            (let ((inhibit-quit t))
-              (push job lispm-elisp--jobs)
-              (add-hook 'lispm-state-change-functions #'lispm-elisp--state-changed)
-              (add-hook 'lispm-session-end-functions #'lispm-elisp--session-ended)
-              (add-hook 'lispm-agents-context-release-functions #'lispm-elisp--terminal-ended)
-              (setf (lispm-elisp--job-id job)
-                    (lispm-kernel-submit
-                     runtime 'exec
-                     (list :program lispm-elisp-program
-                           :args (list "-Q" "--batch" "--load" lispm-elisp--worker
-                                       "--funcall" "lispm-elisp-worker-main")
-                           :cwd cwd
-                           :env (lispm-elisp--environment directory)
-                           :stdin (concat (prin1-to-string code) "\n")
-                           :timeout timeout)
-                     :timeout (+ timeout 10)
-                     :on-result (lambda (kind value) (lispm-elisp--result job kind value)))))
-            (when quit-flag (signal 'quit nil)))
-        ((error quit)
-         (let ((inhibit-quit t)) (lispm-elisp--cancel job))
-         (signal (car err) (cdr err))))))
+      ;; Keep the id before C-g can unwind a submission that reached
+      ;; the kernel.  The error/quit handler can then cancel it.
+      (lispm-tools-with-async-start (lispm-elisp--cancel job)
+        (push job lispm-elisp--jobs)
+        (add-hook 'lispm-state-change-functions #'lispm-elisp--state-changed)
+        (add-hook 'lispm-session-end-functions #'lispm-elisp--session-ended)
+        (add-hook 'lispm-agents-context-release-functions #'lispm-elisp--terminal-ended)
+        (setf (lispm-elisp--job-id job)
+              (lispm-kernel-submit
+               runtime 'exec
+               (list :program lispm-elisp-program
+                     :args (list "-Q" "--batch" "--load" lispm-elisp--worker
+                                 "--funcall" "lispm-elisp-worker-main")
+                     :cwd cwd
+                     :env (lispm-elisp--environment directory)
+                     :stdin (concat (prin1-to-string code) "\n")
+                     :timeout timeout)
+               :timeout (+ timeout 10)
+               :on-result (lambda (kind value) (lispm-elisp--result job kind value)))))))
   nil)
 
 (lispm-deftool run_elisp
