@@ -932,11 +932,11 @@ BODY can use `port' and `log', the file the server records requests in."
     (should (equal (alist-get 'required input-schema) ["why" "path" "old_text" "new_text"]))
     (should (equal (mapcar #'car (alist-get 'properties input-schema))
                    '(why path old_text new_text replace_all)))
-    (should (equal (lispm-tools--arguments tool '((path . "a") (old_text . "x") (new_text . "y")
+    (should (equal (lispm-tools-arguments tool '((path . "a") (old_text . "x") (new_text . "y")
                                                   (replace_all . :false) (why . "w")))
                    '("a" "x" "y" nil)))
-    (should-error (lispm-tools--arguments tool '((path . 3) (old_text . "x") (new_text . "y"))))
-    (should-error (lispm-tools--arguments tool '((path . "a"))))
+    (should-error (lispm-tools-arguments tool '((path . 3) (old_text . "x") (new_text . "y"))))
+    (should-error (lispm-tools-arguments tool '((path . "a"))))
     ;; read tools take no rationale
     (should-not (assq 'why (alist-get 'properties (alist-get 'input_schema
                                                              (lispm-tool-schema (lispm-get-tool "read_file"))))))))
@@ -1113,10 +1113,10 @@ stand in."
                              `((role . "user")
                                (content . [((type . "tool_result") (tool_use_id . "x")
                                             (content . ,(vector (lispm-transcript--text-block "shot")
-                                                                (lispm-transcript--image-block file))))])))
+                                                                (lispm-media-image-block file))))])))
                            files))
          (lispm-context-images 5)
-         (loaded (lispm-transcript--load-images messages))
+         (loaded (lispm-media-load-images messages))
          (blocks (mapcar (lambda (m) (aref (alist-get 'content (aref (alist-get 'content m) 0)) 1))
                          loaded)))
     (unwind-protect
@@ -1252,7 +1252,7 @@ taken; over the limit, or without ffmpeg, it is a line of text."
                                    "-pix_fmt" "yuv420p" video)))
       (should (equal (lispm-video-description video) "clip.mp4, 2.0 s, 64×48"))
       (should (equal (lispm-video--length 125) "2:05"))
-      (let ((blocks (lispm-transcript--video-blocks video)))
+      (let ((blocks (lispm-media-video-blocks video)))
         (should (equal (length blocks) 3))
         (should (equal (alist-get 'text (car blocks))
                        "[video clip.mp4, 2.0 s, 64×48; 2 frames follow, at 0.5 s, 1.5 s]"))
@@ -1261,14 +1261,14 @@ taken; over the limit, or without ffmpeg, it is a line of text."
       (should (file-exists-p (lispm-video-poster video)))
       (let* ((messages (list `((role . "user")
                                (content . ,(vector (lispm-transcript--text-block "see")
-                                                   (lispm-transcript--image-block video))))))
+                                                   (lispm-media-image-block video))))))
              (types (lambda (loaded)
                       (mapcar (lambda (b) (alist-get 'type b))
                               (alist-get 'content (car loaded))))))
-        (should (equal (funcall types (lispm-transcript--load-images messages))
+        (should (equal (funcall types (lispm-media-load-images messages))
                        '("text" "text" "image" "image")))
         (let ((lispm-ffmpeg nil))
-          (let ((loaded (lispm-transcript--load-images messages)))
+          (let ((loaded (lispm-media-load-images messages)))
             (should (equal (funcall types loaded) '("text" "text")))
             (should (string-match-p "ffmpeg is needed"
                                     (alist-get 'text (aref (alist-get 'content (car loaded)) 1))))))))))
@@ -4325,7 +4325,7 @@ nothing."
 
 (defun lispm-test--input-heading-p (agent)
   "Whether AGENT's session ends with an empty input heading."
-  (with-current-buffer (lispm-agent-buffer agent) (lispm--input-heading-p)))
+  (with-current-buffer (lispm-agent-buffer agent) (lispm-session-input-heading-p)))
 
 (ert-deftest lispm-test-deny-and-policy ()
   "Denials reach the model with the user's reason; policies refuse without asking."
@@ -5399,7 +5399,7 @@ BODY can use `agent', `id' (the call's) and `reply' (the turn's, once it ends)."
     ;; No result is not one.
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) " ")))
       (should-error (lispm-choose-restart-named agent 'use-value) :type 'user-error))
-    (should (lispm--call-condition agent id))
+    (should (lispm-conditions-call agent id))
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "It says hello.")))
       (lispm-choose-restart-named agent 'use-value))
     (should (lispm-test--wait (lispm-test--idle-p agent)))
@@ -5534,7 +5534,7 @@ BODY can use `agent'."
        (lispm-tell agent "write")
        (should (lispm-test--wait (lambda () (equal (lispm-waiting-calls agent) '("t1" "t2")))))
        (lispm-resolve agent "t1" 'approve)
-       (should (lispm-test--wait (lambda () (lispm--call-condition agent "t1"))))
+       (should (lispm-test--wait (lambda () (lispm-conditions-call agent "t1"))))
        ,@body)))
 
 (ert-deftest lispm-test-tool-error-not-approval ()
@@ -5553,7 +5553,7 @@ BODY can use `agent'."
                   ((symbol-function 'recenter) #'ignore))
           (lispm-review)))
       (should (lispm-test--wait (lambda () (file-exists-p (expand-file-name "b.txt" project)))))
-      (should (lispm--call-condition agent "t1"))
+      (should (lispm-conditions-call agent "t1"))
       (should-not (string-match-p "Stopped: " (lispm-test--transcript agent)))
       (lispm-test--chat-key chat "1")
       (should (lispm-test--wait (lispm-test--idle-p agent)))
@@ -5565,14 +5565,14 @@ BODY can use `agent'."
     (lispm-restart agent "t1" 'retry)
     (should (lispm-test--wait (lambda () (string-match-p "^\\*\\*\\* Stopped\n"
                                                          (lispm-test--transcript agent)))))
-    (should (lispm--call-condition agent "t1"))
+    (should (lispm-conditions-call agent "t1"))
     (should (equal (lispm-waiting-calls agent) '("t2"))))
   (lispm-test-with-stopped-write
     (let ((lispm-condition-handlers '((tool-error retry))))
       ;; Stopped before the handler was set: offer it again.
-      (lispm--offer-condition agent (lispm--call-condition agent "t1"))
+      (lispm-conditions-offer agent (lispm-conditions-call agent "t1"))
       (should (lispm-test--wait (lambda () (equal (lispm-waiting-calls agent) '("t1" "t2")))))
-      (should-not (lispm--call-condition agent "t1"))
+      (should-not (lispm-conditions-call agent "t1"))
       (should (equal (lispm-agent-status agent) "2 calls await approval"))
       (should (string-match-p "^\\*\\* WAITING write_file  a\\.txt/x\n\\(?:.*\n\\)*\\*\\*\\* Stopped: retry\n"
                               (lispm-test--transcript agent)))
@@ -5598,7 +5598,7 @@ BODY can use `agent'."
                   `((tester ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "lispm_test_snap" nil))
                             ,(lispm-test--msg "end_turn" (lispm-test--text "Done.")))))
             (lispm-tell agent "snap")
-            (should (lispm-test--wait (lambda () (lispm--call-condition agent "t1"))))
+            (should (lispm-test--wait (lambda () (lispm-conditions-call agent "t1"))))
             (lispm-restart agent "t1" 'report)
             (should (lispm-test--wait (lispm-test--idle-p agent)))
             (let* ((messages (alist-get 'messages (car lispm-test--requests)))
@@ -7746,12 +7746,12 @@ session."
         (lispm-tell agent "first")
         (should (lispm-test--wait (lambda () (= (length lispm-test--requests) 2))))
         (let ((buffer (lispm-agent-buffer agent)))
-          (should (eq (gethash agent lispm--idle-handovers) 'saving))
+          (should (eq (gethash agent lispm-session-idle-handovers) 'saving))
           (lispm-abort agent)
           (should (lispm-test--wait (lispm-test--idle-p agent)))
           (accept-process-output nil 0.1)
           (should (= (length lispm-test--requests) 2))
-          (should-not (gethash agent lispm--idle-handovers))
+          (should-not (gethash agent lispm-session-idle-handovers))
           (should-not (lispm--idle-handover-p agent))
           (should-not (lispm--memory-saved-p agent))
           ;; Still large after the next turn: left to a turn's start.
@@ -8370,7 +8370,7 @@ name; long results are cut to a few lines and say how many more there are."
         (search-forward "hello")
         (replace-match "howdy"))
       (should (string-match-p "^λ >> howdy$" (lispm-test--chat-text chat)))
-      (lispm--live-delete agent)
+      (lispm-turns-live-delete agent)
       (should-not (string-match-p "Partial" (lispm-test--chat-text chat))))))
 
 (ert-deftest lispm-test-live-segments ()
@@ -8390,7 +8390,7 @@ kind; a call being written also says so as the agent's activity."
                        (:kind tool :name "edit_file"))))
       (should (equal (lispm-agent-activity agent) '(writing . "edit_file")))
       (should (equal (lispm-agent-status agent) "writing a edit_file call"))
-      (lispm--live-delete agent)
+      (lispm-turns-live-delete agent)
       (should-not (lispm-live-region session))
       (should-not (lispm-live-segments session)))))
 
@@ -13127,22 +13127,22 @@ are flagged with public interface suggestions and translated via `lispm-tr'."
     (should (equal (match-string 2 sample) "42"))))
 
 (ert-deftest lispm-test-tool-argument-error-condition ()
-  "`lispm-tools--arguments' signals structured `lispm-tool-argument-error' on invalid input."
+  "`lispm-tools-arguments' signals structured `lispm-tool-argument-error' on invalid input."
   (let ((tool (lispm-get-tool "read_file")))
-    (should-error (lispm-tools--arguments tool "not-an-alist")
+    (should-error (lispm-tools-arguments tool "not-an-alist")
                   :type 'lispm-tool-argument-error)
-    (should-error (lispm-tools--arguments tool nil)
+    (should-error (lispm-tools-arguments tool nil)
                   :type 'lispm-tool-argument-error)
-    (should-error (lispm-tools--arguments tool '((path . 123)))
+    (should-error (lispm-tools-arguments tool '((path . 123)))
                   :type 'lispm-tool-argument-error)))
 
 (ert-deftest lispm-test-dispatching-macro-hygiene-and-unwind ()
-  "`lispm--dispatching' evaluates its agent form once and clears `dispatching' on non-local exit."
+  "`lispm-turns-dispatching' evaluates its agent form once and clears `dispatching' on non-local exit."
   (lispm-test-env
     (let ((agent (lispm-defagent tester "Test agent." :root project))
           (eval-count 0))
       (catch 'abort
-        (lispm--dispatching (progn (cl-incf eval-count) agent)
+        (lispm-turns-dispatching (progn (cl-incf eval-count) agent)
           (should (lispm-agent-dispatching agent))
           (throw 'abort nil)))
       (should (= eval-count 1))
