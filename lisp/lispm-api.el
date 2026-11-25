@@ -185,7 +185,7 @@ It is fed on stdin, so keys stay off the command line."
                                               (message . ,(error-message-string err))))))))
                  :sentinel (lambda (p _event)
                              (unless (process-live-p p)
-                               (ignore-errors (delete-file file))
+                               (condition-case nil (delete-file file) (file-error nil))
                                (unless (process-get p 'lispm-aborted)
                                  (lispm-api--finish shape state client-error
                                                     (apply #'concat (nreverse raw))
@@ -197,7 +197,7 @@ It is fed on stdin, so keys stay off the command line."
       (unless started
         (when (and (processp proc) (process-live-p proc))
           (delete-process proc))
-        (ignore-errors (delete-file file))))))
+        (condition-case nil (delete-file file) (file-error nil))))))
 
 (cl-defun lispm-api-stream (backend request &key on-delta on-done on-error)
   "POST REQUEST to BACKEND and stream the response.
@@ -268,7 +268,7 @@ CLIENT-ERROR is an error raised while decoding, if any."
            (not (funcall (plist-get shape :started) state))
            (string-prefix-p "{" body))
       ;; A response that was not streamed.
-      (let* ((json (ignore-errors (lispm--json-decode body)))
+      (let* ((json (condition-case nil (lispm--json-decode body) (json-error nil)))
              (message (and (consp json) (funcall (plist-get shape :whole) json))))
         (cond (message (funcall on-done message))
               ((and (consp json) (alist-get 'error json))
@@ -286,7 +286,7 @@ CLIENT-ERROR is an error raised while decoding, if any."
       (funcall on-error (list :status status :type "network_error"
                               :message (if (string-empty-p body) "curl failed" body))))
      (t
-      (let ((json (ignore-errors (lispm--json-decode body))))
+      (let ((json (condition-case nil (lispm--json-decode body) (json-error nil))))
         (funcall on-error
                  (lispm-api--error-plist
                   status (or (and (consp json) (alist-get 'error json))

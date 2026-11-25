@@ -40,6 +40,8 @@ jobs:
         with:
           path: .deps
           key: deps-${{ matrix.emacs }}-${{ hashFiles('lisp/lispm.el', 'test/install-deps.el') }}
+      - name: Check module boundaries and layers
+        run: make check-layers LISPM_UI=.lispm-ui LISPM_AUTH=.lispm-auth
       - name: Byte-compile, warnings as errors
         run: make compile LISPM_UI=.lispm-ui LISPM_AUTH=.lispm-auth
       - name: Test

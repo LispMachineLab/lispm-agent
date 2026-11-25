@@ -42,8 +42,6 @@
 (require 'lispm-tools)
 (require 'lispm-stage)
 
-(declare-function lispm-asked "lispm-runtime" (call))
-
 (defgroup lispm-edits nil
   "Agents' edits, shown in the buffers they change."
   :group 'lispm

@@ -89,7 +89,7 @@
 
 ;; A kind of file error, so that its message reads as a sentence: the
 ;; reason follows unquoted (see `lispm-sandbox--fail').
-(define-error 'lispm-sandbox-error "Sandbox unavailable" 'file-error)
+(define-error 'lispm-sandbox-error "Sandbox unavailable" '(lispm-error file-error))
 
 (defun lispm-sandbox--fail (why)
   "Signal that the sandbox cannot be had, because of WHY."

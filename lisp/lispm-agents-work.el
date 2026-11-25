@@ -15,9 +15,7 @@
 (require 'tabulated-list)
 (require 'lispm-kit-commands)
 (require 'lispm-agents-roster)
-
-(declare-function lispm-chat "lispm-chat" (agent))
-(defvar lispm-chat-agent)
+(require 'lispm-chat)
 
 (defvar lispm-agents-open-project-functions nil
   "Functions optionally displaying the live agents of a project.
@@ -183,12 +181,10 @@ A native agent's canonical roster buffer can be its transcript.  Reuse
 that agent's chat view, creating only the view if necessary.  Other
 agent kinds keep their existing buffer, including unclaimed terminals."
   (if (eq (lispm-agents-emacs-buffer-agent buffer) 'lispm)
-      (progn
-        (require 'lispm-chat)
-        (if-let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
-                            (buffer-local-value 'lispm-chat-agent buffer))))
-            (lispm-chat agent)
-          buffer))
+      (if-let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
+                          (buffer-local-value 'lispm-chat-agent buffer))))
+          (lispm-chat agent)
+        buffer)
     buffer))
 
 (defun lispm-agents-work-open ()

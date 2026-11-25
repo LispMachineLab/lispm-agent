@@ -67,8 +67,6 @@
 (require 'lispm-api)
 (require 'lispm-tools)
 
-(declare-function lispm--reply-text "lispm-runtime" (content))
-
 (defcustom lispm-git t
   "Whether to commit memory, tasks and finished turns to git.
 The repository is `lispm-directory' itself."

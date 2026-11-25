@@ -55,15 +55,9 @@
 (require 'lispm-runtime)
 (require 'lispm-ground)
 
-(declare-function lispm-show "lispm" (agent))
-(declare-function lispm-chat-transcript "lispm-chat" (agent &optional argument))
 (declare-function lispm-browser-available-p "lispm-browser" ())
 (declare-function lispm-browser-open-url "lispm-browser" (url &optional new-tab))
 (declare-function lispm-browser-normalize-url "lispm-browser" (url))
-(declare-function lispm-agents-roster-buffer "lispm-agents-roster" (key))
-(declare-function lispm-agents-roster-waits "lispm-agents-roster" (buffer))
-(declare-function lispm-agents-bridge-mailbox "lispm-agents-bridge" (terminal))
-(declare-function lispm-agents-bridge-observe-work "lispm-agents-bridge" (terminal work))
 (declare-function lispm-agents-work-input-summary "lispm-agents" (input))
 
 ;;;; Presentations
@@ -321,9 +315,9 @@ See `lispm-inspect.el' for presentation types."
          (if (or (derived-mode-p 'lispm-inspect-mode)
                  (eq agent (bound-and-true-p lispm-chat-agent))
                  (eq agent (bound-and-true-p lispm-session-agent))
-                 (not (fboundp 'lispm-show)))
+                 (not lispm-show-agent-function))
              (lispm-inspect agent)
-           (lispm-show agent))))
+           (funcall lispm-show-agent-function agent))))
       (`(symbol ,symbol) (describe-symbol symbol))
       (`(tool ,name) (lispm-inspect--visit-tool name))
       (`(call ,agent ,id) (lispm-inspect--visit-call (lispm-resolve-agent agent) id))
@@ -384,8 +378,8 @@ Where none is, act as one of `lispm-act-functions' does."
   (let ((buffer (lispm-agent-buffer agent)))
     (unless (buffer-live-p buffer)
       (user-error "%s" (lispm-tr "%s's session is closed" (lispm-agent-name agent))))
-    (if (fboundp 'lispm-chat-transcript)
-        (lispm-chat-transcript agent)
+    (if lispm-open-transcript-function
+        (funcall lispm-open-transcript-function agent)
       (pop-to-buffer buffer))
     (widen)
     (goto-char (point-min))
@@ -812,20 +806,22 @@ LINES are strings, whose objects are presented."
                                            (mapconcat (lambda (tr) (plist-get tr :name))
                                                       (lispm-agent-triggers agent) ", ")))))))))
 
-(defun lispm-inspect--copy-data (data)
+(defun lispm-inspect-copy-data (data)
   "Copy plain DATA, including the strings in its lists and vectors.
 Buffers, numbers and symbols keep their identities.  Sources shared
 with the runtime can then be returned without exposing mutable text."
   (cond ((stringp data) (substring-no-properties data))
-        ((consp data) (cons (lispm-inspect--copy-data (car data))
-                           (lispm-inspect--copy-data (cdr data))))
-        ((vectorp data) (apply #'vector (mapcar #'lispm-inspect--copy-data data)))
+        ((consp data) (cons (lispm-inspect-copy-data (car data))
+                           (lispm-inspect-copy-data (cdr data))))
+        ((vectorp data) (apply #'vector (mapcar #'lispm-inspect-copy-data data)))
         (t data)))
+
+(defalias 'lispm-inspect--copy-data #'lispm-inspect-copy-data)
 
 (defconst lispm-inspect--recent-call-limit 20
   "Maximum number of completed calls a roster inspector returns.")
 
-(defun lispm-inspect--call-data (id call)
+(defun lispm-inspect-call-data (id call)
   "The public work record of the pending CALL with ID.
 The summary is of the input it awaits approval for, when it asks on
 another call's behalf, as in `lispm-inspect-sections'."
@@ -833,7 +829,7 @@ another call's behalf, as in `lispm-inspect-sections'."
         :input-summary (lispm-agents-work-input-summary (plist-get (lispm-asked call) :input))
         :status (plist-get call :status)))
 
-(defun lispm-inspect--recent-calls (agent)
+(defun lispm-inspect-recent-calls (agent)
   "AGENT's latest completed calls of this turn, in transcript order.
 Read only the current turn's transcript, when an inspector asks for
 it, and return at most `lispm-inspect--recent-call-limit' records.
@@ -875,7 +871,7 @@ and transcript positions never form part of the returned record."
         (setq record (plist-put record field (or (plist-get entry field) (plist-get stored field)))))
       record)))
 
-(defun lispm-inspect--mailbox (agent data)
+(defun lispm-inspect-mailbox (agent data)
   "The handling and queued entries of AGENT from its inspector DATA.
 Read the project's inbox only here, to fill metadata unknown in
 memory.  A running entry's text is held in memory, not in that file."
@@ -893,45 +889,6 @@ memory.  A running entry's text is held in memory, not in that file."
                   state)))
       (list :handling (record entry 'running)
             :queued (mapcar (lambda (entry) (record entry 'queued)) inbox)))))
-
-(defun lispm-agents-roster-details (key)
-  "Return the lazy work and mailbox snapshot of the agent named by KEY.
-KEY is (KIND SESSION-ID), as `lispm-agents-roster' returns.  Return
-nil for an absent or archived session.  :work holds :turn,
-:pending-calls, :recent-calls (at most twenty, completed in this turn)
-and :files, the files in this turn's in-memory journal.  Call records
-have :id, :name, :input-summary and :status.  :mailbox holds :handling
-and :queued entries, with their known sender, reply-to, time and text.
-:waits-on, :waited-on-by and :request-ids describe delegation edges.
-Terminal kinds may supply :work-details in `lispm-agents-define';
-unknown work or a provider-owned mailbox is nil.  Unlike the cheap
-roster this function may read one agent's current transcript and inbox.
-The returned lists and strings belong to the caller."
-  (require 'lispm-agents-roster)
-  (when-let* ((buffer (lispm-agents-roster-buffer key)))
-    (let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
-                      (and (boundp 'lispm-chat-agent)
-                           (buffer-local-value 'lispm-chat-agent buffer))))
-           (data (and agent (lispm-inspect-data agent)))
-           (work (if agent
-                     (list :turn (lispm-agent-turn agent)
-                           :pending-calls (mapcar (pcase-lambda (`(,id . ,call))
-                                                   (lispm-inspect--call-data id call))
-                                                 (plist-get data :pending))
-                           :recent-calls (lispm-inspect--recent-calls agent)
-                           :files (delete-dups
-                                   (delq nil (mapcar (lambda (snapshot) (plist-get (cdr snapshot) :file))
-                                                      (cdr (assq (lispm-agent-turn agent)
-                                                                 (plist-get data :journal)))))))
-                   (when-let* ((details (plist-get (lispm-agents-props (car key)) :work-details)))
-                     (let ((work (funcall details buffer)))
-                       (lispm-agents-bridge-observe-work buffer work)
-                       work))))
-           (mailbox (if agent (lispm-inspect--mailbox agent data)
-                      (lispm-agents-bridge-mailbox buffer))))
-      (lispm-inspect--copy-data
-       (append (list :key key :work work :mailbox mailbox)
-               (lispm-agents-roster-waits buffer))))))
 
 (defun lispm-inspect-text (agent &optional viewspec)
   "What the inspector shows of AGENT, as plain text, in English: what an
@@ -991,7 +948,9 @@ agent reads of it.  VIEWSPEC is `full' (default), `compact' or `summary'."
 (defun lispm-inspect-chat ()
   "Show the inspected agent's conversation."
   (interactive)
-  (lispm-show lispm-inspect-agent))
+  (if lispm-show-agent-function
+      (funcall lispm-show-agent-function lispm-inspect-agent)
+    (user-error "Chat display is not available")))
 
 (defun lispm-inspect-transcript ()
   "Show the inspected agent's org transcript."

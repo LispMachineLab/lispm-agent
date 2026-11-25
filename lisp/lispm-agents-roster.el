@@ -521,6 +521,58 @@ caller without changing agents; buffer objects still identify live buffers."
       (when (and (buffer-live-p buffer) (lispm-agents-buffer-p buffer))
         (lispm-agents-roster-notify buffer '(alive agents))))))
 
+(defun lispm-agents-roster-details (key)
+  "Return the lazy work and mailbox snapshot of the agent named by KEY.
+KEY is (KIND SESSION-ID), as `lispm-agents-roster' returns.  Return
+nil for an absent or archived session.  :work holds :turn,
+:pending-calls, :recent-calls (at most twenty, completed in this turn)
+and :files, the files in this turn's in-memory journal.  Call records
+have :id, :name, :input-summary and :status.  :mailbox holds :handling
+and :queued entries, with their known sender, reply-to, time and text.
+:waits-on, :waited-on-by and :request-ids describe delegation edges.
+Terminal kinds may supply :work-details in `lispm-agents-define';
+unknown work or a provider-owned mailbox is nil.  Unlike the cheap
+roster this function may read one agent's current transcript and inbox.
+The returned lists and strings belong to the caller."
+  (when-let* ((buffer (lispm-agents-roster-buffer key)))
+    (let* ((agent (or (buffer-local-value 'lispm-session-agent buffer)
+                      (and (boundp 'lispm-chat-agent)
+                           (buffer-local-value 'lispm-chat-agent buffer))))
+           (data (and agent (lispm-inspect-data agent)))
+           (work (if agent
+                     (list :turn (lispm-agent-turn agent)
+                           :pending-calls (mapcar (pcase-lambda (`(,id . ,call))
+                                                   (lispm-inspect-call-data id call))
+                                                 (plist-get data :pending))
+                           :recent-calls (lispm-inspect-recent-calls agent)
+                           :files (delete-dups
+                                   (delq nil (mapcar (lambda (snapshot) (plist-get (cdr snapshot) :file))
+                                                      (cdr (assq (lispm-agent-turn agent)
+                                                                 (plist-get data :journal)))))))
+                   (when-let* ((details (plist-get (lispm-agents-props (car key)) :work-details)))
+                     (let ((work (funcall details buffer)))
+                       (lispm-agents-bridge-observe-work buffer work)
+                       work))))
+           (mailbox (if agent (lispm-inspect-mailbox agent data)
+                      (lispm-agents-bridge-mailbox buffer))))
+      (lispm-inspect-copy-data
+       (append (list :key key :work work :mailbox mailbox)
+               (lispm-agents-roster-waits buffer))))))
+
+(defun lispm-agents-roster--on-change (subject fields &optional event)
+  "Forward observable changes from `lispm-change-functions' to roster collection.
+Handles synthetic `mailbox-relation' events to resolve sender keys lazily."
+  (when lispm-agents-roster-change-functions
+    (if (eq (plist-get event :type) 'mailbox-relation)
+        (progn
+          (lispm-agents-roster--collect subject fields nil)
+          (if-let* ((key (lispm-agents-roster--named-key (plist-get event :from))))
+              (lispm-agents-roster--collect key '(request-ids) nil)
+            (lispm-agents-roster--collect nil '(relations) nil)))
+      (lispm-agents-roster--collect subject fields event))))
+
+(add-hook 'lispm-change-functions #'lispm-agents-roster--on-change)
+
 (add-hook 'lispm-state-change-functions #'lispm-agents-roster--state)
 (add-hook 'lispm-turn-end-functions #'lispm-agents-roster--state)
 (add-hook 'lispm-tool-input-functions #'lispm-agents-roster--input)
