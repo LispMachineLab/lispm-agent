@@ -50,7 +50,9 @@
                  "(pcase \"a\" ((rx (eval (setq lispm-security-test--pwned t))) 1))"
                  "(cl-flet ((f () 1)) (let ((run_elisp_forms (eval-when-compile (setq lispm-security-test--pwned t)))) 1))"
                  "(cl-flet ((f () 1)) (let ((eval_elisp_forms (rx (eval (setq lispm-security-test--pwned t))))) 1))"
-                 "(setf (car (list 1)) 2)"))
+                 "(setf (car (list 1)) 2)"
+                 "(cl-callf + (car (list 1)) 1)"
+                 "(cl-callf + (eval-when-compile (setq lispm-security-test--pwned t)) 1)"))
         (let ((res (lispm-test--lisp agent code)))
           (should (cdr res))
           (should (string-prefix-p "Not allowed in run_lisp:" (car res)))
@@ -302,13 +304,24 @@
                       "* Assistant\n** Reply\nSkill mdsec loaded.\n")
               (should-not (lispm-skills--loaded))))
         (when (fboundp 'lispm-sec-md-fn) (fmakunbound 'lispm-sec-md-fn))))
-    ;; `lispm-batch--with-environment' with `:sandbox' disables `auto-approve-all' and denies `exec'.
+    ;; `lispm-batch--with-environment' and `lispm-batch-run' with `:sandbox' deny `exec'.
     (lispm-batch--with-environment (tmp '(:api openai :model "gpt-4o") '(:sandbox low) nil)
       (should-not lispm-auto-approve-all)
       (should (eq lispm-sandbox-level 'low))
       (let ((agent (lispm-register-agent 'sb-batch :root project)))
         (should (eq (lispm-policy-action agent 'exec) 'deny))
-        (should (eq (lispm-policy-action agent 'shell) 'auto))))))
+        (should (eq (lispm-policy-action agent 'shell) 'auto))))
+    (let (seen-exec seen-shell)
+      (cl-letf (((symbol-function 'lispm-batch--start-kernel) (lambda () nil))
+                ((symbol-function 'lispm-batch--run-turns)
+                 (lambda (agent &rest _)
+                   (setq seen-exec (lispm-policy-action agent 'exec)
+                         seen-shell (lispm-policy-action agent 'shell))
+                   (list :outcome "done" :reason "done" :turns 0 :text "ok" :error nil))))
+        (lispm-batch-run "hi" :cwd project :api 'openai :model "gpt-4o"
+                         :key "sk-test" :sandbox 'low)
+        (should (eq seen-exec 'deny))
+        (should (eq seen-shell 'auto))))))
 
 (provide 'lispm-security-test)
 ;;; lispm-security-test.el ends here

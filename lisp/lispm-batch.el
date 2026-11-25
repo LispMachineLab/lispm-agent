@@ -695,7 +695,7 @@ OPTIONS:
                                               :backend 'batch
                                               :model (plist-get backend-spec :model)
                                               :effort (or effort lispm-effort)
-                                              :policy lispm-batch-policy
+                                              :policy lispm-default-policy
                                               :instructions instructions))
             (pcase-let ((`(,on-response . ,get-records)
                          (lispm-batch--make-recorder agent calls-path usage-path)))

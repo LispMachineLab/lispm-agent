@@ -109,7 +109,7 @@ pass printed; DONE gets its result, once it is FINISHED."
   '(when unless dolist dotimes push pop lambda prog2 \` letrec
     if-let if-let* when-let when-let* and-let* while-let
     pcase pcase-let pcase-let* pcase-dolist pcase-exhaustive pcase-setq seq-let seq-doseq
-    cl-incf cl-decf incf decf setf ignore-errors ignore-error save-match-data
+    cl-incf cl-decf cl-callf incf decf setf ignore-errors ignore-error save-match-data
     with-temp-buffer with-current-buffer let-alist thread-first thread-last
     cl-loop cl-case cl-ecase cl-dolist cl-dotimes cl-block cl-return cl-return-from
     cl-destructuring-bind cl-function cl-flet cl-flet* cl-labels named-let rx)
@@ -117,7 +117,7 @@ pass printed; DONE gets its result, once it is FINISHED."
 
 (defconst lispm-lisp--early-macros
   '(cl-function cl-flet cl-flet* cl-labels rx
-    setf push pop cl-incf cl-decf incf decf
+    setf push pop cl-incf cl-decf cl-callf incf decf
     pcase pcase-let pcase-let* pcase-dolist pcase-exhaustive pcase-setq cl-loop)
   "Macros of `lispm-lisp--macros' expanding subforms during macroexpansion.
 Before one is expanded, its forms are scanned for disallowed macros and places.")
@@ -382,6 +382,10 @@ eval smuggling inside enclosing early macros."
          (setq tail (cddr tail)))))
     ('push
      (unless (and (proper-list-p args) (= (length args) 2))
+       (lispm-lisp--refuse "%S" (cons head args)))
+     (lispm-lisp--check-place (cadr args)))
+    ('cl-callf
+     (unless (and (proper-list-p args) (>= (length args) 2))
        (lispm-lisp--refuse "%S" (cons head args)))
      (lispm-lisp--check-place (cadr args)))
     ((or 'pop 'cl-incf 'cl-decf 'incf 'decf)
