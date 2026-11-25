@@ -68,6 +68,13 @@ file=$(server_file) || {
   echo "lispm-tool: cannot read $file" >&2
   exit 2
 }
+cr=$(printf '\r')
+case $token in
+  *"$nl"* | *"$cr"*) echo "lispm-tool: invalid token in $file" >&2; exit 2 ;;
+esac
+case $PWD in
+  *"$nl"* | *"$cr"*) echo "lispm-tool: working directory contains newline" >&2; exit 2 ;;
+esac
 
 # The token goes in a header read from a file descriptor, not in argv.
 # The server for agents outside LispM takes the directory they work in.

@@ -544,10 +544,11 @@ the agent gets the text alone."
       (let ((nearest (lispm-skills--nearest name agent)))
         (error "No skill named %s%s; search_tools finds skills by what they do" name
                (if nearest (format " (nearest: %s)" (string-join nearest ", ")) ""))))
-    (let* ((text (lispm-skills--file-text (plist-get skill :file)))
+    (let* ((file (plist-get skill :file))
+           (text (lispm-skills--file-text file))
            (problem nil)
            (forms (condition-case err
-                      (lispm-skills--forms text)
+                      (lispm-skills--forms text file)
                     (error (setq problem (error-message-string err)) nil)))
            (unevaluated (cond (problem (concat "its code was not evaluated: " problem))
                               ((not (lispm-skill-trusted-p skill text))

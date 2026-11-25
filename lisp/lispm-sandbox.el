@@ -129,7 +129,8 @@ take a new level's network rules at once."
   '("~/.ssh" "~/.gnupg" "~/.aws" "~/.azure" "~/.kube" "~/.docker" "~/.config/gcloud"
     "~/.config/gh" "~/.password-store" "~/.netrc" "~/.authinfo" "~/.authinfo.gpg"
     "~/.git-credentials" "~/.npmrc" "~/.pypirc" "~/.cargo/credentials.toml"
-    "~/Library/Keychains")
+    "~/Library/Keychains" "~/.lispm/mcp-server" "~/.lispm/peers"
+    "~/.claude/ide" "/tmp/lispm-claude-mcp-*.json")
   "Files and directories sandboxed commands may not read, at levels low and middle.
 Entries are srt's: file names, or globs such as **/.env."
   :type '(repeat string))
@@ -274,8 +275,10 @@ loads them or runs srt.  And the Emacs server's places, which they may
 not read either (see `lispm-sandbox--server-places')."
   (delete-dups
    (append
-    (mapcar (lambda (file) (directory-file-name (expand-file-name file)))
-            (delq nil (list user-emacs-directory lispm-directory custom-file
+    (mapcan (lambda (file)
+              (let ((dir (directory-file-name (expand-file-name file))))
+                (list dir (directory-file-name (file-truename dir)))))
+            (delq nil (list user-emacs-directory lispm-directory "~/.lispm" custom-file
                             "~/.emacs" "~/.emacs.el" "~/.config/emacs")))
     (lispm-sandbox--server-places))))
 
@@ -386,13 +389,16 @@ names are relative to a sandboxed command's directory: its project."
 That is a level other than `none' whose rules are sound and open no way
 out: commands of this machine then run in the sandbox, or not at all
 while srt is missing, and cannot reach Emacs (see
-`lispm-sandbox--server-places').  Rules that allow Apple Events do not
-confine: what they open runs outside the sandbox.  Commands on another
-machine are never the sandbox's; see `lispm-tools-elsewhere-p'."
+`lispm-sandbox--server-places').  Rules that allow Apple Events, Unix
+sockets or local network binding do not confine: what they open or
+connect to reaches outside the sandbox.  Commands on another machine
+are never the sandbox's; see `lispm-tools-elsewhere-p'."
   (condition-case nil
       (when-let* ((rules (lispm-sandbox-rules level)))
         (lispm-sandbox--check rules)
-        (not (plist-get rules :apple-events)))
+        (and (not (plist-get rules :apple-events))
+             (not (plist-get rules :unix-sockets))
+             (not (plist-get rules :local-binding))))
     (lispm-sandbox-error nil)))
 
 (defun lispm-sandbox--some (items)

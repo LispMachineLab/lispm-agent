@@ -78,8 +78,9 @@ of a type including `lispm-agents-mcp', taking :token and
           (lispm-local-http-serve
            name
            (lambda (headers)
-             (equal (cdr (assoc "authorization" headers))
-                    (concat "Bearer " (lispm-agents-mcp-token server))))
+             (and (not (assoc "origin" headers))
+                  (equal (cdr (assoc "authorization" headers))
+                         (concat "Bearer " (lispm-agents-mcp-token server)))))
            (lambda (method path _headers body)
              (lispm-agents-mcp--respond server method path body))))
     (setf (lispm-agents-mcp-port server) (process-contact (lispm-agents-mcp-server server) :service))
@@ -114,16 +115,20 @@ SERVER stops.  Return the file."
     (error "Not the name of an environment variable: %s" variable))
   (unless (string-match-p "\\`[A-Za-z0-9._:@+-]+\\'" value)
     (error "Not a value bin/lispm-tool can find: %s" value))
-  (let ((directory (file-name-as-directory (expand-file-name lispm-agents-mcp-peer-directory)))
-        (file nil))
+  (let* ((directory (file-name-as-directory (expand-file-name lispm-agents-mcp-peer-directory)))
+         (file (expand-file-name (concat variable "=" value) directory))
+         temporary)
     (with-file-modes #o700
       (make-directory directory t))
-    (setq file (expand-file-name (concat variable "=" value) directory))
-    (with-file-modes #o600
-      (with-temp-file file
-        (insert (format "http://127.0.0.1:%d\n%s\n"
-                        (lispm-agents-mcp-port server) (lispm-agents-mcp-token server)))))
-    (set-file-modes file #o600)
+    (setq temporary (make-temp-file (concat file ".")))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (write-region (format "http://127.0.0.1:%d\n%s\n"
+                                (lispm-agents-mcp-port server) (lispm-agents-mcp-token server))
+                        nil temporary nil 'silent)
+          (rename-file temporary file t))
+      (when (and temporary (file-exists-p temporary)) (delete-file temporary)))
     (push (cons server file) lispm-agents-mcp--announced)
     file))
 

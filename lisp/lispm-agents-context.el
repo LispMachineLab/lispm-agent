@@ -180,9 +180,32 @@ other than Eat's call this, see `lispm-agents-terminal-make-function'."
                         (url-unhex-string (substring uri (length "file://")))
                       uri)))
 
+(defun lispm-agents-context--realpath (file)
+  "Resolve symlinks on FILE or its nearest existing ancestor directory."
+  (let* ((expanded (expand-file-name file))
+         (probe expanded)
+         tail)
+    (while (and probe (not (file-exists-p probe)))
+      (let* ((trimmed (directory-file-name probe))
+             (parent (file-name-directory trimmed)))
+        (if (or (null parent) (equal parent probe))
+            (setq probe nil)
+          (push (file-name-nondirectory trimmed) tail)
+          (setq probe (directory-file-name parent)))))
+    (if (not probe)
+        expanded
+      (let ((resolved (file-truename probe)))
+        (dolist (part tail resolved)
+          (setq resolved (expand-file-name part resolved)))))))
+
 (defun lispm-agents-context-visible-p (directory file)
-  "Return non-nil when FILE lies under DIRECTORY."
-  (and file (file-in-directory-p file directory)))
+  "Return non-nil when local FILE lies under DIRECTORY."
+  (and file
+       (not (file-remote-p file))
+       (let ((dir (file-name-as-directory (lispm-agents-context--realpath directory)))
+             (target (lispm-agents-context--realpath file)))
+         (or (equal (file-name-as-directory target) dir)
+             (file-in-directory-p target dir)))))
 
 (defun lispm-agents-context--buffers (directory)
   "Return the buffers visiting files under DIRECTORY."
@@ -351,10 +374,16 @@ Only files under DIRECTORY are reported."
 the selection."
   (display-buffer buffer lispm-agents-context-display-action))
 
-(defun lispm-agents-context--tool-open-file (_directory arguments)
-  "Show the file ARGUMENTS name, at its start text when given, without focus."
+(defun lispm-agents-context--tool-open-file (directory arguments)
+  "Show the file ARGUMENTS name under DIRECTORY, without stealing focus."
   (let ((file (lispm-agents-context-path (or (alist-get 'filePath arguments)
                                              (alist-get 'uri arguments)))))
+    (when (file-remote-p file)
+      (error "Remote files cannot be opened: %s" file))
+    (when (and directory
+               (not (lispm-agents-context-visible-p directory file))
+               (not (find-buffer-visiting file)))
+      (error "File outside workspace: %s" file))
     (unless (file-exists-p file)
       (error "File not found: %s" file))
     (let ((buffer (find-file-noselect file))

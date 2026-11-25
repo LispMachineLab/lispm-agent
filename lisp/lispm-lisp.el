@@ -109,16 +109,22 @@ pass printed; DONE gets its result, once it is FINISHED."
   '(when unless dolist dotimes push pop lambda prog2 \` letrec
     if-let if-let* when-let when-let* and-let* while-let
     pcase pcase-let pcase-let* pcase-dolist pcase-exhaustive pcase-setq seq-let seq-doseq
-    cl-incf cl-decf setf ignore-errors ignore-error save-match-data
+    cl-incf cl-decf incf decf setf ignore-errors ignore-error save-match-data
     with-temp-buffer with-current-buffer let-alist thread-first thread-last
     cl-loop cl-case cl-ecase cl-dolist cl-dotimes cl-block cl-return cl-return-from
     cl-destructuring-bind cl-function cl-flet cl-flet* cl-labels named-let rx)
   "Macros a program may use.  Their expansions are checked in turn.")
 
-(defconst lispm-lisp--early-macros '(cl-function cl-flet cl-flet* cl-labels rx)
-  "Macros of `lispm-lisp--macros' that expand the forms in them while expanding.
-Before one is expanded, its forms are searched for macros a program
-may not use, which would run then, unchecked.")
+(defconst lispm-lisp--early-macros
+  '(cl-function cl-flet cl-flet* cl-labels rx
+    setf push pop cl-incf cl-decf incf decf
+    pcase pcase-let pcase-let* pcase-dolist pcase-exhaustive pcase-setq cl-loop)
+  "Macros of `lispm-lisp--macros' expanding subforms during macroexpansion.
+Before one is expanded, its forms are scanned for disallowed macros and places.")
+
+(defconst lispm-lisp--pcase-patterns
+  '(\` cl-struct cl-type let map rx seq)
+  "Built-in `pcase' pattern macroexpanders allowed in `run_lisp'.")
 
 (defconst lispm-lisp--never '(eval eval-when-compile eval-and-compile cl-eval-when
                               load-time-value cl-load-time-value)
@@ -145,13 +151,25 @@ may not use, which would run then, unchecked.")
     file-truename file-attributes directory-files file-expand-wildcards get-file-buffer
     file-attribute-type file-attribute-size file-attribute-modification-time
     file-size-human-readable
-    ;; Errors, and buffers to read.
-    error user-error signal set-buffer)
+    ;; Errors.
+    error user-error signal)
   "Functions a program may call besides those declared free of side effects.")
 
 (defconst lispm-lisp--unsafe-functions
   '(;; They run code, or make functions of it.
     documentation apply-partially make-byte-code
+    ;; They read environment, globals, processes, secrets, or hidden buffers.
+    getenv getenv-internal symbol-value default-value default-toplevel-value
+    buffer-local-value buffer-local-variables symbol-plist
+    process-list get-process process-command process-contact process-plist
+    process-get process-buffer get-buffer-process
+    network-interface-list network-interface-info all-threads
+    system-name user-login-name user-real-login-name user-original-login-name
+    user-full-name user-uid user-real-uid group-gid group-real-gid command-line-args
+    symbol-function
+    frame-parameters frame-parameter terminal-parameters terminal-parameter
+    current-kill gui-get-selection x-get-selection-internal
+    obarray-get mapatoms buffer-list
     ;; They tell what the user types.
     recent-keys this-command-keys this-command-keys-vector this-single-command-keys
     this-single-command-raw-keys minibuffer-contents minibuffer-contents-no-properties
@@ -165,6 +183,11 @@ may not use, which would run then, unchecked.")
 (defconst lispm-lisp--bindable
   '(case-fold-search print-length print-level print-escape-newlines print-circle print-quoted)
   "Variables of Emacs's a program may bind: they change only how it computes.")
+
+(defconst lispm-lisp--readable-globals
+  '(most-positive-fixnum most-negative-fixnum float-e float-pi
+    default-directory system-type major-mode buffer-file-name)
+  "Global constants and benign buffer-context symbols a program may read.")
 
 (defconst lispm-lisp--unhandled '(t quit minibuffer-quit debug lispm-lisp-refused)
   "Conditions a program may not handle: C-g must stop it, and refusals end it.")
@@ -213,6 +236,7 @@ may not use, which would run then, unchecked.")
     (skip-chars-forward :buffer motion) (skip-chars-backward :buffer motion)
     (narrow-to-region :buffer narrow) (widen :buffer narrow)
     ;; Control and output: to its own catches, and its own output.
+    (set-buffer :use lispm-lisp--set-buffer)
     (throw :throw t) (cl--block-throw :throw t)
     (print :nil (1)) (prin1 :nil (1)) (princ :nil (1)) (terpri :nil (0)))
   "Functions a program may call with checks as it runs, and the checks.
@@ -240,9 +264,10 @@ Each entry is (FUNCTION . PROPS):
   (and (symbolp function) (fboundp function)
        (not (memq function lispm-lisp--unsafe-functions))
        (or (memq function lispm-lisp--functions)
-           (function-get function 'side-effect-free)
-           (function-get function 'pure)
-           (eq (get function 'safe-function) t))))
+           (and (not (string-prefix-p "lispm-" (symbol-name function)))
+                (or (function-get function 'side-effect-free)
+                    (function-get function 'pure)
+                    (eq (get function 'safe-function) t))))))
 
 ;;;; Checking a program
 
@@ -315,21 +340,62 @@ Each entry is (FUNCTION . PROPS):
           (lispm-lisp--refuse "%s: missing required parameter :%s" head (car p)))))
     `(lispm-lisp--call-pairs ',head (list ,@(nreverse pairs)))))
 
-(defun lispm-lisp--macro-env ()
-  "Return a `macroexpand-all-environment' alist for `lispm-lisp--macro-tools'."
+(defun lispm-lisp--macro-env (&optional blocked)
+  "Return a `macroexpand-all-environment' alist for early macro expansion.
+Includes `lispm-lisp--macro-tools', refuses `lispm-lisp--never' plus BLOCKED
+symbols found inside skipped code-tool forms, and guards `rx' against
+eval smuggling inside enclosing early macros."
   (let (env)
     (maphash (lambda (name expander)
                (push (cons name (lambda (&rest args) (funcall expander args))) env))
              lispm-lisp--macro-tools)
+    (dolist (sym (append lispm-lisp--never blocked))
+      (let ((s sym))
+        (push (cons s (lambda (&rest _) (lispm-lisp--refuse "%s" s))) env)))
+    (push (cons 'rx (lambda (&rest args)
+                      (let ((form (cons 'rx args)))
+                        (lispm-lisp--scan form t)
+                        (let ((macroexpand-all-environment nil))
+                          (macroexpand-1 form)))))
+          env)
     env))
 
-(defun lispm-lisp--scan (form)
-  "Refuse FORM if a macro a program may not use is in it, anywhere.
-Quoted data too: FORM is about to be expanded by a macro that expands
-what is in it, whatever it is."
+(defun lispm-lisp--check-place (place)
+  "Refuse PLACE unless it is a safe generalized variable place for mutation."
+  (cond
+   ((and (symbolp place) (not (memq place '(nil t))) (not (keywordp place)))
+    place)
+   ((and (consp place) (eq (car place) 'gethash)
+         (proper-list-p place) (<= 3 (length place) 4))
+    place)
+   (t (lispm-lisp--refuse "place %S" place))))
+
+(defun lispm-lisp--check-places (head args)
+  "Refuse place-mutating macro `(HEAD . ARGS)' if any place is unsafe."
+  (pcase head
+    ('setf
+     (unless (and (proper-list-p args) (cl-evenp (length args)))
+       (lispm-lisp--refuse "%S" (cons head args)))
+     (let ((tail args))
+       (while tail
+         (lispm-lisp--check-place (car tail))
+         (setq tail (cddr tail)))))
+    ('push
+     (unless (and (proper-list-p args) (= (length args) 2))
+       (lispm-lisp--refuse "%S" (cons head args)))
+     (lispm-lisp--check-place (cadr args)))
+    ((or 'pop 'cl-incf 'cl-decf 'incf 'decf)
+     (unless (and (proper-list-p args) (<= 1 (length args) 2))
+       (lispm-lisp--refuse "%S" (cons head args)))
+     (lispm-lisp--check-place (car args)))))
+
+(defun lispm-lisp--scan (form &optional strict)
+  "Refuse FORM if a disallowed macro is in it, and return skipped blocked symbols.
+When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
   (let ((seen (make-hash-table :test #'eq))
-        (count 0))
-    (cl-labels ((walk (x)
+        (count 0)
+        skipped)
+    (cl-labels ((walk (x in-skip)
                   (while (consp x)
                     (when (gethash x seen)
                       (lispm-lisp--refuse "a circular form"))
@@ -340,27 +406,40 @@ what is in it, whatever it is."
                       (cond
                        ((and (memq head '(cl-flet cl-flet* cl-labels))
                              (consp (cdr x)) (proper-list-p (cadr x)))
-                        (dolist (def (cadr x))
-                          (when (and (consp def) (symbolp (car def))
-                                     (gethash (car def) lispm-lisp--macro-tools))
-                            (lispm-lisp--refuse "redefining macro %s" (car def))))
-                        (walk head)
+                        (unless in-skip
+                          (dolist (def (cadr x))
+                            (when (and (consp def) (symbolp (car def))
+                                       (gethash (car def) lispm-lisp--macro-tools))
+                              (lispm-lisp--refuse "redefining macro %s" (car def)))))
+                        (walk head in-skip)
                         (setq x (cdr x)))
-                       ((and (memq head '(run_elisp_forms eval_elisp_forms))
+                       ((and (not strict) (not in-skip)
+                             (memq head '(run_elisp_forms eval_elisp_forms))
                              (proper-list-p x))
-                        ;; Skip the quoted worker body serialized for the child Emacs;
-                        ;; still scan any leading `:bind' / `:timeout' plist.
+                        ;; Scan any leading option plist strictly; record blocked
+                        ;; macros in the worker body so outer early macros still refuse them.
                         (when (and (consp (cdr x)) (consp (cadr x)) (keywordp (caadr x)))
-                          (walk (cadr x)))
+                          (walk (cadr x) nil))
+                        (walk (if (and (consp (cdr x)) (consp (cadr x)) (keywordp (caadr x)))
+                                  (cddr x)
+                                (cdr x))
+                              t)
                         (setq x nil))
                        (t
                         (when (and (symbolp head)
                                    (or (memq head lispm-lisp--never)
-                                       (and (macrop head) (not (memq head lispm-lisp--macros)))))
-                          (lispm-lisp--refuse "%s" head))
-                        (walk head)
+                                       (and (macrop head) (not (memq head lispm-lisp--macros))
+                                            (not (and (not strict)
+                                                      (gethash head lispm-lisp--macro-tools))))
+                                       (and (get head 'pcase-macroexpander)
+                                            (not (memq head lispm-lisp--pcase-patterns)))))
+                          (if in-skip
+                              (push head skipped)
+                            (lispm-lisp--refuse "%s" head)))
+                        (walk head in-skip)
                         (setq x (cdr x))))))))
-      (walk form))))
+      (walk form nil)
+      (delete-dups skipped))))
 
 (defun lispm-lisp--binder (symbol)
   "SYMBOL, if a program may bind it; else refuse."
@@ -436,7 +515,15 @@ what is in it, whatever it is."
   "FORM, rewritten as a program runs it; refuse it if it may not run.
 SCOPE lists the variables the program bound around FORM."
   (cond
-   ((atom form) form)
+   ((atom form)
+    (when (and (symbolp form)
+               (not (memq form '(nil t :false :null)))
+               (not (keywordp form))
+               (not (memq form scope))
+               (not (memq form lispm-lisp--bindable))
+               (not (memq form lispm-lisp--readable-globals)))
+      (lispm-lisp--refuse "reading %s, a variable the program did not bind" form))
+    form)
    ((not (proper-list-p form)) (lispm-lisp--refuse "%S" form))
    (t
     (let ((head (car form))
@@ -483,9 +570,10 @@ SCOPE lists the variables the program bound around FORM."
        ((macrop head)
         (unless (memq head lispm-lisp--macros)
           (lispm-lisp--refuse "the macro %s" head))
-        (when (memq head lispm-lisp--early-macros)
-          (lispm-lisp--scan form))
-        (let* ((env (and (memq head lispm-lisp--early-macros) (lispm-lisp--macro-env)))
+        (let* ((early-p (memq head lispm-lisp--early-macros))
+               (blocked (and early-p (lispm-lisp--scan form)))
+               (_ (when early-p (lispm-lisp--check-places head args)))
+               (env (and early-p (lispm-lisp--macro-env blocked)))
                (macroexpand-all-environment env)
                (expansion (macroexpand-1 form env)))
           (when (eq expansion form)
@@ -623,6 +711,15 @@ program's output, or change the object given" function (1+ n))))
   "The results of FUNCTION on SEQUENCE's elements, appended; none changed."
   (apply #'append (mapcar function sequence)))
 
+(defun lispm-lisp--set-buffer (buffer-or-name)
+  "Select BUFFER-OR-NAME if owned by the program or a non-internal buffer."
+  (let ((buffer (and buffer-or-name (get-buffer buffer-or-name))))
+    (unless (and buffer
+                 (or (lispm-lisp--owned-p buffer)
+                     (not (string-prefix-p " " (buffer-name buffer)))))
+      (lispm-lisp--refuse "set-buffer on %S, an internal buffer" buffer-or-name))
+    (set-buffer buffer)))
+
 (defun lispm-lisp--sort (sequence &rest args)
   "A sorted copy of SEQUENCE, as `sort' with ARGS sorts."
   (apply #'sort (copy-sequence sequence) args))
@@ -721,7 +818,7 @@ The call runs as one the model made does, whatever the program bound."
          (index (lispm-lisp--run-index run))
          (entry (nth index (lispm-lisp--run-log run))))
     (when (>= index lispm-lisp-max-calls)
-      (error "The program made more than %d tool calls" lispm-lisp-max-calls))
+      (lispm-lisp--refuse "more than %d tool calls" lispm-lisp-max-calls))
     (setf (lispm-lisp--run-index run) (1+ index))
     (if (and entry (equal (car entry) name) (equal (nth 1 entry) input)
              (not (eq (nth 2 entry) 'retry)))

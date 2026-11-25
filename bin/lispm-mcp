@@ -28,6 +28,7 @@ child=
 stopping=
 nl='
 '
+cr=$(printf '\r')
 work=$(mktemp -d "${TMPDIR:-/tmp}/lispm-mcp.XXXXXX") || exit 2
 headers=$work/headers
 : > "$headers"
@@ -36,6 +37,14 @@ fail() {
   echo "lispm-mcp: $1" >&2
   exit 2
 }
+
+check_header_value() {
+  case $2 in
+    *"$nl"* | *"$cr"*) fail "invalid $1 header value (contains newline)" ;;
+  esac
+}
+
+check_header_value directory "$directory"
 
 check_stop() {
   case $stopping in
@@ -48,11 +57,15 @@ check_stop() {
 connect() {
   { read -r url && read -r token; } < "$server" 2>/dev/null ||
     fail "no LispM serves agents outside it: $server names none"
+  check_header_value token "$token"
 }
 
 # The headers of every request.  The token goes in them, read from a
 # file descriptor, not in argv.
 request_headers() {
+  check_header_value token "$token"
+  check_header_value directory "$directory"
+  check_header_value session "$session"
   printf 'Authorization: Bearer %s\n' "$token"
   printf 'X-LispM-Directory: %s\n' "$directory"
   [ -z "$session" ] || printf 'Mcp-Session-Id: %s\n' "$session"

@@ -134,6 +134,8 @@ alists in Messages shape."
   "curl configuration sending HEADERS.
 It is fed on stdin, so keys stay off the command line."
   (mapconcat (lambda (header)
+               (when (string-match-p "[\r\n]" header)
+                 (error "Invalid HTTP header: contains newline"))
                (format "header = \"%s\"\n"
                        (replace-regexp-in-string "[\"\\\\]" "\\\\\\&" header)))
              headers ""))

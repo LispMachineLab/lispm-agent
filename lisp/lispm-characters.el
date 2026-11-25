@@ -682,9 +682,10 @@ Its tools are then AGENT's.  A project's skill, only while the user
 trusts it (see `lispm-skill-trusted-p')."
   (when-let* ((skill (lispm-characters--skill agent)))
     (condition-case err
-        (let ((text (lispm-skills--file-text (plist-get skill :file))))
+        (let* ((file (plist-get skill :file))
+               (text (lispm-skills--file-text file)))
           (when (lispm-skill-trusted-p skill text)
-            (lispm-skills--evaluate skill agent (lispm-skills--forms text))))
+            (lispm-skills--evaluate skill agent (lispm-skills--forms text file))))
       (error (message "%s" (lispm-tr "LispM: skill %s: %s" (plist-get skill :name)
                                      (error-message-string err)))))))
 
@@ -1120,28 +1121,51 @@ using BM25 and Lorebook keyword triggers."
              (cdr (assq (lispm-character-backend character) lispm-backends)))
         (cdr (assq lispm-backend lispm-backends)))))
 
+(defcustom lispm-character-rag-timeout 5
+  "Timeout in seconds for character embedding HTTP requests."
+  :type 'integer
+  :group 'lispm-characters)
+
 (defun lispm-characters--fetch-embeddings (backend model texts)
   "Fetch embeddings from BACKEND's `/embeddings' endpoint for MODEL and TEXTS."
   (when-let* ((url (plist-get backend :url))
               (endpoint (concat (string-remove-suffix "/" url) "/embeddings"))
-              (body (json-serialize `((model . ,model)
-                                      (input . ,(vconcat texts))))))
-    (let ((key (ignore-errors (lispm-api--key backend))))
-      (with-temp-buffer
-        (let* ((args (append (list "-sS" "--max-time" "15"
-                                   "-H" "Content-Type: application/json")
-                             (when key (list "-H" (concat "Authorization: Bearer " key)))
-                             (list "-d" body endpoint)))
-               (status (apply #'call-process lispm-curl-program nil t nil args)))
-          (when (eq status 0)
-            (goto-char (point-min))
-            (when-let* ((json (ignore-errors
-                                (json-parse-buffer :object-type 'alist :array-type 'list)))
-                        (data (alist-get 'data json)))
-              (mapcar (lambda (item) (alist-get 'embedding item))
-                      (sort (copy-sequence data)
-                            (lambda (a b) (< (or (alist-get 'index a) 0)
-                                             (or (alist-get 'index b) 0))))))))))))
+              (body (encode-coding-string
+                     (json-serialize `((model . ,model)
+                                       (input . ,(vconcat texts))))
+                     'utf-8)))
+    (let* ((key (ignore-errors (lispm-api--key backend)))
+           (headers (append '("Content-Type: application/json")
+                            (when key (list (concat "Authorization: Bearer " key)))))
+           (config (lispm-api--curl-config headers))
+           (payload-file (make-temp-file "lispm-embed-" nil ".json")))
+      (unwind-protect
+          (progn
+            (let ((coding-system-for-write 'binary))
+              (with-temp-file payload-file
+                (set-buffer-multibyte nil)
+                (insert body)))
+            (with-temp-buffer
+              (let ((out (current-buffer)))
+                (with-temp-buffer
+                  (insert config)
+                  (let ((status (call-process-region
+                                 (point-min) (point-max)
+                                 lispm-curl-program nil (list out nil) nil
+                                 "-sS" "--max-time" (number-to-string lispm-character-rag-timeout)
+                                 "--config" "-" "--data-binary" (concat "@" payload-file)
+                                 endpoint)))
+                    (when (eq status 0)
+                      (with-current-buffer out
+                        (goto-char (point-min))
+                        (when-let* ((json (ignore-errors
+                                            (json-parse-buffer :object-type 'alist :array-type 'list)))
+                                    (data (alist-get 'data json)))
+                          (mapcar (lambda (item) (alist-get 'embedding item))
+                                  (sort (copy-sequence data)
+                                        (lambda (a b) (< (or (alist-get 'index a) 0)
+                                                         (or (alist-get 'index b) 0)))))))))))))
+        (when (file-exists-p payload-file) (delete-file payload-file))))))
 
 (defun lispm-characters--rag-index-file (character)
   "File caching embedding vectors for CHARACTER."

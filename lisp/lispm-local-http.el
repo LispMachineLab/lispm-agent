@@ -32,6 +32,7 @@
 
 ;;; Code:
 
+(require 'seq)
 (require 'subr-x)
 
 (defconst lispm-local-http-max-request (* 64 1024 1024)
@@ -50,6 +51,32 @@ handler that answers later keeps it and returns `deferred'.")
         (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*?\\)[ \t]*\\'" line)
           (push (cons (downcase (match-string 1 line)) (match-string 2 line)) headers)))
       headers)))
+
+(defun lispm-local-http--loopback-host-p (host)
+  "Non-nil if HTTP Host header HOST names localhost/loopback or is nil."
+  (or (null host)
+      (let ((case-fold-search t))
+        (string-match-p
+         "\\`\\(?:127\\.0\\.0\\.1\\|localhost\\|\\[::1\\]\\)\\(?::[0-9]+\\)?\\'"
+         host))))
+
+(defun lispm-local-http--loopback-origin-p (origin)
+  "Non-nil if HTTP Origin header ORIGIN is nil or an HTTP(S) loopback origin."
+  (or (null origin)
+      (let ((case-fold-search t))
+        (string-match-p
+         "\\`https?://\\(?:127\\.0\\.0\\.1\\|localhost\\|\\[::1\\]\\)\\(?::[0-9]+\\)?\\'"
+         origin))))
+
+(defun lispm-local-http--content-length (headers)
+  "Parse Content-Length from HEADERS: a non-negative integer, or nil if invalid."
+  (let ((entries (seq-filter (lambda (h) (equal (car h) "content-length")) headers)))
+    (cond ((cdr entries) nil)
+          (entries
+           (let ((value (cdar entries)))
+             (and (string-match-p "\\`[0-9]+\\'" value)
+                  (string-to-number value))))
+          (t 0))))
 
 (defun lispm-local-http-serve (name authorize handler)
   "Start an HTTP server called NAME on a free local port; return it.
@@ -76,40 +103,57 @@ is `(process-contact SERVER :service)'."
 
 (defun lispm-local-http--filter (connection bytes)
   "Accumulate BYTES from CONNECTION and answer the request once complete."
-  (save-match-data
-    (let* ((input (concat (process-get connection :input) bytes))
-           (end (string-search "\r\n\r\n" input)))
-      (process-put connection :input input)
-      (cond
-       (end
-        (let* ((head (substring input 0 end))
-               (headers (lispm-local-http-headers head))
-               (length (string-to-number (or (cdr (assoc "content-length" headers)) "0")))
-               (handler (plist-get (process-plist (process-get connection :server)) :handler))
-               (authorize (plist-get (process-plist (process-get connection :server)) :authorize)))
-          (cond
-           ((> length lispm-local-http-max-request)
-            (lispm-local-http--reply connection '("413 Content Too Large")))
-           ((>= (length input) (+ end 4 length))
-            (process-put connection :input nil)
-            (pcase-let ((`(,method ,path) (split-string (car (split-string head "\r\n")) " ")))
-              (let* ((lispm-local-http-respond
-                      (lambda (response)
-                        (when (process-live-p connection)
-                          (lispm-local-http--reply connection response))))
-                     (response
-                      (if (funcall authorize headers)
-                          (funcall handler method path headers
-                                   (decode-coding-string (substring input (+ end 4) (+ end 4 length))
-                                                         'utf-8))
-                        '("401 Unauthorized"))))
-                (unless (eq response 'deferred)
-                  (lispm-local-http--reply connection response))))))))
-       ((> (length input) 16384)
-        (lispm-local-http--reply connection '("431 Request Header Fields Too Large")))))))
+  (unless (or (process-get connection :done) (process-get connection :deferred))
+    (save-match-data
+      (let* ((input (concat (process-get connection :input) bytes))
+             (end (string-search "\r\n\r\n" input)))
+        (process-put connection :input input)
+        (cond
+         (end
+          (let* ((head (substring input 0 end))
+                 (headers (lispm-local-http-headers head))
+                 (length (lispm-local-http--content-length headers))
+                 (handler (plist-get (process-plist (process-get connection :server)) :handler))
+                 (authorize (plist-get (process-plist (process-get connection :server)) :authorize)))
+            (cond
+             ((null length)
+              (lispm-local-http--reply connection '("400 Bad Request")))
+             ((> length lispm-local-http-max-request)
+              (lispm-local-http--reply connection '("413 Content Too Large")))
+             ((>= (length input) (+ end 4 length))
+              (process-put connection :input nil)
+              (pcase-let ((`(,method ,path) (split-string (car (split-string head "\r\n")) " ")))
+                (let* ((lispm-local-http-respond
+                        (lambda (response)
+                          (when (and (process-live-p connection)
+                                     (not (process-get connection :done)))
+                            (process-put connection :deferred nil)
+                            (lispm-local-http--reply connection response))))
+                       (_ (process-put connection :deferred t))
+                       (response
+                        (cond
+                         ((not (lispm-local-http--loopback-host-p (cdr (assoc "host" headers))))
+                          '("403 Forbidden"))
+                         ((not (funcall authorize headers))
+                          '("401 Unauthorized"))
+                         ((not (lispm-local-http--loopback-origin-p
+                                (cdr (assoc "origin" headers))))
+                          '("403 Forbidden"))
+                         (t (funcall handler method path headers
+                                     (decode-coding-string
+                                      (substring input (+ end 4) (+ end 4 length))
+                                      'utf-8))))))
+                  (unless (eq response 'deferred)
+                    (process-put connection :deferred nil)
+                    (lispm-local-http--reply connection response))))))))
+         ((> (length input) 16384)
+          (lispm-local-http--reply connection '("431 Request Header Fields Too Large"))))))))
 
 (defun lispm-local-http--reply (connection response)
   "Send CONNECTION the (STATUS BODY TYPE HEADERS) RESPONSE and close it."
+  (when (processp connection)
+    (process-put connection :done t)
+    (process-put connection :input nil))
   (pcase-let ((`(,status ,body ,type ,headers) response))
     (process-send-string
      connection
@@ -119,7 +163,9 @@ is `(process-contact SERVER :service)'."
                         headers "")
              (format "Content-Length: %d\r\nConnection: close\r\n\r\n" (length body))
              body))
-    (process-send-eof connection)))
+    (process-send-eof connection)
+    (when (and (processp connection) (string-match-p "\\`4\\(?:00\\|13\\|31\\) " status))
+      (delete-process connection))))
 
 (provide 'lispm-local-http)
 ;;; lispm-local-http.el ends here

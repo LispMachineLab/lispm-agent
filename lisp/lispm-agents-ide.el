@@ -110,26 +110,32 @@ Return the server, to bind with `lispm-agents-context-bind'."
                     lispm-agents-ide-lock-directory))
 
 (defun lispm-agents-ide--write-lock (session)
-  "Advertise SESSION in a lock file only its owner can read.
+  "Advertise SESSION atomically in a lock file only its owner can read.
 The file holds the token, so a stale file from a crash is replaced rather
 than reused with whatever permissions it had."
-  (let ((file (lispm-agents-ide--lock-file session)))
-    (make-directory lispm-agents-ide-lock-directory t)
-    (ignore-errors (delete-file file))
-    (with-file-modes #o600
-      (write-region
-       (json-serialize
-        `((pid . ,(emacs-pid))
-          (workspaceFolders . [,(directory-file-name (lispm-agents-ide-directory session))])
-          (ideName . "Emacs")
-          (transport . "ws")
-          (runningInWindows . :false)
-          (authToken . ,(lispm-agents-ide-token session))))
-       nil file nil 'silent))))
+  (with-file-modes #o700
+    (make-directory lispm-agents-ide-lock-directory t))
+  (let* ((file (lispm-agents-ide--lock-file session))
+         (temporary (make-temp-file (concat file "."))))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (write-region
+           (json-serialize
+            `((pid . ,(emacs-pid))
+              (workspaceFolders . [,(directory-file-name (lispm-agents-ide-directory session))])
+              (ideName . "Emacs")
+              (transport . "ws")
+              (runningInWindows . :false)
+              (authToken . ,(lispm-agents-ide-token session))))
+           nil temporary nil 'silent)
+          (rename-file temporary file t))
+      (when (file-exists-p temporary) (delete-file temporary)))))
 
 (defun lispm-agents-ide--authorized-p (session headers)
-  "Return non-nil when HEADERS carry SESSION's token and no client holds it."
+  "Return non-nil when HEADERS carry SESSION's token, no Origin, and no client."
   (and (null (lispm-agents-ide-connection session))
+       (not (assoc "origin" headers))
        (equal (cdr (assoc "x-claude-code-ide-authorization" headers))
               (lispm-agents-ide-token session))))
 
@@ -209,6 +215,11 @@ Once Claude reports itself connected, it is sent the current selection."
          (tab (alist-get 'tab_name arguments))
          (contents (alist-get 'new_file_contents arguments))
          (visiting (find-buffer-visiting file)))
+    (when (file-remote-p file)
+      (error "Remote files cannot be opened: %s" file))
+    (when (and (not (lispm-agents-context-visible-p (lispm-agents-ide-directory session) file))
+               (not visiting))
+      (error "File outside workspace: %s" file))
     (lispm-agents-ide--close-diff session tab)
     (let ((buffer (lispm-agents-ide--diff-buffer file contents tab)))
       (with-current-buffer buffer

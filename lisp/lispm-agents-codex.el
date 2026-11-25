@@ -406,21 +406,94 @@ outside it, permission state and files touched are unknown."
   "Seconds Codex waits for a call of a tool of its server `emacs'.
 A call of a LispM tool may wait for the user's approval.")
 
+(defvar lispm-agents-codex-config-file nil
+  "Path to Codex's config.toml, or nil for `$CODEX_HOME/config.toml'.")
+
+(defun lispm-agents-codex--toml-string ()
+  "Read a TOML basic (`\"...\"') or literal (`'...'') string at point, or nil."
+  (let ((q (char-after)))
+    (when (memq q '(?\" ?'))
+      (forward-char 1)
+      (let (chars done)
+        (while (and (not (eobp)) (not done))
+          (let ((c (char-after)))
+            (forward-char 1)
+            (cond ((eq c q) (setq done t))
+                  ((and (eq q ?\") (eq c ?\\) (not (eobp)))
+                   (push (char-after) chars)
+                   (forward-char 1))
+                  ((eq c ?\n) (setq done t chars nil))
+                  (t (push c chars)))))
+        (and done (apply #'string (nreverse chars)))))))
+
+(defun lispm-agents-codex--toml-array ()
+  "Read a TOML array of strings starting at `[' at point."
+  (when (eq (char-after) ?\[)
+    (forward-char 1)
+    (let (items done)
+      (while (and (not (eobp)) (not done))
+        (skip-chars-forward " \t\r\n,")
+        (cond ((eq (char-after) ?#) (end-of-line))
+              ((eq (char-after) ?\]) (forward-char 1) (setq done t))
+              ((memq (char-after) '(?\" ?'))
+               (when-let* ((s (lispm-agents-codex--toml-string)))
+                 (push s items)))
+              (t (setq done t))))
+      (nreverse items))))
+
+(defun lispm-agents-codex--parse-excluded-vars (text)
+  "Return `shell_environment_policy.exclude' strings parsed from TOML TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let ((section "")
+          vars)
+      (while (not (eobp))
+        (skip-chars-forward " \t\r\n")
+        (cond
+         ((eobp))
+         ((eq (char-after) ?#) (forward-line 1))
+         ((looking-at "\\[\\[?\\([^]\n#]+?\\)\\]?\\][ \t]*\\(?:#.*\\)?$")
+          (setq section (string-trim (match-string 1)))
+          (forward-line 1))
+         ((and (equal section "")
+               (looking-at "shell_environment_policy\\.exclude[ \t]*=[ \t]*"))
+          (goto-char (match-end 0))
+          (setq vars (append vars (lispm-agents-codex--toml-array))))
+         ((and (equal section "shell_environment_policy")
+               (looking-at "exclude[ \t]*=[ \t]*"))
+          (goto-char (match-end 0))
+          (setq vars (append vars (lispm-agents-codex--toml-array))))
+         (t (forward-line 1))))
+      (delete-dups vars))))
+
+(defun lispm-agents-codex--excluded-vars (&optional file)
+  "Env vars Codex excludes, merging FILE's policy with LispM's token var."
+  (let* ((config (or file lispm-agents-codex-config-file
+                     (expand-file-name "config.toml"
+                                       (or (getenv "CODEX_HOME") "~/.codex"))))
+         (existing (when (and config (file-readable-p config))
+                     (ignore-errors
+                       (with-temp-buffer
+                         (insert-file-contents config)
+                         (lispm-agents-codex--parse-excluded-vars (buffer-string)))))))
+    (delete-dups (append existing (list lispm-agents-codex-token-variable)))))
+
 (cl-defmethod lispm-agents-context-arguments ((server lispm-agents-codex-mcp))
   "Configure SERVER as Codex's MCP server `emacs' for this run only.
 Its tools are approved in Codex: they read Emacs's state, talk with
 agents, or run LispM's tools under LispM's policy, which asks the user
 itself.  Codex passes its whole environment to the commands it runs
-unless told otherwise, so the token variable is excluded from them.  The
-exclusion replaces any `shell_environment_policy.exclude' of config.toml."
+unless told otherwise, so the token variable is excluded alongside any
+existing `shell_environment_policy.exclude' entries from config.toml."
   (list "-c" (format "mcp_servers.emacs.url=\"http://127.0.0.1:%d/mcp\""
                      (lispm-agents-mcp-port server))
         "-c" (format "mcp_servers.emacs.tool_timeout_sec=%d" lispm-agents-codex-tool-timeout)
         "-c" "mcp_servers.emacs.default_tools_approval_mode=\"approve\""
         "-c" (format "mcp_servers.emacs.bearer_token_env_var=\"%s\""
                      lispm-agents-codex-token-variable)
-        "-c" (format "shell_environment_policy.exclude=[\"%s\"]"
-                     lispm-agents-codex-token-variable)))
+        "-c" (format "shell_environment_policy.exclude=%s"
+                     (json-serialize (vconcat (lispm-agents-codex--excluded-vars))))))
 
 (defun lispm-agents-codex--context (directory)
   "Serve Emacs's state to a Codex terminal running in DIRECTORY."
