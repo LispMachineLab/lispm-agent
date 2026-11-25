@@ -16,21 +16,21 @@
                     "{\"type\":\"user\",\"timestamp\":\"2026-10-20T08:00:01Z\",\"cwd\":\"/tmp\",\"message\":{\"content\":\"Fix the build\"}}\n"))
           (set-file-times file (seconds-to-time 1000))
           (let ((before (car (lispm-agents-file-sessions
-                             (list file) #'lispm-agents-claude--session))))
+                             (list file) #'lispm-agents-claude-session))))
             (should (= (plist-get before :started)
                        (float-time (parse-iso8601-time-string "2026-10-20T08:00:00Z"))))
             (write-region "{\"type\":\"assistant\",\"timestamp\":\"2026-10-29T10:00:00Z\"}\n"
                           nil file t 'silent)
             (set-file-times file (seconds-to-time 2000))
             (let ((after (car (lispm-agents-file-sessions
-                              (list file) #'lispm-agents-claude--session))))
+                              (list file) #'lispm-agents-claude-session))))
               (should (> (plist-get after :time) (plist-get before :time)))
               (should (= (plist-get before :started) (plist-get after :started))))))
       (delete-file file))))
 
 (ert-deftest lispm-test-claude-session-without-start-does-not-use-tail ()
   "A recent response cannot stand in for missing creation metadata."
-  (let ((session (lispm-agents-claude--session
+  (let ((session (lispm-agents-claude-session
                   "/tmp/lispm-missing-start.jsonl"
                   '(((:type "user" :cwd "/tmp" :message (:content "Work")))
                     (:type "assistant" :timestamp "2026-10-29T10:00:00Z")))))
@@ -43,7 +43,7 @@
                    :source (:subagent (:thread_spawn (:parent_thread_id "parent"
                                                      :agent_path "/root/check_build"
                                                      :agent_nickname "Kuhn")))))
-         (session (lispm-agents-codex--session
+         (session (lispm-agents-codex-session
                    "/tmp/lispm-nested-spawn.jsonl"
                    (list (list (list :type "session_meta" :payload payload))))))
     (should (equal (plist-get session :parent) "parent"))
@@ -71,10 +71,10 @@ while subagents named in the session index are preserved."
                            :source (:subagent "review") :thread_source "subagent"
                            :timestamp "2026-10-20T08:00:00Z"))
          (prompt '(:type "event_msg" :payload (:type "user_message" :message "Review the code"))))
-    (should-not (lispm-agents-codex--session
+    (should-not (lispm-agents-codex-session
                  "/tmp/exec.jsonl"
                  (list (list (list :type "session_meta" :payload exec-payload) prompt))))
-    (let ((rev (lispm-agents-codex--session
+    (let ((rev (lispm-agents-codex-session
                 "/tmp/review.jsonl"
                 (list (list (list :type "session_meta" :payload review-payload) prompt))))
           (names (make-hash-table :test #'equal)))
@@ -164,14 +164,14 @@ and clearing or changing custom-title.json takes effect without transcript cache
                                    ("root" . "/tmp") ("title" . "Fix the build"))))))
           (set-file-times first (seconds-to-time 1000))
           (set-file-times next (seconds-to-time 2000))
-          (let ((one (lispm--session-description first))
-                (two (lispm--session-description next)))
+          (let ((one (lispm-session-description first))
+                (two (lispm-session-description next)))
             (should (= (plist-get one :started) (plist-get two :started)))
             (should (= (plist-get one :started) (float-time (encode-time 0 0 16 20 10 2026))))
             (should (< (plist-get one :time) (plist-get two :time))))
       (delete-directory directory t)))
-  (should-not (lispm--session-started "custom-session"))
-  (should-not (lispm--session-started "20261340-160000-abcd"))))
+  (should-not (lispm-session-started "custom-session"))
+  (should-not (lispm-session-started "20261340-160000-abcd"))))
 
 (provide 'lispm-agents-session-metadata-test)
 ;;; lispm-agents-session-metadata-test.el ends here

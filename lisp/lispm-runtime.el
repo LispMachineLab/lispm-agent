@@ -124,10 +124,10 @@ at least one turn is always left to the summary.  0 keeps none."
   :type 'integer
   :group 'lispm)
 
-(defconst lispm--default-compact-idle 0.75
+(defconst lispm-default-compact-idle 0.75
   "Default fraction for `lispm-compact-idle'.")
 
-(defcustom lispm-compact-idle lispm--default-compact-idle
+(defcustom lispm-compact-idle lispm-default-compact-idle
   "Fraction of `lispm-compact-threshold' past which a session is compacted at idle.
 When a turn ends with the session past it, LispM makes room once Emacs
 has been idle for `lispm-idle-delay' seconds, rather than when the
@@ -188,6 +188,12 @@ The marker records the exact boundary when a turn starts, so later
 events or a draft for the next turn cannot move the work inspector's
 boundary.  A resumed turn has a nil marker: its exact boundary was
 not recorded, and must not be guessed from intervening events.")
+
+(defun lispm-turn-start (&optional buffer)
+  "Return BUFFER's current turn-start cons `(TURN . MARKER)', or nil."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (buffer-local-value 'lispm--turn-start buf))))
 
 (defvar-local lispm--tools nil
   "Schemas of the tools the session in this buffer offers the model.
@@ -284,10 +290,10 @@ needs nothing more."
     (dolist (name lispm-project-instruction-files)
       (let ((file (expand-file-name name (lispm-agent-root agent))))
         (when (file-readable-p file)
-          (let ((text (string-trim (lispm--file-text file))))
+          (let ((text (string-trim (lispm-file-text file))))
             (unless (or (string-empty-p text) (member text seen))
               (push text seen)
-              (push (format "# Project instructions (%s)\n%s" name (lispm--truncate text 20000))
+              (push (format "# Project instructions (%s)\n%s" name (lispm-truncate text 20000))
                     sections))))))
     (and sections (string-join (nreverse sections) "\n\n"))))
 
@@ -375,14 +381,14 @@ the session's agent is started again from its role."
           (if (buffer-live-p (lispm-agent-buffer agent))
               ;; An earlier conversation of it there, while it has another open.
               (lispm-make-agent (lispm-agent-role agent) root
-                                :name (lispm--free-name name) :id id
+                                :name (lispm-free-name name) :id id
                                 :character (lispm-character-name character))
             (when id (setf (lispm-agent-id agent) id))
             agent)))
        ((lispm-get-role (intern (or (cdr (assoc "role" keywords)) "")) t)
         (let ((agent (lispm-make-agent (intern (cdr (assoc "role" keywords)))
                                        (or (cdr (assoc "root" keywords)) default-directory)
-                                       :name (lispm--free-name name) :id id
+                                       :name (lispm-free-name name) :id id
                                        :system (equal (cdr (assoc "system" keywords)) "t"))))
           ;; A helper stays bounded by its caller.
           (when-let* ((ceiling (assoc "ceiling" keywords)))
@@ -404,7 +410,7 @@ no ceiling at all."
     (if (and (consp ceiling)
              (seq-every-p (lambda (entry)
                             (and (consp entry) (symbolp (car entry))
-                                 (memq (cdr entry) lispm--policy-actions)))
+                                 (memq (cdr entry) lispm-policy-actions)))
                           ceiling))
         ceiling
       (mapcar (lambda (entry) (cons (car entry) 'ask)) lispm-default-policy))))
@@ -431,7 +437,7 @@ opened again, after Emacs stopped or by hand, is bounded alike."
     (with-current-buffer (lispm-agent-buffer agent)
       (let ((print-length nil) (print-level nil))
         (lispm--set-keyword "ceiling" (prin1-to-string ceiling))))
-    (lispm--save-session agent)))
+    (lispm-save-session agent)))
 
 (defun lispm-set-parent (agent parent)
   "Record that AGENT was started by the agent whose session id is PARENT.
@@ -442,7 +448,7 @@ sessions show AGENT's under PARENT's, see `lispm-sessions'."
   (when (buffer-live-p (lispm-agent-buffer agent))
     (with-current-buffer (lispm-agent-buffer agent)
       (lispm--set-keyword "parent" parent))
-    (lispm--save-session agent)))
+    (lispm-save-session agent)))
 
 (define-minor-mode lispm-session-mode
   "Minor mode of agent session transcripts.
@@ -520,7 +526,7 @@ Tool calls awaiting approval are WAITING headings: review them with
         (concat " λ " (symbol-name (lispm-agent-name agent))
                 (propertize (format " (%s)" (lispm-agent-role agent)) 'face 'shadow)
                 "  "
-                (propertize (lispm--state-name state)
+                (propertize (lispm-state-name state)
                             'face (if (eq state 'waiting) 'warning 'success))
                 (if (lispm-agent-status agent)
                     (concat ": " (lispm-agent-status agent))
@@ -545,7 +551,7 @@ Session files are under git (see `lispm-git'); images are kept out."
   "Save the image DATA (base64) in AGENT's session; return the file.
 TYPE is its media type, image/png by default.  Without an agent, the
 image goes to a temporary file."
-  (let* ((extension (or (car (rassoc (or type "image/png") lispm-transcript--image-types)) "png"))
+  (let* ((extension (or (car (rassoc (or type "image/png") lispm-transcript-image-types)) "png"))
          (file (if agent
                    (let ((dir (lispm-image-directory agent)))
                      (expand-file-name (format "%04d.%s" (1+ (length (directory-files
@@ -594,8 +600,8 @@ the continuation keeps the title the conversation is listed under."
                     `(("ceiling" . ,(let ((print-length nil) (print-level nil))
                                       (prin1-to-string ceiling)))))
                 ,@(when-let* ((title (and previous
-                                          (plist-get (lispm--session-description previous) :title))))
-                    `(("title" . ,(lispm--oneline title 200))))))
+                                          (plist-get (lispm-session-description previous) :title))))
+                    `(("title" . ,(lispm-oneline title 200))))))
              (lispm-transcript-section (lispm-transcript-title 'system) (lispm-system-prompt agent))
              (if summary (lispm-transcript-section (lispm-transcript-title 'summary) summary) "")
              (or kept "")
@@ -617,7 +623,7 @@ the continuation keeps the title the conversation is listed under."
     (setf (lispm-agent-buffer agent) buffer)
     buffer))
 
-(defun lispm--session-files-in (pattern)
+(defun lispm-session-files-in (pattern)
   "Session files matching the wildcard PATTERN under `lispm-directory'.
 Emacs's lock files (.#NAME) and other dot files are left out."
   (seq-filter (lambda (file)
@@ -641,7 +647,7 @@ the agent was called then."
                                      (expand-file-name (or (cdr (assoc "root" keywords)) "~")))
                                     root))
                       (equal (cdr (assoc "agent" keywords)) name))))
-                (lispm--session-files-in
+                (lispm-session-files-in
                  (expand-file-name "*.org" (lispm--sessions-directory (lispm-agent-root agent)))))
                (lambda (a b) (time-less-p (file-attribute-modification-time (file-attributes b))
                                           (file-attribute-modification-time (file-attributes a))))))))
@@ -665,13 +671,13 @@ is none, a fresh session starts."
           (when new
             ;; What waits for the agent waits for it in the new session.
             (lispm-inbox-forget agent)
-            (setf (lispm-agent-id agent) (lispm--new-id)))
+            (setf (lispm-agent-id agent) (lispm-new-id)))
           (setq file (lispm--create-session-file agent)))
         (prog1 (lispm--visit-session agent file)
           (lispm--record-session-opening agent opened)
           (when new (lispm-inbox-save agent)))))))
 
-(defun lispm--project-root (&optional directory)
+(defun lispm-project-root (&optional directory)
   "Root of the project around DIRECTORY (default: `default-directory')."
   (let ((default-directory (or directory default-directory)))
     (if-let* ((project (project-current))
@@ -684,7 +690,7 @@ is none, a fresh session starts."
   "Start a new agent of ROLE working in ROOT; return it.
 ROLE defaults to `lispm-default-role', ROOT to the current project."
   (let ((agent (lispm-make-agent (or role lispm-default-role)
-                                 (or root (lispm--project-root)))))
+                                 (or root (lispm-project-root)))))
     (lispm-session-buffer agent)
     agent))
 
@@ -710,7 +716,7 @@ it cannot be resumed (its role is not defined, say)."
   "End AGENT: save its session and close its buffer.
 A standing agent stays declared and resumes its session when needed."
   (let ((buffer (lispm-agent-buffer agent)))
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (if (buffer-live-p buffer)
         (kill-buffer buffer)
       (run-hook-with-args 'lispm-session-end-functions agent)
@@ -752,7 +758,7 @@ its request was made from, for the turn to be taken up again."
     (with-demoted-errors "LispM: saving a session: %S"
       (when (buffer-live-p (lispm-agent-buffer agent))
         (lispm--live-delete agent)
-        (lispm--save-session agent)))))
+        (lispm-save-session agent)))))
 
 (add-hook 'kill-emacs-hook #'lispm--save-sessions)
 
@@ -769,9 +775,9 @@ its request was made from, for the turn to be taken up again."
               ((not (string-empty-p text))))
     (car (split-string text "\n"))))
 
-(defun lispm--session-started (id)
+(defun lispm-session-started (id)
   "Return the creation time encoded in session ID, or nil when unknown.
-`lispm--new-id' records local time as YYYYMMDD-HHMMSS before its suffix.
+`lispm-new-id' records local time as YYYYMMDD-HHMMSS before its suffix.
 Unlike a transcript's modification time, this survives later responses
 and continuation files."
   (when (and (stringp id)
@@ -786,7 +792,7 @@ and continuation files."
         (when (equal (format-time-string "%Y%m%d-%H%M%S" time) (substring id 0 15))
           (float-time time))))))
 
-(defun lispm--session-description (file)
+(defun lispm-session-description (file)
   "Describe the session recorded in FILE, or nil if it holds none.
 Descriptions are remembered until FILE changes."
   (let ((time (float-time (file-attribute-modification-time (file-attributes file))))
@@ -805,7 +811,7 @@ Descriptions are remembered until FILE changes."
                          :role (cdr (assoc "role" keywords))
                          :root (expand-file-name (or (cdr (assoc "root" keywords)) "~"))
                          :title title
-                         :started (lispm--session-started (cdr (assoc "id" keywords)))
+                         :started (lispm-session-started (cdr (assoc "id" keywords)))
                          :time time
                          :file file
                          :parent (cdr (assoc "parent" keywords))))))))
@@ -820,8 +826,8 @@ session of the agent that started this one, see `lispm-set-parent',
 else nil; a session continued in several files is listed once, by its
 newest file."
   (let ((latest (make-hash-table :test #'equal)))
-    (dolist (file (lispm--session-files-in "projects/*/sessions/*.org"))
-      (when-let* ((session (lispm--session-description file)))
+    (dolist (file (lispm-session-files-in "projects/*/sessions/*.org"))
+      (when-let* ((session (lispm-session-description file)))
         (let ((seen (gethash (plist-get session :id) latest)))
           (when (or (null seen) (> (plist-get session :time) (plist-get seen :time)))
             (puthash (plist-get session :id) session latest)))))
@@ -839,7 +845,7 @@ newest file."
 (defun lispm-session-files (id)
   "Every file recording the session ID."
   (seq-filter (lambda (file) (equal (cdr (assoc "id" (lispm--file-keywords file))) id))
-              (lispm--session-files-in (format "projects/*/sessions/%s*.org" id))))
+              (lispm-session-files-in (format "projects/*/sessions/%s*.org" id))))
 
 (defun lispm-rename-session (file title)
   "Give the session recorded in FILE the TITLE shown in session lists."
@@ -855,7 +861,7 @@ newest file."
         (save-buffer)))
     (unless visiting (kill-buffer buffer))))
 
-(defmacro lispm--in-session (agent &rest body)
+(defmacro lispm-in-session (agent &rest body)
   "Run BODY in AGENT's session buffer, at its end.
 Windows that showed the end of the buffer keep following it."
   (declare (indent 1) (debug t))
@@ -889,7 +895,7 @@ Windows that showed the end of the buffer keep following it."
          (looking-at (concat (lispm-transcript-heading-regexp 'user) "[ \t\n]*\\'"))
          (point))))
 
-(defun lispm--save-session (agent)
+(defun lispm-save-session (agent)
   "Save AGENT's session file."
   (let ((buffer (lispm-agent-buffer agent)))
     (when (and lispm-save-sessions (buffer-live-p buffer) (buffer-file-name buffer))
@@ -903,7 +909,7 @@ Windows that showed the end of the buffer keep following it."
 (defun lispm--add-section (agent title text)
   "Add a section titled TITLE, holding TEXT, to AGENT's session.
 It goes before the input heading a turn ended with, if any."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (let ((input (lispm--input-heading-p)))
       (if input
           (goto-char input)
@@ -1009,7 +1015,7 @@ ANSWER-TO identifies the background request this input answers."
     (run-at-time 0 nil #'lispm--drain-inbox agent)
     agent))
 
-(defun lispm--await-reply (agent id &optional peer)
+(defun lispm-await-reply (agent id &optional peer)
   "Keep request ID as a dependency of AGENT's current input.
 PEER names an external agent whose request cannot survive Emacs.
 This records no blocking state: other inputs remain free to run."
@@ -1100,12 +1106,12 @@ is given up: the session goes on."
         (lispm-agent-entry agent) (if (plist-get entry :id)
                                       entry
                                     (plist-put (copy-sequence entry) :id (lispm-inbox-new-id))))
-  (lispm--in-session agent
+  (lispm-in-session agent
     (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
     (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)
           lispm--turn-context nil))
   (when entry
-    (lispm--in-session agent
+    (lispm-in-session agent
       (let ((input (lispm--input-heading-p)))
         (when input (delete-region input (point-max))))
       (lispm--newline)
@@ -1117,7 +1123,7 @@ is given up: the session goes on."
           (forward-line 1)
           (insert (format ":PROPERTIES:\n:ENTRY: %s\n:END:\n" (plist-get entry :id)))))))
   (unless entry
-    (lispm--in-session agent
+    (lispm-in-session agent
       (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
         (setcdr lispm--turn-start (copy-marker (match-beginning 0))))))
   (lispm-inbox-save agent)
@@ -1320,7 +1326,7 @@ starting hold requests back so that their tools are there.")
        (cl-incf (lispm-agent-steps agent))
        (setf (lispm-agent-request-bytes agent) (lispm--session-bytes agent))
        ;; What the request carries is on disk, should Emacs stop now.
-       (lispm--save-session agent)
+       (lispm-save-session agent)
        (lispm--send agent request 0))))))
 
 (defun lispm--send (agent request attempt)
@@ -1357,7 +1363,7 @@ what a session opened again after Emacs stopped takes up."
 
 (defun lispm--live-begin (agent)
   "Open the region where AGENT's response streams in."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (lispm--unsaved
       (lispm--newline)
       (let ((start (point-marker)))
@@ -1367,7 +1373,7 @@ what a session opened again after Emacs stopped takes up."
 
 (defun lispm--live-insert (agent kind text)
   "Show streamed content TEXT of KIND (text, thinking or tool) for AGENT."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (when lispm--live
       (lispm--unsaved
         (goto-char (cdr lispm--live))
@@ -1419,7 +1425,7 @@ Each is a plist: (:kind text :text TEXT), (:kind thinking :text TEXT) or
 
 (defun lispm--live-delete (agent)
   "Remove AGENT's streamed region; the final message replaces it."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (when lispm--live
       (lispm--unsaved
         (delete-region (car lispm--live) (max (car lispm--live) (cdr lispm--live))))
@@ -1509,9 +1515,9 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
                                                      (unless proceed stop))))
                               uses))
            calls)
-      (setf (lispm-agent-last-reply agent) (lispm--reply-text content))
+      (setf (lispm-agent-last-reply agent) (lispm-content-text content))
       (when content
-        (setq calls (lispm--in-session agent
+        (setq calls (lispm-in-session agent
                       (lispm--newline)
                       (insert (lispm-transcript-heading 'assistant))
                       (lispm-transcript-insert-blocks
@@ -1570,7 +1576,7 @@ once every call has a result."
     (lispm--run-next-queued-tool agent)
     (lispm--update-state agent)
     ;; The calls, awaiting approval or running, are on disk.
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (when proceed
       (lispm--maybe-continue agent))))
 
@@ -1616,7 +1622,7 @@ tools of MCP servers appear only once the servers have started."
                           t "FAILED")
       (plist-put call :status 'run)
       (plist-put call :started t)
-      (lispm--in-session agent
+      (lispm-in-session agent
         (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
       (lispm-set-state agent 'acting (format "running %s" (plist-get call :name))
                        (cons 'running (plist-get call :name)))
@@ -1625,7 +1631,7 @@ tools of MCP servers appear only once the servers have started."
             (default-directory (lispm-agent-root agent)))
         (lispm-tool-invoke tool (plist-get call :input)
                            (lambda (text errorp &optional images)
-                             (lispm--call-finished agent id text errorp images)))))))
+                             (lispm-call-finished agent id text errorp images)))))))
 
 (defcustom lispm-debug-tool-errors nil
   "Whether a tool's failure stops its call, for the user to choose how to go on.
@@ -1647,14 +1653,14 @@ See `lispm-debug-tool-errors'."
       (and (listp lispm-debug-tool-errors)
            (member name (mapcar (lambda (tool) (format "%s" tool)) lispm-debug-tool-errors)))))
 
-(defun lispm--call-finished (agent id text errorp images)
+(defun lispm-call-finished (agent id text errorp images)
   "Take the result TEXT of AGENT's call ID; ERRORP marks failure.
 IMAGES are files the result holds besides TEXT.  A failure that
 `lispm-debug-tool-errors' covers stops the call instead."
   (let ((call (gethash id (lispm-agent-pending agent))))
     (if (and errorp call
              (lispm--debug-tool-error-p (plist-get call :name))
-             (not (equal text lispm-tools--interrupted)))
+             (not (equal text lispm-tools-interrupted)))
         (lispm--stop-call agent id text images)
       (lispm--tool-done agent id text errorp nil images))))
 
@@ -1675,7 +1681,7 @@ result holds besides TEXT."
                                   (unless (string-suffix-p "\n" text) "\n")
                                   note)
                         text)))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (when (and marker (marker-buffer marker))
           (lispm-transcript-set-state marker (or state (if errorp "FAILED" "DONE")))
           (goto-char (lispm-transcript-subtree-end marker 2))
@@ -1776,13 +1782,13 @@ observers, as the runtime's agent status does for other interfaces."
       (dolist (target waiting-on)
         (lispm-emit-change target '(waited-on-by request-ids))))
     (clrhash (lispm-agent-pending agent))
-    (lispm--in-session agent
+    (lispm-in-session agent
       (lispm--newline)
       (when note
         (insert (lispm-transcript-section (lispm-transcript-title 'note) note)))
       (insert (lispm-transcript-heading 'user)))
     (lispm-set-state agent 'idle)
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (with-demoted-errors "LispM: taking a snapshot: %S"
       (lispm-journal-end agent))
     (let* ((answer (string-trim (concat reply (if note (concat "\n\n" note) ""))))
@@ -1811,7 +1817,7 @@ observers, as the runtime's agent status does for other interfaces."
      ((and (eql (plist-get err :status) 413)
            (buffer-live-p (lispm-agent-buffer agent))
            (> (buffer-local-value 'lispm-context-images (lispm-agent-buffer agent)) 0))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (setq-local lispm-context-images 0))
       (cl-decf (lispm-agent-steps agent))
       (lispm--request agent))
@@ -1844,7 +1850,7 @@ observers, as the runtime's agent status does for other interfaces."
 
 (defvar lispm-chat-agent)
 
-(defun lispm--buffer-agent ()
+(defun lispm-buffer-agent ()
   "The agent of the current session or chat buffer."
   (or lispm-session-agent
       (bound-and-true-p lispm-chat-agent)
@@ -1853,12 +1859,12 @@ observers, as the runtime's agent status does for other interfaces."
 (defun lispm-send ()
   "Send what you wrote under the last \"* User\" heading."
   (interactive)
-  (let ((agent (lispm--buffer-agent)))
+  (let ((agent (lispm-buffer-agent)))
     (if (and (lispm-agent-condition agent) (not (lispm--open-calls agent)))
         (lispm--send-past-condition agent)
       (when (lispm-agent-busy-p agent)
         (user-error "%s" (lispm-tr "%s is busy (%s); C-c C-k aborts"
-                                   (lispm-agent-name agent) (lispm--state-name (lispm-agent-state agent)))))
+                                   (lispm-agent-name agent) (lispm-state-name (lispm-agent-state agent)))))
       (setf (lispm-agent-buffer agent) (current-buffer))
       (let ((parsed (lispm-transcript-parse)))
         (when (plist-get parsed :pending)
@@ -1893,7 +1899,7 @@ under a new \"* User\" heading after it" (lispm-agent-name agent))))
   "Stop AGENT's turn: cancel the request, the running and waiting calls,
 and its queued inputs."
   (interactive)
-  (let ((agent (if agent (lispm-get-agent agent) (lispm--buffer-agent))))
+  (let ((agent (if agent (lispm-get-agent agent) (lispm-buffer-agent))))
     (unless (or (lispm-agent-busy-p agent) (lispm-agent-suspended agent))
       (user-error "%s" (lispm-tr "%s is idle" (lispm-agent-name agent))))
     (lispm--stop agent "Aborted by the user.")))
@@ -1943,7 +1949,7 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
         (lispm--finish-turn agent note)
       (lispm--record-event agent "stopped" note)
       (lispm-set-state agent 'idle)
-      (lispm--save-session agent)
+      (lispm-save-session agent)
       (lispm-inbox-save agent))))
 
 ;;;; Approval
@@ -1980,10 +1986,10 @@ The call's input is already in its heading or its Asks subsection."
                              `((scope . "custom") (allowance . ,(cdr scope)))
                            `((scope . ,(symbol-name scope)))))
                      ,@(when reason `((reason . ,reason))))))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (goto-char (lispm-transcript-subtree-end marker 2))
         (insert (lispm-transcript-approval record)))
-      (lispm--save-session agent))))
+      (lispm-save-session agent))))
 
 (defun lispm-resolve (agent id decision &optional reason source)
   "Settle AGENT's call ID awaiting approval: DECISION is `approve' or `deny'.
@@ -2000,7 +2006,7 @@ call's remembered approval settles this one; otherwise it is `user'."
           (progn
             (plist-put call :asking nil)
             (plist-put call :status 'run)
-            (lispm--in-session agent
+            (lispm-in-session agent
               (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
             (lispm--update-state agent)
             (funcall (plist-get asking :continue) decision
@@ -2029,7 +2035,7 @@ if ID is not running."
     (plist-put call :status 'ask)
     (when-let* ((marker (plist-get call :marker))
                 ((marker-buffer marker)))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (lispm-transcript-set-state marker "WAITING")
         (goto-char (lispm-transcript-subtree-end marker 2))
         (insert (lispm-transcript-asks (lispm-tool-name tool) input))))
@@ -2055,12 +2061,12 @@ is told, and nothing more is allowed."
     (dolist (other (lispm-waiting-calls agent))
       (let ((asked (lispm-asked (gethash other (lispm-agent-pending agent)))))
         (when (and (plist-get asked :tool)
-                   (lispm-tools--allowed-p agent (plist-get asked :tool) (plist-get asked :input))
+                   (lispm-tools-invocation-allowed-p agent (plist-get asked :tool) (plist-get asked :input))
                    (eq (lispm-tool-action agent (plist-get asked :tool) (plist-get asked :input))
                        'auto))
           (lispm-resolve agent other 'approve nil 'allowance))))))
 
-(defconst lispm--interrupted-result
+(defconst lispm-interrupted-result
   "The call was interrupted: Emacs stopped before it finished, so whether it took effect is unknown.  Check before repeating it."
   "Result of a call that was running when its session was last saved.")
 
@@ -2070,7 +2076,7 @@ Each is called with the agent and the call, a plist (:id :name :input
 :properties) as `lispm-transcript-parse' gives it, while the session
 is opened again after Emacs stopped.  One that returns non-nil has
 taken the call up: it stays pending, running, until its result comes
-\(see `lispm--call-finished').  Otherwise the call is recorded as
+\(see `lispm-call-finished').  Otherwise the call is recorded as
 interrupted.  Delegation takes up ask_agent calls this way: the agent
 asked can still reply.")
 
@@ -2139,7 +2145,7 @@ not known (a session saved before inputs were kept there).  CALLS are
 the calls the transcript leaves without a result, CONDITION the
 condition it waits at, if any; see `lispm--resume-calls'."
   (cl-incf (lispm-agent-turn agent))
-  (lispm--in-session agent
+  (lispm-in-session agent
     (when (markerp (cdr lispm--turn-start)) (set-marker (cdr lispm--turn-start) nil))
     (setq lispm--turn-start (cons (lispm-agent-turn agent) nil)
           lispm--turn-context nil))
@@ -2187,12 +2193,12 @@ condition it waits at, if any; see `lispm--resume-calls'."
             ;; Approved, but never run: ask again rather than run it
             ;; while the session is being opened.
             ("APPROVED"
-             (lispm--in-session agent
+             (lispm-in-session agent
                (lispm-transcript-set-state
                 (plist-get (gethash id (lispm-agent-pending agent)) :marker) "WAITING"))
              (lispm--approval-event agent id 'resumed))
             (_ (unless (run-hook-with-args-until-success 'lispm-resume-call-functions agent call)
-                 (lispm--tool-done agent id lispm--interrupted-result t)))))))
+                 (lispm--tool-done agent id lispm-interrupted-result t)))))))
     (lispm--update-state agent)
     ;; Calls stopped at an error wait for a restart again; the
     ;; handlers are asked afresh.
@@ -2259,7 +2265,7 @@ if it has one; the inbox file then no longer holds ENTRY."
     (when-let* ((callback (plist-get entry :callback)))
       (let* ((last (seq-find (lambda (m) (equal (alist-get 'role m) "assistant"))
                              (reverse (plist-get parsed :messages))))
-             (text (string-trim (lispm--reply-text (append (alist-get 'content last) nil))))
+             (text (string-trim (lispm-content-text (append (alist-get 'content last) nil))))
              (reply (if (string-empty-p text) "(no reply)" text))
              (value (lispm--recorded-turn-value entry)))
         (when value
@@ -2294,7 +2300,7 @@ PREVIEW, a string or nil, and why it asks go in the transcript; then
 `lispm-approval-functions' run, and a message says where to answer."
   (let ((reasons (plist-get asked :reasons)))
     (when (and (or preview reasons) (plist-get call :marker))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (goto-char (lispm-transcript-subtree-end (plist-get call :marker) 2))
         (insert (lispm-transcript-preview preview reasons))))
     (run-hook-with-args 'lispm-approval-functions agent (plist-get asked :name)
@@ -2374,11 +2380,11 @@ That is approval, or for a call stopped at an error, a restart."
 For a call stopped at an error, or with none, the condition the turn
 waits at, choose a restart."
   (interactive)
-  (let* ((agent (lispm--buffer-agent))
+  (let* ((agent (lispm-buffer-agent))
          (id (lispm--answered-call agent))
          (condition (if id (lispm--call-condition agent id) (lispm-agent-condition agent))))
     (cond (condition (lispm-choose-restart agent condition))
-          (id (lispm--review-call agent id))
+          (id (lispm-review-call agent id))
           (t (user-error "%s" (lispm-tr "No call awaits approval"))))))
 
 (defun lispm-call-allowance (agent id)
@@ -2393,7 +2399,7 @@ every later call of its tool."
            'exact)
           (t 'tool))))
 
-(defun lispm--review-call (agent id)
+(defun lispm-review-call (agent id)
   "Review AGENT's call ID awaiting approval, and decide."
   (let* ((call (gethash id (lispm-agent-pending agent)))
          (asked (lispm-asked call)))
@@ -2461,7 +2467,7 @@ later turn or a call that starts while approving these is approved."
 (defun lispm-approve-all ()
   "List and approve every pending permission call of this agent's turn."
   (interactive)
-  (let* ((agent (lispm--buffer-agent))
+  (let* ((agent (lispm-buffer-agent))
          (turn (lispm-agent-turn agent))
          (calls (lispm--approval-snapshot agent)))
     (unless calls
@@ -2489,7 +2495,7 @@ waits at (see `lispm-stop-at-condition')."
   "Approve the call at point, or the first one awaiting approval.
 With none, choose the default restart of the condition the turn waits at."
   (interactive)
-  (let ((agent (lispm--buffer-agent)))
+  (let ((agent (lispm-buffer-agent)))
     (lispm-approve-for agent (lispm--answered-call agent))))
 
 (defun lispm-deny (reason)
@@ -2497,11 +2503,11 @@ With none, choose the default restart of the condition the turn waits at."
 With none, stop at the condition the turn waits at (see
 `lispm-stop-at-condition')."
   (interactive
-   (let* ((agent (lispm--buffer-agent))
+   (let* ((agent (lispm-buffer-agent))
           (id (lispm--answered-call agent)))
      (list (and id (not (lispm--call-condition agent id))
                 (read-string (lispm-tr "Reason (optional): "))))))
-  (let ((agent (lispm--buffer-agent)))
+  (let ((agent (lispm-buffer-agent)))
     (lispm-deny-for agent reason (lispm--answered-call agent))))
 
 ;;;; Conditions and restarts
@@ -2520,7 +2526,7 @@ With none, stop at the condition the turn waits at (see
      :title ,(lispm-tr-noop "Request failed")
      :restarts ((retry ,(lispm-tr-noop "Retry the request") lispm--restart-retry)
                 (use-model ,(lispm-tr-noop "Retry with another backend or model")
-                           lispm--restart-use-model lispm--read-model)
+                           lispm--restart-use-model lispm-read-model)
                 (abort ,(lispm-tr-noop "Stop here") lispm--restart-abort)))
     (step-limit
      :title ,(lispm-tr-noop "Step limit reached")
@@ -2636,13 +2642,13 @@ non-nil if a turn waits in the middle, for a condition signaled
 between turns (`compaction-failed')."
   (let* ((spec (lispm--condition-spec type))
          (restarts (mapcar #'car (plist-get spec :restarts)))
-         (id (lispm--in-session agent
+         (id (lispm-in-session agent
                (format "c%d" (1+ (count-matches "^:CONDITION_ID:" (point-min) (point-max))))))
          (resume (plist-get props :resume))
          (condition (list :id id :type type :title (plist-get spec :title)
                           :message message :restarts restarts :resume resume)))
     (setf (lispm-agent-process agent) nil)
-    (lispm--in-session agent
+    (lispm-in-session agent
       ;; Before the input heading a turn ended with, if any: the next
       ;; turn takes its place.
       (if-let* ((input (lispm--input-heading-p)))
@@ -2651,7 +2657,7 @@ between turns (`compaction-failed')."
       (setq condition (plist-put condition :marker (point-marker)))
       (insert (lispm-transcript-condition (plist-get spec :title) id type restarts message
                                           resume)))
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (lispm--wait-at agent condition)
     condition))
 
@@ -2660,7 +2666,7 @@ between turns (`compaction-failed')."
   (setf (lispm-agent-condition agent) condition)
   (lispm-set-state agent 'waiting
                    (format "%s: %s" (plist-get condition :title)
-                           (lispm--oneline (plist-get condition :message) 80)))
+                           (lispm-oneline (plist-get condition :message) 80)))
   (lispm--offer-condition agent condition))
 
 (defun lispm--call-condition (agent id)
@@ -2754,7 +2760,7 @@ Stopped subsection names the restart."
     (plist-put call :condition nil)
     (when-let* ((marker (plist-get call :marker))
                 ((marker-buffer marker)))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (lispm-transcript-set-property marker "CONDITION" nil)
         (goto-char marker)
         (when (re-search-forward "^\\*\\*\\* Stopped[ \t]*$"
@@ -2800,10 +2806,10 @@ it, if any; `abort' removes it, since the note the turn ends with
 says the same."
   (when-let* ((marker (plist-get condition :marker))
               ((marker-buffer marker)))
-    (lispm--in-session agent
+    (lispm-in-session agent
       (goto-char marker)
       ;; Changing its TODO state in org may have chosen the restart.
-      (when (looking-at (concat "\\* " lispm-transcript--state-re " Condition: "))
+      (when (looking-at (concat "\\* " lispm-transcript-state-re " Condition: "))
         (if (eq restart 'abort)
             (delete-region marker (lispm-transcript-subtree-end marker 1))
           (lispm-transcript-set-state marker "DONE")
@@ -2816,7 +2822,7 @@ says the same."
   "Choose a restart for CONDITION, by default the one AGENT asks about.
 Interactively, the agent of the current session or chat."
   (interactive)
-  (let* ((agent (or agent (lispm--buffer-agent)))
+  (let* ((agent (or agent (lispm-buffer-agent)))
          (condition (or condition
                         (lispm-asked-condition agent)
                         (user-error "%s" (lispm-tr "%s waits at no condition" (lispm-agent-name agent)))))
@@ -2913,12 +2919,12 @@ session reopened later takes it up again (without IMAGES)."
     (plist-put call :status 'stopped)
     (plist-put call :condition condition)
     (when (and marker (marker-buffer marker))
-      (lispm--in-session agent
+      (lispm-in-session agent
         (lispm-transcript-set-state marker "WAITING")
         (lispm-transcript-set-property marker "CONDITION" "tool-error")
         (goto-char (lispm-transcript-subtree-end marker 2))
         (insert (lispm-transcript-stopped text))))
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (unless (lispm-agent-dispatching agent)
       (lispm--update-state agent))
     (lispm--offer-condition agent condition)))
@@ -2974,7 +2980,7 @@ if there is one (a response may have had nothing in it): tagged
 :ignore:, it stays in the transcript but is no longer sent."
   (when-let* ((marker (plist-get condition :marker))
               ((marker-buffer marker)))
-    (lispm--in-session agent
+    (lispm-in-session agent
       (goto-char marker)
       (when (and (re-search-backward "^\\* " nil t)
                  (looking-at (lispm-transcript-heading-regexp 'assistant)))
@@ -3033,7 +3039,7 @@ asked for the handover is dropped, and whoever sent it told."
                                   (lispm-agent-name agent) (plist-get condition :message)))))
     (lispm--record-event agent "compaction" (plist-get condition :message))
     (lispm-set-state agent 'idle)
-    (lispm--save-session agent)
+    (lispm-save-session agent)
     (lispm-inbox-save agent)
     (lispm--drain-inbox agent)))
 
@@ -3050,7 +3056,7 @@ that asked for the handover starts the next one."
     (lispm-set-state agent 'idle)
     (lispm--drain-inbox agent)))
 
-(defun lispm--read-model (agent)
+(defun lispm-read-model (agent)
   "Ask for a backend and a model for AGENT; return (BACKEND . MODEL)."
   (let* ((current (lispm-backend-name agent))
          (own (when-let* ((character (lispm-agent-character* agent)))
@@ -3187,7 +3193,7 @@ tokens, smaller older reads stay intact; otherwise all candidates clear.
 Return the number of tokens freed, or nil."
   (when lispm-compact-keep-results
     (let* ((old (seq-remove (lambda (result) (nth 2 result))
-                            (butlast (lispm--in-session agent (lispm-transcript-results))
+                            (butlast (lispm-in-session agent (lispm-transcript-results))
                                      lispm-compact-keep-results)))
            (bulky (seq-filter #'lispm--result-bulky-p old))
            (bulky-freed (/ (apply #'+ (mapcar #'cadr bulky)) 3))
@@ -3197,7 +3203,7 @@ Return the number of tokens freed, or nil."
            (freed (/ (apply #'+ (mapcar #'cadr chosen)) 3)))
       (when (and chosen (>= freed lispm-compact-clear-at-least))
         (let ((tokens (- (lispm--estimated-tokens agent) freed)))
-          (lispm--in-session agent
+          (lispm-in-session agent
             ;; The latest first: tags move what comes after them.
             (dolist (result (reverse chosen))
               (lispm-transcript-tag (car result) "cleared")))
@@ -3209,7 +3215,7 @@ Return the number of tokens freed, or nil."
 Return (TEXT . INPUT): the text of their sections, conditions left
 out, and the beginning of the input the first of them handled.  See
 `lispm-compact-keep-turns'."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (let* ((end (or (lispm--input-heading-p) (point-max)))
            (sections (seq-filter (lambda (section) (< (plist-get section :start) end))
                                  (lispm-transcript-sections)))
@@ -3238,7 +3244,7 @@ out, and the beginning of the input the first of them handled.  See
                            sections "")
                when (<= (string-bytes text) limit)
                return (cons (if (string-suffix-p "\n" text) text (concat text "\n"))
-                            (lispm--oneline (lispm-transcript-section-text first) 60))))))
+                            (lispm-oneline (lispm-transcript-section-text first) 60))))))
 
 (defun lispm--has-history-p (agent)
   "Non-nil if AGENT's session holds a response: something to hand over."
@@ -3249,7 +3255,7 @@ out, and the beginning of the input the first of them handled.  See
 
 (defun lispm--take-input (agent)
   "Remove the text the user typed under AGENT's last \"* User\" and return it."
-  (lispm--in-session agent
+  (lispm-in-session agent
     (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
       (let ((text (string-trim (buffer-substring-no-properties
                                 (min (point-max) (1+ (line-end-position))) (point-max)))))
@@ -3262,7 +3268,7 @@ Interactively, the agent of the current session.  Memory saved for a
 handover since the last one is not saved again, and a summary being
 written at idle is taken (see `lispm-compact-idle')."
   (interactive)
-  (let ((agent (if agent (lispm-get-agent agent) (lispm--buffer-agent))))
+  (let ((agent (if agent (lispm-get-agent agent) (lispm-buffer-agent))))
     (when (or (lispm-agent-busy-p agent) (lispm-agent-compacting agent))
       (user-error "%s" (lispm-tr "%s is busy" (lispm-agent-name agent))))
     (setf (lispm-agent-compacting agent) t)
@@ -3286,7 +3292,7 @@ Return (REQUEST . KEPT), KEPT being what `lispm--kept-turns' returns."
                      (concat lispm--summary-prompt " "
                              (format lispm--summary-kept-prompt (cdr kept)))
                    lispm--summary-prompt))
-         (messages (lispm-transcript--normalize
+         (messages (lispm-transcript-normalize
                     (append (plist-get parsed :messages)
                             (list `((role . "user")
                                     (content . [((type . "text")
@@ -3310,7 +3316,7 @@ non-nil goes on with the turn in the continuation."
                (proc (funcall lispm-api-function (lispm-agent-backend* agent) request
                               :on-done (lambda (message)
                                          (setf (lispm-agent-process agent) nil)
-                                         (lispm--continue agent (lispm--reply-text
+                                         (lispm--continue agent (lispm-content-text
                                                                  (append (alist-get 'content message) nil))
                                                           resume (car kept)))
                               :on-error (lambda (err)
@@ -3333,14 +3339,14 @@ RESUME non-nil goes on with the turn there."
       (let* ((old (lispm-agent-buffer agent))
              (old-file (buffer-file-name old))
              (file (lispm--create-session-file agent old-file summary kept)))
-        (lispm--in-session agent
+        (lispm-in-session agent
           (let ((input (lispm--input-heading-p)))
             (when input (delete-region input (point-max))))
           (lispm--newline)
           (insert (lispm-transcript-section
                    (lispm-transcript-title 'note)
                    (format "Continued in [[file:%s]]." (abbreviate-file-name file)))))
-        (lispm--save-session agent)
+        (lispm-save-session agent)
         (let ((new (lispm--visit-session agent file)))
           (dolist (window (get-buffer-window-list old nil t))
             (set-window-buffer window new)
@@ -3349,7 +3355,7 @@ RESUME non-nil goes on with the turn there."
           (kill-buffer old))
         ;; Sizes reported for the old session say nothing of this one.
         (setf (lispm-agent-context agent) nil)
-        (lispm--save-session agent)
+        (lispm-save-session agent)
         (when (fboundp 'lispm-git-commit)
           (lispm-git-commit agent (format "%s: hand over to %s" (lispm-agent-name agent)
                                           (file-name-nondirectory file))))
@@ -3361,7 +3367,7 @@ RESUME non-nil goes on with the turn there."
               ;; The turn goes on from the summary, not from an input,
               ;; after saving what should outlive the session, as a
               ;; handover between turns does before it.
-              (lispm--in-session agent
+              (lispm-in-session agent
                 (when-let* ((input (lispm--input-heading-p)))
                   (delete-region input (point-max))))
               (if lispm-compact-save-memory
@@ -3411,7 +3417,7 @@ Text the user is writing under the last \"* User\" heading stays theirs."
        (not (lispm-agent-condition agent))
        (null (lispm-agent-inbox agent))
        (buffer-live-p (lispm-agent-buffer agent))
-       (lispm--in-session agent (lispm--input-heading-p))))
+       (lispm-in-session agent (lispm--input-heading-p))))
 
 (defun lispm--note-memory-saved (agent)
   "Record that AGENT saved memory for the handover of its session."
@@ -3483,7 +3489,7 @@ is given up.  A handover the next turn waits for takes it (see
                        (lambda (message)
                          (when (funcall current)
                            (remhash agent lispm--idle-handovers)
-                           (let ((summary (lispm--reply-text (append (alist-get 'content message) nil))))
+                           (let ((summary (lispm-content-text (append (alist-get 'content message) nil))))
                              (cond
                               ((nth 3 token)
                                (if (string-blank-p summary)
@@ -3611,11 +3617,11 @@ nil for the latest turn with changes."
 (defun lispm--snapshot-now (snapshot)
   "Current text of the buffer or file in SNAPSHOT.
 A file's is its buffer's, unless that is out of date with it (see
-`lispm--file-text')."
+`lispm-file-text')."
   (let ((buffer (car snapshot))
         (file (plist-get (cdr snapshot) :file)))
-    (cond (file (lispm--file-text file))
-          ((buffer-live-p buffer) (lispm-tools--buffer-text buffer))
+    (cond (file (lispm-file-text file))
+          ((buffer-live-p buffer) (lispm-tools-buffer-text buffer))
           (t ""))))
 
 (defun lispm--journal-parts (turn)
@@ -3641,7 +3647,7 @@ visit no file, or a file the snapshots do not show changed."
 (defun lispm-turn-diff (agent &optional turn)
   "Show every change AGENT made in TURN (default: its latest edits).
 With a prefix argument, choose the turn."
-  (interactive (let ((agent (lispm--buffer-agent))) (list agent (lispm--read-turn agent))))
+  (interactive (let ((agent (lispm-buffer-agent))) (list agent (lispm--read-turn agent))))
   (let* ((turn (lispm--journal-turn agent turn))
          (parts (lispm--journal-parts turn))
          ;; Where the diff's file names are relative to.
@@ -3650,7 +3656,7 @@ With a prefix argument, choose the turn."
                  (concat (lispm-tr "Changes by %s in %s" (lispm-agent-name agent) (lispm--turn-label turn)) "\n\n"
                          (if (car parts) (concat (lispm-journal-diff (plist-get turn :record)) "\n") "")
                          (mapconcat (lambda (s)
-                                      (concat (lispm--diff (plist-get (cdr s) :text) (lispm--snapshot-now s)
+                                      (concat (lispm-diff (plist-get (cdr s) :text) (lispm--snapshot-now s)
                                                            (or (plist-get (cdr s) :file)
                                                                (plist-get (cdr s) :name)))
                                               "\n"))
@@ -3670,17 +3676,17 @@ Default: its latest turn with edits; with a prefix argument, choose
 the turn.  In a project in git, that is every change its files went
 through in the turn, made by tools, shell commands or Lisp, since the
 turn's snapshots show them, even from before Emacs restarted."
-  (interactive (let ((agent (lispm--buffer-agent))) (list agent (lispm--read-turn agent))))
+  (interactive (let ((agent (lispm-buffer-agent))) (list agent (lispm--read-turn agent))))
   (let* ((turn (lispm--journal-turn agent turn))
          (parts (lispm--journal-parts turn))
          (record (plist-get turn :record))
-         (names (append (mapcar (lambda (c) (lispm-tools--label (cdr c))) (car parts))
+         (names (append (mapcar (lambda (c) (lispm-tools-label (cdr c))) (car parts))
                         (mapcar (lambda (s) (or (plist-get (cdr s) :file) (plist-get (cdr s) :name)))
                                 (cdr parts)))))
     ;; All or nothing: a buffer with unsaved changes whose file changed
     ;; on disk too is for the user to settle first.
     (when-let* ((conflicts (seq-filter (lambda (buffer)
-                                         (memq (lispm-tools--sync buffer) '(conflict held)))
+                                         (memq (lispm-tools-sync buffer) '(conflict held)))
                                        (delq nil (append (mapcar (lambda (c) (find-buffer-visiting (cdr c)))
                                                                  (car parts))
                                                          (seq-filter #'buffer-live-p
@@ -3707,7 +3713,7 @@ turn's snapshots show them, even from before Emacs restarted."
                                                       file (lispm-agent-name agent)))))
                   (delete-file file)))
             (if buffer
-                (lispm-tools--set-text buffer (lispm-journal-text-before record file))
+                (lispm-tools-set-text buffer (lispm-journal-text-before record file))
               (lispm-journal-restore record file)))))
       (dolist (s (cdr parts))
         (let* ((buffer (car s))
@@ -3723,7 +3729,7 @@ turn's snapshots show them, even from before Emacs restarted."
                            (yes-or-no-p (lispm-tr "Delete %s, which %s created? "
                                                   file (lispm-agent-name agent)))))
               (delete-file file)))
-           ((buffer-live-p buffer) (lispm-tools--set-text buffer (plist-get props :text)))
+           ((buffer-live-p buffer) (lispm-tools-set-text buffer (plist-get props :text)))
            (file (let ((coding-system-for-write 'utf-8))
                    (write-region (plist-get props :text) nil file nil 'silent)))))))
     (when-let* ((number (plist-get turn :turn)))

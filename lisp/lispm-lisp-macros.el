@@ -35,13 +35,11 @@
 
 (defun lispm-lisp-macros--call (fn &rest args)
   "Construct an unforgeable internal helper call to FN with ARGS."
-  `(,lispm-lisp--internal ,fn ,@args))
+  (apply #'lispm-lisp-internal-call fn args))
 
 (defun lispm-lisp-macros--require-tools (macro required)
-  "Refuse MACRO unless every symbol in REQUIRED is in `lispm-lisp--tools'."
-  (dolist (tool required)
-    (unless (memq tool lispm-lisp--tools)
-      (lispm-lisp--refuse "%s requires the tool %s" macro tool))))
+  "Refuse MACRO unless every symbol in REQUIRED is enabled in this run."
+  (lispm-lisp-require-tools macro required))
 
 (defun lispm-lisp-macros--sanitize (value tool seen)
   "Return VALUE stripped of text properties if printable, else signal for TOOL.
@@ -84,16 +82,16 @@ SEEN tracks composite containers to reject circular structures."
 (defun lispm-lisp-macros--parse-binds (macro specs)
   "Validate `:bind' SPECS for MACRO and return checked pair forms."
   (unless (proper-list-p specs)
-    (lispm-lisp--refuse "%s: :bind must be a list of variables or (VAR EXPR) pairs" macro))
+    (lispm-lisp-refuse "%s: :bind must be a list of variables or (VAR EXPR) pairs" macro))
   (mapcar (lambda (spec)
             (pcase spec
               ((pred symbolp)
-               (lispm-lisp--binder spec)
+               (lispm-lisp-check-binder spec)
                `(cons ',spec ,spec))
               (`(,sym ,expr)
-               (lispm-lisp--binder sym)
+               (lispm-lisp-check-binder sym)
                `(cons ',sym ,expr))
-              (_ (lispm-lisp--refuse "%s: invalid :bind entry %S" macro spec))))
+              (_ (lispm-lisp-refuse "%s: invalid :bind entry %S" macro spec))))
           specs))
 
 (defun lispm-lisp-macros--expand-code-tool (macro tool allow-timeout args)
@@ -105,9 +103,9 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
         (setq opts (car args) body (cdr args))
       (setq body args))
     (unless (and (proper-list-p opts) (cl-evenp (length opts)))
-      (lispm-lisp--refuse "%s: options must be a keyword plist" macro))
+      (lispm-lisp-refuse "%s: options must be a keyword plist" macro))
     (unless (and body (proper-list-p body))
-      (lispm-lisp--refuse "%s requires one or more Lisp forms" macro))
+      (lispm-lisp-refuse "%s requires one or more Lisp forms" macro))
     (let ((tail opts)
           (gbinds (make-symbol "binds"))
           (gtimeout (make-symbol "timeout"))
@@ -117,7 +115,7 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
         (let ((kw (pop tail))
               (val (pop tail)))
           (when (memq kw seen-opts)
-            (lispm-lisp--refuse "%s: duplicate option %s" macro kw))
+            (lispm-lisp-refuse "%s: duplicate option %s" macro kw))
           (push kw seen-opts)
           (cond ((eq kw :bind)
                  (setq has-binds t)
@@ -126,13 +124,13 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
                 ((and allow-timeout (eq kw :timeout))
                  (setq has-timeout t)
                  (push `(,gtimeout ,val) ordered))
-                (t (lispm-lisp--refuse "%s has no option %s" macro kw)))))
+                (t (lispm-lisp-refuse "%s has no option %s" macro kw)))))
       `(let* (,@(nreverse ordered)
               (,gcode ,(lispm-lisp-macros--call
                         'lispm-lisp-macros--serialize
                         `',tool (if has-binds gbinds nil) `',body)))
          ,(lispm-lisp-macros--call
-           'lispm-lisp--call-pairs
+           'lispm-lisp-call-pairs
            `',tool
            `(list (cons 'code ,gcode)
                   ,@(when has-timeout `((cons 'timeout ,gtimeout)))))))))
@@ -162,30 +160,30 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
 
 (defun lispm-lisp-macros--live-file-text (run path)
   "Return exact live text of PATH for RUN's agent if open or readable."
-  (let* ((agent (lispm-lisp--run-agent run))
+  (let* ((agent (lispm-lisp-run-agent run))
          (lispm-current-agent agent)
          (default-directory (lispm-agent-root agent))
-         (file-name-handler-alist (lispm-lisp--run-handlers run))
-         (file (ignore-errors (lispm-tools--file path)))
+         (file-name-handler-alist (lispm-lisp-run-handlers run))
+         (file (ignore-errors (lispm-tools-file path)))
          (open (and file (find-buffer-visiting file)))
-         (state (and open (lispm-tools--state open))))
+         (state (and open (lispm-tools-state open))))
     (cond ((and open (memq state '(current conflict held)))
-           (lispm-tools--buffer-text open))
+           (lispm-tools-buffer-text open))
           ((and file (file-regular-p file) (file-readable-p file))
-           (lispm--file-text file)))))
+           (lispm-file-text file)))))
 
 (defun lispm-lisp-macros--read-file-text (path)
   "Read PATH via `read_file' and return exact replay-cached unnumbered text."
-  (let* ((run (or lispm-lisp--run (error "No program is running")))
-         (first-index (lispm-lisp--run-index run))
-         (raw (lispm-lisp--call-pairs 'read_file
+  (let* ((run (or (lispm-lisp-current-run) (error "No program is running")))
+         (first-index (lispm-lisp-run-index run))
+         (raw (lispm-lisp-call-pairs 'read_file
                                       (list (cons 'path path) (cons 'offset 1)))))
     (when (and (string-prefix-p "[" raw)
                (string-match-p "\\`\\[\\(?:image\\|video\\) " raw))
       (signal 'lispm-call-failed
               (list (propertize (format "transform_file: %s is a media file" path)
                                 'lispm-call-index first-index))))
-    (let* ((entry (nth first-index (lispm-lisp--run-log run)))
+    (let* ((entry (nth first-index (lispm-lisp-run-log run)))
            (logged (and entry (nth 3 entry)))
            (cached (and (stringp logged) (not (string-empty-p logged))
                         (get-text-property 0 'lispm-raw-text logged))))
@@ -197,7 +195,7 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
                            (let ((pages (list lines))
                                  (offset next))
                              (while offset
-                               (let ((page (lispm-lisp--call-pairs
+                               (let ((page (lispm-lisp-call-pairs
                                             'read_file
                                             (list (cons 'path path)
                                                   (cons 'offset offset)
@@ -222,8 +220,8 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
   (let ((clean (substring-no-properties new)))
     (unless (equal clean old)
       (if (string-empty-p old)
-          (lispm-lisp--call-pairs 'write_file (list (cons 'path path) (cons 'content clean)))
-        (lispm-lisp--call-pairs 'edit_file
+          (lispm-lisp-call-pairs 'write_file (list (cons 'path path) (cons 'content clean)))
+        (lispm-lisp-call-pairs 'edit_file
                                 (list (cons 'path path)
                                       (cons 'old_text old)
                                       (cons 'new_text clean))))
@@ -240,7 +238,7 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
 (lispm-lisp-defmacro with_tool_fallback (args)
   "Evaluate `(car ARGS)'; on `lispm-call-failed', run `(cdr ARGS)'."
   (unless (and (consp args) (cdr args) (proper-list-p args))
-    (lispm-lisp--refuse "with_tool_fallback requires a primary form and fallback forms"))
+    (lispm-lisp-refuse "with_tool_fallback requires a primary form and fallback forms"))
   `(condition-case nil
        ,(car args)
      (lispm-call-failed ,@(cdr args))))
@@ -250,17 +248,17 @@ When ALLOW-TIMEOUT is non-nil, `:timeout' is accepted in the leading plist."
   (lispm-lisp-macros--require-tools 'with_terminal '(terminal_enter terminal_leave))
   (let ((gidx (make-symbol "idx"))
         (gdone (make-symbol "done")))
-    `(let ((,gidx ,(lispm-lisp-macros--call 'lispm-lisp--current-index))
+    `(let ((,gidx ,(lispm-lisp-macros--call 'lispm-lisp-current-index))
            (,gdone nil))
        (terminal_enter)
        (unwind-protect
            (prog1
                (progn ,@args)
              (setq ,gdone t))
-         (unless ,(lispm-lisp-macros--call 'lispm-lisp--stopping-p)
+         (unless ,(lispm-lisp-macros--call 'lispm-lisp-stopping-p)
            (terminal_leave)
            (unless ,gdone
-             ,(lispm-lisp-macros--call 'lispm-lisp--note-unwind gidx)))))))
+             ,(lispm-lisp-macros--call 'lispm-lisp-note-unwind gidx)))))))
 
 (lispm-lisp-defmacro with_worktree (args)
   "Delegate in a scoped git worktree for ARGS and remove it on exit.
@@ -268,10 +266,10 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
   (lispm-lisp-macros--require-tools 'with_worktree '(worktree_ask worktree_remove))
   (unless (and (consp args) (cdr args) (consp (car args)) (proper-list-p (car args))
                (cl-oddp (length (car args))))
-    (lispm-lisp--refuse
+    (lispm-lisp-refuse
      "with_worktree requires (VAR :role ROLE :request REQ ...) followed by body forms"))
   (let* ((spec (car args))
-         (var (lispm-lisp--binder (car spec)))
+         (var (lispm-lisp-check-binder (car spec)))
          (tail (cdr spec))
          (grole (make-symbol "role"))
          (greq (make-symbol "req"))
@@ -287,7 +285,7 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
       (let ((kw (pop tail))
             (val (pop tail)))
         (when (memq kw seen)
-          (lispm-lisp--refuse "with_worktree: duplicate option %s" kw))
+          (lispm-lisp-refuse "with_worktree: duplicate option %s" kw))
         (push kw seen)
         (pcase kw
           (:role (push `(,grole ,val) ordered))
@@ -295,9 +293,9 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
           (:name (push `(,gopt-name ,val) ordered))
           (:base (push `(,gbase ,val) ordered))
           (:keep (push `(,gkeep ,val) ordered))
-          (_ (lispm-lisp--refuse "with_worktree has no option %s" kw)))))
+          (_ (lispm-lisp-refuse "with_worktree has no option %s" kw)))))
     (unless (and (memq :role seen) (memq :request seen))
-      (lispm-lisp--refuse "with_worktree requires :role and :request"))
+      (lispm-lisp-refuse "with_worktree requires :role and :request"))
     (dolist (pair `((:name . ,gopt-name) (:base . ,gbase) (:keep . ,gkeep)))
       (unless (memq (car pair) seen)
         (push `(,(cdr pair) nil) ordered)))
@@ -305,10 +303,10 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
             (,gname (or ,gopt-name
                         ,(lispm-lisp-macros--call
                           'lispm-lisp-macros--worktree-name grole greq gbase)))
-            (,gidx ,(lispm-lisp-macros--call 'lispm-lisp--current-index))
+            (,gidx ,(lispm-lisp-macros--call 'lispm-lisp-current-index))
             (,gdone nil)
             (,greply ,(lispm-lisp-macros--call
-                       'lispm-lisp--call-pairs
+                       'lispm-lisp-call-pairs
                        ''worktree_ask
                        `(list (cons 'role ,grole)
                               (cons 'request ,greq)
@@ -321,16 +319,16 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
                                  :reply ,greply)))
                  ,@(cdr args))
              (setq ,gdone t))
-         (unless ,(lispm-lisp-macros--call 'lispm-lisp--stopping-p)
+         (unless ,(lispm-lisp-macros--call 'lispm-lisp-stopping-p)
            (unless ,gkeep
              (condition-case nil
                  ,(lispm-lisp-macros--call
-                   'lispm-lisp--call-pairs
+                   'lispm-lisp-call-pairs
                    ''worktree_remove
                    `(list (cons 'name ,gname) (cons 'force t)))
                (lispm-call-failed nil))
              (unless ,gdone
-               ,(lispm-lisp-macros--call 'lispm-lisp--note-unwind gidx))))))))
+               ,(lispm-lisp-macros--call 'lispm-lisp-note-unwind gidx))))))))
 
 (lispm-lisp-defmacro run_elisp_forms (args)
   "Quote S-expressions in ARGS with `:bind'/`:timeout' for `run_elisp'."
@@ -344,8 +342,8 @@ Syntax: `(with_worktree (VAR :role R :request Q ...) BODY...)'."
   "Read `(VAR PATH)' in ARGS, evaluate body, and write only if changed."
   (lispm-lisp-macros--require-tools 'transform_file '(read_file edit_file write_file))
   (unless (and (consp args) (proper-list-p (car args)) (= (length (car args)) 2) (cdr args))
-    (lispm-lisp--refuse "transform_file requires (VAR PATH) followed by body forms"))
-  (let* ((var (lispm-lisp--binder (caar args)))
+    (lispm-lisp-refuse "transform_file requires (VAR PATH) followed by body forms"))
+  (let* ((var (lispm-lisp-check-binder (caar args)))
          (path-form (cadar args))
          (body (cdr args))
          (gpath (make-symbol "path"))

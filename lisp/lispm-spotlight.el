@@ -156,7 +156,7 @@
       (condition-case nil
           (let* ((enable-local-variables :safe)
                  (inhibit-message t)
-                 (buffer (lispm-tools--find-file file)))
+                 (buffer (lispm-tools-find-file file)))
             (with-current-buffer buffer
               (setq-local lispm-spotlight--ephemeral t
                           lispm-ui-stage-managed t)
@@ -387,7 +387,7 @@ EPHEMERAL-P marks whether BUFFER was opened solely for spotlighting."
     (lispm-ui-spotlight-actor-create
      :key label
      :label label
-     :color (or (lispm-edits--color agent) "#89b4fa")
+     :color (or (lispm-edits-color agent) "#89b4fa")
      :glyph "λ")))
 
 (defun lispm-spotlight--window-agent (window)
@@ -409,7 +409,7 @@ EPHEMERAL-P marks whether BUFFER was opened solely for spotlighting."
                   (sort windows
                         (lambda (a b) (> (window-use-time a) (window-use-time b))))))))
 
-(defun lispm-spotlight--follow-agent-p (agent now)
+(defun lispm-spotlight-follow-agent-p (agent now)
   "Return non-nil if AGENT may record or scroll its buffer on stage at NOW.
 Background root agents record into their own inactive stage subject
 without touching visible windows; sibling subagents share scroll-lock."
@@ -501,9 +501,9 @@ without touching visible windows; sibling subagents share scroll-lock."
                    :retire-before-step (and agent t)
                    :now now)))
         (lispm-edits-mark-shared buffer)
-        (when (lispm-spotlight--follow-agent-p agent now)
+        (when (lispm-spotlight-follow-agent-p agent now)
           (when-let* ((window (lispm-stage-window buffer t agent 'code)))
-            (lispm-edits--reveal
+            (lispm-edits-reveal
              window
              (marker-position (lispm-ui-spotlight-beam-tag-marker beam)))
             (lispm-spotlight--reap-ephemeral)))
@@ -520,7 +520,7 @@ without touching visible windows; sibling subagents share scroll-lock."
   (pcase (and tool (lispm-tool-name tool))
     ("read_file"
      (when-let* ((path (alist-get 'path input))
-                 (file (lispm-tools--file path)))
+                 (file (lispm-tools-file path)))
        (unless (or (lispm-media-kind file) (file-directory-p file))
          (list :kind 'read-file
                :file file
@@ -531,7 +531,7 @@ without touching visible windows; sibling subagents share scroll-lock."
     ("read_buffer"
      (when-let* ((name (alist-get 'buffer input)))
        (list :kind 'read-buffer
-             :buffer (lispm-tools--buffer name)
+             :buffer (lispm-tools-buffer name)
              :start-line (alist-get 'offset input)
              :limit (or (alist-get 'limit input) 2000)
              :tail (alist-get 'tail input)
@@ -557,9 +557,9 @@ without touching visible windows; sibling subagents share scroll-lock."
     ("flymake_diagnostics"
      (list :kind 'flymake-diagnostics
            :file (and (alist-get 'path input)
-                      (lispm-tools--file (alist-get 'path input)))
+                      (lispm-tools-file (alist-get 'path input)))
            :buffer (and (alist-get 'buffer input)
-                        (lispm-tools--buffer (alist-get 'buffer input)))
+                        (lispm-tools-buffer (alist-get 'buffer input)))
            :result result))))
 
 (defun lispm-spotlight--on-tool-call (agent phase tool input result errorp)
@@ -596,7 +596,7 @@ Nothing is shown when ERRORP is non-nil."
   (remhash agent lispm-spotlight--steps)
   (lispm-spotlight--fade-agent agent (float-time)))
 
-(add-hook 'lispm-stage--reap-hooks #'lispm-spotlight--reap-ephemeral)
+(add-hook 'lispm-stage-reap-hooks #'lispm-spotlight--reap-ephemeral)
 (add-hook 'lispm-response-functions #'lispm-spotlight--on-response)
 (add-hook 'lispm-tool-call-functions #'lispm-spotlight--on-tool-call)
 (add-hook 'lispm-buffer-change-functions #'lispm-spotlight--on-buffer-change)

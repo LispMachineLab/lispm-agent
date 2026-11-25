@@ -110,7 +110,7 @@
                                             (type . "function")
                                             (function
                                              (name . ,(alist-get 'name b))
-                                             (arguments . ,(lispm--json-encode
+                                             (arguments . ,(lispm-json-encode
                                                             (alist-get 'input b))))))))
               (when (or text calls)
                 (push `((role . "assistant")
@@ -205,7 +205,7 @@ ARGUMENTS); FINISH the finish reason; USAGE the usage object."
              (json (string-trim (or arguments "")))
              (input (if (string-empty-p json)
                         nil
-                      (condition-case nil (lispm--json-decode json) (error :invalid)))))
+                      (condition-case nil (lispm-json-decode json) (error :invalid)))))
         (unless (listp input)
           (push id invalid)
           (setq input nil))
@@ -248,7 +248,7 @@ ARGUMENTS); FINISH the finish reason; USAGE the usage object."
                            (arguments (alist-get 'arguments fn)))
                       (list (alist-get 'id call)
                             (alist-get 'name fn)
-                            (if (stringp arguments) arguments (lispm--json-encode arguments)))))
+                            (if (stringp arguments) arguments (lispm-json-encode arguments)))))
                   (if (vectorp calls) calls []))
          (alist-get 'finish_reason choice)
          (alist-get 'usage json))))))
@@ -268,12 +268,12 @@ ARGUMENTS); FINISH the finish reason; USAGE the usage object."
 ON-DELTA, if non-nil, is called with KIND and a string as content
 arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
   (pcase-let ((`(,events . ,rest)
-               (lispm--sse-split (concat (lispm-openai-stream-pending stream) chunk))))
+               (lispm-sse-split (concat (lispm-openai-stream-pending stream) chunk))))
     (setf (lispm-openai-stream-pending stream) rest)
     (dolist (data events)
       (if (equal (string-trim data) "[DONE]")
           (setf (lispm-openai-stream-done stream) t)
-        (lispm-openai--chunk stream (lispm--json-decode data) on-delta)))))
+        (lispm-openai--chunk stream (lispm-json-decode data) on-delta)))))
 
 (defun lispm-openai--chunk (stream chunk on-delta)
   "Apply the decoded CHUNK to STREAM, reporting content to ON-DELTA."

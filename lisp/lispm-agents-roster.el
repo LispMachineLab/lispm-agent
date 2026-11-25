@@ -60,7 +60,7 @@
 A terminal's bridge agent carries its delegations, but is never a
 separate roster entry."
   (or (lispm-agents-roster--buffer-agent buffer)
-      (buffer-local-value 'lispm-agents-bridge--agent buffer)))
+      (lispm-agents-bridge-existing-agent buffer)))
 
 (defun lispm-agents-roster--buffer-key (buffer)
   "Return BUFFER's known stable key without consulting a session reader."
@@ -86,7 +86,7 @@ invented for it.  This never asks a session reader to scan files."
                                   (lispm-agent-view subject))
                              (seq-find (lambda (buffer)
                                          (or (eq subject (lispm-agents-roster--buffer-agent buffer))
-                                             (eq subject (buffer-local-value 'lispm-agents-bridge--agent buffer))))
+                                             (eq subject (lispm-agents-bridge-existing-agent buffer))))
                                        (lispm-agents-live-buffers))))))
            (if (buffer-live-p buffer) (lispm-agents-roster-key buffer)
              (when (lispm-principal-id subject) (list 'lispm (lispm-principal-id subject))))))
@@ -104,7 +104,7 @@ invented for it.  This never asks a session reader to scan files."
     (let* ((index (or lispm-agents-roster--index
                       (lispm-agents-roster--build-index (lispm-agents-live-buffers))))
            (buffer (gethash key (lispm-agents-roster--index-by-key index))))
-      (unless (gethash (lispm-agents--session-key (list :agent (car key) :id (cadr key)))
+      (unless (gethash (lispm-agents-session-key (list :agent (car key) :id (cadr key)))
                        (lispm-agents-roster--index-archived index))
         buffer))))
 
@@ -120,7 +120,7 @@ invented for it.  This never asks a session reader to scan files."
         (when-let* ((buffer (seq-find
                             (lambda (buffer)
                               (equal (format "%s" name)
-                                     (buffer-local-value 'lispm-agents-bridge--name buffer)))
+                                     (lispm-agents-bridge-existing-name buffer)))
                             (lispm-agents-live-buffers))))
           (lispm-agents-roster-key buffer))))))
 
@@ -146,9 +146,9 @@ invented for it.  This never asks a session reader to scan files."
           (puthash agent buffer (lispm-agents-roster--index-agents index))
           (puthash (symbol-name (lispm-principal-name agent)) buffer names)
           (when (lispm-principal-id agent) (puthash (lispm-principal-id agent) buffer names)))
-        (when-let* ((name (buffer-local-value 'lispm-agents-bridge--name buffer)))
+        (when-let* ((name (lispm-agents-bridge-existing-name buffer)))
           (puthash name buffer names))
-        (when-let* ((proxy (buffer-local-value 'lispm-agents-bridge--agent buffer)))
+        (when-let* ((proxy (lispm-agents-bridge-existing-agent buffer)))
           (puthash (lispm-principal-id proxy) buffer (lispm-agents-roster--index-parents index)))))
     (setf (lispm-agents-roster--index-archived index) (lispm-agents-roster--archive-index index))
     (lispm-agents-roster--build-wait-index index)
@@ -158,9 +158,7 @@ invented for it.  This never asks a session reader to scan files."
   "Resolve archives from INDEX's live parents without scanning transcripts.
 Overlay known live relations on the last full session graph for this
 snapshot only; a partial roster must not erase historical parent links."
-  (let ((lispm-agents--session-parents lispm-agents--session-parents)
-        (lispm-agents--effective-archive nil)
-        sessions bridges)
+  (let (sessions bridges)
     (dolist (buffer (lispm-agents-roster--index-buffers index))
       (when-let* ((key (gethash buffer (lispm-agents-roster--index-keys index))))
         (let* ((agent (lispm-agents-roster--buffer-agent buffer))
@@ -172,13 +170,10 @@ snapshot only; a partial roster must not erase historical parent links."
           (when (or agent session)
             (push (list :agent (car key) :id (cadr key) :parent parent) sessions))
           (when parent-key
-            (push (cons (lispm-agents--session-key (list :agent (car key) :id (cadr key)))
-                        (lispm-agents--session-key (list :agent (car parent-key) :id (cadr parent-key))))
+            (push (cons (lispm-agents-session-key (list :agent (car key) :id (cadr key)))
+                        (lispm-agents-session-key (list :agent (car parent-key) :id (cadr parent-key))))
                   bridges)))))
-    (lispm-agents--index-session-parents sessions t)
-    (dolist (edge bridges)
-      (puthash (car edge) (cdr edge) (cdr lispm-agents--session-parents)))
-    (lispm-agents--effective-archive)))
+    (lispm-agents-archive-map sessions :extra-edges bridges)))
 
 (defun lispm-agents-roster--add-wait (index buffer field value)
   "Add VALUE to BUFFER's relation FIELD in INDEX, ignoring unknown values."
@@ -207,7 +202,7 @@ snapshot only; a partial roster must not erase historical parent links."
               (lispm-agents-roster--add-wait index buffer :request-ids id)
               (lispm-agents-roster--add-wait
                index (gethash (format "%s" (plist-get entry :from)) names) :request-ids id))))))
-    (dolist (request lispm-collab--requests)
+    (dolist (request (lispm-collab-pending-requests))
       (let* ((metadata (nth 3 request))
              (from (gethash (format "%s" (plist-get metadata :from)) names))
              (to (gethash (format "%s" (or (plist-get metadata :to) (nth 1 request))) names)))
@@ -247,13 +242,13 @@ builds a fresh index so settled requests never remain cached."
                       (list :handling (and (lispm-agent-entry agent) t)
                             :queued (length (lispm-agent-inbox agent)))
                     (lispm-agents-bridge-mailbox-summary buffer))))
-    (unless (and key (gethash (lispm-agents--session-key (list :agent kind :id (cadr key)))
+    (unless (and key (gethash (lispm-agents-session-key (list :agent kind :id (cadr key)))
                               (lispm-agents-roster--index-archived lispm-agents-roster--index)))
       (when (and lispm-agents-roster-change-functions (not agent)
                  (null (buffer-local-value 'lispm-agents-roster--terminal-data buffer)))
         (with-current-buffer buffer
           (setq lispm-agents-roster--terminal-data
-                (lispm-inspect--copy-data (list :status status :mailbox mailbox)))))
+                (lispm-inspect-copy-data (list :status status :mailbox mailbox)))))
       (append
        (list :key key :buffer buffer
              :name (if agent (symbol-name (lispm-agent-name agent))
@@ -302,7 +297,7 @@ builds a fresh index so settled requests never remain cached."
                          (child-key (list 'lispm child-id)))
                     (unless (or (gethash child-key by-key)
                                 (gethash child-key seen)
-                                (gethash (lispm-agents--session-key
+                                (gethash (lispm-agents-session-key
                                           (list :agent 'lispm :id child-id))
                                          archived))
                       (puthash child-key t seen)
@@ -334,7 +329,7 @@ Read work and mail contents lazily
 with `lispm-agents-roster-details'.  Returned data may be changed by the
 caller without changing agents; buffer objects still identify live buffers."
   (let ((lispm-agents-roster--index (lispm-agents-roster--build-index (lispm-agents-live-buffers))))
-    (lispm-inspect--copy-data
+    (lispm-inspect-copy-data
      (append (delq nil (mapcar #'lispm-agents-roster--record
                                (lispm-agents-roster--index-buffers lispm-agents-roster--index)))
              (lispm-agents-roster--retired-children lispm-agents-roster--index)))))
@@ -379,7 +374,7 @@ caller without changing agents; buffer objects still identify live buffers."
             lispm-agents-roster--fields nil lispm-agents-roster--events nil
             lispm-agents-roster--pending-buffers nil lispm-agents-roster--all nil))
     (when-let* ((key (lispm-agents-roster-key subject)))
-      (cl-pushnew (lispm-inspect--copy-data key) lispm-agents-roster--keys :test #'equal))
+      (cl-pushnew (lispm-inspect-copy-data key) lispm-agents-roster--keys :test #'equal))
     (when-let* ((buffer (cond ((bufferp subject) subject)
                               ((lispm-agent-p subject)
                                (or (and (lispm-agents-buffer-p (lispm-agent-buffer subject))
@@ -391,7 +386,7 @@ caller without changing agents; buffer objects still identify live buffers."
     (when (or (null subject) (memq 'agents fields)) (setq lispm-agents-roster--all t))
     (dolist (field fields) (cl-pushnew field lispm-agents-roster--fields))
     (when event
-      (push (plist-put (lispm-inspect--copy-data event) :sequence
+      (push (plist-put (lispm-inspect-copy-data event) :sequence
                        (cl-incf lispm-agents-roster--sequence))
             lispm-agents-roster--events))
     (unless lispm-agents-roster--timer
@@ -432,7 +427,7 @@ caller without changing agents; buffer objects still identify live buffers."
           (unless (eq (gethash buffer (lispm-agents-roster--index-keys lispm-agents-roster--index) 'absent) 'absent)
             (when-let* ((record (lispm-agents-roster--record buffer)))
               (let ((id (lispm-agents-roster--identity record)))
-                (puthash id (lispm-inspect--copy-data record) current)
+                (puthash id (lispm-inspect-copy-data record) current)
                 (puthash id t changed)))))
         (when all (maphash (lambda (id _) (puthash id t changed)) previous))
         (maphash
@@ -503,7 +498,7 @@ caller without changing agents; buffer objects still identify live buffers."
              (data (list :status status :mailbox mailbox))
              fields)
         (unless (equal data old)
-          (setq lispm-agents-roster--terminal-data (lispm-inspect--copy-data data))
+          (setq lispm-agents-roster--terminal-data (lispm-inspect-copy-data data))
           (when old
             (unless (equal status (plist-get old :status)) (push 'status fields))
             (unless (equal mailbox (plist-get old :mailbox)) (push 'mailbox fields))

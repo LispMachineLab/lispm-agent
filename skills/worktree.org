@@ -72,7 +72,7 @@ unmerged branch are deleted too.  Do that only when the work is not wanted, or t
 (defun lispm-worktree--git (directory &rest args)
   "Output of git ARGS run in DIRECTORY; signal an error with git's if it fails."
   (let ((default-directory (file-name-as-directory (expand-file-name directory)))
-        (process-environment (lispm--git-environment)))
+        (process-environment (lispm-git-environment)))
     (with-temp-buffer
       (unless (eql 0 (apply #'call-process "git" nil t nil args))
         (error "git %s: %s" (car args) (string-trim (buffer-string))))
@@ -81,7 +81,7 @@ unmerged branch are deleted too.  Do that only when the work is not wanted, or t
 (defun lispm-worktree--git-async (directory args callback)
   "Run git ARGS in DIRECTORY; then call CALLBACK with nil, or git's complaint."
   (let* ((default-directory (file-name-as-directory (expand-file-name directory)))
-         (process-environment (lispm--git-environment))
+         (process-environment (lispm-git-environment))
          (buffer (generate-new-buffer " *lispm-worktree*" t)))
     (make-process
      :name "lispm-worktree" :buffer buffer :noquery t :connection-type 'pipe
@@ -209,7 +209,7 @@ nothing leaves nothing behind."
          (repository (lispm-worktree--repository root))
          (name (or name (format "%s-%04x" role (random #x10000))))
          (branch (concat lispm-worktree-branch-prefix name))
-         (path (expand-file-name (format "%s/%s/" (lispm--project-name (lispm--main-worktree (car repository)))
+         (path (expand-file-name (format "%s/%s/" (lispm-project-name (lispm-main-worktree (car repository)))
                                          name)
                                  lispm-worktree-directory))
          (base (or base "HEAD"))
@@ -238,7 +238,7 @@ nothing leaves nothing behind."
 (lispm-deftool worktree_list ()
   "List the worktrees worktree_ask made in your repository: their names,
 branches and places, and whether changes are left uncommitted there."
-  (let ((trees (lispm-worktree--list (lispm-tools--root))))
+  (let ((trees (lispm-worktree--list (lispm-tools-root))))
     (if (null trees)
         "No worktrees."
       (mapconcat (pcase-lambda (`(,name ,path ,branch))
@@ -256,7 +256,7 @@ branches and places, and whether changes are left uncommitted there."
 yours.  Changes not committed there stop it, unless FORCE."
   :permission write
   :async t
-  (let* ((root (lispm-tools--root))
+  (let* ((root (lispm-tools-root))
          (tree (or (assoc name (lispm-worktree--list root))
                    (error "No worktree %s; worktree_list shows them" name))))
     (lispm-worktree--remove root (nth 1 tree) (nth 2 tree) force done)))

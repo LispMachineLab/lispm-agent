@@ -59,11 +59,8 @@
 
 (defvar lispm-mcp-servers nil)
 (defvar lispm-mcp-autostart t)
-(defvar lispm-mcp--tools (make-hash-table :test #'equal))
-(defvar lispm-mcp--starting (make-hash-table :test #'equal))
-(defvar lispm-mcp--failed (make-hash-table :test #'equal))
-(declare-function lispm-mcp--running-p "lispm-mcp" (server))
-(declare-function lispm-mcp--live-p "lispm-mcp" (server))
+(declare-function lispm-mcp-connection-status "lispm-mcp" (name))
+(declare-function lispm-mcp-live-p "lispm-mcp" (server))
 (declare-function lispm-mcp-start "lispm-mcp" (&optional server))
 (declare-function lispm-mcp-stop "lispm-mcp" (&optional server))
 
@@ -233,7 +230,7 @@ The store keeps the key, never `lispm-backends' itself."
   (when-let* ((entry (assq name lispm-backends)))
     (copy-tree (cdr entry))))
 
-(defun lispm-backend--check-name (name)
+(defun lispm-backend-check-name (name)
   "Signal an error unless NAME can name a backend."
   (unless (and (symbolp name) name
                (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" (symbol-name name)))
@@ -267,7 +264,7 @@ The store keeps the key, never `lispm-backends' itself."
 (defun lispm-backend-add (name backend &optional save)
   "Add BACKEND, a plist, as NAME, a symbol; SAVE it for later starts.
 Signal an error when NAME is taken, or BACKEND is not one LispM can ask."
-  (lispm-backend--check-name name)
+  (lispm-backend-check-name name)
   (when (assq name lispm-backends)
     (user-error "%s" (lispm-tr "There is already a backend %s" name)))
   (setq backend (lispm-backend--normalize backend))
@@ -278,7 +275,7 @@ Signal an error when NAME is taken, or BACKEND is not one LispM can ask."
 
 (defun lispm-backend-change (name backend &optional save)
   "Make BACKEND, a plist, the one NAME names; SAVE it for later starts."
-  (lispm-backend--check-name name)
+  (lispm-backend-check-name name)
   (unless (assq name lispm-backends)
     (user-error "%s" (lispm-tr "There is no backend %s" name)))
   (setq backend (lispm-backend--normalize backend))
@@ -316,7 +313,7 @@ Its key is removed from the secret store once no other backend uses it."
 without asking anyone for its key: a plist of :state and :message, see
 `lispm-model-status'."
   (let* ((key (plist-get backend :key))
-         (variable (lispm--key-variable backend))
+         (variable (lispm-key-variable backend))
          (value (and variable (getenv variable)))
          (host (or (nth 2 (assq key lispm-key-sources))
                    (ignore-errors (url-host (url-generic-parse-url (plist-get backend :url)))))))
@@ -427,7 +424,7 @@ language spoken."
 (defun lispm-default-permission (class)
   "The action the default policy gives tools of CLASS: `auto', `ask' or
 `deny'.  See `lispm-default-policy'."
-  (or (lispm--policy-lookup class lispm-default-policy) 'ask))
+  (or (lispm-policy-lookup class lispm-default-policy) 'ask))
 
 (defun lispm-set-default-permission (class action &optional save)
   "Have the default policy give tools of CLASS the ACTION, and SAVE it.
@@ -454,7 +451,7 @@ CLASS is one of `lispm-permission-classes', ACTION `auto', `ask' or
 (defun lispm-untrust-skill (file)
   "Trust the code of the project's skill in FILE no longer, for good: an
 agent loading it asks again.  FILE may be gone already."
-  (lispm-skills--trust file nil))
+  (lispm-skills-trust file nil))
 
 ;;;; Memory
 
@@ -501,7 +498,7 @@ starts, and SAVE it.  See `lispm-compact-idle'."
   (lispm-settings-set 'lispm-compact-idle
                       (and on (if (numberp lispm-compact-idle)
                                   lispm-compact-idle
-                                lispm--default-compact-idle))
+                                lispm-default-compact-idle))
                       save))
 
 (defconst lispm-memory-sizes
@@ -565,7 +562,7 @@ backend agents use, and SAVE it; nil is each agent's own model.  See
 
 (defun lispm-settings--title (file)
   "The title of the org FILE, or its name in `lispm-directory'."
-  (let ((line (lispm--first-line file)))
+  (let ((line (lispm-first-line file)))
     (if (and line (string-match "\\`#\\+title:[ \t]*\\(.+\\)" line))
         (match-string 1 line)
       (file-relative-name file lispm-directory))))
@@ -608,8 +605,8 @@ which only LispM itself has (see `lispm-system-agent')."
 
 (defun lispm-skill-directory-builtin-p (directory)
   "Non-nil when DIRECTORY holds LispM's own skills."
-  (lispm-skills--same-file-p (file-name-as-directory directory)
-                             (file-name-as-directory lispm-skills--builtin)))
+  (lispm-skills-same-file-p (file-name-as-directory directory)
+                             (file-name-as-directory lispm-skills-builtin)))
 
 (defun lispm-skill-directory-count (directory)
   "How many skills DIRECTORY holds, without reading them."
@@ -625,7 +622,7 @@ which only LispM itself has (see `lispm-system-agent')."
   "Add DIRECTORY to `lispm-skill-directories', last, so that its skills
 replace those of the same name in the others; SAVE it."
   (let ((directory (file-name-as-directory (abbreviate-file-name (expand-file-name directory)))))
-    (when (seq-find (lambda (other) (lispm-skills--same-file-p (file-name-as-directory other) directory))
+    (when (seq-find (lambda (other) (lispm-skills-same-file-p (file-name-as-directory other) directory))
                     lispm-skill-directories)
       (user-error "%s" (lispm-tr "%s is already a directory of skills" directory)))
     (lispm-settings-set 'lispm-skill-directories (append lispm-skill-directories (list directory)) save)))
@@ -635,7 +632,7 @@ replace those of the same name in the others; SAVE it."
 Its skills are left where they are."
   (lispm-settings-set 'lispm-skill-directories
                       (seq-remove (lambda (other)
-                                    (lispm-skills--same-file-p (file-name-as-directory other)
+                                    (lispm-skills-same-file-p (file-name-as-directory other)
                                                                (file-name-as-directory directory)))
                                   lispm-skill-directories)
                       save))
@@ -647,22 +644,22 @@ of LispM's own, `project' for a project's, `user' for one in
 `lispm-skill-sources', else `directory'."
   (let ((file (plist-get skill :file)))
     (cond ((plist-get skill :project) 'project)
-          ((and file (file-in-directory-p file lispm-skills--builtin)) 'builtin)
-          ((and file (file-in-directory-p file (lispm-skills--write-directory))) 'user)
+          ((and file (file-in-directory-p file lispm-skills-builtin)) 'builtin)
+          ((and file (file-in-directory-p file (lispm-skills-write-directory))) 'user)
           ((plist-get skill :origin) 'source)
           (t 'directory))))
 
 (defun lispm-skill-tools (skill)
   "The tools SKILL, an entry of `lispm-skills', defines:
 \(NAME PERMISSION SUMMARY)s."
-  (plist-get (lispm-skills--index skill) :tools))
+  (plist-get (lispm-skills-index skill) :tools))
 
 (defun lispm-skill-has-code-p (skill)
   "Non-nil when SKILL, an entry of `lispm-skills', has code to evaluate."
   (when-let* ((file (plist-get skill :file))
-              ((not (lispm-skills--md-p file)))
+              ((not (lispm-skills-md-p file)))
               ((file-readable-p file)))
-    (and (lispm-skills--blocks (lispm-skills--file-text file)) t)))
+    (and (lispm-skills-blocks (lispm-skills-file-text file)) t)))
 
 ;;;; MCP servers
 
@@ -674,14 +671,9 @@ of LispM's own, `project' for a project's, `user' for one in
 (defun lispm-settings-mcp-status (name)
   "How MCP server NAME stands: a plist (:state STATE :tools COUNT :tool-names).
 STATE is `running', `starting', `failed' or `stopped'."
-  (let* ((tools (and (hash-table-p lispm-mcp--tools) (gethash name lispm-mcp--tools)))
-         (running (and (fboundp 'lispm-mcp--running-p) (lispm-mcp--running-p name)))
-         (state (cond ((and tools running) 'running)
-                      ((and (hash-table-p lispm-mcp--starting) (gethash name lispm-mcp--starting)) 'starting)
-                      ((and (hash-table-p lispm-mcp--failed) (gethash name lispm-mcp--failed)) 'failed)
-                      (running 'running)
-                      (t 'stopped))))
-    (list :state state :tools (length tools) :tool-names tools)))
+  (if (fboundp 'lispm-mcp-connection-status)
+      (lispm-mcp-connection-status name)
+    '(:state stopped :tools 0 :tool-names nil)))
 
 (defun lispm-settings-mcp--check-name (name)
   "Signal an error unless NAME, a string, can name an MCP server."
@@ -730,7 +722,7 @@ If NAME is running, restart it with its new configuration."
   (unless (assoc name lispm-mcp-servers)
     (user-error "There is no MCP server %s" name))
   (setq config (lispm-settings-mcp--check (lispm-settings-mcp--normalize config)))
-  (let ((was-live (and (fboundp 'lispm-mcp--live-p) (lispm-mcp--live-p name))))
+  (let ((was-live (and (fboundp 'lispm-mcp-live-p) (lispm-mcp-live-p name))))
     (when (and was-live (fboundp 'lispm-mcp-stop))
       (lispm-mcp-stop name))
     (lispm-settings-set 'lispm-mcp-servers

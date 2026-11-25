@@ -183,7 +183,7 @@
           (insert-file-contents (expand-file-name "lispm-calls.jsonl" out-dir))
           (let ((lines (split-string (string-trim (buffer-string)) "\n" t)))
             (should (= (length lines) 2))
-            (let ((first-call (lispm--json-decode (car lines))))
+            (let ((first-call (lispm-json-decode (car lines))))
               (should (= (alist-get 'call first-call) 1))
               (should (= (alist-get 'input_tokens first-call) 15))
               (should (= (alist-get 'cache_read_tokens first-call) 5))
@@ -196,7 +196,7 @@
                     ((file-exists-p scorer)))
           (with-temp-buffer
             (should (zerop (call-process python nil t nil scorer out-dir)))
-            (let* ((scored (lispm--json-decode (buffer-string)))
+            (let* ((scored (lispm-json-decode (buffer-string)))
                    (trials (alist-get 'trials scored))
                    (trial (and (vectorp trials) (> (length trials) 0) (aref trials 0))))
               (should (= (alist-get 'total_trials scored) 1))
@@ -255,14 +255,14 @@
                  (lambda (&rest _)
                    (setq prompted t)
                    'raw-text)))
-        (lispm--save-session agent))
+        (lispm-save-session agent))
       (should-not prompted))
     ;; 4. JSON serialization of tool results / API payloads containing raw 8-bit bytes must not fail
     (let* ((raw-str (concat "P5\n958 78\n255\n"
                             (string (unibyte-char-to-multibyte #x96)
                                     (unibyte-char-to-multibyte #xff)
                                     #xd800)))
-           (encoded (lispm--json-encode `((role . "user") (content . ,raw-str)))))
+           (encoded (lispm-json-encode `((role . "user") (content . ,raw-str)))))
       (should (stringp encoded))
       (should (string-search "P5\\n958 78\\n255\\n" encoded)))))
 

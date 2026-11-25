@@ -584,6 +584,10 @@ ROLE is a role, or the name of one: a symbol or a string."
                    (t role))
              lispm--role-files))
 
+(defun lispm-role-files ()
+  "Return the alist of file-backed roles as `(NAME . FILE)'."
+  lispm--role-files)
+
 (defmacro lispm-defrole (name &rest props)
   "Define a role NAME.
 An optional leading string is its one-line description.  The other
@@ -597,18 +601,18 @@ PROPS are as for `lispm-register-role'.
     (setq props (cons :description props)))
   `(lispm-register-role ',name ,@props))
 
-(defun lispm--new-id ()
+(defun lispm-new-id ()
   "A fresh session id: the time, and random digits."
   (format "%s-%04x" (format-time-string "%Y%m%d-%H%M%S") (random #x10000)))
 
-(defun lispm--project-name (root)
+(defun lispm-project-name (root)
   "Short name of the project at ROOT."
   (let ((dir (directory-file-name (expand-file-name root))))
     (if (equal dir (directory-file-name (expand-file-name "~")))
         "~"
       (file-name-nondirectory dir))))
 
-(defun lispm--free-name (base)
+(defun lispm-free-name (base)
   "BASE, or BASE<N>, whichever no live agent is called; a symbol."
   (let ((name base) (n 1))
     (while (alist-get (intern name) lispm--agents)
@@ -637,10 +641,10 @@ conversation (see `lispm-character-agent')."
     (error "An agent cannot be both system and character scoped"))
   (let* ((role (lispm-get-role role))
          (agent (lispm-agent--create
-                 :name (or name (lispm--free-name
+                 :name (or name (lispm-free-name
                                  (format "%s@%s" (lispm-role-name role)
-                                         (lispm--project-name root))))
-                 :id (or id (lispm--new-id))
+                                         (lispm-project-name root))))
+                 :id (or id (lispm-new-id))
                  :root (file-name-as-directory (expand-file-name root))
                  :standing standing
                  :system system
@@ -659,6 +663,26 @@ conversation (see `lispm-character-agent')."
           (lispm-agent-id agent)))
   (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents))
   (lispm-emit-change agent '(agents)))
+
+(defun lispm-retired-agent-id (name)
+  "Return the recorded session id of retired agent NAME, or nil."
+  (and (stringp name)
+       (alist-get name lispm--retired-agents nil nil #'equal)))
+
+(defun lispm-remember-retired-agent (name id)
+  "Record session ID for retired agent NAME and return ID."
+  (when (and (stringp name) (stringp id))
+    (setf (alist-get name lispm--retired-agents nil nil #'equal) id)))
+
+(defun lispm-rename-agent (agent name)
+  "Rename live AGENT to NAME when no other live agent holds that name."
+  (let ((sym (cond ((symbolp name) name)
+                   ((stringp name) (intern name)))))
+    (when (and sym (not (alist-get sym lispm--agents)))
+      (when-let* ((cell (rassq agent lispm--agents)))
+        (setcar cell sym))
+      (setf (lispm-agent-name agent) sym)))
+  agent)
 
 (defun lispm-register-agent (name &rest props)
   "Declare the standing agent NAME and return it.
@@ -846,14 +870,14 @@ Its live conversations go on with what they had from it."
       (run-hook-with-args 'lispm-character-change-functions name 'removed))
     character))
 
-(defun lispm--character-root-p (root)
+(defun lispm-character-root-p (root)
   "Non-nil if ROOT is `lispm-character-home', where characters are at home."
   (equal (file-name-as-directory (expand-file-name root))
          (file-name-as-directory (expand-file-name lispm-character-home))))
 
 (defun lispm-character-home-p (agent)
   "Non-nil if AGENT is a character's own conversation, in no project."
-  (and (lispm-agent-character agent) (lispm--character-root-p (lispm-agent-root agent))))
+  (and (lispm-agent-character agent) (lispm-character-root-p (lispm-agent-root agent))))
 
 (defun lispm-character-agent (character &optional root)
   "CHARACTER's conversation in ROOT: a standing agent, declared if need be.
@@ -872,25 +896,25 @@ conversation it had there, if any."
         (let ((agent (lispm-make-agent
                       (or (lispm-get-role (lispm-character-role character) t) lispm-default-role)
                       root
-                      :name (lispm--free-name
-                             (if (lispm--character-root-p root)
+                      :name (lispm-free-name
+                             (if (lispm-character-root-p root)
                                  (symbol-name name)
-                               (format "%s@%s" name (lispm--project-name root))))
+                               (format "%s@%s" name (lispm-project-name root))))
                       :standing t
                       :character name)))
           (run-hook-with-args 'lispm-agent-declared-functions agent)
           agent))))
 
-(defun lispm--key-variable (backend)
+(defun lispm-key-variable (backend)
   "The environment variable that holds BACKEND's API key, or nil."
   (or (plist-get backend :key-env)
       (nth 1 (assq (plist-get backend :key) lispm-key-sources))))
 
-(defun lispm--backend-key-at-hand-p (backend)
+(defun lispm-backend-key-at-hand-p (backend)
   "Non-nil when BACKEND has a key at hand, without asking anyone for it.
 A backend that needs no key does not count: it must be named."
   (let ((key (plist-get backend :key))
-        (variable (lispm--key-variable backend)))
+        (variable (lispm-key-variable backend)))
     (cond
      (variable (and (getenv variable) (not (string-empty-p (getenv variable)))))
      ((null key) nil)
@@ -907,7 +931,7 @@ A backend that needs no key does not count: it must be named."
 See `lispm-backend'."
   (or (and (lispm-agent-p agent) (lispm-agent-backend agent))
       lispm-backend
-      (car (seq-find (lambda (entry) (lispm--backend-key-at-hand-p (cdr entry)))
+      (car (seq-find (lambda (entry) (lispm-backend-key-at-hand-p (cdr entry)))
                      lispm-backends))))
 
 (defun lispm-backend (name)
@@ -943,14 +967,14 @@ An entry of `lispm-backends', or a character's own endpoint, named
   (replace-regexp-in-string "[^[:alnum:]._]" "-"
                             (directory-file-name (expand-file-name directory))))
 
-(defun lispm--first-line (file)
+(defun lispm-first-line (file)
   "The first line of FILE, trimmed; nil unless FILE is a regular file."
   (when (file-regular-p file)
     (with-temp-buffer
       (insert-file-contents file nil 0 4096)
       (string-trim (buffer-substring (point-min) (line-end-position))))))
 
-(defun lispm--expand-file-name (file directory)
+(defun lispm-expand-file-name (file directory)
   "FILE expanded against DIRECTORY, on DIRECTORY's machine.
 As `expand-file-name', except that on a remote DIRECTORY (a TRAMP file
 name), an absolute FILE that names no machine of its own, such as
@@ -962,7 +986,7 @@ there, a shell command or git, that is the file meant."
                         file)
                       directory)))
 
-(defun lispm--main-worktree (directory)
+(defun lispm-main-worktree (directory)
   "DIRECTORY, or its counterpart in the main worktree if it is in a linked one.
 The worktrees `git worktree add' links to a repository are one project
 with its main worktree.  A linked worktree's .git is a file naming its
@@ -973,11 +997,11 @@ are names on its machine."
          (top (when-let* ((top (locate-dominating-file directory ".git")))
                 (file-name-as-directory (expand-file-name top))))
          (common (when-let* ((top)
-                             (gitdir (lispm--first-line (expand-file-name ".git" top)))
+                             (gitdir (lispm-first-line (expand-file-name ".git" top)))
                              ((string-match "\\`gitdir:[ \t]*\\(.+\\)" gitdir))
-                             (private (lispm--expand-file-name (match-string 1 gitdir) top))
-                             (common (lispm--first-line (expand-file-name "commondir" private))))
-                   (file-name-as-directory (lispm--expand-file-name common private)))))
+                             (private (lispm-expand-file-name (match-string 1 gitdir) top))
+                             (common (lispm-first-line (expand-file-name "commondir" private))))
+                   (file-name-as-directory (lispm-expand-file-name common private)))))
     (if (not common)
         directory
       (file-name-as-directory
@@ -991,7 +1015,7 @@ are names on its machine."
   "Directory of the sessions, tasks and memory of the project at ROOT.
 Created on demand, under `lispm-directory', not in the project.  A
 linked git worktree has its main worktree's."
-  (let ((dir (expand-file-name (concat "projects/" (lispm--slug (lispm--main-worktree root)) "/")
+  (let ((dir (expand-file-name (concat "projects/" (lispm--slug (lispm-main-worktree root)) "/")
                                lispm-directory)))
     (make-directory dir t)
     dir))
@@ -1019,13 +1043,13 @@ project's."
         ((lispm-character-home-p agent) (lispm-character-directory (lispm-agent-character agent)))
         (t (lispm-project-directory (lispm-agent-root agent)))))
 
-(defconst lispm--policy-actions '(deny ask auto)
+(defconst lispm-policy-actions '(deny ask auto)
   "Policy actions, from the strictest to the most permissive.")
 
-(defun lispm--stricter (a b)
+(defun lispm-stricter (a b)
   "The stricter of the policy actions A and B.
 An unknown action counts as the strictest, as `deny' does."
-  (let ((rank (lambda (action) (or (cl-position action lispm--policy-actions) 0))))
+  (let ((rank (lambda (action) (or (cl-position action lispm-policy-actions) 0))))
     (if (<= (funcall rank a) (funcall rank b)) a b)))
 
 (defconst lispm--implied-permissions '((lisp read))
@@ -1040,13 +1064,13 @@ that policies written before the split mean what they meant: shell
 commands were of class `exec', as Lisp is, until they had a class of
 their own.")
 
-(defun lispm--policy-lookup (permission policy)
+(defun lispm-policy-lookup (permission policy)
   "The action POLICY, an alist, gives the class PERMISSION, or nil.
 A class split from another that POLICY does not name gets the action
 POLICY gives that one (see `lispm--permission-fallbacks')."
   (or (alist-get permission policy)
       (when-let* ((from (alist-get permission lispm--permission-fallbacks)))
-        (lispm--policy-lookup from policy))))
+        (lispm-policy-lookup from policy))))
 
 (defun lispm-policy-action (agent permission)
   "Action AGENT's policy prescribes for tools of class PERMISSION.
@@ -1055,14 +1079,14 @@ and the ceiling's.  A class that implies others (see
 `lispm--implied-permissions') gets the strictest of their actions.
 Each policy looked at gives a class it does not name the action of the
 class it was split from, if any (see `lispm--permission-fallbacks')."
-  (let ((action (or (lispm--policy-lookup permission (lispm-principal-policy agent))
-                    (lispm--policy-lookup permission lispm-default-policy)
+  (let ((action (or (lispm-policy-lookup permission (lispm-principal-policy agent))
+                    (lispm-policy-lookup permission lispm-default-policy)
                     'ask))
         (ceiling (lispm-principal-ceiling agent)))
     (dolist (other (alist-get permission lispm--implied-permissions))
-      (setq action (lispm--stricter action (lispm-policy-action agent other))))
+      (setq action (lispm-stricter action (lispm-policy-action agent other))))
     (if ceiling
-        (lispm--stricter action (or (lispm--policy-lookup permission ceiling) 'ask))
+        (lispm-stricter action (or (lispm-policy-lookup permission ceiling) 'ask))
       action)))
 
 (defun lispm-policy (agent)
@@ -1083,7 +1107,7 @@ class it was split from, if any (see `lispm--permission-fallbacks')."
   "The states of agents as views name them to the user, in English,
 translated where shown.")
 
-(defun lispm--state-name (state)
+(defun lispm-state-name (state)
   "STATE, an agent's, as views name it to the user, in the language spoken."
   (if-let* ((name (alist-get state lispm--state-names)))
       (lispm-tr name)
@@ -1163,25 +1187,25 @@ agent, is replaced.  Errors are reported, not raised."
       copy))
    (t object)))
 
-(defun lispm--json-serialize (object &rest args)
+(defun lispm-json-serialize (object &rest args)
   "Like `json-serialize', sanitizing raw bytes on `json-value-p' error."
   (condition-case nil
       (apply #'json-serialize object args)
     (wrong-type-argument
      (apply #'json-serialize (lispm--json-sanitize object) args))))
 
-(defun lispm--json-encode (object)
+(defun lispm-json-encode (object)
   "Encode OBJECT as a JSON string (decoded text, not bytes)."
-  (decode-coding-string (lispm--json-serialize object) 'utf-8))
+  (decode-coding-string (lispm-json-serialize object) 'utf-8))
 
-(defun lispm--json-decode (string)
+(defun lispm-json-decode (string)
   "Decode the JSON STRING.
 Objects become alists with symbol keys, arrays vectors, null `:null'
 and false `:false', so a decoded value encodes back to the same JSON."
   (json-parse-string string :object-type 'alist :array-type 'array
                      :null-object :null :false-object :false))
 
-(defun lispm--json-pretty (object &optional indent)
+(defun lispm-json-pretty (object &optional indent)
   "Encode OBJECT as indented JSON, starting at column INDENT."
   (let* ((indent (or indent 0))
          (pad (make-string (+ indent 2) ?\s))
@@ -1190,22 +1214,22 @@ and false `:false', so a decoded value encodes back to the same JSON."
      ((and (consp object) (consp (car object)))
       (concat "{\n"
               (mapconcat (lambda (kv)
-                           (concat pad (lispm--json-encode (symbol-name (car kv)))
-                                   ": " (lispm--json-pretty (cdr kv) (+ indent 2))))
+                           (concat pad (lispm-json-encode (symbol-name (car kv)))
+                                   ": " (lispm-json-pretty (cdr kv) (+ indent 2))))
                          object ",\n")
               "\n" close "}"))
      ((null object) "{}")
      ((and (vectorp object)
            (cl-some (lambda (x) (or (consp x) (vectorp x))) object))
       (concat "[\n"
-              (mapconcat (lambda (x) (concat pad (lispm--json-pretty x (+ indent 2))))
+              (mapconcat (lambda (x) (concat pad (lispm-json-pretty x (+ indent 2))))
                          object ",\n")
               "\n" close "]"))
-     ((vectorp object) (lispm--json-encode object))
-     (t (let ((s (lispm--json-encode (vector object))))
+     ((vectorp object) (lispm-json-encode object))
+     (t (let ((s (lispm-json-encode (vector object))))
           (substring s 1 -1))))))
 
-(defun lispm--sse-split (text)
+(defun lispm-sse-split (text)
   "Split TEXT, the unparsed part of a server-sent event stream, into events.
 Return (PAYLOADS . REST): the data of each complete event, in order,
 and the incomplete remainder."
@@ -1221,7 +1245,7 @@ and the incomplete remainder."
             (push data payloads)))))
     (cons (nreverse payloads) (substring text start))))
 
-(defun lispm--truncate (string limit)
+(defun lispm-truncate (string limit)
   "Shorten STRING to about LIMIT characters, keeping its head and tail."
   (if (<= (length string) limit)
       string
@@ -1232,13 +1256,13 @@ and the incomplete remainder."
                       (- (length string) head tail))
               (substring string (- (length string) tail))))))
 
-(defun lispm--oneline (string &optional width)
+(defun lispm-oneline (string &optional width)
   "STRING collapsed to a single line of at most WIDTH (default 72) columns."
   (truncate-string-to-width
    (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or string "")))
    (or width 72) nil nil "…"))
 
-(defun lispm--buffer-current-p (buffer)
+(defun lispm-buffer-current-p (buffer)
   "Non-nil if BUFFER holds the text to go by for the file it visits.
 It does unless the file changed on disk since and BUFFER has no
 unsaved changes: then it is out of date, and the file holds the text.
@@ -1247,11 +1271,11 @@ one visiting no file."
   (or (buffer-modified-p buffer)
       (verify-visited-file-modtime buffer)))
 
-(defun lispm--file-text (file)
+(defun lispm-file-text (file)
   "Contents of FILE, from its buffer if one visits it and is not out of date.
-See `lispm--buffer-current-p'.  The empty string if FILE cannot be read."
+See `lispm-buffer-current-p'.  The empty string if FILE cannot be read."
   (if-let* ((buf (find-buffer-visiting file))
-            ((lispm--buffer-current-p buf)))
+            ((lispm-buffer-current-p buf)))
       (with-current-buffer buf
         (save-restriction
           (widen)
@@ -1262,7 +1286,7 @@ See `lispm--buffer-current-p'.  The empty string if FILE cannot be read."
           (buffer-string))
       "")))
 
-(defun lispm--git-environment ()
+(defun lispm-git-environment ()
   "`process-environment' without the variables that steer git from outside.
 Git gives them to the commands it runs, such as hooks and those of
 rebase -x: GIT_DIR and the like name its repository, GIT_AUTHOR_* and
@@ -1278,7 +1302,7 @@ repository, as that author, not to the one in `default-directory'."
                  entry))
               process-environment))
 
-(defun lispm--diff (old new label &optional callback)
+(defun lispm-diff (old new label &optional callback)
   "Unified diff from string OLD to string NEW, with file LABEL.
 With CALLBACK, return nil, and call CALLBACK with the diff instead,
 once `diff' has run in the background (see `lispm-exec'), or with nil

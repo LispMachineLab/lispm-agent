@@ -1714,7 +1714,7 @@ Call CALLBACK with (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
                                   "\n\n")))
         ;; Another engine, or a changed page: let the model read it.
         (t (funcall done (concat "No results recognized; the search page reads:\n\n"
-                                 (lispm--truncate (lispm-web-text dom final) lispm-web-chunk)))))))))
+                                 (lispm-truncate (lispm-web-text dom final) lispm-web-chunk)))))))))
 
 (lispm-deftool web_fetch
     ((url string "The page's URL.")
@@ -1782,7 +1782,7 @@ Call CALLBACK with (DOM FINAL-URL TITLE PROBLEM ACTION-NOTE ELEMENTS)."
                                 (format "Action: %s\n" note)
                               "")
                             "\n"
-                            (lispm--truncate text lispm-web-chunk)
+                            (lispm-truncate text lispm-web-chunk)
                             (lispm-web--format-elements elements))))))
      :url url :action action :target target :value value
      :wait-for wait-for :show show :engine engine)))

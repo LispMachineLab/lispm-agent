@@ -74,7 +74,7 @@ having been lost with Emacs.")
 
 (defun lispm-inbox-new-id ()
   "A fresh id for an inbox entry."
-  (concat "i" (lispm--new-id)))
+  (concat "i" (lispm-new-id)))
 
 (defun lispm-inbox--render (agent entry state)
   "Section of AGENT's inbox ENTRY in STATE, `queued' or `running'.
@@ -91,9 +91,9 @@ A running entry's text is in the session already, and is left out."
           (if (plist-get entry :request-id) (format ":REQUEST_ID: %s\n" (plist-get entry :request-id)) "")
           (if (plist-get entry :answer-to) (format ":ANSWER_TO: %s\n" (plist-get entry :answer-to)) "")
           (if (plist-get entry :awaiting)
-              (format ":AWAITING: %s\n" (lispm--json-encode (vconcat (plist-get entry :awaiting)))) "")
+              (format ":AWAITING: %s\n" (lispm-json-encode (vconcat (plist-get entry :awaiting)))) "")
           (if (plist-member entry :value)
-              (format ":VALUE: %s\n" (lispm--json-encode (or (plist-get entry :value) :null))) "")
+              (format ":VALUE: %s\n" (lispm-json-encode (or (plist-get entry :value) :null))) "")
           ":QUEUED:   " (or (plist-get entry :queued) (format-time-string "[%Y-%m-%d %a %H:%M]")) "\n"
           ":END:\n"
           (if (and (memq state '(queued suspended)) (plist-get entry :text))
@@ -132,12 +132,12 @@ receipt metadata, :awaiting dependencies, :value and :value-saved,
                             :request-id (funcall get "REQUEST_ID")
                             :answer-to (funcall get "ANSWER_TO")
                             :awaiting (when-let* ((json (funcall get "AWAITING")))
-                                        (append (lispm--json-decode json) nil))
+                                        (append (lispm-json-decode json) nil))
                             ;; A separate flag distinguishes an explicit null
                             ;; from an old inbox with no saved turn value.
                             :value-saved (and (funcall get "VALUE") t)
                             :value (when-let* ((json (funcall get "VALUE")))
-                                     (lispm--json-decode json))
+                                     (lispm-json-decode json))
                             :queued (funcall get "QUEUED")
                             :text (lispm-transcript-text-after-drawer body end)
                             :beg (plist-get section :start) :end end)
@@ -183,7 +183,7 @@ unsaved changes, the file is left as it is, and a message says so."
                   (lispm-inhibit-triggers t))
               (write-region nil nil file nil 'silent)))))
       (when visiting
-        (lispm-tools--sync visiting)))))
+        (lispm-tools-sync visiting)))))
 
 (defun lispm-inbox--delete (predicate)
   "Delete the entries of the inbox in the current buffer that PREDICATE holds for."

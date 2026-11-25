@@ -50,7 +50,7 @@
         (pcase-let* ((`(,text . ,errorp)
                       (lispm-process-tools-test--call
                        agent `((program . "/bin/sh") (args . ,argv) (cwd . "with spaces"))))
-                     (result (lispm--json-decode text)))
+                     (result (lispm-json-decode text)))
           (should-not errorp)
           (should (equal (alist-get 'status result) "exited"))
           (should (eql (alist-get 'exit_code result) 0))
@@ -71,7 +71,7 @@
                       (lispm-process-tools-test--call
                        agent '((program . "/bin/sh")
                                (args . ["-c" "cat; printf partial; printf failed >&2; exit 7"]))))
-                     (result (lispm--json-decode text)))
+                     (result (lispm-json-decode text)))
           (should errorp)
           (should (eql (alist-get 'exit_code result) 7))
           (should (equal (alist-get 'stdout result) "partial"))
@@ -97,7 +97,7 @@
         (should (lispm-test--wait (lambda () results)))
         (should-not (cdar results))
         (should (<= (length (caar results)) 256))
-        (should (eq (alist-get 'truncated (lispm--json-decode (caar results))) t))
+        (should (eq (alist-get 'truncated (lispm-json-decode (caar results))) t))
         (should (lispm-process-tools-test--released-p run))))))
 
 (ert-deftest lispm-process-tools-test-timeout-and-late-events ()
@@ -114,8 +114,8 @@
         (let ((run (car (lispm-process-tools--active-runs))))
           (should (lispm-test--wait (lambda () results) 4))
           (should (cdar results))
-          (should (equal (alist-get 'status (lispm--json-decode (caar results))) "timed_out"))
-          (should (equal (alist-get 'stdout (lispm--json-decode (caar results))) "began"))
+          (should (equal (alist-get 'status (lispm-json-decode (caar results))) "timed_out"))
+          (should (equal (alist-get 'stdout (lispm-json-decode (caar results))) "began"))
           (should (lispm-process-tools-test--released-p run))
           (let ((child (string-to-number (lispm-test--file project "child.pid"))))
             (should (> child 0))
@@ -229,7 +229,7 @@
                         (lispm-process-tools-test--call
                          agent '((program . "/bin/sh")
                                  (args . ["-c" "printf '%s' \"$1\"" "test" "a ; $(unknown)"]))))
-                       (result (lispm--json-decode text)))
+                       (result (lispm-json-decode text)))
             (should-not errorp)
             (should (equal (alist-get 'stdout result) "a ; $(unknown)"))
             (should (file-exists-p (expand-file-name "settings.json" log)))
@@ -269,7 +269,7 @@
                         (lispm-process-tools-test--call
                          agent `((program . "-program") (cwd . ,cwd)
                                  (args . ,(vector literal)))))
-                       (result (lispm--json-decode text))
+                       (result (lispm-json-decode text))
                        (settings (lispm-test--json-file (expand-file-name "settings.json" log))))
             (should-not errorp)
             (should (equal (alist-get 'stdout result)
@@ -321,7 +321,7 @@ formats multi-line JSON, and strips benign macOS color-list unarchiver lines."
         (pcase-let* ((`(,text . ,errorp)
                       (lispm-process-tools-test--call
                        agent `((program . "/bin/sh") (args . ["-c" ,script "sh" ,cocoa]))))
-                     (result (lispm--json-decode text)))
+                     (result (lispm-json-decode text)))
           (should-not errorp)
           (should (<= (length text) 600))
           (should (> (cl-count ?\n text) 1))

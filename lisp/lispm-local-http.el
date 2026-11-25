@@ -52,7 +52,7 @@ handler that answers later keeps it and returns `deferred'.")
           (push (cons (downcase (match-string 1 line)) (match-string 2 line)) headers)))
       headers)))
 
-(defun lispm-local-http--loopback-host-p (host)
+(defun lispm-local-http-loopback-host-p (host)
   "Non-nil if HTTP Host header HOST names localhost/loopback or is nil."
   (or (null host)
       (let ((case-fold-search t))
@@ -60,7 +60,7 @@ handler that answers later keeps it and returns `deferred'.")
          "\\`\\(?:127\\.0\\.0\\.1\\|localhost\\|\\[::1\\]\\)\\(?::[0-9]+\\)?\\'"
          host))))
 
-(defun lispm-local-http--loopback-origin-p (origin)
+(defun lispm-local-http-loopback-origin-p (origin)
   "Non-nil if HTTP Origin header ORIGIN is nil or an HTTP(S) loopback origin."
   (or (null origin)
       (let ((case-fold-search t))
@@ -132,11 +132,11 @@ is `(process-contact SERVER :service)'."
                        (_ (process-put connection :deferred t))
                        (response
                         (cond
-                         ((not (lispm-local-http--loopback-host-p (cdr (assoc "host" headers))))
+                         ((not (lispm-local-http-loopback-host-p (cdr (assoc "host" headers))))
                           '("403 Forbidden"))
                          ((not (funcall authorize headers))
                           '("401 Unauthorized"))
-                         ((not (lispm-local-http--loopback-origin-p
+                         ((not (lispm-local-http-loopback-origin-p
                                 (cdr (assoc "origin" headers))))
                           '("403 Forbidden"))
                          (t (funcall handler method path headers

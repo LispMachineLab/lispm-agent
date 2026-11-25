@@ -265,7 +265,7 @@ If it is cut short, return what it holds so far, or nil if WHOLE."
 
 ;;;; Showing
 
-(defun lispm-edits--color (agent)
+(defun lispm-edits-color (agent)
   "The color of AGENT's cursor."
   (if (and agent lispm-edits-colors)
       (nth (mod (sxhash-equal (symbol-name (lispm-principal-name agent))) (length lispm-edits-colors))
@@ -274,7 +274,7 @@ If it is cut short, return what it holds so far, or nil if WHOLE."
 
 (defun lispm-edits--tag (agent &optional note)
   "AGENT's cursor: a bar, then its name, and NOTE, in its color."
-  (let ((color (lispm-edits--color agent)))
+  (let ((color (lispm-edits-color agent)))
     (concat (propertize " " 'face `(:background ,color))
             (propertize " " 'face 'default)
             (propertize (concat " λ " (if agent (symbol-name (lispm-principal-name agent)) "LispM")
@@ -298,7 +298,7 @@ Tiles or reuses stage panes per `lispm-stage-min-sizes', never covering
 the selected window, a side window, or a chat."
   (lispm-stage-window buffer lispm-edits-follow lispm-current-agent 'code))
 
-(defun lispm-edits--reveal (window position)
+(defun lispm-edits-reveal (window position)
   "Show POSITION in WINDOW, unless WINDOW is where the user works."
   (when (and (window-live-p window) (not (eq window (selected-window))))
     (unless (pos-visible-in-window-p position window)
@@ -364,7 +364,7 @@ text, the text it replaced, and its length, TOTAL in all."
                                      (/ total (float lispm-edits-speed)))))))
             (setq lispm-edits--seen nil)
             (add-hook 'before-change-functions #'lispm-edits--interrupt nil t)
-            (lispm-edits--reveal window (marker-position (caar hunks)))
+            (lispm-edits-reveal window (marker-position (caar hunks)))
             (push show lispm-edits--shows)
             (lispm-edits--draw show (float-time))
             (unless (timerp lispm-edits--timer)
@@ -525,7 +525,7 @@ AGENT supplies the agent colour when ACTOR is `agent'."
                 (let* ((bg (or (face-background 'default nil t) "#1e1e2e"))
                        (color (if (eq actor 'user)
                                   lispm-edits-user-color
-                                (lispm-edits--color agent)))
+                                (lispm-edits-color agent)))
                        (tint (and (eq actor 'agent)
                                   (lispm-edits--blend bg color 0.08)))
                        (ov (make-overlay lbeg lend buffer t nil)))
@@ -615,7 +615,7 @@ changes no buffer, or does not make sense yet."
   (let ((buffer (lispm-edits--proposal-buffer p)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (let* ((old (lispm-tools--buffer-text buffer))
+        (let* ((old (lispm-tools-buffer-text buffer))
                (text (lispm-edits--proposal-text p))
                (streaming (lispm-edits--proposal-streaming p))
                (agent (lispm-edits--proposal-agent p))
@@ -626,7 +626,7 @@ changes no buffer, or does not make sense yet."
                                                         (lispm-tr "writing…")
                                                       (lispm-tr "awaiting approval")))
                             "\n"))
-               (bar (propertize " " 'face `(:background ,(lispm-edits--color agent))))
+               (bar (propertize " " 'face `(:background ,(lispm-edits-color agent))))
                overlays)
           ;; Text still coming does not remove what follows it.
           (when streaming
@@ -651,7 +651,7 @@ changes no buffer, or does not make sense yet."
           (setf (lispm-edits--proposal-overlays p) overlays)
           (when (and hunks (not (lispm-edits--proposal-revealed p)))
             (setf (lispm-edits--proposal-revealed p) t)
-            (lispm-edits--reveal window (1+ (caar hunks)))))))))
+            (lispm-edits-reveal window (1+ (caar hunks)))))))))
 
 (defun lispm-edits--open-end (hunks old text)
   "HUNKS, but a last one that runs to the end of OLD and TEXT removes no

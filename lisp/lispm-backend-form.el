@@ -170,7 +170,7 @@ Signal an error when the source needs something that is missing."
          (variable (and (stringp (alist-get 'key-env values))
                         (string-trim (alist-get 'key-env values)))))
     (if new
-        (lispm-backend--check-name name)
+        (lispm-backend-check-name name)
       (unless old
         (user-error "%s" (lispm-tr "There is no backend %s" name))))
     (setq backend (plist-put backend :api (alist-get 'api values)))
@@ -240,7 +240,7 @@ says, once it is valid."
                                (lispm-secret-get (lispm-backend-secret-id name) t))))
          (stored-key (and backend (stringp (plist-get backend :key))
                           (not (string-empty-p (plist-get backend :key)))))
-         (variable (and backend (lispm--key-variable backend)))
+         (variable (and backend (lispm-key-variable backend)))
          (use-p (or (null name) (not (eq name (lispm-backend-name)))))
          (fields
           (append
@@ -290,7 +290,7 @@ says, once it is valid."
            :submit (lispm-tr "Save")
            :cancel (lispm-tr "Cancel")
            :on-submit (lambda (values) (lispm-backend-form--submit name values)))))
-    (when (and name backend (not (lispm--backend-key-at-hand-p backend)))
+    (when (and name backend (not (lispm-backend-key-at-hand-p backend)))
       (with-current-buffer buffer
         (when-let* ((widget (alist-get 'key (lispm-ui-form-widgets buffer))))
           (goto-char (or (widget-field-start widget) (widget-get widget :from))))))
@@ -361,7 +361,7 @@ says, once it is valid."
                        ((eq (plist-get props :key-source) 'none) 'none)
                        ((and (string-empty-p key)
                              old
-                             (lispm--backend-key-at-hand-p old))
+                             (lispm-backend-key-at-hand-p old))
                         (lispm-backend-form--key-source old))
                        ((and (eq provider 'custom) (string-empty-p key))
                         'none)
@@ -369,7 +369,7 @@ says, once it is valid."
                        (t 'typed)))
          (variable (or (and (stringp (alist-get 'key-env values))
                             (string-trim (alist-get 'key-env values)))
-                       (and old (lispm--key-variable old)))))
+                       (and old (lispm-key-variable old)))))
     (unless (and (symbolp name)
                  (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" (symbol-name name)))
       (user-error "%s" (lispm-tr "Use letters, digits, `-', `_' or `.'")))
@@ -449,7 +449,7 @@ says, once it is valid."
                           (let* ((prov (alist-get 'provider values))
                                  (back (and prov (not (eq prov 'custom))
                                             (lispm-backend-get prov))))
-                            (if (and back (lispm--backend-key-at-hand-p back))
+                            (if (and back (lispm-backend-key-at-hand-p back))
                                 (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
                               (lispm-tr "LispM Auth keeps it encrypted.")))))))
          (buffer
@@ -465,7 +465,7 @@ says, once it is valid."
            :on-submit #'lispm-model-setup-form--submit)))
     (with-current-buffer buffer
       (let* ((need-key (and (funcall key-p (list (cons 'provider provider)))
-                            (not (and props (lispm--backend-key-at-hand-p props)))))
+                            (not (and props (lispm-backend-key-at-hand-p props)))))
              (target (if need-key 'key 'model)))
         (when-let* ((widget (alist-get target (lispm-ui-form-widgets buffer))))
           (goto-char (or (widget-field-start widget) (widget-get widget :from))))))
@@ -755,7 +755,7 @@ return its buffer."
                             (cond ((not (let ((case-fold-search nil))
                                           (string-match-p "\\`[a-z0-9][a-z0-9_-]\\{0,63\\}\\'" trimmed)))
                                    (lispm-tr "Use lowercase letters, digits, `-' or `_'"))
-                                  ((lispm-skills--find trimmed nil)
+                                  ((lispm-skills-find trimmed nil)
                                    (lispm-tr "There is already a skill %s" trimmed))))))
            :help ,(lispm-tr "The skill's identifier, as `org-tables' or `deploy-check'."))
      (title :type text :label ,(lispm-tr "Title")

@@ -81,7 +81,7 @@
 (put 'lispm-lisp-refused 'error-conditions '(lispm-lisp-refused))
 (put 'lispm-lisp-refused 'error-message "Not allowed in run_lisp")
 
-(defun lispm-lisp--refuse (format &rest args)
+(defun lispm-lisp-refuse (format &rest args)
   "Refuse to run a program, for the reason FORMAT and ARGS make."
   (signal 'lispm-lisp-refused (list (apply #'format-message format args))))
 
@@ -91,7 +91,7 @@
       (format "%s: %s" (get (car err) 'error-message) (cadr err))
     (error-message-string err)))
 
-(cl-defstruct (lispm-lisp--run (:constructor lispm-lisp--run-create) (:copier nil))
+(cl-defstruct (lispm-lisp-run (:constructor lispm-lisp--run-create) (:copier nil))
   "A program run with run_lisp: its AGENT, its call ID (the call plist
 CALL), its FORMS, checked, the TOOLS it may call.  LOG holds the calls
 it made, each (NAME INPUT OUTCOME TEXT), OUTCOME being `value',
@@ -277,6 +277,16 @@ Each entry is (FUNCTION . PROPS):
 (defconst lispm-lisp--internal (make-symbol "lispm-lisp-internal")
   "Unforgeable head marking runtime helper calls emitted by `lispm-lisp-defmacro'.")
 
+(defun lispm-lisp-internal-call (fn &rest args)
+  "Construct an unforgeable internal helper call to FN with ARGS."
+  `(,lispm-lisp--internal ,fn ,@args))
+
+(defun lispm-lisp-require-tools (macro required)
+  "Refuse MACRO unless every symbol in REQUIRED is allowed in this run."
+  (dolist (tool required)
+    (unless (memq tool lispm-lisp--tools)
+      (lispm-lisp-refuse "%s requires the tool %s" macro tool))))
+
 (defvar lispm-lisp--macro-tools (make-hash-table :test #'eq)
   "Macro tools in `run_lisp': symbol -> pure syntax expander `(ARGS -> FORM)'.")
 
@@ -302,33 +312,33 @@ Each entry is (FUNCTION . PROPS):
       (when lit
         (pcase-let ((`(,_arg ,type ,_doc . ,opts) param))
           (condition-case err
-              (lispm-tools--argument key type (lispm-lisp--json lit head) opts)
-            (error (lispm-lisp--refuse "%s: %s" head (error-message-string err)))))))))
+              (lispm-tools-argument key type (lispm-lisp--json lit head) opts)
+            (error (lispm-lisp-refuse "%s: %s" head (error-message-string err)))))))))
 
 (defun lispm-lisp--expand-tool-call (head args scope)
   "Validate and rewrite a call `(HEAD . ARGS)' of tool HEAD in SCOPE."
   (unless (and (proper-list-p args) (cl-evenp (length args)))
-    (lispm-lisp--refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
+    (lispm-lisp-refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
                         head head))
   (let* ((tool (lispm-get-tool head))
          (schema-p (and tool (lispm-tool-input-schema tool)))
          (params (and tool (not schema-p) (lispm-tool-params tool)))
-         (param-alist (mapcar (lambda (p) (cons (lispm-tools--key (car p)) p)) params))
+         (param-alist (mapcar (lambda (p) (cons (lispm-tools-key (car p)) p)) params))
          (tail args)
          given non-null pairs)
     (while tail
       (let ((kw (pop tail))
             (val-form (pop tail)))
         (unless (keywordp kw)
-          (lispm-lisp--refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
+          (lispm-lisp-refuse "calling %s without keyword arguments, as (%s :path \"a.el\")"
                               head head))
-        (let* ((key (lispm-tools--key (intern (substring (symbol-name kw) 1))))
+        (let* ((key (lispm-tools-key (intern (substring (symbol-name kw) 1))))
                (param (assq key param-alist)))
           (when (memq key given)
-            (lispm-lisp--refuse "%s: duplicate parameter %s" head kw))
+            (lispm-lisp-refuse "%s: duplicate parameter %s" head kw))
           (push key given)
           (when (and tool (not schema-p) (not param) (not (eq key 'why)))
-            (lispm-lisp--refuse "%s has no parameter %s" head kw))
+            (lispm-lisp-refuse "%s has no parameter %s" head kw))
           (lispm-lisp--check-tool-arg head (cdr param) key val-form)
           (unless (lispm-lisp--null-form-p val-form)
             (push key non-null))
@@ -336,9 +346,9 @@ Each entry is (FUNCTION . PROPS):
     (when (and tool (not schema-p))
       (dolist (p params)
         (unless (or (plist-get (cdddr p) :optional)
-                    (memq (lispm-tools--key (car p)) non-null))
-          (lispm-lisp--refuse "%s: missing required parameter :%s" head (car p)))))
-    `(lispm-lisp--call-pairs ',head (list ,@(nreverse pairs)))))
+                    (memq (lispm-tools-key (car p)) non-null))
+          (lispm-lisp-refuse "%s: missing required parameter :%s" head (car p)))))
+    `(lispm-lisp-call-pairs ',head (list ,@(nreverse pairs)))))
 
 (defun lispm-lisp--macro-env (&optional blocked)
   "Return a `macroexpand-all-environment' alist for early macro expansion.
@@ -351,7 +361,7 @@ eval smuggling inside enclosing early macros."
              lispm-lisp--macro-tools)
     (dolist (sym (append lispm-lisp--never blocked))
       (let ((s sym))
-        (push (cons s (lambda (&rest _) (lispm-lisp--refuse "%s" s))) env)))
+        (push (cons s (lambda (&rest _) (lispm-lisp-refuse "%s" s))) env)))
     (push (cons 'rx (lambda (&rest args)
                       (let ((form (cons 'rx args)))
                         (lispm-lisp--scan form t)
@@ -368,29 +378,29 @@ eval smuggling inside enclosing early macros."
    ((and (consp place) (eq (car place) 'gethash)
          (proper-list-p place) (<= 3 (length place) 4))
     place)
-   (t (lispm-lisp--refuse "place %S" place))))
+   (t (lispm-lisp-refuse "place %S" place))))
 
 (defun lispm-lisp--check-places (head args)
   "Refuse place-mutating macro `(HEAD . ARGS)' if any place is unsafe."
   (pcase head
     ('setf
      (unless (and (proper-list-p args) (cl-evenp (length args)))
-       (lispm-lisp--refuse "%S" (cons head args)))
+       (lispm-lisp-refuse "%S" (cons head args)))
      (let ((tail args))
        (while tail
          (lispm-lisp--check-place (car tail))
          (setq tail (cddr tail)))))
     ('push
      (unless (and (proper-list-p args) (= (length args) 2))
-       (lispm-lisp--refuse "%S" (cons head args)))
+       (lispm-lisp-refuse "%S" (cons head args)))
      (lispm-lisp--check-place (cadr args)))
     ('cl-callf
      (unless (and (proper-list-p args) (>= (length args) 2))
-       (lispm-lisp--refuse "%S" (cons head args)))
+       (lispm-lisp-refuse "%S" (cons head args)))
      (lispm-lisp--check-place (cadr args)))
     ((or 'pop 'cl-incf 'cl-decf 'incf 'decf)
      (unless (and (proper-list-p args) (<= 1 (length args) 2))
-       (lispm-lisp--refuse "%S" (cons head args)))
+       (lispm-lisp-refuse "%S" (cons head args)))
      (lispm-lisp--check-place (car args)))))
 
 (defun lispm-lisp--scan (form &optional strict)
@@ -402,10 +412,10 @@ When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
     (cl-labels ((walk (x in-skip)
                   (while (consp x)
                     (when (gethash x seen)
-                      (lispm-lisp--refuse "a circular form"))
+                      (lispm-lisp-refuse "a circular form"))
                     (puthash x t seen)
                     (when (> (cl-incf count) 100000)
-                      (lispm-lisp--refuse "a program this large"))
+                      (lispm-lisp-refuse "a program this large"))
                     (let ((head (car x)))
                       (cond
                        ((and (memq head '(cl-flet cl-flet* cl-labels))
@@ -414,7 +424,7 @@ When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
                           (dolist (def (cadr x))
                             (when (and (consp def) (symbolp (car def))
                                        (gethash (car def) lispm-lisp--macro-tools))
-                              (lispm-lisp--refuse "redefining macro %s" (car def)))))
+                              (lispm-lisp-refuse "redefining macro %s" (car def)))))
                         (walk head in-skip)
                         (setq x (cdr x)))
                        ((and (not strict) (not in-skip)
@@ -439,24 +449,24 @@ When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
                                             (not (memq head lispm-lisp--pcase-patterns)))))
                           (if in-skip
                               (push head skipped)
-                            (lispm-lisp--refuse "%s" head)))
+                            (lispm-lisp-refuse "%s" head)))
                         (walk head in-skip)
                         (setq x (cdr x))))))))
       (walk form nil)
       (delete-dups skipped))))
 
-(defun lispm-lisp--binder (symbol)
+(defun lispm-lisp-check-binder (symbol)
   "SYMBOL, if a program may bind it; else refuse."
   (unless (and symbol (symbolp symbol) (not (keywordp symbol)) (not (eq symbol t)))
-    (lispm-lisp--refuse "binding %S" symbol))
+    (lispm-lisp-refuse "binding %S" symbol))
   (when (and (special-variable-p symbol) (not (memq symbol lispm-lisp--bindable)))
-    (lispm-lisp--refuse "binding %s, a variable of Emacs's: give yours another name" symbol))
+    (lispm-lisp-refuse "binding %s, a variable of Emacs's: give yours another name" symbol))
   symbol)
 
 (defun lispm-lisp--check-body (forms scope)
   "FORMS, checked as `lispm-lisp--check' does, with SCOPE."
   (unless (proper-list-p forms)
-    (lispm-lisp--refuse "%S, which is not a list of forms" forms))
+    (lispm-lisp-refuse "%S, which is not a list of forms" forms))
   (mapcar (lambda (form) (lispm-lisp--check form scope)) forms))
 
 (defun lispm-lisp--check-lambda (lambda scope)
@@ -464,38 +474,38 @@ When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
   (pcase lambda
     (`(lambda ,(and args (pred proper-list-p)) . ,body)
      (let ((vars (seq-remove (lambda (arg) (memq arg '(&optional &rest))) args)))
-       (mapc #'lispm-lisp--binder vars)
+       (mapc #'lispm-lisp-check-binder vars)
        `(lambda ,args ,@(lispm-lisp--check-body body (append vars scope)))))
-    (_ (lispm-lisp--refuse "the function %S" lambda))))
+    (_ (lispm-lisp-refuse "the function %S" lambda))))
 
 (defun lispm-lisp--check-let (head bindings body scope)
   "The form (HEAD BINDINGS . BODY), a `let' or `let*', checked with SCOPE."
   (unless (proper-list-p bindings)
-    (lispm-lisp--refuse "the bindings %S" bindings))
+    (lispm-lisp-refuse "the bindings %S" bindings))
   (let ((inner scope) checked)
     (dolist (binding bindings)
       (pcase binding
         ((pred symbolp)
-         (push (lispm-lisp--binder binding) checked)
+         (push (lispm-lisp-check-binder binding) checked)
          (push binding inner))
         (`(,symbol . ,(and rest (guard (and (proper-list-p rest) (<= (length rest) 1)))))
-         (lispm-lisp--binder symbol)
+         (lispm-lisp-check-binder symbol)
          (push (list symbol (lispm-lisp--check (car rest) (if (eq head 'let*) inner scope)))
                checked)
          (push symbol inner))
-        (_ (lispm-lisp--refuse "the binding %S" binding))))
+        (_ (lispm-lisp-refuse "the binding %S" binding))))
     `(,head ,(nreverse checked) ,@(lispm-lisp--check-body body inner))))
 
 (defun lispm-lisp--check-setq (pairs scope)
   "The form (setq . PAIRS), checked with SCOPE: it sets the program's variables."
   (unless (cl-evenp (length pairs))
-    (lispm-lisp--refuse "setq with an odd number of arguments"))
+    (lispm-lisp-refuse "setq with an odd number of arguments"))
   (let (checked)
     (while pairs
       (let ((symbol (pop pairs))
             (value (pop pairs)))
         (unless (memq symbol scope)
-          (lispm-lisp--refuse "setting %s, a variable the program did not bind: bind it with let"
+          (lispm-lisp-refuse "setting %s, a variable the program did not bind: bind it with let"
                               symbol))
         (push symbol checked)
         (push (lispm-lisp--check value scope) checked)))
@@ -503,14 +513,14 @@ When STRICT is non-nil, do not skip `run_elisp_forms' or `eval_elisp_forms'."
 
 (defun lispm-lisp--check-condition-case (var body handlers scope)
   "The form (condition-case VAR BODY . HANDLERS), checked with SCOPE."
-  (when var (lispm-lisp--binder var))
+  (when var (lispm-lisp-check-binder var))
   `(condition-case ,var ,(lispm-lisp--check body scope)
      ,@(mapcar (lambda (handler)
                  (unless (and (consp handler) (proper-list-p handler))
-                   (lispm-lisp--refuse "the handler %S" handler))
+                   (lispm-lisp-refuse "the handler %S" handler))
                  (dolist (condition (ensure-list (car handler)))
                    (when (memq condition lispm-lisp--unhandled)
-                     (lispm-lisp--refuse "handling %s" condition)))
+                     (lispm-lisp-refuse "handling %s" condition)))
                  (cons (car handler)
                        (lispm-lisp--check-body (cdr handler) (if var (cons var scope) scope))))
                handlers)))
@@ -526,22 +536,22 @@ SCOPE lists the variables the program bound around FORM."
                (not (memq form scope))
                (not (memq form lispm-lisp--bindable))
                (not (memq form lispm-lisp--readable-globals)))
-      (lispm-lisp--refuse "reading %s, a variable the program did not bind" form))
+      (lispm-lisp-refuse "reading %s, a variable the program did not bind" form))
     form)
-   ((not (proper-list-p form)) (lispm-lisp--refuse "%S" form))
+   ((not (proper-list-p form)) (lispm-lisp-refuse "%S" form))
    (t
     (let ((head (car form))
           (args (cdr form)))
       (cond
        ((not (symbolp head))
-        (lispm-lisp--refuse "calling %S: name a function, or use funcall" head))
+        (lispm-lisp-refuse "calling %S: name a function, or use funcall" head))
        ((eq head 'quote) form)
        ((eq head 'function)
         (pcase args
           (`(,(and name (pred symbolp))) `(function ,name))
           (`(,lambda)
            `(lispm-lisp--closure (function ,(lispm-lisp--check-lambda lambda scope))))
-          (_ (lispm-lisp--refuse "%S" form))))
+          (_ (lispm-lisp-refuse "%S" form))))
        ((memq head '(progn prog1 and or if while unwind-protect save-current-buffer))
         (cons head (lispm-lisp--check-body args scope)))
        ((eq head 'save-excursion)
@@ -573,7 +583,7 @@ SCOPE lists the variables the program bound around FORM."
         (lispm-lisp--expand-tool-call head args scope))
        ((macrop head)
         (unless (memq head lispm-lisp--macros)
-          (lispm-lisp--refuse "the macro %s" head))
+          (lispm-lisp-refuse "the macro %s" head))
         (let* ((early-p (memq head lispm-lisp--early-macros))
                (blocked (and early-p (lispm-lisp--scan form)))
                (_ (when early-p (lispm-lisp--check-places head args)))
@@ -581,26 +591,26 @@ SCOPE lists the variables the program bound around FORM."
                (macroexpand-all-environment env)
                (expansion (macroexpand-1 form env)))
           (when (eq expansion form)
-            (lispm-lisp--refuse "%S" form))
+            (lispm-lisp-refuse "%S" form))
           (lispm-lisp--check expansion scope)))
-       ((special-form-p head) (lispm-lisp--refuse "the special form %s" head))
+       ((special-form-p head) (lispm-lisp-refuse "the special form %s" head))
        ((assq head lispm-lisp--guarded)
         `(lispm-lisp--apply ',head ,@(lispm-lisp--check-body args scope)))
        ((lispm-lisp--allowed-p head)
         (cons head (lispm-lisp--check-body args scope)))
        ((not (fboundp head))
-        (lispm-lisp--refuse "%s, which is neither a function nor a tool you have" head))
+        (lispm-lisp-refuse "%s, which is neither a function nor a tool you have" head))
        (t
-        (lispm-lisp--refuse "%s: it is not known to be free of side effects; \
+        (lispm-lisp-refuse "%s: it is not known to be free of side effects; \
 call a tool for that, or use eval_elisp" head)))))))
 
 (defun lispm-lisp--prepare (code)
   "The forms of the program CODE, checked and rewritten to run."
   (mapcar (lambda (form)
             (when (and (consp form) (memq (car form) lispm-lisp--never))
-              (lispm-lisp--refuse "%s" (car form)))
+              (lispm-lisp-refuse "%s" (car form)))
             (lispm-lisp--check form nil))
-          (lispm-tools--read-forms code)))
+          (lispm-tools-read-forms code)))
 
 ;;;; Checks as it runs
 
@@ -618,6 +628,10 @@ call a tool for that, or use eval_elisp" head)))))))
 
 (defvar lispm-lisp--run nil
   "The run of the program being evaluated, while it is.")
+
+(defun lispm-lisp-current-run ()
+  "Return the currently executing `lispm-lisp-run', or nil."
+  lispm-lisp--run)
 
 (defvar lispm-lisp--pass-tag nil
   "The catch tag that ends the pass under way of a program.")
@@ -642,14 +656,14 @@ a function, which is passed on as it is: a string, nil, a keyword."
         ((and (symbolp function) (assq function lispm-lisp--guarded))
          (lambda (&rest args) (apply #'lispm-lisp--apply function args)))
         ((and function (lispm-lisp--allowed-p function)) function)
-        (t (lispm-lisp--refuse "calling %S" function))))
+        (t (lispm-lisp-refuse "calling %S" function))))
 
 (defun lispm-lisp--own (object)
   "Note that the running program made OBJECT, a buffer or a hash table; return it."
   (when object
     (puthash object lispm-lisp--run lispm-lisp--owned)
     (when (bufferp object)
-      (push object (lispm-lisp--run-buffers lispm-lisp--run))))
+      (push object (lispm-lisp-run-buffers lispm-lisp--run))))
   object)
 
 (defun lispm-lisp--owned-p (object)
@@ -661,7 +675,7 @@ a function, which is passed on as it is: a string, nil, a keyword."
   (unless (or (lispm-lisp--owned-p (current-buffer))
               (and (eq kind 'motion) (memq (current-buffer) lispm-lisp--excursions))
               (and (eq kind 'narrow) (memq (current-buffer) lispm-lisp--restrictions)))
-    (lispm-lisp--refuse "%s in %s, a buffer the program did not make%s" function (buffer-name)
+    (lispm-lisp-refuse "%s in %s, a buffer the program did not make%s" function (buffer-name)
                         (pcase kind
                           ('motion " (other than inside save-excursion)")
                           ('narrow " (other than inside save-restriction)")
@@ -685,15 +699,15 @@ a function, which is passed on as it is: a string, nil, a keyword."
     (when-let* ((n (plist-get spec :buffer-arg)))
       (let ((buffer (if (nth n args) (get-buffer (nth n args)) (current-buffer))))
         (unless (and buffer (lispm-lisp--owned-p buffer))
-          (lispm-lisp--refuse "%s on a buffer the program did not make" function))))
+          (lispm-lisp-refuse "%s on a buffer the program did not make" function))))
     (when-let* ((n (plist-get spec :table)))
       (unless (lispm-lisp--owned-p (nth n args))
-        (lispm-lisp--refuse "%s on a hash table the program did not make" function)))
+        (lispm-lisp-refuse "%s on a hash table the program did not make" function)))
     (when (and (plist-get spec :throw) (not (memq (car args) lispm-lisp--tags)))
-      (lispm-lisp--refuse "throwing to %S, which the program did not catch" (car args)))
+      (lispm-lisp-refuse "throwing to %S, which the program did not catch" (car args)))
     (dolist (n (plist-get spec :nil))
       (when (nth n args)
-        (lispm-lisp--refuse "%s with argument %d: it would print elsewhere than to the \
+        (lispm-lisp-refuse "%s with argument %d: it would print elsewhere than to the \
 program's output, or change the object given" function (1+ n))))
     (let ((value (apply (or (plist-get spec :use) function) args)))
       (if (plist-get spec :owned) (lispm-lisp--own value) value))))
@@ -720,7 +734,7 @@ program's output, or change the object given" function (1+ n))))
     (unless (and buffer
                  (or (lispm-lisp--owned-p buffer)
                      (not (string-prefix-p " " (buffer-name buffer)))))
-      (lispm-lisp--refuse "set-buffer on %S, an internal buffer" buffer-or-name))
+      (lispm-lisp-refuse "set-buffer on %S, an internal buffer" buffer-or-name))
     (set-buffer buffer)))
 
 (defun lispm-lisp--sort (sequence &rest args)
@@ -755,7 +769,7 @@ A nil value leaves its argument out."
           (error "Call %s with keyword arguments, as (%s :path \"a.el\")" tool tool))
         (let ((value (pop args)))
           (when value
-            (push (cons (lispm-tools--key (intern (substring (symbol-name key) 1)))
+            (push (cons (lispm-tools-key (intern (substring (symbol-name key) 1)))
                         (lispm-lisp--json value tool))
                   input)))))
     (nreverse input)))
@@ -774,20 +788,20 @@ A nil value leaves its argument out."
 
 (defun lispm-lisp--record (run index name input outcome text)
   "Record in RUN's log that its call INDEX, of NAME on INPUT, had OUTCOME and TEXT."
-  (let ((log (lispm-lisp--run-log run))
+  (let ((log (lispm-lisp-run-log run))
         (entry (list name input outcome text)))
     (if (< index (length log))
-        (setf (nth index (lispm-lisp--run-log run)) entry)
-      (setf (lispm-lisp--run-log run)
+        (setf (nth index (lispm-lisp-run-log run)) entry)
+      (setf (lispm-lisp-run-log run)
             (append (seq-take log index) (list entry))))))
 
 (defun lispm-lisp--invoke (run tool input callback)
   "Run TOOL on INPUT as a call of RUN's agent; CALLBACK gets TEXT and ERRORP.
 The call runs as one the model made does, whatever the program bound."
-  (let ((lispm-current-agent (lispm-lisp--run-agent run))
+  (let ((lispm-current-agent (lispm-lisp-run-agent run))
         (lispm-current-call nil)
-        (default-directory (lispm-agent-root (lispm-lisp--run-agent run)))
-        (file-name-handler-alist (lispm-lisp--run-handlers run))
+        (default-directory (lispm-agent-root (lispm-lisp-run-agent run)))
+        (file-name-handler-alist (lispm-lisp-run-handlers run))
         (standard-output t)
         (lispm-lisp--run nil))
     (lispm-tool-invoke tool input (lambda (text errorp &optional _images)
@@ -795,41 +809,41 @@ The call runs as one the model made does, whatever the program bound."
 
 (defun lispm-lisp--stop (run how)
   "End RUN's pass under way at a call, as HOW says (see `lispm-lisp--pass')."
-  (setf (lispm-lisp--run-stopping run) how)
+  (setf (lispm-lisp-run-stopping run) how)
   (throw lispm-lisp--pass-tag how))
 
-(defun lispm-lisp--stopping-p ()
+(defun lispm-lisp-stopping-p ()
   "Non-nil when the current `run_lisp' pass is suspending for approval or wait."
-  (and lispm-lisp--run (lispm-lisp--run-stopping lispm-lisp--run) t))
+  (and lispm-lisp--run (lispm-lisp-run-stopping lispm-lisp--run) t))
 
-(defun lispm-lisp--current-index ()
+(defun lispm-lisp-current-index ()
   "Return the current tool-call index in `lispm-lisp--run', or nil."
-  (and lispm-lisp--run (lispm-lisp--run-index lispm-lisp--run)))
+  (and lispm-lisp--run (lispm-lisp-run-index lispm-lisp--run)))
 
-(defun lispm-lisp--note-unwind (from-index)
+(defun lispm-lisp-note-unwind (from-index)
   "Mark calls from FROM-INDEX on as unwound so retry re-enters the bracket."
   (when (and lispm-lisp--run (integerp from-index))
-    (let ((prev (lispm-lisp--run-unwound-from lispm-lisp--run)))
-      (setf (lispm-lisp--run-unwound-from lispm-lisp--run)
+    (let ((prev (lispm-lisp-run-unwound-from lispm-lisp--run)))
+      (setf (lispm-lisp-run-unwound-from lispm-lisp--run)
             (if prev (min prev from-index) from-index)))))
 
 (defun lispm-lisp--call-input (name tool input)
   "Execute or replay call of TOOL (named NAME) with decoded JSON INPUT."
   (let* ((run (or lispm-lisp--run (error "No program is running")))
-         (_ (when-let* ((how (lispm-lisp--run-stopping run)))
+         (_ (when-let* ((how (lispm-lisp-run-stopping run)))
               (throw lispm-lisp--pass-tag how)))
-         (index (lispm-lisp--run-index run))
-         (entry (nth index (lispm-lisp--run-log run))))
+         (index (lispm-lisp-run-index run))
+         (entry (nth index (lispm-lisp-run-log run))))
     (when (>= index lispm-lisp-max-calls)
-      (lispm-lisp--refuse "more than %d tool calls" lispm-lisp-max-calls))
-    (setf (lispm-lisp--run-index run) (1+ index))
+      (lispm-lisp-refuse "more than %d tool calls" lispm-lisp-max-calls))
+    (setf (lispm-lisp-run-index run) (1+ index))
     (if (and entry (equal (car entry) name) (equal (nth 1 entry) input)
              (not (eq (nth 2 entry) 'retry)))
         (lispm-lisp--outcome entry index)
       ;; If the program takes a different branch than before, discard the old tail.
       (unless (and entry (equal (car entry) name) (equal (nth 1 entry) input))
-        (setf (lispm-lisp--run-log run) (seq-take (lispm-lisp--run-log run) index)))
-      (let ((agent (lispm-lisp--run-agent run)))
+        (setf (lispm-lisp-run-log run) (seq-take (lispm-lisp-run-log run) index)))
+      (let ((agent (lispm-lisp-run-agent run)))
         (pcase (lispm-tool-decision agent tool input)
           (`(auto . ,_)
            (let ((running t) result)
@@ -840,19 +854,19 @@ The call runs as one the model made does, whatever the program bound."
                                      (lispm-lisp--settle run index name input text errorp))))
              (setq running nil)
              (cond ((null result) (lispm-lisp--stop run '(:wait)))
-                   ((equal (car result) lispm-tools--interrupted) (signal 'quit nil))
+                   ((equal (car result) lispm-tools-interrupted) (signal 'quit nil))
                    (t (lispm-lisp--record run index name input
                                           (if (nth 1 result) 'failed 'value) (car result))
-                      (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)) index)))))
+                      (lispm-lisp--outcome (nth index (lispm-lisp-run-log run)) index)))))
           (`(ask . ,reasons) (lispm-lisp--stop run (list :ask index tool input reasons)))
           (`(,_ . ,reasons)
            (lispm-lisp--record run index name input 'denied (lispm-tools-denial agent tool reasons))
-           (lispm-lisp--outcome (nth index (lispm-lisp--run-log run)) index)))))))
+           (lispm-lisp--outcome (nth index (lispm-lisp-run-log run)) index)))))))
 
-(defun lispm-lisp--call-pairs (name pairs)
+(defun lispm-lisp-call-pairs (name pairs)
   "Call tool NAME from precompiled `(JSON-KEY . VALUE)' PAIRS."
   (let* ((run (or lispm-lisp--run (error "No program is running")))
-         (_ (when-let* ((how (lispm-lisp--run-stopping run)))
+         (_ (when-let* ((how (lispm-lisp-run-stopping run)))
               (throw lispm-lisp--pass-tag how)))
          (tool (or (lispm-get-tool name) (error "No tool %s" name)))
          (tname (lispm-tool-name tool))
@@ -869,7 +883,7 @@ the run before gets the result it had then."
   (let* ((run (or lispm-lisp--run (error "No program is running")))
          ;; Cleanups of the program, as its pass ends at a call, make
          ;; no more calls.
-         (_ (when-let* ((how (lispm-lisp--run-stopping run)))
+         (_ (when-let* ((how (lispm-lisp-run-stopping run)))
               (throw lispm-lisp--pass-tag how)))
          (tool (or (lispm-get-tool name) (error "No tool %s" name)))
          (tname (lispm-tool-name tool)))
@@ -885,44 +899,44 @@ REASONS) if it stopped at a call awaiting approval, REASONS as
 program's errors are signaled."
   (let ((output (generate-new-buffer " *lispm-lisp*" t))
         (tag (list 'lispm-lisp-pass)))
-    (setf (lispm-lisp--run-index run) 0
-          (lispm-lisp--run-buffers run) nil
-          (lispm-lisp--run-stopping run) nil
-          (lispm-lisp--run-unwound-from run) nil)
+    (setf (lispm-lisp-run-index run) 0
+          (lispm-lisp-run-buffers run) nil
+          (lispm-lisp-run-stopping run) nil
+          (lispm-lisp-run-unwound-from run) nil)
     (unwind-protect
         (catch tag
           (let ((lispm-lisp--run run)
                 (lispm-lisp--pass-tag tag)
-                (lispm-lisp--tools (lispm-lisp--run-tools run))
+                (lispm-lisp--tools (lispm-lisp-run-tools run))
                 (lispm-lisp--tags nil)
                 (lispm-lisp--excursions nil)
                 (lispm-lisp--restrictions nil)
                 (standard-output output)
                 (file-name-handler-alist nil)
-                (default-directory (lispm-agent-root (lispm-lisp--run-agent run)))
+                (default-directory (lispm-agent-root (lispm-lisp-run-agent run)))
                 value)
             (save-current-buffer
               (save-match-data
-                (dolist (form (lispm-lisp--run-forms run))
+                (dolist (form (lispm-lisp-run-forms run))
                   (setq value (eval form t)))))
             (list :value value)))
-      (setf (lispm-lisp--run-output run)
+      (setf (lispm-lisp-run-output run)
             (with-current-buffer output (buffer-substring-no-properties (point-min) (point-max))))
       (kill-buffer output)
-      (dolist (buffer (lispm-lisp--run-buffers run))
+      (dolist (buffer (lispm-lisp-run-buffers run))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (defun lispm-lisp--live-p (run)
   "Non-nil if RUN goes on: unfinished, and its call not stopped."
-  (and (not (lispm-lisp--run-finished run))
-       (or (null (lispm-lisp--run-id run))
-           (eq (gethash (lispm-lisp--run-id run)
-                        (lispm-agent-pending (lispm-lisp--run-agent run)))
-               (lispm-lisp--run-call run)))))
+  (and (not (lispm-lisp-run-finished run))
+       (or (null (lispm-lisp-run-id run))
+           (eq (gethash (lispm-lisp-run-id run)
+                        (lispm-agent-pending (lispm-lisp-run-agent run)))
+               (lispm-lisp-run-call run)))))
 
 (defun lispm-lisp--calls-text (run)
   "The calls RUN's program made, a line each, as its result lists them."
-  (when-let* ((log (lispm-lisp--run-log run)))
+  (when-let* ((log (lispm-lisp-run-log run)))
     (concat "Tool calls:\n"
             (mapconcat (pcase-lambda (`(,name ,input ,outcome ,_text))
                          (let ((summary (lispm-transcript-summary input)))
@@ -934,11 +948,11 @@ program's errors are signaled."
 
 (defun lispm-lisp--saved-log (run orig-index)
   "Saved call log for RUN when an error originated at call ORIG-INDEX."
-  (let* ((unwound (lispm-lisp--run-unwound-from run))
+  (let* ((unwound (lispm-lisp-run-unwound-from run))
          (cap (if unwound
-                  (min unwound (lispm-lisp--run-index run))
-                (lispm-lisp--run-index run)))
-         (log (mapcar #'copy-sequence (seq-take (lispm-lisp--run-log run) cap)))
+                  (min unwound (lispm-lisp-run-index run))
+                (lispm-lisp-run-index run)))
+         (log (mapcar #'copy-sequence (seq-take (lispm-lisp-run-log run) cap)))
          (len (length log)))
     (cond
      ((and unwound (or (null orig-index) (>= orig-index unwound))) log)
@@ -954,16 +968,16 @@ program's errors are signaled."
 When RUN fails in a turn, store SAVED-LOG on its pending call record
 \(`:lisp-log') so a `retry' restart replays earlier completed and
 handled steps without repeating their side effects."
-  (setf (lispm-lisp--run-finished run) t)
-  (when-let* ((call (lispm-lisp--run-call run)))
+  (setf (lispm-lisp-run-finished run) t)
+  (when-let* ((call (lispm-lisp-run-call run)))
     (plist-put call :lisp-log (and errorp saved-log)))
-  (funcall (lispm-lisp--run-done run) (substring-no-properties text) errorp))
+  (funcall (lispm-lisp-run-done run) (substring-no-properties text) errorp))
 
 (defun lispm-lisp--step (run)
   "Run RUN's program, again if it ran before, and go on as it ends."
   (when (lispm-lisp--live-p run)
     (pcase (condition-case err
-               (lispm-tools--interruptibly #'lispm-lisp--pass (list run))
+               (lispm-tools-interruptibly #'lispm-lisp--pass (list run))
              ((lispm-lisp-refused error)
               (let ((orig (and (memq (car err) '(lispm-call-failed lispm-call-denied))
                                (stringp (cadr err))
@@ -971,21 +985,21 @@ handled steps without repeating their side effects."
                 (list :error (lispm-lisp--error-text err) orig)))
              (quit (list :quit)))
       (`(:value ,value)
-       (setf (lispm-lisp--run-log run)
-             (seq-take (lispm-lisp--run-log run) (lispm-lisp--run-index run)))
+       (setf (lispm-lisp-run-log run)
+             (seq-take (lispm-lisp-run-log run) (lispm-lisp-run-index run)))
        (lispm-lisp--finish run (concat (lispm-lisp--calls-text run)
-                                       (lispm-tools--eval-result
-                                        (lispm-lisp--run-output run)
+                                       (lispm-tools-eval-result
+                                        (lispm-lisp-run-output run)
                                         (if (stringp value) (substring-no-properties value) value)))
                            nil))
       (`(:ask ,index ,tool ,input ,reasons) (lispm-lisp--ask run index tool input reasons))
       (`(:wait))
       (`(:error ,message ,orig)
-       (setf (lispm-lisp--run-log run)
-             (seq-take (lispm-lisp--run-log run) (lispm-lisp--run-index run)))
+       (setf (lispm-lisp-run-log run)
+             (seq-take (lispm-lisp-run-log run) (lispm-lisp-run-index run)))
        (lispm-lisp--finish run (concat (lispm-lisp--calls-text run) message)
                            t (lispm-lisp--saved-log run orig)))
-      (_ (lispm-lisp--finish run lispm-tools--interrupted t)))))
+      (_ (lispm-lisp--finish run lispm-tools-interrupted t)))))
 
 (defun lispm-lisp--again (run)
   "Run RUN's program again soon, from the event loop."
@@ -995,7 +1009,7 @@ handled steps without repeating their side effects."
   "Take the result TEXT of RUN's call INDEX, of NAME on INPUT, that ran on.
 ERRORP marks a failure.  Then the program runs again."
   (when (lispm-lisp--live-p run)
-    (if (equal text lispm-tools--interrupted)
+    (if (equal text lispm-tools-interrupted)
         (lispm-lisp--finish run text t)
       (lispm-lisp--record run index name input (if errorp 'failed 'value) text)
       (lispm-lisp--again run))))
@@ -1005,9 +1019,9 @@ ERRORP marks a failure.  Then the program runs again."
 REASONS are why it asks, if a check said (see `lispm-tool-decision').
 Once approved it runs, once denied it fails, and the program runs again."
   (let ((name (lispm-tool-name tool)))
-    (unless (and (lispm-lisp--run-id run)
+    (unless (and (lispm-lisp-run-id run)
                  (lispm-call-ask
-                  (lispm-lisp--run-agent run) (lispm-lisp--run-id run) tool input
+                  (lispm-lisp-run-agent run) (lispm-lisp-run-id run) tool input
                   (lambda (decision denial)
                     (when (lispm-lisp--live-p run)
                       (if (memq decision '(approve allow))

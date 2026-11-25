@@ -106,7 +106,7 @@ Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
     (when (processp errors) (ignore-errors (delete-process errors))))
   ;; A spawn failure may precede sandbox-attach and its sentinel.
   (when-let* ((sandbox (lispm-process-tools--run-sandbox run)))
-    (ignore-errors (lispm-sandbox--forget sandbox))))
+    (ignore-errors (lispm-sandbox-forget sandbox))))
 
 (defun lispm-process-tools--cleanup (run)
   "Cancel RUN through `lispm-job' and release its resources."
@@ -122,8 +122,8 @@ Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
 
 (defun lispm-process-tools--encode-envelope (fields limit)
   "Encode alist FIELDS as multi-line JSON when within LIMIT, else compact JSON."
-  (let ((pretty (lispm--json-pretty fields)))
-    (if (<= (length pretty) limit) pretty (lispm--json-encode fields))))
+  (let ((pretty (lispm-json-pretty fields)))
+    (if (<= (length pretty) limit) pretty (lispm-json-encode fields))))
 
 (defun lispm-process-tools--shrink-budget (budget)
   "Reduce positive integer BUDGET conservatively so JSON escaping converges."
@@ -164,7 +164,7 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
     (if (<= (length result) limit)
         result
       ;; A deliberately tiny global limit cannot hold the full envelope.
-      (let ((small (lispm--json-encode `((status . ,status) (truncated . t)))))
+      (let ((small (lispm-json-encode `((status . ,status) (truncated . t)))))
         (if (<= (length small) limit) small "{}")))))
 
 (defun lispm-process-tools--finish (run status &optional exit signal)
@@ -286,7 +286,7 @@ and run_elisp for standalone Lisp/JSON processing in a kernel worker."
 (defun lispm-process-tools-unload-function ()
   "Stop running programs before unloading their callbacks."
   (lispm-job-cancel-kind 'process)
-  (remhash "run_program" lispm-tools--registry)
+  (lispm-tools-unregister "run_program")
   nil)
 
 (provide 'lispm-process-tools)

@@ -26,7 +26,7 @@ otherwise require inspection."
       (lispm-agents-roster-notify 'unused '(status) '(:type unused)))
     (cl-letf (((symbol-function 'lispm-agents-roster-notify) fail)
               ((symbol-function 'lispm-agents-roster-key) fail)
-              ((symbol-function 'lispm-inspect--copy-data) fail)
+              ((symbol-function 'lispm-inspect-copy-data) fail)
               ((symbol-function 'lispm-agents-buffer-status) fail)
               ((symbol-function 'lispm-agents-terminal-agent) fail)
               ((symbol-function 'lispm-agents-buffer-p) fail)

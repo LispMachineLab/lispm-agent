@@ -181,7 +181,7 @@ error if FILE is no character file."
       (user-error "%s" (lispm-tr "The name of a character is letters, digits, - and _, at most 64: not %S"
                                  name)))
     (with-temp-buffer
-      (insert (or text (lispm--file-text file)))
+      (insert (or text (lispm-file-text file)))
       (goto-char (point-min))
       (let ((case-fold-search t))
         (while (and (not (eobp))
@@ -461,7 +461,7 @@ is one of its name already."
   "A :when of the form: non-nil while the character thinks with KIND."
   (lambda (values) (eq (alist-get 'thinks values) kind)))
 
-(defun lispm-characters--when-checked (key)
+(defun lispm-characters-when-checked (key)
   "A :when of the form: non-nil while check field KEY is checked."
   (lambda (values) (and (alist-get key values) t)))
 
@@ -655,7 +655,7 @@ comes back."
   "The skill of the app whose conversation AGENT is, as `lispm-skills' has it."
   (when-let* ((character (lispm-agent-character* agent))
               (name (lispm-character-skill character)))
-    (lispm-skills--find name agent)))
+    (lispm-skills-find name agent)))
 
 (defun lispm-characters--load-skill (agent)
   "Evaluate for AGENT, an app's conversation, the code of the app's skill.
@@ -664,9 +664,9 @@ trusts it (see `lispm-skill-trusted-p')."
   (when-let* ((skill (lispm-characters--skill agent)))
     (condition-case err
         (let* ((file (plist-get skill :file))
-               (text (lispm-skills--file-text file)))
+               (text (lispm-skills-file-text file)))
           (when (lispm-skill-trusted-p skill text)
-            (lispm-skills--evaluate skill agent (lispm-skills--forms text file))))
+            (lispm-skills-evaluate skill agent (lispm-skills-forms text file))))
       (error (message "%s" (lispm-tr "LispM: skill %s: %s" (plist-get skill :name)
                                      (error-message-string err)))))))
 
@@ -680,7 +680,7 @@ trusts it (see `lispm-skill-trusted-p')."
             (if-let* ((skill (lispm-characters--skill agent)))
                 (concat (format "You are the app %s. This is your skill, the manual of what you do; its tools are yours.\n\n"
                                 (lispm-character-title* character))
-                        (lispm--truncate (lispm-skills--text (plist-get skill :file)) 30000))
+                        (lispm-truncate (lispm-skills-text (plist-get skill :file)) 30000))
               (format "You are the app %s, whose skill %s is not here now: say so to whoever asks."
                       (lispm-character-title* character) name)))))
 
@@ -695,7 +695,7 @@ trusts it (see `lispm-skill-trusted-p')."
   (let ((file (lispm-characters--self-file (lispm-character-name (lispm-get-character character)))))
     (when (file-exists-p file)
       (let ((text (string-trim (replace-regexp-in-string "\\`\\(?:#\\+.*\n\\)+" ""
-                                                         (lispm--file-text file)))))
+                                                         (lispm-file-text file)))))
         (and (not (string-empty-p text)) text)))))
 
 (defun lispm-character-revise-self (agent text why)
@@ -705,7 +705,7 @@ character is told."
   (let* ((character (or (lispm-agent-character* agent)
                         (error "You are no character")))
          (file (lispm-characters--self-file (lispm-character-name character)))
-         (buffer (lispm-memory--visit file (format "#+title: %s, in its own words\n"
+         (buffer (lispm-memory-visit file (format "#+title: %s, in its own words\n"
                                                    (lispm-character-title* character))
                                       t)))
     (with-current-buffer buffer
@@ -716,9 +716,9 @@ character is told."
           (while (looking-at "#\\+") (forward-line 1))
           (delete-region (point) (point-max))
           (insert "\n" (string-trim text) "\n"))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: revise itself: %s" (lispm-principal-name agent)
-                                    (lispm--oneline why 200)))
+                                    (lispm-oneline why 200)))
     "Revised. Every conversation of yours starts with it from now on; tell the user what you \
 changed and why."))
 
@@ -740,7 +740,7 @@ that should last, and tell the user what you changed."
   (when-let* ((character (lispm-agent-character* agent)))
     (concat "# Yourself, as you came to know it\n"
             (or (when-let* ((self (lispm-character-self character)))
-                  (lispm--truncate self 12000))
+                  (lispm-truncate self 12000))
                 "You have written nothing of yourself yet.")
             "\nrevise_self keeps what you come to know of yourself, for all your conversations;"
             " remember with scope self keeps what you learn that is yours, as what you know of"
@@ -771,7 +771,7 @@ state and what it does, while it is; :title, what it was last about, and
                                        recorded)))
                 (list :agent (if agent (lispm-agent-name agent) (intern (plist-get session :agent)))
                       :root root
-                      :home (lispm--character-root-p root)
+                      :home (lispm-character-root-p root)
                       :live agent
                       :state (and agent (lispm-agent-state agent))
                       :status (and agent (lispm-agent-status agent))
@@ -789,7 +789,7 @@ ada@lispm\"; :text, what happened."
          (days (and (file-directory-p directory)
                     (directory-files directory t "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\.org\\'"))))
     (seq-take (cl-loop for file in (reverse days)
-                       append (cl-loop for entry in (reverse (lispm-episodes--entries file))
+                       append (cl-loop for entry in (reverse (lispm-episodes-entries file))
                                        collect (list :day (file-name-base file)
                                                      :title (plist-get entry :title)
                                                      :text (plist-get entry :body))))
@@ -817,7 +817,7 @@ ada@lispm\"; :text, what happened."
                                                    (lispm-agents))))
                           collect (format "- %s, in %s, last about: %s" (plist-get session :agent)
                                           (abbreviate-file-name root)
-                                          (lispm--oneline (plist-get session :title) 120)))))))
+                                          (lispm-oneline (plist-get session :title) 120)))))))
     (concat "# Your other conversations\n"
             (string-join (seq-take places 20) "\n"))))
 
@@ -827,21 +827,21 @@ ada@lispm\"; :text, what happened."
               (lispm-episodes)
               ((not (lispm-agent-compacting agent))))
     (let* ((rollup (seq-some (lambda (kind)
-                               (when-let* ((file (car (last (lispm-episodes--files agent kind))))
-                                           (entry (car (last (lispm-episodes--entries file)))))
+                               (when-let* ((file (car (last (lispm-episodes-files agent kind))))
+                                           (entry (car (last (lispm-episodes-entries file)))))
                                  (cons (file-name-base file) (plist-get entry :body))))
                              '(week month)))
            (lines (seq-take
-                   (cl-loop for file in (reverse (lispm-episodes--files agent 'day))
-                            append (cl-loop for entry in (reverse (lispm-episodes--entries file))
+                   (cl-loop for file in (reverse (lispm-episodes-files agent 'day))
+                            append (cl-loop for entry in (reverse (lispm-episodes-entries file))
                                             collect (format "- %s %s: %s" (file-name-base file)
                                                             (plist-get entry :title)
-                                                            (lispm--oneline (plist-get entry :body) 400))))
+                                                            (lispm-oneline (plist-get entry :body) 400))))
                    lispm-character-diary-entries)))
       (when (or rollup lines)
         (concat "# Your latest days\n"
                 (if rollup
-                    (format "In the %s:\n%s\n" (car rollup) (lispm--truncate (cdr rollup) 8000))
+                    (format "In the %s:\n%s\n" (car rollup) (lispm-truncate (cdr rollup) 8000))
                   "")
                 (if lines
                     (concat "Lately, in all your conversations, the latest first:\n"
@@ -853,7 +853,7 @@ ada@lispm\"; :text, what happened."
 (add-hook 'lispm-system-prompt-functions #'lispm-characters--places t)
 (add-hook 'lispm-system-prompt-functions #'lispm-characters--diary t)
 
-(defun lispm-characters--last-input (agent)
+(defun lispm-characters-last-input (agent)
   "The latest input of AGENT's session, as (FROM . TEXT), or nil.
 FROM is who gave it: the user, another agent, or an event."
   (when (buffer-live-p (lispm-agent-buffer agent))
@@ -876,15 +876,15 @@ FROM is who gave it: the user, another agent, or an event."
 The diary is the character's episodes of the day (lispm-episodes.el),
 of all its conversations, rolled up by week and month."
   (when (and lispm-episodes (lispm-agent-character agent))
-    (when-let* ((input (lispm-characters--last-input agent)))
+    (when-let* ((input (lispm-characters-last-input agent)))
       (with-demoted-errors "LispM: writing a diary: %S"
         (lispm-episodes-add agent
                             (format "In %s, %s asked: %s\nYou replied: %s"
                                     (if (lispm-character-home-p agent)
                                         "your own conversation"
                                       (abbreviate-file-name (lispm-agent-root agent)))
-                                    (car input) (lispm--oneline (cdr input) 300)
-                                    (lispm--oneline (or reply "") 400))
+                                    (car input) (lispm-oneline (cdr input) 300)
+                                    (lispm-oneline (or reply "") 400))
                             (buffer-file-name (lispm-agent-buffer agent))
                             "diary")))))
 

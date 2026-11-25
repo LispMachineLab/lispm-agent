@@ -55,6 +55,9 @@
 (defvar lispm-stage-frame-function nil
   "Optional host function returning the preferred splittable editor frame.")
 
+(defvar lispm-stage-prompt-position-function nil
+  "Optional function returning a conversation buffer's prompt position.")
+
 (defgroup lispm-stage nil
   "Adaptive multi-pane stage layout and focus zoom for agents."
   :group 'lispm
@@ -98,9 +101,9 @@ When nil, the stage stays zoomed until the conversation is selected."
 (defun lispm-stage-agent-by-id (session-id)
   "Return the live `lispm-agent' whose `:id' equals SESSION-ID, or nil."
   (when (stringp session-id)
-    (cdr (seq-find (lambda (cell)
-                     (equal (lispm-agent-id (cdr cell)) session-id))
-                   lispm--agents))))
+    (seq-find (lambda (agent)
+                (equal (lispm-agent-id agent) session-id))
+              (lispm-agents))))
 
 (defun lispm-stage--parent-agent (agent)
   "Resolve AGENT's parent to a live `lispm-agent', or nil."
@@ -139,11 +142,10 @@ When nil, the stage stays zoomed until the conversation is selected."
   "Return non-nil when ROOT or any live subagent of ROOT is busy."
   (and (lispm-agent-p root)
        (or (lispm-agent-busy-p root)
-           (seq-some (lambda (cell)
-                       (let ((candidate (cdr cell)))
-                         (and (lispm-agent-busy-p candidate)
-                              (lispm-stage-descendant-p candidate root))))
-                     lispm--agents))))
+           (seq-some (lambda (candidate)
+                       (and (lispm-agent-busy-p candidate)
+                            (lispm-stage-descendant-p candidate root)))
+                     (lispm-agents)))))
 
 (defun lispm-stage--subject-key (agent)
   "Return the reactive subject key for AGENT's root session."
@@ -235,15 +237,10 @@ When nil, the stage stays zoomed until the conversation is selected."
   "Return non-nil if conversation WINDOW currently shows its bottom prompt."
   (and (lispm-stage-conversation-window-p window)
        (with-current-buffer (window-buffer window)
-         (let ((prompt (if (and (local-variable-p 'lispm-chat--prompt-start
-                                                  (current-buffer))
-                                (markerp (buffer-local-value
-                                          'lispm-chat--prompt-start
-                                          (current-buffer))))
-                           (marker-position
-                            (buffer-local-value 'lispm-chat--prompt-start
-                                                (current-buffer)))
-                         (point-max))))
+         (let ((prompt (or (and (functionp lispm-stage-prompt-position-function)
+                                (funcall lispm-stage-prompt-position-function
+                                         (current-buffer)))
+                           (point-max))))
            (or (>= (window-point window) prompt)
                (pos-visible-in-window-p prompt window)
                (>= (or (window-end window) (point-max)) prompt))))))
@@ -266,7 +263,7 @@ When nil, the stage stays zoomed until the conversation is selected."
 (defvar lispm-stage--enabled-effect nil
   "Reactive `lispm-ui-effect' observing `lispm-stage-enabled-signal'.")
 
-(defvar lispm-stage--reap-hooks nil
+(defvar lispm-stage-reap-hooks nil
   "Functions run after stage reconciliation closes panes.")
 
 (defun lispm-stage-set-enabled (enabled)
@@ -317,7 +314,7 @@ When nil, the stage stays zoomed until the conversation is selected."
            :anchor-primary-fn #'lispm-stage--anchor-conversation
            :on-reconcile (lambda (spec _frame)
                            (when (memq (plist-get spec :mode) '(closed disabled))
-                             (run-hooks 'lispm-stage--reap-hooks))))))
+                             (run-hooks 'lispm-stage-reap-hooks))))))
   (lispm-stage--sync-config lispm-stage--controller)
   (lispm-stage--ensure-enabled-binding lispm-stage--controller)
   lispm-stage--controller)
@@ -378,8 +375,7 @@ When no conversation window exists on FRAME, fall back to FALLBACK-AGENT."
                                   (window-list f 'nomini)))))
     (if roots
         (seq-some #'lispm-stage-agent-tree-busy-p roots)
-      (seq-some (lambda (cell) (lispm-agent-busy-p (cdr cell)))
-                lispm--agents))))
+      (seq-some #'lispm-agent-busy-p (lispm-agents)))))
 
 (defun lispm-stage--windows (frame)
   "Return live stage windows on FRAME."

@@ -68,7 +68,7 @@ search_tools finds them too."
   (let* ((words (split-string pattern "[ \t]+" t))
          (regexp (and (null (cdr words))
                       (string-match-p "[][^$*+?\\\\(){}|.]" pattern)
-                      (lispm-tools--emacs-regexp pattern)))
+                      (lispm-tools-emacs-regexp pattern)))
          (kind (if (member kind '(nil "any")) nil kind))
          found)
     (mapatoms
@@ -117,7 +117,7 @@ menus, or look a term up in its index."
         (Info-index search)))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
       (concat (format "(%s)%s\n" (file-name-base (or Info-current-file "dir")) Info-current-node)
-              (lispm--truncate text 30000)))))
+              (lispm-truncate text 30000)))))
 
 (provide 'lispm-emacs)
 ;;; lispm-emacs.el ends here

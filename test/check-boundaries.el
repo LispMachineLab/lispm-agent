@@ -14,6 +14,8 @@
 ;;      module points strictly downward in both layer number and `Makefile' order.
 ;;   4. Lower layers (Layers 0-2) contain no direct `lispm-chat--' or
 ;;      `lispm-agents-roster-' references.
+;;   5. Zero duplicate `--' definitions across modules and zero cross-module
+;;      `--' internal symbol references.
 
 ;;; Code:
 
@@ -75,6 +77,109 @@
               (setq in-els nil))))
         (forward-line 1))
       (nreverse mods))))
+
+(defun lispm-boundaries--record-private-defs (form mod defs)
+  "Record any `--' definitions inside FORM from MOD into hash table DEFS."
+  (when (consp form)
+    (let ((head (car form)))
+      (cond
+       ((and (eq head 'defvar) (= (length form) 2)) nil)
+       ((memq head '(defun defmacro defsubst defvar defvar-local defconst
+                      defcustom defalias defvaralias define-minor-mode
+                      define-derived-mode cl-defun cl-defmacro cl-defmethod
+                      cl-defgeneric))
+        (let ((sym (cadr form)))
+          (when (and (consp sym) (eq (car sym) 'quote))
+            (setq sym (cadr sym)))
+          (when (and (symbolp sym) (string-match-p "--" (symbol-name sym)))
+            (cl-pushnew mod (gethash sym defs) :test #'equal))))
+       ((eq head 'cl-defstruct)
+        (let* ((spec (cadr form))
+               (name (if (consp spec) (car spec) spec))
+               (opts (and (consp spec) (cdr spec)))
+               (conc (if (assq :conc-name opts)
+                         (let ((c (cadr (assq :conc-name opts))))
+                           (if c (format "%s" c) ""))
+                       (concat (symbol-name name) "-"))))
+          (when (and (symbolp name) (string-match-p "--" (symbol-name name)))
+            (cl-pushnew mod (gethash name defs) :test #'equal))
+          (dolist (opt '(:constructor :predicate :copier))
+            (when-let* ((entry (assq opt opts))
+                        (sym (cadr entry)))
+              (when (and (symbolp sym) (string-match-p "--" (symbol-name sym)))
+                (cl-pushnew mod (gethash sym defs) :test #'equal))))
+          (dolist (slot (cddr form))
+            (unless (stringp slot)
+              (let* ((sname (if (consp slot) (car slot) slot))
+                     (acc (intern (format "%s%s" conc sname))))
+                (when (string-match-p "--" (symbol-name acc))
+                  (cl-pushnew mod (gethash acc defs) :test #'equal)))))))
+       ((memq head '(eval-when-compile eval-and-compile progn))
+        (dolist (sub (cdr form))
+          (lispm-boundaries--record-private-defs sub mod defs)))
+       ((memq head '(when unless with-eval-after-load))
+        (dolist (sub (cddr form))
+          (lispm-boundaries--record-private-defs sub mod defs)))))))
+
+(defun lispm-boundaries--collect-private-defs (lisp-dir disk-mods)
+  "Collect private `--' definitions for DISK-MODS under LISP-DIR.
+Return `(DEFS . DUPLICATE-ERRORS)'."
+  (let ((defs (make-hash-table :test #'eq))
+        (table (make-syntax-table emacs-lisp-mode-syntax-table))
+        dup-errors)
+    (modify-syntax-entry ?\; "<" table)
+    (modify-syntax-entry ?\n ">" table)
+    (dolist (mod disk-mods)
+      (let ((file (expand-file-name (concat mod ".el") lisp-dir)))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (with-syntax-table table
+            (goto-char (point-min))
+            (condition-case nil
+                (while (progn (skip-chars-forward " \t\n\r") (not (eobp)))
+                  (lispm-boundaries--record-private-defs
+                   (read (current-buffer)) mod defs))
+              (end-of-file nil))))))
+    (maphash (lambda (sym owners)
+               (when (> (length owners) 1)
+                 (push (format "Duplicate private definition: `%s' in multiple modules (%s)"
+                               sym (string-join (sort (copy-sequence owners) #'string<) ", "))
+                       dup-errors)))
+             defs)
+    (cons defs (nreverse dup-errors))))
+
+(defun lispm-boundaries--scan-private-refs (file mod defs)
+  "Return alist of `(SYM . OWNERS)' referenced in FILE (MOD) beyond DEFS."
+  (let ((table (make-syntax-table emacs-lisp-mode-syntax-table))
+        leaks)
+    (modify-syntax-entry ?\; "<" table)
+    (modify-syntax-entry ?\n ">" table)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (with-syntax-table table
+        (goto-char (point-min))
+        (condition-case nil
+            (cl-labels
+                ((walk (form)
+                   (cond
+                    ((symbolp form)
+                     (when (string-match-p "--" (symbol-name form))
+                       (when-let* ((owners (gethash form defs)))
+                         (unless (or (member mod owners) (assq form leaks))
+                           (push (cons form owners) leaks)))))
+                    ((consp form)
+                     (let ((tail form))
+                       (while (consp tail)
+                         (walk (car tail))
+                         (setq tail (cdr tail)))
+                       (when tail (walk tail))))
+                    ((vectorp form)
+                     (dotimes (i (length form))
+                       (walk (aref form i)))))))
+              (while (progn (skip-chars-forward " \t\n\r") (not (eobp)))
+                (walk (read (current-buffer)))))
+          (end-of-file nil))))
+    (sort leaks (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))))
 
 (defun lispm-boundaries--scan-file (file)
   "Scan FILE and return a plist of :requires, :declares, and :upward refs."
@@ -189,41 +294,50 @@ Return plist (:ok BOOL :modules INT :errors LIST :cycles LIST)."
                (unless (member mod disk-mods)
                  (push (format "Stale layer assignment for non-existent lisp/%s.el" mod) errors)))
              layer-of)
-    ;; 2. Scan files for require edges, declare-functions, and lower-layer upward refs.
-    (dolist (mod disk-mods)
-      (let* ((file (expand-file-name (concat mod ".el") lisp-dir))
-             (scan (lispm-boundaries--scan-file file))
-             (src-layer (gethash mod layer-of))
-             (src-pos (gethash mod els-pos)))
-        (dolist (req (plist-get scan :requires))
-          (when (and (gethash req layer-of) (not (equal req mod)))
-            (push req (gethash mod edges))
-            (let ((dst-layer (gethash req layer-of))
-                  (dst-pos (gethash req els-pos)))
-              (when (and src-layer dst-layer (> dst-layer src-layer))
-                (push (format "Layer violation: %s (L%d) requires %s (L%d)"
-                              mod src-layer req dst-layer)
-                      errors))
-              (when (and src-pos dst-pos (>= dst-pos src-pos))
-                (push (format "Backward require in Makefile ELS order: %s (%d) -> %s (%d)"
-                              mod src-pos req dst-pos)
-                      errors)))))
-        (pcase-dolist (`(,sym . ,target) (plist-get scan :declares))
-          (let ((dst (string-remove-prefix "ext:" (string-remove-suffix ".el" target))))
-            (when (and (gethash dst layer-of) (not (equal dst mod)))
-              (let ((dst-layer (gethash dst layer-of))
-                    (dst-pos (gethash dst els-pos)))
+    ;; 2. Collect private `--' definitions and detect duplicates across modules.
+    (pcase-let* ((`(,private-defs . ,dup-errors)
+                  (lispm-boundaries--collect-private-defs lisp-dir disk-mods)))
+      (setq errors (nconc (nreverse dup-errors) errors))
+      ;; 3. Scan files for require edges, declare-functions, upward refs, and private leaks.
+      (dolist (mod disk-mods)
+        (let* ((file (expand-file-name (concat mod ".el") lisp-dir))
+               (scan (lispm-boundaries--scan-file file))
+               (src-layer (gethash mod layer-of))
+               (src-pos (gethash mod els-pos)))
+          (dolist (req (plist-get scan :requires))
+            (when (and (gethash req layer-of) (not (equal req mod)))
+              (push req (gethash mod edges))
+              (let ((dst-layer (gethash req layer-of))
+                    (dst-pos (gethash req els-pos)))
                 (when (and src-layer dst-layer (> dst-layer src-layer))
-                  (push (format "Upward declare-function: %s (L%d) declares `%s' from %s (L%d)"
-                                mod src-layer sym dst dst-layer)
+                  (push (format "Layer violation: %s (L%d) requires %s (L%d)"
+                                mod src-layer req dst-layer)
                         errors))
                 (when (and src-pos dst-pos (>= dst-pos src-pos))
-                  (push (format "Backward declare-function in ELS order: %s (%d) -> `%s' (%s %d)"
-                                mod src-pos sym dst dst-pos)
-                        errors))))))
-        (when (and src-layer (<= src-layer 2))
-          (dolist (sym (plist-get scan :upward))
-            (push (format "Upward UI reference in Layer %d (%s): %s" src-layer mod sym) errors)))))
+                  (push (format "Backward require in Makefile ELS order: %s (%d) -> %s (%d)"
+                                mod src-pos req dst-pos)
+                        errors)))))
+          (pcase-dolist (`(,sym . ,target) (plist-get scan :declares))
+            (let ((dst (string-remove-prefix "ext:" (string-remove-suffix ".el" target))))
+              (when (and (gethash dst layer-of) (not (equal dst mod)))
+                (let ((dst-layer (gethash dst layer-of))
+                      (dst-pos (gethash dst els-pos)))
+                  (when (and src-layer dst-layer (> dst-layer src-layer))
+                    (push (format "Upward declare-function: %s (L%d) declares `%s' from %s (L%d)"
+                                  mod src-layer sym dst dst-layer)
+                          errors))
+                  (when (and src-pos dst-pos (>= dst-pos src-pos))
+                    (push (format "Backward declare-function in ELS order: %s (%d) -> `%s' (%s %d)"
+                                  mod src-pos sym dst dst-pos)
+                          errors))))))
+          (when (and src-layer (<= src-layer 2))
+            (dolist (sym (plist-get scan :upward))
+              (push (format "Upward UI reference in Layer %d (%s): %s" src-layer mod sym) errors)))
+          (pcase-dolist (`(,sym . ,owners)
+                         (lispm-boundaries--scan-private-refs file mod private-defs))
+            (push (format "Cross-module private reference: %s references `%s' (owned by %s)"
+                          mod sym (string-join (sort (copy-sequence owners) #'string<) ", "))
+                  errors)))))
     (let ((cycles (lispm-boundaries--find-cycles disk-mods edges)))
       (dolist (cycle cycles)
         (push (format "Require cycle detected: %s" (string-join cycle " <-> ")) errors))
@@ -241,7 +355,7 @@ Return plist (:ok BOOL :modules INT :errors LIST :cycles LIST)."
          (errors (plist-get report :errors)))
     (if ok
         (progn
-          (princ (format "check-layers: OK (%d modules, %d layers, 0 cycles, 0 violations)\n"
+          (princ (format "check-layers: OK (%d modules, %d layers, 0 cycles, 0 private leaks, 0 violations)\n"
                          mods (length lispm-boundaries-layers)))
           (kill-emacs 0))
       (dolist (err errors)

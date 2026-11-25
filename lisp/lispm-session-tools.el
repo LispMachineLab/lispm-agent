@@ -53,9 +53,9 @@ Codex fork can record the same id under a different rollout filename."
     (dolist (kind (if provider (list (intern provider)) '(lispm claude codex)))
       (condition-case err
           (let ((found (pcase kind
-                         ('lispm (lispm--session-files-in "projects/*/sessions/*.org"))
-                         ('claude (lispm-agents-claude--files))
-                         ('codex (lispm-agents-codex--files)))))
+                         ('lispm (lispm-session-files-in "projects/*/sessions/*.org"))
+                         ('claude (lispm-agents-claude-files))
+                         ('codex (lispm-agents-codex-files)))))
             ;; Codex moves archived rollouts beside its sessions directory.
             (when (eq kind 'codex)
               (let ((archive (expand-file-name "../archived_sessions/"
@@ -80,19 +80,7 @@ Codex fork can record the same id under a different rollout filename."
 (defun lispm-session-tools--archived ()
   "Read LispM's archive keys without repairing or rewriting its state file.
 Return (KEYS . KNOWN); a malformed or oversized file leaves KNOWN nil."
-  (if (not (eq lispm-agents--archived 'unloaded))
-      (cons lispm-agents--archived t)
-    (if (not (file-exists-p lispm-agents-state-file))
-        (cons nil t)
-      (condition-case nil
-          (when (<= (file-attribute-size (file-attributes lispm-agents-state-file)) 65536)
-            (with-temp-buffer
-              (insert-file-contents lispm-agents-state-file)
-              (let ((state (read (current-buffer))))
-                (when (and (plistp state) (listp (plist-get state :archived))
-                           (seq-every-p #'stringp (plist-get state :archived)))
-                  (cons (plist-get state :archived) t)))))
-        (error nil)))))
+  (lispm-agents-archived-snapshot))
 
 (defun lispm-session-tools--check-claude-sidecar (file)
   "Reject an unbounded subagent metadata sidecar beside FILE.
@@ -115,18 +103,18 @@ size even when the transcript's own metadata is already cached."
       (lispm-session-tools--check-claude-sidecar file))
     (let* ((lispm-agents-codex-prompt-bytes 65536)
            (raw (if (eq provider 'lispm)
-                    (lispm--session-description file)
+                    (lispm-session-description file)
                   (lispm-agents-cached-session
                    file (apply-partially (if (eq provider 'claude)
-                                            #'lispm-agents-claude--session
-                                          #'lispm-agents-codex--session)
+                                            #'lispm-agents-claude-session
+                                          #'lispm-agents-codex-session)
                                         file))))
            (raw (if (and (eq provider 'claude) raw)
-                    (let* ((title-file (lispm-agents-claude--title-file raw))
+                    (let* ((title-file (lispm-agents-claude-title-file raw))
                            (attrs (file-attributes title-file)))
                       (if (and attrs (null (file-attribute-type attrs))
                                (<= (file-attribute-size attrs) 65536))
-                          (lispm-agents-claude--titled raw)
+                          (lispm-agents-claude-titled raw)
                         (and (plist-get raw :title) raw)))
                   raw))
            (record (copy-sequence raw)))
@@ -160,7 +148,7 @@ size even when the transcript's own metadata is already cached."
 (defun lispm-session-tools--json (value)
   "Render VALUE for a tool-history message without running anything."
   (if (stringp value) value
-    (condition-case nil (lispm--json-encode value) (error "[unreadable input]"))))
+    (condition-case nil (lispm-json-encode value) (error "[unreadable input]"))))
 
 (defun lispm-session-tools--external-events (provider objects)
   "Conversation events of PROVIDER in bounded transcript OBJECTS."
@@ -258,7 +246,7 @@ section or JSON line is omitted.  Invalid JSON lines are counted."
         (goto-char (point-min))
         (let ((lines (count-lines (point-min) (point-max)))
               (objects (seq-filter (lambda (object) (and (consp object) (keywordp (car object))))
-                                   (lispm-agents--parse-json-lines nil))))
+                                   (lispm-agents-parse-json-lines nil))))
           (list :events (lispm-session-tools--external-events provider objects)
                 :tail-only (> start 0) :source "file" :invalid-lines (- lines (length objects))))))))
 
@@ -270,7 +258,7 @@ section or JSON line is omitted.  Invalid JSON lines are counted."
     (project . ,(truncate-string-to-width (or (plist-get record :cwd) "") 1000 nil nil "…"))
     (updated_at . ,(format-time-string "%FT%TZ" (seconds-to-time (plist-get record :time)) t))
     (archived . ,(cond ((or (plist-get record :archived-file)
-                            (member (lispm-agents--session-key record) (car archive))) t)
+                            (member (lispm-agents-session-key record) (car archive))) t)
                        ((cdr archive) :false) (t :null)))))
 
 (defun lispm-session-tools--excerpt (text &optional query)
@@ -286,7 +274,7 @@ section or JSON line is omitted.  Invalid JSON lines are counted."
 Drop older result rows or messages before shortening the last excerpt;
 output_truncated says that this output budget discarded information."
   (let* ((budget lispm-tool-output-limit)
-         (encoded (lispm--json-encode data)))
+         (encoded (lispm-json-encode data)))
     (while (> (length encoded) budget)
       (setf (alist-get 'output_truncated data) t)
       (let* ((sessions (append (alist-get 'sessions data) nil))
@@ -302,7 +290,7 @@ output_truncated says that this output budget discarded information."
             (setcdr cell (concat (substring text 0 (/ (length text) 2)) "…"))))
          ((> (length (alist-get 'errors data)) 0) (setf (alist-get 'errors data) []))
          (t (setq data '((output_truncated . t) (error . "Output limit is too small for a session record."))))))
-      (setq encoded (lispm--json-encode data))
+      (setq encoded (lispm-json-encode data))
       (when (and (> (length encoded) budget) (not (assq 'sessions data)))
         (setq encoded "{}")))
     encoded))
@@ -357,17 +345,15 @@ output_truncated says that this output budget discarded information."
 
 (defun lispm-session-tools--resolve-archived (seen archive results)
   "Resolve ancestry in SEEN against ARCHIVE and update `archived' in RESULTS."
-  (let ((lispm-agents--archived (car archive))
-        (lispm-agents--session-parents lispm-agents--session-parents)
-        (lispm-agents--effective-archive nil))
-    (lispm-agents--index-session-parents (hash-table-values seen) t)
+  (let ((archived (lispm-agents-archive-map (hash-table-values seen)
+                                            :archived (car archive))))
     (dolist (public results results)
       (let ((record (gethash (format "%s:%s" (alist-get 'provider public)
                                      (alist-get 'id public)) seen)))
         (setf (alist-get 'archived public)
               (cond ((plist-get record :archived-file) t)
                     ((not (cdr archive)) :null)
-                    ((lispm-agents-archived-p record) t)
+                    ((lispm-agents-archived-p record archived) t)
                     (t :false)))))))
 
 (cl-defun lispm-session-tools--scan (done &key query project provider since role limit id)
@@ -422,7 +408,7 @@ time.  ID selects one session; without it this is a bounded search."
                (condition-case err
                    (when-let* ((record (or (lispm-session-tools--metadata entry)
                                            (progn (cl-incf skipped) nil)))
-                               (key (lispm-agents--session-key record))
+                               (key (lispm-agents-session-key record))
                                ((not (gethash key seen))))
                      (puthash key record seen)
                      (when (funcall accept-p record)

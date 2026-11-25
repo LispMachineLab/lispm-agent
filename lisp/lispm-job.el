@@ -37,7 +37,9 @@
 (require 'lispm-core)
 
 (defvar lispm-agents-context-release-functions)
-(defvar lispm-agents-bridge--agent)
+
+(defvar lispm-job-terminal-owner-function nil
+  "Optional function returning the principal owning a terminal buffer.")
 
 ;;;; Bounded chunk collector
 
@@ -161,8 +163,9 @@ Return non-nil if this call cancelled an active job."
 (defun lispm-job--terminal-ended (terminal)
   "Cancel active jobs belonging to the external principal in TERMINAL."
   (when (and (buffer-live-p terminal)
-             (local-variable-p 'lispm-agents-bridge--agent terminal))
-    (lispm-job-cancel-owner (buffer-local-value 'lispm-agents-bridge--agent terminal))))
+             (functionp lispm-job-terminal-owner-function))
+    (when-let* ((owner (funcall lispm-job-terminal-owner-function terminal)))
+      (lispm-job-cancel-owner owner))))
 
 (provide 'lispm-job)
 ;;; lispm-job.el ends here

@@ -135,6 +135,19 @@
 (defvar-local lispm-chat--prompt-start nil
   "Marker where the input prompt starts; everything before it is drawn.")
 
+(defvar lispm-stage-prompt-position-function)
+
+(defun lispm-chat-prompt-position (&optional buffer)
+  "Return the prompt marker position in BUFFER (default current buffer), or nil."
+  (let ((buf (or buffer (current-buffer))))
+    (when (and (buffer-live-p buf)
+               (local-variable-p 'lispm-chat--prompt-start buf))
+      (let ((marker (buffer-local-value 'lispm-chat--prompt-start buf)))
+        (when (markerp marker)
+          (marker-position marker))))))
+
+(setq lispm-stage-prompt-position-function #'lispm-chat-prompt-position)
+
 (defvar-local lispm-chat--input-start nil
   "Marker where the text being written starts.")
 
@@ -153,7 +166,7 @@ are not drawn again.")
 
 (defvar-local lispm-chat--streamed nil
   "What of a reply streaming in is drawn already, as (TEXT SHOWN LINES CODE):
-TEXT its complete lines, SHOWN them as `lispm-chat--markdown' shows them
+TEXT its complete lines, SHOWN them as `lispm-chat-markdown' shows them
 with nothing presented, LINES non-nil when SHOWN holds a line, CODE
 non-nil when a code block is open after TEXT.  Each redraw draws only
 the lines that came after.")
@@ -270,20 +283,20 @@ A condition still waiting is the prompt below the chat, not an item."
                             :text (if (string-blank-p text)
                                       (lispm-tr "A response, left out of the conversation.")
                                     (lispm-tr "Left out of the conversation: %s"
-                                              (lispm--oneline text 70))))
+                                              (lispm-oneline text 70))))
                       items)))
           (pcase kind
             ('user
              (let ((text (lispm-transcript-section-text section)))
                (unless (string-empty-p text)
                  (push (list :kind 'user :text text
-                             :images (lispm-transcript--images (plist-get section :body)
+                             :images (lispm-transcript-images (plist-get section :body)
                                                                (plist-get section :end)))
                        items))))
             ('message
              (push (list :kind 'user :from (plist-get section :arg)
                          :text (lispm-transcript-section-text section)
-                         :images (lispm-transcript--images (plist-get section :body)
+                         :images (lispm-transcript-images (plist-get section :body)
                                                            (plist-get section :end)))
                    items))
             ('event
@@ -354,7 +367,7 @@ the numbers gaining a digit as the chat grows."
   (let ((window (get-buffer-window (current-buffer) t)))
     (max 40 (min 100 (1- (if window (window-max-chars-per-line window) 80))))))
 
-(defun lispm-chat--indent (text prefix &optional first)
+(defun lispm-chat-indent (text prefix &optional first)
   "TEXT with PREFIX before each line, or FIRST before the first one.
 Lines that wrap are indented by PREFIX too."
   (let ((lines (split-string text "\n")))
@@ -382,7 +395,7 @@ in: it is presented once it is complete."
         (start 0) parts)
     ;; Org links name literal objects: the stars in *scratch*, for
     ;; example, are part of the buffer's name, not Markdown emphasis.
-    (while (string-match lispm-present--link-re line start)
+    (while (string-match lispm-present-link-re line start)
       (let ((beg (match-beginning 0)) (end (match-end 0)))
         (push (lispm-chat--inline-markdown (substring line start beg) defined plain) parts)
         (push (substring line beg end) parts)
@@ -433,13 +446,13 @@ the code's `lispm-chat-code' property marks."
   (string-match-p "\\`[ \t]*```" line))
 
 (defun lispm-chat--markdown-line (line in-code &optional defined plain)
-  "LINE of a reply, no fence, as `lispm-chat--markdown' shows it: as code
+  "LINE of a reply, no fence, as `lispm-chat-markdown' shows it: as code
 when IN-CODE, else see `lispm-chat--inline' for DEFINED and PLAIN."
   (if in-code
       (propertize (concat "  " line) 'face 'lispm-chat-code)
     (lispm-chat--inline line defined plain)))
 
-(defun lispm-chat--markdown (text &optional plain)
+(defun lispm-chat-markdown (text &optional plain)
   "TEXT of a reply, its Markdown shown as faces.
 Code blocks lose their fences and keep their lines as they are.  PLAIN
 presents no code, see `lispm-chat--inline'."
@@ -457,7 +470,7 @@ presents no code, see `lispm-chat--inline'."
     (string-join (nreverse out) "\n")))
 
 (defun lispm-chat--streaming-markdown (text)
-  "TEXT of a reply streaming in, as `lispm-chat--markdown' shows it with
+  "TEXT of a reply streaming in, as `lispm-chat-markdown' shows it with
 nothing presented.  Its complete lines are kept as drawn, in
 `lispm-chat--streamed', so each step draws only those that came since:
 drawn whole, a long reply took longer at every step."
@@ -563,14 +576,14 @@ strings are English, translated where shown (see lispm-i18n.el).")
   "PROPERTY of the tool NAME, see `lispm-chat--tools'."
   (plist-get (cdr (assoc name lispm-chat--tools)) property))
 
-(defun lispm-chat--tool-text (name property input preview subject)
+(defun lispm-chat-tool-text (name property input preview subject)
   "The text PROPERTY of the tool NAME gives a call of INPUT and PREVIEW,
 SUBJECT standing for %s, or nil when it gives none."
   (let ((value (lispm-chat--tool-get name property)))
     (cond ((functionp value) (funcall value input preview))
           (value (lispm-tr value subject)))))
 
-(defun lispm-chat--tool-name (name)
+(defun lispm-chat-tool-name (name)
   "The name the tool NAME is shown under; SERVER:TOOL for an MCP server's."
   (cond ((when-let* ((shown (lispm-chat--tool-get name :shown))) (lispm-tr shown)))
         ((and name (string-match "\\`mcp__\\(.+?\\)__\\(.+\\)\\'" name))
@@ -582,7 +595,7 @@ SUBJECT standing for %s, or nil when it gives none."
   (let ((input (plist-get item :input))
         (root (lispm-chat--root)))
     (cond ((stringp (alist-get 'path input))
-           (when-let* ((file (lispm-present--file (car (lispm-tools-reference (alist-get 'path input)))
+           (when-let* ((file (lispm-present-file (car (lispm-tools-reference (alist-get 'path input)))
                                                   root)))
              (list 'file file (let ((offset (alist-get 'offset input)))
                                 (and (integerp offset) offset)))))
@@ -609,11 +622,11 @@ it names one."
                                    (format ", %s" (alist-get 'glob input))
                                  ""))
                      (lispm-transcript-summary input))))
-    (concat (lispm-present (propertize (lispm-chat--tool-name (plist-get item :name))
+    (concat (lispm-present (propertize (lispm-chat-tool-name (plist-get item :name))
                                        'face 'lispm-chat-tool)
                            (list 'tool (plist-get item :name)))
             (if argument
-                (let ((shown (lispm--oneline argument 70))
+                (let ((shown (lispm-oneline argument 70))
                       (object (lispm-chat--argument-object item)))
                   (format "(%s)" (if object (lispm-present shown object) shown)))
               ""))))
@@ -776,7 +789,7 @@ else nil.  See `lispm-transcript-media-link'."
                 bullet))
             " " (lispm-chat--tool-title item)
             (if lines
-                (concat "\n" (lispm-chat--indent (lispm-chat--present (string-join lines "\n")) "     "
+                (concat "\n" (lispm-chat-indent (lispm-chat--present (string-join lines "\n")) "     "
                                                  (propertize "  ⎿  " 'face 'lispm-chat-dim)))
               "")
             "\n")))
@@ -798,10 +811,10 @@ else nil.  See `lispm-transcript-media-link'."
        (concat "\n" (lispm-chat--present shown) "\n")))
     ('text
      (let ((text (plist-get item :text)))
-       (concat "\n" (lispm-chat--indent (if (plist-get item :live)
+       (concat "\n" (lispm-chat-indent (if (plist-get item :live)
                                             ;; Presented and checked once complete.
                                             (lispm-chat--streaming-markdown text)
-                                          (lispm-chat--present (lispm-chat--markdown text)))
+                                          (lispm-chat--present (lispm-chat-markdown text)))
                                         "  " (concat (if lispm-chat-agent
                                                          (lispm-chat--mark lispm-chat-agent)
                                                        "⏺")
@@ -810,10 +823,10 @@ else nil.  See `lispm-transcript-media-link'."
     ('thought
      (let ((text (plist-get item :text)))
        (concat "\n"
-               (propertize (lispm-chat--indent
+               (propertize (lispm-chat-indent
                             (if (or (plist-get item :expanded) (plist-get item :live))
                                 text
-                              (concat (lispm--oneline text 70) "  " (lispm-tr "(TAB to show)")))
+                              (concat (lispm-oneline text 70) "  " (lispm-tr "(TAB to show)")))
                             "  " "✻ ")
                            'face 'lispm-chat-thought)
                "\n")))
@@ -821,26 +834,26 @@ else nil.  See `lispm-transcript-media-link'."
      (concat "\n"
              (propertize (concat "✻ " (lispm-tr "Conversation compacted")) 'face 'lispm-chat-accent)
              (if (plist-get item :expanded)
-                 (concat "\n" (propertize (lispm-chat--indent (plist-get item :text) "  ")
+                 (concat "\n" (propertize (lispm-chat-indent (plist-get item :text) "  ")
                                           'face 'lispm-chat-dim))
                (propertize (concat " " (lispm-tr "(TAB for the summary)")) 'face 'lispm-chat-dim))
              "\n"))
     ('event
      (concat "\n"
-             (propertize (lispm-chat--indent (format "%s: %s" (plist-get item :name)
+             (propertize (lispm-chat-indent (format "%s: %s" (plist-get item :name)
                                                      (plist-get item :text))
                                              "  " "⚡ ")
                          'face 'lispm-chat-dim)
              "\n"))
     ('note
-     (concat (lispm-chat--present (propertize (lispm-chat--indent (plist-get item :text) "     " "  ⎿  ")
+     (concat (lispm-chat--present (propertize (lispm-chat-indent (plist-get item :text) "     " "  ⎿  ")
                                               'face 'lispm-chat-dim))
              "\n"))
     ('tool (lispm-chat--tool item))))
 
 (defun lispm-chat--prompted (text)
   "TEXT after the prompt, its other lines indented to match."
-  (lispm-chat--indent text (make-string (string-width lispm-chat-prompt) ?\s)
+  (lispm-chat-indent text (make-string (string-width lispm-chat-prompt) ?\s)
                       lispm-chat-prompt))
 
 (defun lispm-chat--read-only (string)
@@ -1103,7 +1116,7 @@ ITEMS are the session's items, where the call's preview is."
     (let* ((asked (lispm-asked call))
            (name (plist-get asked :name))
            (input (and (consp (plist-get asked :input)) (plist-get asked :input)))
-           (shown (lispm-chat--tool-name name))
+           (shown (lispm-chat-tool-name name))
            (path (or (alist-get 'path input) (alist-get 'buffer input)))
            (why (alist-get 'why input))
            (item (seq-find (lambda (i) (equal (plist-get i :key) id)) items))
@@ -1119,17 +1132,17 @@ ITEMS are the session's items, where the call's preview is."
                                (and preview (split-string (string-trim preview) "\n"))))
                    ('command (split-string (or (alist-get 'command input) "") "\n"))
                    ('code (split-string (or (alist-get 'code input) "") "\n"))
-                   (_ (split-string (lispm--json-pretty input) "\n"))))
-           (title (concat (or (lispm-chat--tool-text name :title input preview subject)
+                   (_ (split-string (lispm-json-pretty input) "\n"))))
+           (title (concat (or (lispm-chat-tool-text name :title input preview subject)
                               (lispm-tr "Use %s" shown))
                           (if (and (plist-get call :asking) (not (lispm-chat--tool-get name :alone)))
                               (concat " · " (lispm-tr "in the program %s runs"
-                                                      (lispm-chat--tool-name (plist-get call :name))))
+                                                      (lispm-chat-tool-name (plist-get call :name))))
                             "")))
-           (question (or (lispm-chat--tool-text name :question input preview subject)
+           (question (or (lispm-chat-tool-text name :question input preview subject)
                          (lispm-tr "Do you want to proceed?")))
            ;; What saying yes leads to, beyond the call itself.
-           (note (lispm-chat--tool-text name :note input preview subject))
+           (note (lispm-chat-tool-text name :note input preview subject))
            (options (list (lispm-tr "Yes")
                           (pcase (lispm-call-allowance agent id)
                             (`(always . ,text) (lispm-tr text))
@@ -1630,7 +1643,7 @@ sees, and the chat shows.  Interactively, FILE is asked for."
 It is saved in the agent's session, as the images tools return are;
 one of a kind models do not take, TIFF say, is made a PNG first."
   (let* ((type (symbol-name type))
-         (file (if (rassoc type lispm-transcript--image-types)
+         (file (if (rassoc type lispm-transcript-image-types)
                    (lispm-save-image lispm-chat-agent (base64-encode-string data t) type)
                  (let ((pasted (make-temp-file "lispm-pasted-" nil
                                                (concat "." (cadr (split-string type "/"))))))
@@ -1814,7 +1827,7 @@ Return the chat of the new conversation."
     (user-error "%s" (lispm-tr "%s is busy; C-c C-c interrupts it" (lispm-agent-name agent))))
   (if (lispm-agent-standing agent)
       (let ((old (lispm-agent-buffer agent)))
-        (lispm--save-session agent)
+        (lispm-save-session agent)
         (lispm-session-buffer agent t)
         (when (buffer-live-p old)
           (with-current-buffer old (setq lispm-session-agent nil))
@@ -1855,7 +1868,7 @@ Return the chat of the new conversation."
             (progn
               (require 'lispm-backend-form)
               (lispm-setup-model))
-          (pcase-let ((`(,backend . ,model) (lispm--read-model agent)))
+          (pcase-let ((`(,backend . ,model) (lispm-read-model agent)))
             (lispm-use-model agent backend model)
             (when (buffer-live-p (lispm-agent-view agent))
               (with-current-buffer (lispm-agent-view agent)
@@ -1894,7 +1907,7 @@ ARGUMENT edit edits the rules of the level Custom instead."
 
 (defun lispm-chat-memory (agent _argument)
   "Open the memory of AGENT's project."
-  (pop-to-buffer (lispm-memory--buffer agent)))
+  (pop-to-buffer (lispm-memory-buffer agent)))
 
 (defun lispm-chat-cost (agent _argument)
   "Show the tokens AGENT used."
@@ -1923,7 +1936,7 @@ ARGUMENT edit edits the rules of the level Custom instead."
   (let ((agent lispm-chat-agent)
         (id (lispm-chat--waiting)))
     (lispm-chat-transcript agent)
-    (lispm--review-call agent id)))
+    (lispm-review-call agent id)))
 
 (defun lispm-chat-inspect (agent argument)
   "Inspect AGENT, or the agent ARGUMENT names."
