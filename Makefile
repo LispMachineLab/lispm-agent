@@ -9,11 +9,15 @@ LISPM_KERNEL ?= ../lispm-kernel
 # The sources, in lisp/, in strict dependency layer order (Layers 0 -> 4).
 ELS = $(addprefix lisp/, \
       lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
-      lispm-core.el lispm-job.el lispm-sandbox.el lispm-services.el lispm-roles.el lispm-transcript.el \
-      lispm-anthropic.el lispm-openai.el lispm-api.el lispm-deftool-macros.el lispm-agents.el \
-      lispm-agents-mcp.el lispm-agents-ide.el lispm-agents-claude.el lispm-agents-codex.el \
-      lispm-tools.el lispm-elisp-worker.el lispm-elisp.el lispm-memory.el lispm-inbox.el \
-      lispm-journal.el lispm-runtime.el lispm-lisp.el lispm-lisp-macros.el lispm-collab.el lispm-mcp.el \
+      lispm-util.el lispm-secrets.el lispm-core.el lispm-job.el lispm-sandbox.el lispm-services.el \
+      lispm-roles.el lispm-media.el lispm-transcript.el lispm-anthropic.el lispm-openai.el lispm-api.el \
+      lispm-deftool-macros.el lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el \
+      lispm-agents-claude.el lispm-agents-codex.el \
+      lispm-tool-core.el lispm-tool-permissions.el lispm-tool-search.el lispm-tool-builtins.el \
+      lispm-shell-classify.el lispm-tools.el lispm-elisp-worker.el lispm-elisp.el lispm-memory.el \
+      lispm-inbox.el lispm-journal.el lispm-session.el lispm-turns.el lispm-conditions.el \
+      lispm-approval.el lispm-runtime.el lispm-lisp-check.el lispm-lisp.el lispm-lisp-macros.el \
+      lispm-collab.el lispm-mcp.el \
       lispm-title.el lispm-episodes.el lispm-emacs.el lispm-develop.el lispm-skills.el \
       lispm-characters.el lispm-character-rag.el lispm-character-comfyui.el lispm-agents-bridge.el \
       lispm-mcp-server.el lispm-ground.el lispm-inspect.el lispm-agents-roster.el lispm-settings.el \

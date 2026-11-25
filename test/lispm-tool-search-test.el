@@ -156,7 +156,7 @@
     (lispm-tool-search-test--registry
       (lispm-deftool core_status () "Read status." "status")
       (let ((agent (lispm-defagent tester :root project)))
-        (should (lispm-tools--searchable-p))
+        (should (lispm-tools-searchable-p))
         (should (member "search_tools" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
         (should-not (car (lispm-tools-discover agent "tools" 5)))
         (should (equal (mapcar #'lispm-tool-name (car (lispm-tools-discover agent "select:search_tools" 5)))

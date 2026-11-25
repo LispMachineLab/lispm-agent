@@ -26,13 +26,18 @@
 (defconst lispm-boundaries-layers
   '((0 . ("lispm-i18n" "lispm-exec" "lispm-local-http" "lispm-websocket"
           "lispm-agents-context"))
-    (1 . ("lispm-core" "lispm-job" "lispm-sandbox" "lispm-services" "lispm-roles"
-          "lispm-transcript" "lispm-anthropic" "lispm-openai" "lispm-api"
+    (1 . ("lispm-util" "lispm-secrets" "lispm-core" "lispm-job" "lispm-sandbox"
+          "lispm-services" "lispm-roles" "lispm-media" "lispm-transcript"
+          "lispm-anthropic" "lispm-openai" "lispm-api"
           "lispm-deftool-macros" "lispm-agents" "lispm-agents-mcp"
           "lispm-agents-ide" "lispm-agents-claude" "lispm-agents-codex"))
-    (2 . ("lispm-tools" "lispm-elisp-worker" "lispm-elisp" "lispm-memory"
-          "lispm-inbox" "lispm-journal" "lispm-runtime" "lispm-lisp"
-          "lispm-lisp-macros" "lispm-collab" "lispm-mcp"))
+    (2 . ("lispm-tool-core" "lispm-tool-permissions" "lispm-tool-search"
+          "lispm-tool-builtins" "lispm-shell-classify" "lispm-tools"
+          "lispm-elisp-worker" "lispm-elisp" "lispm-memory"
+          "lispm-inbox" "lispm-journal" "lispm-session" "lispm-turns"
+          "lispm-conditions" "lispm-approval" "lispm-runtime"
+          "lispm-lisp-check" "lispm-lisp" "lispm-lisp-macros"
+          "lispm-collab" "lispm-mcp"))
     (3 . ("lispm-title" "lispm-episodes" "lispm-emacs" "lispm-develop"
           "lispm-skills" "lispm-characters" "lispm-character-rag"
           "lispm-character-comfyui" "lispm-agents-bridge" "lispm-mcp-server"
