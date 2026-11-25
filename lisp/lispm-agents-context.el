@@ -464,7 +464,7 @@ ERRORP, non-nil, marks the call failed."
 (defun lispm-agents-context-parse (text)
   "Return the JSON-RPC message TEXT as an alist, or nil when malformed."
   (ignore-errors
-    (json-parse-string text :object-type 'alist :null-object nil :false-object nil)))
+    (json-parse-string text :object-type 'alist :null-object nil :false-object :false)))
 
 (defun lispm-agents-context-handle (server tools message)
   "Answer the MCP MESSAGE, an alist, for SERVER offering TOOLS.

@@ -2236,14 +2236,6 @@ error then."
                   (not (buffer-local-value 'buffer-read-only buffer)))))
           (t (error "Cannot write %s: it is not writable" label)))))
 
-(defun lispm-tools--edit-diff (path old-text new-text &optional replace-all)
-  "The file at PATH as it is and as edit_file would leave it, and its label.
-OLD-TEXT, NEW-TEXT and REPLACE-ALL are edit_file's arguments."
-  (let* ((file (lispm-tools--file path))
-         (old (lispm--file-text file)))
-    (list old (car (lispm-tools--replace old old-text new-text replace-all))
-          (lispm-tools--label file))))
-
 (lispm-deftool edit_file
     ((path string "File to edit, absolute or relative to your root.")
      (old-text string "Exact text to replace, with enough context to be unique.")
@@ -2954,7 +2946,8 @@ allows."
                                   (format " *lispm-shell-proc: %s*" (if agent (lispm-agent-name agent) "?"))
                                   t))
                     (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
-                    (output "")
+                    (output-chunks nil)
+                    (output-text (lambda () (apply #'concat (reverse output-chunks))))
                     ;; At `lispm-sandbox-level', or not at all if the sandbox
                     ;; cannot be had.
                     (run (lispm-sandbox-prepare
@@ -2973,7 +2966,7 @@ allows."
                            :command (lispm-sandbox-run-command run)
                            :filter
                            (lambda (_p chunk)
-                             (setq output (concat output chunk))
+                             (push chunk output-chunks)
                              (when (buffer-live-p log-buffer)
                                (with-current-buffer log-buffer
                                  (save-excursion
@@ -2985,37 +2978,40 @@ allows."
                                          (process-get p 'lispm-done))
                                (process-put p 'lispm-done t)
                                (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
-                               (when (and (buffer-live-p proc-buffer) (string-empty-p output))
-                                 (let ((pre (with-current-buffer proc-buffer (buffer-string))))
-                                   (unless (string-empty-p pre)
-                                     (setq output pre))))
-                               (when (buffer-live-p proc-buffer)
-                                 (kill-buffer proc-buffer))
-                               (let ((status (process-exit-status p))
-                                     (timed-out (process-get p 'timed-out)))
-                                 (run-at-time
-                                  0 nil done
-                                  (concat (lispm-tools-strip-benign-stderr output)
-                                          "\n["
-                                          (if timed-out
-                                              "killed: timeout"
-                                            (format "exit status %d" status))
-                                          (if note (concat "; " note) "")
-                                          "]")
-                                  timed-out)))))))
+                               (let ((output (funcall output-text)))
+                                 (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+                                   (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+                                     (unless (string-empty-p pre)
+                                       (setq output pre))))
+                                 (when (buffer-live-p proc-buffer)
+                                   (kill-buffer proc-buffer))
+                                 (let ((status (process-exit-status p))
+                                       (timed-out (process-get p 'timed-out)))
+                                   (run-at-time
+                                    0 nil done
+                                    (concat (lispm-tools-strip-benign-stderr output)
+                                            "\n["
+                                            (if timed-out
+                                                "killed: timeout"
+                                              (format "exit status %d" status))
+                                            (if note (concat "; " note) "")
+                                            "]")
+                                    timed-out))))))))
                (lispm-sandbox-attach run proc)
                (when (buffer-live-p log-buffer)
                  (with-current-buffer log-buffer
-                   (goto-char (point-max))
-                   (insert (format "\n$ %s\n" command))))
-               (when (and (buffer-live-p proc-buffer) (string-empty-p output))
+                   (save-excursion
+                     (goto-char (point-max))
+                     (insert (format "\n$ %s\n" command)))))
+               (when (and (buffer-live-p proc-buffer) (null output-chunks))
                  (let ((pre (with-current-buffer proc-buffer (buffer-string))))
                    (unless (string-empty-p pre)
-                     (setq output pre)
+                     (push pre output-chunks)
                      (when (buffer-live-p log-buffer)
                        (with-current-buffer log-buffer
-                         (goto-char (point-max))
-                         (insert pre))))))
+                         (save-excursion
+                           (goto-char (point-max))
+                           (insert pre)))))))
                (process-put proc 'lispm-agent agent)
                (cond
                 ((and (not (process-live-p proc)) (not (process-get proc 'lispm-done)))
@@ -3047,13 +3043,14 @@ allows."
 (defun lispm-tools--read-forms (code)
   "All Lisp forms in the string CODE."
   (with-temp-buffer
-    (insert code)
-    (goto-char (point-min))
-    (let (forms)
-      (condition-case nil
-          (while t (push (read (current-buffer)) forms))
-        (end-of-file nil))
-      (nreverse forms))))
+    (with-syntax-table emacs-lisp-mode-syntax-table
+      (insert code)
+      (goto-char (point-min))
+      (let (forms)
+        (while (progn (forward-comment (point-max))
+                      (not (eobp)))
+          (push (read (current-buffer)) forms))
+        (nreverse forms)))))
 
 (defcustom lispm-tools-file-writers
   '(save-buffer save-some-buffers write-file write-region append-to-file

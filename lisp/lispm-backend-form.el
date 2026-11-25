@@ -137,7 +137,8 @@ Signal an error when the source needs something that is missing."
       ('typed
        (cond ((and (stringp key) (not (string-empty-p key)))
               (plist-put backend :key key))
-             ((stringp old-key) backend)
+             ((stringp old-key)
+              (plist-put backend :key old-key))
              (t (user-error "%s" (lispm-tr "Type a key, or choose where it comes from")))))
       ('env
        (when (or (not (stringp variable)) (string-empty-p variable))
@@ -372,6 +373,8 @@ says, once it is valid."
     (unless (and (symbolp name)
                  (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" (symbol-name name)))
       (user-error "%s" (lispm-tr "Use letters, digits, `-', `_' or `.'")))
+    (when (and (eq provider 'custom) old)
+      (user-error "%s" (lispm-tr "There is already a backend %s" name)))
     (setq backend (plist-put backend :api api))
     (setq backend (plist-put backend :url url))
     (setq backend (plist-put backend :model model))
@@ -415,11 +418,14 @@ says, once it is valid."
                   :when ,custom-p
                   :validate ,(lambda (value)
                                (when (stringp value)
-                                 (let ((name (intern (string-trim value))))
-                                   (unless (string-match-p
-                                            "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
-                                            (symbol-name name))
-                                     (lispm-tr "Use letters, digits, `-', `_' or `.'")))))
+                                 (let* ((trimmed (string-trim value))
+                                        (name (intern trimmed)))
+                                   (cond ((not (string-match-p
+                                                "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
+                                                trimmed))
+                                          (lispm-tr "Use letters, digits, `-', `_' or `.'"))
+                                         ((lispm-backend-get name)
+                                          (lispm-tr "There is already a backend %s" name))))))
                   :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))
             (api :type radio :label ,(lispm-tr "API")
                  :choices ,(mapcar (lambda (api)
@@ -551,19 +557,56 @@ says, once it is valid."
   "Format ENV, a plist of environment variables, as KEY=VALUE words."
   (string-join
    (cl-loop for (key val) on env by #'cddr
-            collect (format "%s=%s" (string-trim-left (symbol-name key) ":") val))
+            for k = (string-trim-left (symbol-name key) ":")
+            for v = (format "%s" val)
+            collect (format "%s=%s" k
+                            (if (or (string-empty-p v) (string-match-p "[ \t\n,\"'\\\\]" v))
+                                (prin1-to-string v)
+                              v)))
    " "))
 
 (defun lispm-mcp-form--parse-env (text)
-  "Parse TEXT, KEY=VALUE entries separated by spaces or commas, into a plist."
-  (let ((entries (split-string (string-trim (or text "")) "[, \t\n]+" t))
-        plist)
-    (dolist (entry entries)
-      (unless (string-match "\\`\\([[:alpha:]_][[:alnum:]_]*\\)=\\(.*\\)\\'" entry)
-        (user-error "Write environment variables as KEY=VALUE, not %s" entry))
-      (setq plist (plist-put plist (intern (concat ":" (match-string 1 entry)))
-                             (match-string 2 entry))))
-    plist))
+  "Parse TEXT, KEY=VALUE entries separated by spaces or commas, into a plist.
+Values containing spaces or commas may be enclosed in single or double quotes."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let (plist)
+      (while (progn (skip-chars-forward " \t\n,") (not (eobp)))
+        (unless (looking-at "\\([[:alpha:]_][[:alnum:]_]*\\)=")
+          (let ((bad (buffer-substring (point) (progn (skip-chars-forward "^ \t\n,") (point)))))
+            (user-error "Write environment variables as KEY=VALUE, not %s" bad)))
+        (let ((key (intern (concat ":" (match-string 1))))
+              (parts nil))
+          (goto-char (match-end 0))
+          (while (and (not (eobp)) (not (memq (char-after) '(?\s ?\t ?\n ?,))))
+            (let ((ch (char-after)))
+              (cond
+               ((memq ch '(?\" ?\'))
+                (let ((quote-ch ch)
+                      (start (progn (forward-char 1) (point)))
+                      (closed nil))
+                  (while (and (not (eobp)) (not closed))
+                    (let ((c (char-after)))
+                      (cond
+                       ((and (eq quote-ch ?\") (eq c ?\\) (< (1+ (point)) (point-max)))
+                        (push (buffer-substring start (point)) parts)
+                        (forward-char 1)
+                        (setq start (point))
+                        (forward-char 1))
+                       ((eq c quote-ch)
+                        (push (buffer-substring start (point)) parts)
+                        (forward-char 1)
+                        (setq closed t))
+                       (t (forward-char 1)))))
+                  (unless closed
+                    (user-error "Write environment variables as KEY=VALUE: unterminated quote"))))
+               (t
+                (let ((start (point)))
+                  (skip-chars-forward "^ \t\n,\"'")
+                  (push (buffer-substring start (point)) parts))))))
+          (setq plist (plist-put plist key (apply #'concat (nreverse parts))))))
+      plist)))
 
 (defun lispm-mcp-form--submit (name values)
   "Keep the MCP server VALUES describe; NAME nil adds one, else changes it."

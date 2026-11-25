@@ -517,7 +517,7 @@ Return (:done DONE :timed-out TIMED-OUT :reply FINAL-REPLY)."
                  (> (- deadline (float-time)) 15))
         (when hit-soft-deadline
           (ignore-errors (lispm-abort agent)))
-        (setq done (funcall run-turn lispm-batch--wrapup-prompt deadline 6 nil nil t))))
+        (setq done (funcall run-turn lispm-batch--wrapup-prompt deadline 6 nil t t))))
     (when-let* (((and done (< (float-time) deadline)
                       (< (funcall call-count-fn) lispm-max-steps)))
                 (hygiene-prompt (lispm-batch--hygiene-prompt root initial-files agent)))

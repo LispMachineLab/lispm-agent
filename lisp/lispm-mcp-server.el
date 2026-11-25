@@ -126,9 +126,8 @@ LispM: those talking with the agents, whose messages reach none of them.")
                                         (:constructor lispm-mcp-server--session-make))
   "The session of an agent outside LispM, working in DIRECTORY.
 ID is its Mcp-Session-Id; NAME and KIND are what its client calls itself;
-AGENT is the LispM agent it acts as; USED is when it last asked anything.
-CLOSED invalidates queued calls; PENDING holds answers not yet delivered."
-  id name kind agent used closed pending)
+AGENT is the LispM agent it acts as; USED is when it last asked anything."
+  id name kind agent used)
 
 ;;;; Sessions
 

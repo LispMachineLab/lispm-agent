@@ -388,7 +388,17 @@ terminal's directory; it is none of LispM's running agents."
   "Settle what was asked of the agent of TERMINAL, whose servers stop.
 This is one of `lispm-agents-context-release-functions'."
   (when-let* ((name (buffer-local-value 'lispm-agents-bridge--name terminal)))
-    (lispm-collab-peer-ended name)))
+    (lispm-collab-peer-ended name))
+  (when-let* ((agent (buffer-local-value 'lispm-agents-bridge--agent terminal)))
+    (run-hook-wrapped
+     'lispm-session-end-functions
+     (lambda (function)
+       (condition-case nil (funcall function agent) ((error quit) nil))
+       nil))
+    (dolist (process (process-list))
+      (when (eq (process-get process 'lispm-agent) agent)
+        (process-put process 'lispm-aborted t)
+        (lispm-exec-delete process)))))
 
 ;;;; Talking with the agents
 
@@ -419,11 +429,30 @@ about its calls.")
 
 (cl-defgeneric lispm-agents-bridge-server-live-p (server)
   "Whether SERVER still accepts the execution of a tool call."
-  (:method ((_server lispm-agents-mcp)) t))
+  (:method ((server lispm-agents-mcp))
+   (and (not (lispm-agents-mcp-closed server))
+        (let ((proc (lispm-agents-mcp-server server)))
+          (or (null proc) (process-live-p proc))))))
 
 (cl-defgeneric lispm-agents-bridge-server-answer (server answer)
   "Return ANSWER tied to SERVER's lifetime, when it owns pending calls."
-  (:method ((_server lispm-agents-mcp) answer) answer))
+  (:method ((server lispm-agents-mcp) answer)
+   (let (done callback)
+     (setq callback
+           (lambda (text &optional errorp)
+             (unless done
+               (setq done t)
+               (setf (lispm-agents-mcp-pending server)
+                     (delq callback (lispm-agents-mcp-pending server)))
+               (funcall answer
+                        (if (lispm-agents-mcp-closed server)
+                            '("Cancelled: the session has ended.")
+                          text)
+                        (or (lispm-agents-mcp-closed server) errorp)))))
+     (if (lispm-agents-mcp-closed server)
+         (funcall callback '("Cancelled: the session has ended.") t)
+       (push callback (lispm-agents-mcp-pending server)))
+     callback)))
 
 (defun lispm-agents-bridge--string (arguments key)
   "Return the string ARGUMENTS hold under KEY; an error if they hold none."
@@ -571,7 +600,7 @@ An agent may give it as an object, or as the text of one."
     (cond ((null input) nil)
           ((stringp input)
            (condition-case nil
-               (json-parse-string input :object-type 'alist :null-object nil :false-object nil)
+               (json-parse-string input :object-type 'alist :null-object nil :false-object :false)
              (error (error "The input is not a JSON object: %s" input))))
           ((listp input) input)
           (t (error "The input is a JSON object")))))

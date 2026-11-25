@@ -146,9 +146,10 @@ It is fed on stdin, so keys stay off the command line."
 (defun lispm-api--stream-locally (shape state headers payload url on-delta on-done on-error)
   "POST PAYLOAD to URL with HEADERS using a local curl process."
   (let ((file (make-temp-file "lispm-request-" nil ".json"))
+        (curl-config (lispm-api--curl-config headers))
         (raw nil)
         (client-error nil)
-        proc)
+        proc started)
     (unwind-protect
         (progn
           (let ((coding-system-for-write 'binary))
@@ -188,10 +189,13 @@ It is fed on stdin, so keys stay off the command line."
                                  (lispm-api--finish shape state client-error
                                                     (apply #'concat (nreverse raw))
                                                     on-done on-error))))))
-          (process-send-string proc (lispm-api--curl-config headers))
+          (process-send-string proc curl-config)
           (process-send-eof proc)
+          (setq started t)
           proc)
-      (unless (processp proc)
+      (unless started
+        (when (and (processp proc) (process-live-p proc))
+          (delete-process proc))
         (ignore-errors (delete-file file))))))
 
 (cl-defun lispm-api-stream (backend body betas &key on-delta on-done on-error)
@@ -243,7 +247,11 @@ curl process or kernel cancellation function."
 (defun lispm-api--finish (shape state client-error output on-done on-error)
   "Report the outcome of a request in SHAPE whose decoding STATE produced OUTPUT.
 CLIENT-ERROR is an error raised while decoding, if any."
-  (let* ((at (string-search lispm-api--status-marker output))
+  (let* ((at (let ((pos 0) found next)
+               (while (setq next (string-search lispm-api--status-marker output pos))
+                 (setq found next
+                       pos (+ next (length lispm-api--status-marker))))
+               found))
          (status (and at (string-to-number
                           (substring output (+ at (length lispm-api--status-marker))))))
          (body (string-trim (if at (substring output 0 at) output)))

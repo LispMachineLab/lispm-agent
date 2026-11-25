@@ -991,9 +991,8 @@ Unless NO-OPEN is non-nil, open the skill file in a buffer for editing."
                    (lispm-skills--compose name description instructions nil title)
                  (error (user-error "%s" (error-message-string err))))))
     (when (file-exists-p file)
-      (user-error "%s" (lispm-tr "Skill %s is in %s, not among the skills installed in %s; it is not deleted"
-                                 name (abbreviate-file-name (file-name-directory file))
-                                 (abbreviate-file-name (lispm-skills--write-directory)))))
+      (user-error "Skill %s already exists in %s"
+                  name (abbreviate-file-name file)))
     (make-directory (file-name-directory file) t)
     (let ((coding-system-for-write 'utf-8))
       (write-region text nil file nil 'silent))

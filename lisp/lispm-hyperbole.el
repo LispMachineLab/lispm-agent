@@ -62,15 +62,22 @@ That is (OBJECT START END)."
           (next-single-property-change (point) 'lispm-object nil (point-max)))))
 
 ;; `defib' is Hyperbole's macro, expanded once Hyperbole is there: this
-;; file compiles without it.  Defined last, the type is tried first.
-(eval '(defib lispm-presentation ()
-         "An object LispM presents, acted on as RET acts on it.
+;; file loads and compiles cleanly without it.  Defined last, the type is
+;; tried first.
+(with-eval-after-load 'hyperbole
+  (eval '(defib lispm-presentation ()
+           "An object LispM presents, acted on as RET acts on it.
 See lispm-inspect.el."
-         (pcase (lispm-hyperbole--presented)
-           (`(,object ,start ,end)
-            (ibut:label-set (buffer-substring-no-properties start end) start end)
-            (hact #'lispm-act object))))
-      t)
+           (pcase (lispm-hyperbole--presented)
+             (`(,object ,start ,end)
+              (ibut:label-set (buffer-substring-no-properties start end) start end)
+              (hact #'lispm-act object))))
+        t)
+  ;; In the chat's input, M-RET starts a new line, Hyperbole mode or not.
+  ;; The Action Mouse Key keeps its own list.
+  (add-to-list 'hkey-alist
+               '((and (derived-mode-p 'lispm-chat-mode) (lispm-chat--in-input-p))
+                 . ((lispm-chat-newline) . (lispm-chat-newline)))))
 
 (defun lispm-hyperbole-act ()
   "Activate the implicit button Hyperbole recognizes at point, if any.
@@ -80,12 +87,6 @@ Only while Hyperbole mode is on.  Return non-nil if there was one."
     t))
 
 (add-hook 'lispm-act-functions #'lispm-hyperbole-act)
-
-;; In the chat's input, M-RET starts a new line, Hyperbole mode or not.
-;; The Action Mouse Key keeps its own list.
-(add-to-list 'hkey-alist
-             '((and (derived-mode-p 'lispm-chat-mode) (lispm-chat--in-input-p))
-               . ((lispm-chat-newline) . (lispm-chat-newline))))
 
 (provide 'lispm-hyperbole)
 ;;; lispm-hyperbole.el ends here

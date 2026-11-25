@@ -550,11 +550,12 @@ ERRORP marks an execution or timeout failure."
 
 (defun lispm-shell-stage--on-log-change (_beg _end _len)
   "Mirror live insertions in a `*lispm-shell*' buffer to its stage session."
-  (let ((log (current-buffer)))
-    (maphash (lambda (_agent session)
-               (when (eq (lispm-shell-stage--session-log-buffer session) log)
-                 (lispm-shell-stage--sync-shell-log session)))
-             lispm-shell-stage--sessions)))
+  (save-match-data
+    (let ((log (current-buffer)))
+      (maphash (lambda (_agent session)
+                 (when (eq (lispm-shell-stage--session-log-buffer session) log)
+                   (lispm-shell-stage--sync-shell-log session)))
+               lispm-shell-stage--sessions))))
 
 (defun lispm-shell-stage--on-program-output (agent errorp text)
   "Mirror live `run_program' TEXT (stderr when ERRORP) for AGENT."

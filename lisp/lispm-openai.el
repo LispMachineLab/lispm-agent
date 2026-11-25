@@ -256,9 +256,9 @@ ARGUMENTS); FINISH the finish reason; USAGE the usage object."
   "Decoding state of a Chat Completions event stream."
   (pending "")                          ; unparsed tail of the stream
   started                               ; non-nil once a chunk arrived
-  (text "")
-  (reasoning "")
-  (calls (make-hash-table))             ; index -> (ID NAME ARGUMENTS)
+  text
+  reasoning
+  (calls (make-hash-table))             ; index -> (ID NAME ARGUMENTS-CHUNKS)
   finish usage error done)
 
 (defun lispm-openai-feed (stream chunk &optional on-delta)
@@ -287,13 +287,11 @@ arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
             (finish (alist-get 'finish_reason choice)))
         (when (consp delta)
           (when-let* ((text (lispm-openai--string (alist-get 'content delta))))
-            (setf (lispm-openai-stream-text stream)
-                  (concat (lispm-openai-stream-text stream) text))
+            (push text (lispm-openai-stream-text stream))
             (when on-delta (funcall on-delta 'text text)))
           (when-let* ((thought (or (lispm-openai--string (alist-get 'reasoning_content delta))
                                    (lispm-openai--string (alist-get 'reasoning delta)))))
-            (setf (lispm-openai-stream-reasoning stream)
-                  (concat (lispm-openai-stream-reasoning stream) thought))
+            (push thought (lispm-openai-stream-reasoning stream))
             (when on-delta (funcall on-delta 'thinking thought)))
           (let ((calls (alist-get 'tool_calls delta)))
             (seq-doseq (call (if (vectorp calls) calls []))
@@ -306,7 +304,7 @@ arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
   (let* ((calls (lispm-openai-stream-calls stream))
          (index (let ((i (alist-get 'index call)))
                   (if (integerp i) i (hash-table-count calls))))
-         (entry (gethash index calls (list nil nil "")))
+         (entry (gethash index calls (list nil nil nil)))
          (fn (alist-get 'function call))
          (name (and (consp fn) (lispm-openai--string (alist-get 'name fn))))
          (arguments (and (consp fn) (alist-get 'arguments fn))))
@@ -316,10 +314,11 @@ arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
       (setf (nth 1 entry) name)
       (when on-delta (funcall on-delta 'tool name)))
     (when (stringp arguments)
-      (setf (nth 2 entry) (concat (nth 2 entry) arguments))
+      (push arguments (nth 2 entry))
       (when (and on-delta (nth 1 entry))
         (funcall on-delta 'tool-input
-                 (list :id (nth 0 entry) :name (nth 1 entry) :json (nth 2 entry)))))
+                 (list :id (nth 0 entry) :name (nth 1 entry)
+                       :json (apply #'concat (reverse (nth 2 entry)))))))
     (puthash index entry calls)))
 
 (defun lispm-openai-stream-complete-p (stream)
@@ -330,12 +329,16 @@ arrives: `text', `thinking' (reasoning text) or `tool' (a tool name)."
 (defun lispm-openai-result (stream)
   "The complete message STREAM received, in Messages shape."
   (let ((calls (lispm-openai-stream-calls stream)))
-    (lispm-openai--message (lispm-openai-stream-reasoning stream)
-                           (lispm-openai-stream-text stream)
-                           (mapcar (lambda (i) (gethash i calls))
-                                   (sort (hash-table-keys calls) #'<))
-                           (lispm-openai-stream-finish stream)
-                           (lispm-openai-stream-usage stream))))
+    (lispm-openai--message
+     (apply #'concat (reverse (lispm-openai-stream-reasoning stream)))
+     (apply #'concat (reverse (lispm-openai-stream-text stream)))
+     (mapcar (lambda (i)
+               (let ((entry (gethash i calls)))
+                 (list (nth 0 entry) (nth 1 entry)
+                       (apply #'concat (reverse (nth 2 entry))))))
+             (sort (hash-table-keys calls) #'<))
+     (lispm-openai-stream-finish stream)
+     (lispm-openai-stream-usage stream))))
 
 (provide 'lispm-openai)
 ;;; lispm-openai.el ends here

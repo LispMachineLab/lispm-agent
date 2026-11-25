@@ -125,8 +125,9 @@ functions looking at them afresh.")
 ;;;; JSON
 
 (defun lispm-mcp--json-in (value)
-  "VALUE, decoded by mcp.el (plists, :json-false), as LispM decodes JSON."
+  "VALUE, decoded by mcp.el (plists, :json-false, :json-null), as LispM decodes."
   (cond ((eq value :json-false) :false)
+        ((eq value :json-null) :null)
         ((vectorp value) (vconcat (mapcar #'lispm-mcp--json-in value)))
         ((and (consp value) (keywordp (car value)))
          (cl-loop for (key val) on value by #'cddr

@@ -63,8 +63,9 @@
 (require 'lispm-agents-context)
 
 (cl-defstruct (lispm-agents-mcp (:constructor nil))
-  "The MCP server of one agent terminal; DIRECTORY bounds what it shows."
-  server port token directory)
+  "The MCP server of one agent terminal; DIRECTORY bounds what it shows.
+CLOSED is non-nil once stopped; PENDING holds in-flight answer callbacks."
+  server port token directory closed pending)
 
 (defun lispm-agents-mcp-start (name make directory)
   "Serve MCP to an agent terminal running in DIRECTORY; return the server,
@@ -87,9 +88,18 @@ of a type including `lispm-agents-mcp', taking :token and
     server))
 
 (cl-defmethod lispm-agents-context-stop ((server lispm-agents-mcp))
-  "Stop SERVER, and forget the names it was announced by."
+  "Stop SERVER, settle pending callbacks, and forget announced names."
+  (setf (lispm-agents-mcp-closed server) t)
+  (let ((callbacks (lispm-agents-mcp-pending server)))
+    (setf (lispm-agents-mcp-pending server) nil)
+    (dolist (callback callbacks)
+      (condition-case nil
+          (funcall callback '("Cancelled: the session has ended.") t)
+        ((error quit) nil))))
   (lispm-agents-mcp--unannounce server)
-  (delete-process (lispm-agents-mcp-server server)))
+  (when-let* ((proc (lispm-agents-mcp-server server)))
+    (when (processp proc)
+      (delete-process proc))))
 
 ;;;; Servers named to bin/lispm-tool
 
@@ -197,7 +207,7 @@ of the JSON object BODY, empty for none; return its result as text."
   (let ((arguments (if (string-blank-p body)
                        nil
                      (condition-case nil
-                         (json-parse-string body :object-type 'alist :null-object nil :false-object nil)
+                         (json-parse-string body :object-type 'alist :null-object nil :false-object :false)
                        (error 'malformed))))
         (tool (assoc name (lispm-agents-mcp-served-tools server)))
         (respond lispm-local-http-respond)

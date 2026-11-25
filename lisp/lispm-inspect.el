@@ -538,7 +538,7 @@ left as it is."
                              (and (string-match-p "\\`https?://" target)
                                   (list 'url target)))))
             (when object
-              (lispm-present-in text beg end object))
+              (mark beg end object))
             (setq start end))))
       (let ((start 0))
         (while (string-match lispm-present--place-re text start)
@@ -1102,8 +1102,4 @@ and does not inspect macOS privacy permissions."
                       (and viewspec (intern viewspec))))
 
 (provide 'lispm-inspect)
-
-;; Hyperbole's Action Key on these objects, and its implicit buttons in
-;; LispM's text, once Hyperbole is loaded.  LispM does not need it.
-(with-eval-after-load 'hyperbole (require 'lispm-hyperbole))
 ;;; lispm-inspect.el ends here

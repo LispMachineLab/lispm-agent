@@ -115,7 +115,8 @@ of alists in Messages shape."
   (pending "")                          ; unparsed tail of the stream
   message                               ; from message_start
   (blocks (make-hash-table))            ; index -> content block
-  (json (make-hash-table))              ; index -> partial tool input
+  (parts (make-hash-table))             ; index -> reversed chunk lists per field
+  (json (make-hash-table))              ; index -> reversed partial tool input chunks
   invalid                               ; ids of tool calls with bad input
   error                                 ; error object, if any
   done)                                 ; non-nil after message_stop
@@ -129,6 +130,22 @@ arrives: `text', `thinking' or `tool' (a tool name)."
     (setf (lispm-anthropic-stream-pending stream) rest)
     (dolist (data events)
       (lispm-anthropic--event stream (lispm--json-decode data) on-delta))))
+
+(defun lispm-anthropic--finalize-block (stream index block)
+  "Materialize accumulated chunk lists into BLOCK at INDEX of STREAM."
+  (let ((entry (gethash index (lispm-anthropic-stream-parts stream))))
+    (when entry
+      (dolist (key '(text thinking signature))
+        (when-let* ((chunks (alist-get key entry)))
+          (let ((base (let ((v (alist-get key block))) (if (stringp v) v ""))))
+            (setf (alist-get key block)
+                  (concat base (apply #'concat (reverse chunks)))))))
+      (when-let* ((cites (alist-get 'citations entry)))
+        (let ((base (alist-get 'citations block)))
+          (setf (alist-get 'citations block)
+                (vconcat base (nreverse (copy-sequence cites))))))
+      (remhash index (lispm-anthropic-stream-parts stream)))
+    block))
 
 (defun lispm-anthropic--event (stream ev on-delta)
   "Apply the decoded event EV to STREAM, reporting content to ON-DELTA."
@@ -145,9 +162,11 @@ arrives: `text', `thinking' or `tool' (a tool name)."
       ("content_block_delta"
        (lispm-anthropic--delta stream index (alist-get 'delta ev) on-delta))
       ("content_block_stop"
-       (let ((block (gethash index blocks)))
+       (when-let* ((block (gethash index blocks)))
+         (lispm-anthropic--finalize-block stream index block)
          (when (equal (alist-get 'type block) "tool_use")
-           (let ((json (string-trim (gethash index (lispm-anthropic-stream-json stream) ""))))
+           (let ((json (string-trim
+                        (apply #'concat (reverse (gethash index (lispm-anthropic-stream-json stream)))))))
              (setf (alist-get 'input block)
                    (if (string-empty-p json)
                        (alist-get 'input block)
@@ -171,39 +190,41 @@ arrives: `text', `thinking' or `tool' (a tool name)."
 
 (defun lispm-anthropic--delta (stream index delta on-delta)
   "Apply DELTA to the block at INDEX of STREAM."
-  (let ((block (gethash index (lispm-anthropic-stream-blocks stream))))
+  (let* ((block (gethash index (lispm-anthropic-stream-blocks stream)))
+         (parts (lispm-anthropic-stream-parts stream))
+         (entry (gethash index parts)))
     (pcase (alist-get 'type delta)
       ("text_delta"
        (let ((text (alist-get 'text delta)))
-         (setf (alist-get 'text block) (concat (alist-get 'text block) text))
+         (push text (alist-get 'text entry))
+         (puthash index entry parts)
          (when on-delta (funcall on-delta 'text text))))
       ("thinking_delta"
        (let ((text (alist-get 'thinking delta)))
-         (setf (alist-get 'thinking block) (concat (alist-get 'thinking block) text))
+         (push text (alist-get 'thinking entry))
+         (puthash index entry parts)
          (when on-delta (funcall on-delta 'thinking text))))
       ("signature_delta"
-       (setf (alist-get 'signature block)
-             (concat (let ((s (alist-get 'signature block))) (if (stringp s) s ""))
-                     (alist-get 'signature delta))))
+       (push (alist-get 'signature delta) (alist-get 'signature entry))
+       (puthash index entry parts))
       ("input_json_delta"
-       (let ((json (concat (gethash index (lispm-anthropic-stream-json stream) "")
-                           (alist-get 'partial_json delta))))
-         (puthash index json (lispm-anthropic-stream-json stream))
+       (let ((chunks (push (alist-get 'partial_json delta)
+                           (gethash index (lispm-anthropic-stream-json stream)))))
          (when on-delta
            (funcall on-delta 'tool-input
-                    (list :id (alist-get 'id block) :name (alist-get 'name block) :json json)))))
+                    (list :id (alist-get 'id block) :name (alist-get 'name block)
+                          :json (apply #'concat (reverse chunks)))))))
       ("citations_delta"
-       (setf (alist-get 'citations block)
-             (vconcat (alist-get 'citations block)
-                      (vector (alist-get 'citation delta))))))
-    (puthash index block (lispm-anthropic-stream-blocks stream))))
+       (push (alist-get 'citation delta) (alist-get 'citations entry))
+       (puthash index entry parts)))))
 
 (defun lispm-anthropic-result (stream)
   "The complete message STREAM received, as an alist.
 Its content is a vector of blocks in order.  The key `lispm-invalid'
 lists tool calls whose input was not valid JSON."
   (let* ((blocks (lispm-anthropic-stream-blocks stream))
-         (content (mapcar (lambda (i) (gethash i blocks))
+         (content (mapcar (lambda (i)
+                            (lispm-anthropic--finalize-block stream i (copy-alist (gethash i blocks))))
                           (sort (hash-table-keys blocks) #'<)))
          (message (copy-alist (lispm-anthropic-stream-message stream))))
     (setf (alist-get 'content message) (vconcat (lispm-anthropic--after-fallback content)))

@@ -333,21 +333,22 @@ items, already known."
   "The items of AGENT's session, read again only as far as it changed.
 While a response streams in, what precedes it is not read again
 unless it was edited."
-  (let* ((buffer (lispm-agent-buffer agent))
-         (tick (buffer-modified-tick buffer)))
-    (let ((old lispm-chat--parsed))
-      (if (and (eq (plist-get old :buffer) buffer) (eql (plist-get old :tick) tick))
-          (plist-get old :items)
-        (let* ((live-start (car (lispm-live-region buffer)))
-               (reuse (and (eq (plist-get old :buffer) buffer) live-start
-                           (eql (plist-get old :live) live-start)
-                           (>= lispm-chat--dirty live-start)))
-               (read (lispm-chat--read buffer (and reuse (plist-get old :stable))))
-               (items (append (nth 1 read) (nth 2 read))))
-          (setq lispm-chat--parsed (list :buffer buffer :tick tick :live (nth 0 read)
-                                         :stable (nth 1 read) :items items)
-                lispm-chat--dirty most-positive-fixnum)
-          items)))))
+  (let ((buffer (lispm-agent-buffer agent)))
+    (when (buffer-live-p buffer)
+      (let* ((tick (buffer-modified-tick buffer))
+             (old lispm-chat--parsed))
+        (if (and (eq (plist-get old :buffer) buffer) (eql (plist-get old :tick) tick))
+            (plist-get old :items)
+          (let* ((live-start (car (lispm-live-region buffer)))
+                 (reuse (and (eq (plist-get old :buffer) buffer) live-start
+                             (eql (plist-get old :live) live-start)
+                             (>= lispm-chat--dirty live-start)))
+                 (read (lispm-chat--read buffer (and reuse (plist-get old :stable))))
+                 (items (append (nth 1 read) (nth 2 read))))
+            (setq lispm-chat--parsed (list :buffer buffer :tick tick :live (nth 0 read)
+                                           :stable (nth 1 read) :items items)
+                  lispm-chat--dirty most-positive-fixnum)
+            items))))))
 
 ;;;; Drawing items
 
@@ -1256,6 +1257,34 @@ ITEMS are the session's items, where the call's preview is."
 (defvar-local lispm-chat--jump-timer nil
   "Idle timer debouncing `lispm-chat--refresh-jump-bars' after commands.")
 
+(defun lispm-chat--shift-undo (undo-list delta threshold)
+  "Shift UNDO-LIST positions at or after THRESHOLD by DELTA.
+Returns an undo list preserving user input edits after `lispm-chat--redraw'."
+  (cond
+   ((not (listp undo-list)) undo-list)
+   ((zerop delta) undo-list)
+   (t
+    (let ((shift-pos (lambda (p) (if (< p 0) (- (+ (- p) delta)) (+ p delta))))
+          out)
+      (dolist (item undo-list)
+        (let ((shifted
+               (cond
+                ((null item) nil)
+                ((integerp item)
+                 (when (>= (abs item) threshold)
+                   (funcall shift-pos item)))
+                ((and (consp item) (integerp (car item)) (integerp (cdr item)))
+                 (when (>= (car item) threshold)
+                   (cons (+ (car item) delta) (+ (cdr item) delta))))
+                ((and (consp item) (stringp (car item)) (integerp (cdr item)))
+                 (when (>= (abs (cdr item)) threshold)
+                   (cons (car item) (funcall shift-pos (cdr item)))))
+                ((and (consp item) (eq (car item) t)) item)
+                ((and (consp item) (markerp (car item)) (integerp (cdr item))) item))))
+          (when (or shifted (and (null item) out (car out)))
+            (push shifted out))))
+      (nreverse out)))))
+
 (defun lispm-chat--redraw ()
   "Bring the current chat up to date, from the first string that changed."
   (let* ((strings (lispm-chat--strings lispm-chat-agent))
@@ -1267,6 +1296,8 @@ ITEMS are the session's items, where the call's preview is."
     (when (or old new)
       (let* ((inhibit-read-only t)
              (inhibit-modification-hooks t)
+             (old-prompt (marker-position lispm-chat--prompt-start))
+             (saved-undo buffer-undo-list)
              (buffer-undo-list t)
              (windows (mapcar (lambda (w)
                                 (let* ((p (window-point w))
@@ -1301,9 +1332,11 @@ ITEMS are the session's items, where the call's preview is."
             (lispm-chat--follow w))
            (t
             (setq lispm-chat--unseen-output t)
-            (set-window-point w (min (window-point w) lispm-chat--prompt-start))))))
-      ;; Positions recorded for undoing input edits are stale now.
-      (setq buffer-undo-list nil))
+            (set-window-point w (min (window-point w) lispm-chat--prompt-start)))))
+        (setq buffer-undo-list
+              (lispm-chat--shift-undo saved-undo
+                                      (- (marker-position lispm-chat--prompt-start) old-prompt)
+                                      old-prompt))))
     (setq lispm-chat--drawn strings)
     (lispm-chat--update-footer)
     (lispm-chat--refresh-jump-bars)
@@ -1512,35 +1545,36 @@ then no menu shows."
 While a / command's name is written, the commands it may be show in
 place of the hints.  Run on a CHANGE of the input, the first of them is
 chosen again."
-  (when change
-    (setq lispm-chat--menu-choice 0))
-  (when (overlayp lispm-chat--footer)
-    (let* ((menu (lispm-chat--menu))
-           (footer
-           (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
-                       (propertize (cond ((not (lispm-chat--prompting-p))
-                                          (lispm-tr "Try \"explain this project\", or / for commands"))
-                                         ((lispm-chat--condition)
-                                          (lispm-tr "Choose above with its number, or write to stop and send"))
-                                         (t (lispm-tr "Answer above with 1, 2 or 3")))
-                                   'face 'lispm-chat-dim)
-                     " ")
-                   "\n" (lispm-chat--rule) "\n"
-                   (if menu
-                       (lispm-chat--menu-lines menu)
-                     (propertize (concat "  " (if (display-graphic-p)
-                                                (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt")
-                                              ;; A text terminal sends Return alike with Shift held.
-                                              (lispm-tr "/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt")))
-                                 'face 'lispm-chat-dim)))))
-      ;; The footer is drawn at the end of the input, where point usually
-      ;; is, and Emacs would draw the cursor after it, below the hints.
-      ;; Put it on the footer's first character instead: the placeholder,
-      ;; or a space (a newline holds no cursor).
-      (put-text-property 0 1 'cursor t footer)
-      ;; Its lines are not the input's: no indentation under the prompt.
-      (add-text-properties 0 (length footer) '(line-prefix "" wrap-prefix "") footer)
-      (overlay-put lispm-chat--footer 'after-string footer))))
+  (save-match-data
+    (when change
+      (setq lispm-chat--menu-choice 0))
+    (when (overlayp lispm-chat--footer)
+      (let* ((menu (lispm-chat--menu))
+             (footer
+             (concat (if (and lispm-chat--input-start (= lispm-chat--input-start (point-max)))
+                         (propertize (cond ((not (lispm-chat--prompting-p))
+                                            (lispm-tr "Try \"explain this project\", or / for commands"))
+                                           ((lispm-chat--condition)
+                                            (lispm-tr "Choose above with its number, or write to stop and send"))
+                                           (t (lispm-tr "Answer above with 1, 2 or 3")))
+                                     'face 'lispm-chat-dim)
+                       " ")
+                     "\n" (lispm-chat--rule) "\n"
+                     (if menu
+                         (lispm-chat--menu-lines menu)
+                       (propertize (concat "  " (if (display-graphic-p)
+                                                  (lispm-tr "/ for commands · RET send · S-RET newline · TAB expand · C-c C-c interrupt")
+                                                ;; A text terminal sends Return alike with Shift held.
+                                                (lispm-tr "/ for commands · RET send · C-j newline · TAB expand · C-c C-c interrupt")))
+                                   'face 'lispm-chat-dim)))))
+        ;; The footer is drawn at the end of the input, where point usually
+        ;; is, and Emacs would draw the cursor after it, below the hints.
+        ;; Put it on the footer's first character instead: the placeholder,
+        ;; or a space (a newline holds no cursor).
+        (put-text-property 0 1 'cursor t footer)
+        ;; Its lines are not the input's: no indentation under the prompt.
+        (add-text-properties 0 (length footer) '(line-prefix "" wrap-prefix "") footer)
+        (overlay-put lispm-chat--footer 'after-string footer)))))
 
 (defun lispm-chat-return ()
   "Send what is written, or answer the approval prompt if nothing is.
@@ -1875,9 +1909,10 @@ ARGUMENT edit edits the rules of the level Custom instead."
 (defun lispm-chat-transcript (agent &optional _argument)
   "Show the org transcript of AGENT's conversation."
   (interactive (list lispm-chat-agent))
-  (let ((buffer (lispm-agent-buffer agent)))
+  (let ((buffer (lispm-session-buffer agent)))
     (with-current-buffer buffer
-      (rename-buffer (file-name-nondirectory buffer-file-name) t))
+      (when buffer-file-name
+        (rename-buffer (file-name-nondirectory buffer-file-name) t)))
     (pop-to-buffer buffer)))
 
 (defun lispm-chat-review ()
