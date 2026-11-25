@@ -7243,12 +7243,12 @@ the end of Model so pasting or deleting replaces the old model cleanly."
         (setf (alist-get 'rotom lispm-backends)
               (list :api 'openai :url "http://127.0.0.1:4141/v1"
                     :model "gpt-6-sol" :key key-fn))
-        (with-current-buffer (lispm-model-setup-form)
+        (let ((buf (lispm-model-setup-form)))
           (unwind-protect
-              (progn
+              (with-current-buffer buf
                 (lispm-ui-form-set 'model "grok-5.5")
                 (lispm-ui-form-submit))
-            (when (buffer-live-p (current-buffer)) (kill-buffer (current-buffer)))))
+            (when (buffer-live-p buf) (kill-buffer buf))))
         (should (eq (plist-get (lispm-backend-get 'rotom) :key) key-fn))
         (should (equal (plist-get (lispm-backend-get 'rotom) :model) "grok-5.5"))
         (should (equal (lispm-default-model) "grok-5.5")))
@@ -7259,13 +7259,13 @@ the end of Model so pasting or deleting replaces the old model cleanly."
         (setf (alist-get 'rotom lispm-backends)
               (list :api 'openai :url "http://127.0.0.1:4141/v1"
                     :model "gpt-6-sol" :key '(secret . lispm-backend-rotom)))
-        (with-current-buffer (lispm-model-setup-form)
+        (let ((buf (lispm-model-setup-form)))
           (unwind-protect
-              (progn
+              (with-current-buffer buf
                 (should (eq (lispm-ui-form--key-at (point)) 'model))
                 (lispm-ui-form-set 'model "grok-5.5")
                 (lispm-ui-form-submit))
-            (when (buffer-live-p (current-buffer)) (kill-buffer (current-buffer)))))
+            (when (buffer-live-p buf) (kill-buffer buf))))
         (should (equal (plist-get (lispm-backend-get 'rotom) :model) "grok-5.5"))
         (should (equal (lispm-default-model) "grok-5.5"))
         (should-not (plist-get (lispm-backend-get 'rotom) :key)))
@@ -7276,12 +7276,12 @@ the end of Model so pasting or deleting replaces the old model cleanly."
         (setf (alist-get 'rotom lispm-backends)
               (list :api 'openai :url "http://127.0.0.1:4141/v1"
                     :model "gpt-6-sol" :key nil))
-        (with-current-buffer (lispm-model-setup-form)
+        (let ((buf (lispm-model-setup-form)))
           (unwind-protect
-              (progn
+              (with-current-buffer buf
                 (lispm-test--form-type 'key "rotom-tok-1")
                 (lispm-ui-form-submit))
-            (when (buffer-live-p (current-buffer)) (kill-buffer (current-buffer)))))
+            (when (buffer-live-p buf) (kill-buffer buf))))
         (should (equal (cdr (assq 'lispm-backend-rotom store)) "rotom-tok-1"))
         (should (equal (plist-get (lispm-backend-get 'rotom) :key)
                        '(secret . lispm-backend-rotom))))
@@ -7292,12 +7292,12 @@ the end of Model so pasting or deleting replaces the old model cleanly."
         (setf (alist-get 'ollama lispm-backends)
               (list :api 'openai :url "http://localhost:11434/v1"
                     :model "qwen3-coder"))
-        (with-current-buffer (lispm-model-setup-form)
+        (let ((buf (lispm-model-setup-form)))
           (unwind-protect
-              (progn
+              (with-current-buffer buf
                 (lispm-ui-form-set 'model "qwen3-coder:latest")
                 (lispm-ui-form-submit))
-            (when (buffer-live-p (current-buffer)) (kill-buffer (current-buffer)))))
+            (when (buffer-live-p buf) (kill-buffer buf))))
         (should (equal (plist-get (lispm-backend-get 'ollama) :model) "qwen3-coder:latest"))
         (should (equal (lispm-default-model) "qwen3-coder:latest"))
         (should-not (plist-get (lispm-backend-get 'ollama) :key))))))
