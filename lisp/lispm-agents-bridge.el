@@ -58,6 +58,7 @@
 (require 'lispm-agents)
 (require 'lispm-agents-mcp)
 (require 'lispm-core)
+(require 'lispm-job)
 (require 'lispm-tools)
 (require 'lispm-collab)
 (require 'lispm-skills)
@@ -123,6 +124,20 @@ not tell of the message yet.")
                          (lispm-agents-terminal-agent terminal))))
     (plist-get (lispm-agents-props agent) property)))
 
+(defun lispm-agents-bridge-existing-name (terminal)
+  "Return TERMINAL's recorded bridge peer name without allocating one, or nil."
+  (and (buffer-live-p terminal)
+       (local-variable-p 'lispm-agents-bridge--name terminal)
+       (buffer-local-value 'lispm-agents-bridge--name terminal)))
+
+(defun lispm-agents-bridge-existing-agent (terminal)
+  "Return TERMINAL's recorded bridge proxy principal without creating one."
+  (and (buffer-live-p terminal)
+       (local-variable-p 'lispm-agents-bridge--agent terminal)
+       (buffer-local-value 'lispm-agents-bridge--agent terminal)))
+
+(setq lispm-job-terminal-owner-function #'lispm-agents-bridge-existing-agent)
+
 (defun lispm-agents-bridge-terminals ()
   "Return the live agent terminals that are peers, oldest first: those
 LispM's tools are served to, and those whose agent takes messages through
@@ -131,7 +146,7 @@ its own program."
                 (and (or (lispm-agents-bridge--server terminal)
                          (lispm-agents-bridge--prop terminal :deliver))
                      (lispm-agents-terminal-live-p terminal)))
-              (delete-dups (mapcar #'car lispm-agents-context--servers))))
+              (lispm-agents-context-terminals)))
 
 (defun lispm-agents-bridge-name (terminal)
   "Return the name the agent of TERMINAL has among the agents.
@@ -501,14 +516,14 @@ about its calls.")
 
 ;;;; Skills and tools
 
-(defun lispm-agents-bridge--served-p (tool)
+(defun lispm-agents-bridge-served-p (tool)
   "Non-nil if call_tool runs TOOL."
   (not (or (member (lispm-tool-name tool) lispm-agents-bridge-unserved-tools)
            (memq (lispm-tool-permission tool) lispm-agents-bridge-unserved-permissions))))
 
 (defun lispm-agents-bridge--tool-line (tool)
   "TOOL, its description and its input's schema, for an agent to call."
-  (format "- %s: %s\n  input: %s" (lispm-tool-name tool) (lispm-tools--description tool)
+  (format "- %s: %s\n  input: %s" (lispm-tool-name tool) (lispm-tools-description tool)
           (condition-case nil
               (json-serialize (lispm-tool-spec-resolved-schema (lispm-tool-to-spec tool)))
             (error "an object"))))
@@ -521,17 +536,17 @@ about its calls.")
          (query (lispm-agents-bridge--string arguments 'query))
          (limit (alist-get 'max_results arguments))
          (answer (lispm-agents-bridge-server-answer server lispm-agents-context-answer)))
-    (lispm-tools--prepare
-     (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools--sources))
+    (lispm-tools-prepare
+     (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools-sources))
      (lambda (problems)
        (when (lispm-agents-bridge-server-live-p server)
          (condition-case err
              (pcase-let ((`(,found . ,others)
-                          (lispm-tools--discover agent query
+                          (lispm-tools-discover agent query
 						 (if (integerp limit) limit lispm-tool-search-results)
-						 #'lispm-agents-bridge--served-p)))
-               (let ((help (lispm-tools--selection-help
-                            agent query found others #'lispm-agents-bridge--served-p)))
+						 #'lispm-agents-bridge-served-p)))
+               (let ((help (lispm-tools-selection-help
+                            agent query found others #'lispm-agents-bridge-served-p)))
 		 (funcall answer
                           (list (concat
 				 (if (or found others)
@@ -555,10 +570,10 @@ about its calls.")
 (defun lispm-agents-bridge--skill-tools (skill defined)
   "The tools of SKILL an agent calls with call_tool: DEFINED, those its code
 defined, and those its file names, as are registered."
-  (seq-filter (lambda (tool) (and tool (lispm-agents-bridge--served-p tool)))
+  (seq-filter (lambda (tool) (and tool (lispm-agents-bridge-served-p tool)))
               (mapcar #'lispm-get-tool
                       (seq-uniq (append defined
-                                        (mapcar #'car (plist-get (lispm-skills--index skill) :tools)))))))
+                                        (mapcar #'car (plist-get (lispm-skills-index skill) :tools)))))))
 
 (defun lispm-agents-bridge--tool-skill (server arguments _id)
   "Load the skill ARGUMENTS name for SERVER's agent; return its text.
@@ -567,16 +582,16 @@ project runs only while the user trusts it, as for LispM's agents; else
 the agent gets the text alone."
   (let* ((agent (lispm-agents-bridge-server-agent server))
          (name (lispm-agents-bridge--string arguments 'name))
-         (skill (lispm-skills--find name agent)))
+         (skill (lispm-skills-find name agent)))
     (unless skill
-      (let ((nearest (lispm-skills--nearest name agent)))
+      (let ((nearest (lispm-skills-nearest name agent)))
         (error "No skill named %s%s; search_tools finds skills by what they do" name
                (if nearest (format " (nearest: %s)" (string-join nearest ", ")) ""))))
     (let* ((file (plist-get skill :file))
-           (text (lispm-skills--file-text file))
+           (text (lispm-skills-file-text file))
            (problem nil)
            (forms (condition-case err
-                      (lispm-skills--forms text file)
+                      (lispm-skills-forms text file)
                     (error (setq problem (error-message-string err)) nil)))
            (unevaluated (cond (problem (concat "its code was not evaluated: " problem))
                               ((not (lispm-skill-trusted-p skill text))
@@ -584,9 +599,9 @@ the agent gets the text alone."
 this project's skill (M-x lispm-trust-skill)")))
            (defined (unless unevaluated
                       (let ((lispm-current-agent agent))
-                        (lispm-skills--evaluate skill agent forms))))
+                        (lispm-skills-evaluate skill agent forms))))
            (tools (lispm-agents-bridge--skill-tools skill defined)))
-      (list (lispm-skills--loaded-text
+      (list (lispm-skills-loaded-text
              skill defined unevaluated
              (when tools
                (concat "Call its tools with call_tool:\n"
@@ -623,7 +638,7 @@ When SERVER is given, do not execute a call after its session ends."
   (let ((preview (let ((lispm-current-agent agent)
                        (default-directory (lispm-principal-root agent)))
                    (lispm-tool-preview-text tool input))))
-    (lispm--truncate (string-join (delq nil (append reasons
+    (lispm-truncate (string-join (delq nil (append reasons
                                                     (list (or preview
                                                               (and input
                                                                    (condition-case nil
@@ -654,7 +669,7 @@ be live both before asking and after the user answers."
               (allowed (lispm-agents-bridge--run agent tool input answer server))
               (t (funcall answer (list "Denied: the user did not approve this call.") t)))))))
 
-(defun lispm-agents-bridge--tool-call (server arguments _id)
+(defun lispm-agents-bridge-tool-call (server arguments _id)
   "Run the LispM tool ARGUMENTS name, on their input, for SERVER's agent.
 It runs at once, waits for the user's approval or is refused, as the
 policy of the agent acting in LispM decides."
@@ -672,7 +687,7 @@ policy of the agent acting in LispM decides."
                   (if (lispm-tool-spec-find name (lispm-agents-mcp-served-tools server))
                       ": it is a tool of your own"
                     "")))
-          ((not (lispm-agents-bridge--served-p tool))
+          ((not (lispm-agents-bridge-served-p tool))
            (error "%s keeps a LispM agent's own memory: use your own" name))
           ((not (lispm-tools-allowed-p agent name))
            (error "The role you have in LispM does not give you %s" name)))
@@ -735,7 +750,7 @@ lack in Emacs or its apps.  Load a skill with skill; call a tool with call_tool.
       ["name"]
       "Load a LispM skill that search_tools found: how to do a kind of thing in this system, \
 and its tools with their inputs, which you call with call_tool.")
-     ("call_tool" lispm-agents-bridge--tool-call
+     ("call_tool" lispm-agents-bridge-tool-call
       ((name . ((type . "string") (description . "The LispM tool, as search_tools or a skill names it.")))
        (input . ((type . "object") (description . "Its input, as its schema says."))))
       ["name"]

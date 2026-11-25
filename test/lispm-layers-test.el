@@ -91,5 +91,36 @@
     (should (null (plist-get report :errors)))
     (should (>= (plist-get report :modules) 60))))
 
+(ert-deftest lispm-layers-test-private-encapsulation ()
+  "Boundary verifier catches cross-module `--' leaks and duplicate `--' defs."
+  (let* ((root (make-temp-file "lispm-bounds-" t))
+         (lisp-dir (expand-file-name "lisp" root))
+         (lispm-boundaries-layers '((0 . ("lispm-mod-a"))
+                                    (1 . ("lispm-mod-b")))))
+    (unwind-protect
+        (progn
+          (make-directory lisp-dir t)
+          (with-temp-file (expand-file-name "Makefile" root)
+            (insert "ELS = lisp/lispm-mod-a.el lisp/lispm-mod-b.el\n"))
+          (with-temp-file (expand-file-name "lispm-mod-a.el" lisp-dir)
+            (insert "(defun lispm-mod-a--secret () t)\n"
+                    "(defvar lispm-shared--var 1)\n"
+                    "(defun lispm-shared--var () 2)\n"
+                    "(provide 'lispm-mod-a)\n"))
+          (with-temp-file (expand-file-name "lispm-mod-b.el" lisp-dir)
+            (insert "(require 'lispm-mod-a)\n"
+                    "(declare-function lispm-mod-a--secret \"lispm-mod-a\" ())\n"
+                    "(defvar lispm-shared--var 9)\n"
+                    "(defun lispm-mod-b-use () (lispm-mod-a--secret))\n"
+                    "(provide 'lispm-mod-b)\n"))
+          (let* ((report (lispm-check-boundaries-report root))
+                 (errors (plist-get report :errors)))
+            (should-not (plist-get report :ok))
+            (should (seq-some (lambda (e) (string-match-p "Cross-module private reference" e))
+                              errors))
+            (should (seq-some (lambda (e) (string-match-p "Duplicate private definition.*lispm-shared--var" e))
+                              errors))))
+      (delete-directory root t))))
+
 (provide 'lispm-layers-test)
 ;;; lispm-layers-test.el ends here

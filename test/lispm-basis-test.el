@@ -186,7 +186,7 @@
        :form-fields (lambda () '((badge :type text :label "Badge"))))
       (let* ((zoe (lispm-create-character "Zoe" :badge "architect"))
              (file (lispm-character-file zoe)))
-        (should (string-search "#+badge: architect\n" (lispm--file-text file)))
+        (should (string-search "#+badge: architect\n" (lispm-file-text file)))
         (let ((lispm--characters nil))
           (lispm-load-characters)
           (should (equal (lispm-character-extension (lispm-get-character 'zoe) :badge)

@@ -103,7 +103,7 @@ Tests replace it.")
       (user-error "No API key: set %s or add %s to auth-source"
                   (or variable "the key") host)))
 
-(defun lispm-api--key (backend)
+(defun lispm-api-key (backend)
   "API key for BACKEND, or nil if it needs none."
   (let ((key (plist-get backend :key))
         (variable (plist-get backend :key-env)))
@@ -131,7 +131,7 @@ alists in Messages shape.  Returns a `lispm-api-envelope'."
 
 (declare-function lispm-kernel-http-stream "lispm-kernel-exec")
 
-(defun lispm-api--curl-config (headers)
+(defun lispm-api-curl-config (headers)
   "curl configuration sending HEADERS.
 It is fed on stdin, so keys stay off the command line."
   (mapconcat (lambda (header)
@@ -147,7 +147,7 @@ It is fed on stdin, so keys stay off the command line."
 (defun lispm-api--stream-locally (shape state headers payload url on-delta on-done on-error)
   "POST PAYLOAD to URL with HEADERS using a local curl process."
   (let ((file (make-temp-file "lispm-request-" nil ".json"))
-        (curl-config (lispm-api--curl-config headers))
+        (curl-config (lispm-api-curl-config headers))
         (raw nil)
         (client-error nil)
         proc started)
@@ -216,9 +216,9 @@ function."
          (shape (lispm-api--shape backend))
          (state (funcall (plist-get shape :stream)))
          (headers (funcall (plist-get shape :headers)
-                           (lispm-api--key backend)
+                           (lispm-api-key backend)
                            (lispm-api-envelope-headers env)))
-         (payload (lispm--json-encode (lispm-api-envelope-body env)))
+         (payload (lispm-json-encode (lispm-api-envelope-body env)))
          (url (concat (string-remove-suffix "/" (plist-get backend :url))
                       (plist-get shape :path)))
          (client-error nil))
@@ -268,13 +268,13 @@ CLIENT-ERROR is an error raised while decoding, if any."
            (not (funcall (plist-get shape :started) state))
            (string-prefix-p "{" body))
       ;; A response that was not streamed.
-      (let* ((json (condition-case nil (lispm--json-decode body) (json-error nil)))
+      (let* ((json (condition-case nil (lispm-json-decode body) (json-error nil)))
              (message (and (consp json) (funcall (plist-get shape :whole) json))))
         (cond (message (funcall on-done message))
               ((and (consp json) (alist-get 'error json))
                (funcall on-error (lispm-api--error-plist status (alist-get 'error json))))
               (t (funcall on-error (list :status status :type "bad_response"
-                                         :message (lispm--truncate body 500)))))))
+                                         :message (lispm-truncate body 500)))))))
      ((and (eql status 200) err)
       (funcall on-error (lispm-api--error-plist status err)))
      ((and (eql status 200) (funcall (plist-get shape :complete) state))
@@ -286,11 +286,11 @@ CLIENT-ERROR is an error raised while decoding, if any."
       (funcall on-error (list :status status :type "network_error"
                               :message (if (string-empty-p body) "curl failed" body))))
      (t
-      (let ((json (condition-case nil (lispm--json-decode body) (json-error nil))))
+      (let ((json (condition-case nil (lispm-json-decode body) (json-error nil))))
         (funcall on-error
                  (lispm-api--error-plist
                   status (or (and (consp json) (alist-get 'error json))
-                             (lispm--truncate body 500)))))))))
+                             (lispm-truncate body 500)))))))))
 
 (defun lispm-api-retryable-p (err)
   "Non-nil if the error plist ERR is worth retrying."

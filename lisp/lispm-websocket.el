@@ -127,11 +127,11 @@ is answered with an HTTP error and the connection is dropped."
                       (string-equal-ignore-case
                        (or (cdr (assoc "upgrade" headers)) "") "websocket")))
             (lispm-websocket--refuse connection "400 Bad Request"))
-           ((not (lispm-local-http--loopback-host-p (cdr (assoc "host" headers))))
+           ((not (lispm-local-http-loopback-host-p (cdr (assoc "host" headers))))
             (lispm-websocket--refuse connection "403 Forbidden"))
            ((not (funcall (lispm-websocket--server-get connection :authorize) headers))
             (lispm-websocket--refuse connection "401 Unauthorized"))
-           ((not (lispm-local-http--loopback-origin-p (cdr (assoc "origin" headers))))
+           ((not (lispm-local-http-loopback-origin-p (cdr (assoc "origin" headers))))
             (lispm-websocket--refuse connection "403 Forbidden"))
            (t
             (process-send-string

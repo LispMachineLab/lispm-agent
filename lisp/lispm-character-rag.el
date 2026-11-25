@@ -156,7 +156,7 @@ Returns a list of float vectors, one per string in TEXTS, or nil on failure.")
 (defun lispm-characters--file-chunks (file)
   "Split knowledge FILE into chunks: plists with :id, :file, :title,
 :keywords, :text and :tokens."
-  (let ((text (lispm--file-text file))
+  (let ((text (lispm-file-text file))
         (org-p (string-suffix-p ".org" (downcase file)))
         sections chunks)
     (with-temp-buffer
@@ -288,10 +288,10 @@ using BM25 and Lorebook keyword triggers."
                      (json-serialize `((model . ,model)
                                        (input . ,(vconcat texts))))
                      'utf-8)))
-    (let* ((key (ignore-errors (lispm-api--key backend)))
+    (let* ((key (ignore-errors (lispm-api-key backend)))
            (headers (append '("Content-Type: application/json")
                             (when key (list (concat "Authorization: Bearer " key)))))
-           (config (lispm-api--curl-config headers))
+           (config (lispm-api-curl-config headers))
            (payload-file (make-temp-file "lispm-embed-" nil ".json")))
       (unwind-protect
           (progn
@@ -402,9 +402,9 @@ in CHARACTER's knowledge base."
                         keywords
                       (split-string keywords "[, \t:]+" t))))
          (tag-str (if tags (concat "  :" (string-join tags ":") ":") ""))
-         (clean-title (lispm--oneline title 120)))
+         (clean-title (lispm-oneline title 120)))
     (make-directory dir t)
-    (let ((buffer (lispm-memory--visit
+    (let ((buffer (lispm-memory-visit
                    file (format "#+title: Knowledge of %s\n" (lispm-character-title* character))
                    t)))
       (with-current-buffer buffer
@@ -424,7 +424,7 @@ in CHARACTER's knowledge base."
                 (unless (bolp) (insert "\n"))))
             (insert "* " clean-title tag-str "\n"
                     (org-escape-code-in-string (string-trim content)) "\n")))
-        (lispm-memory--save buffer)))
+        (lispm-memory-save buffer)))
     (lispm-git-commit (symbol-name (lispm-character-name character))
                       (format "%s: knowledge: %s" (lispm-character-name character) clean-title))
     file))
@@ -452,11 +452,11 @@ in CHARACTER's knowledge base."
   (when-let* ((character (lispm-agent-character* agent))
               ((lispm-character-rag-enabled-p character))
               ((lispm-character-knowledge-files character))
-              (input (cdr (lispm-characters--last-input agent)))
+              (input (cdr (lispm-characters-last-input agent)))
               ((not (string-empty-p input)))
               (hits (lispm-character-rag-search character input lispm-character-rag-top-k)))
     (concat "Relevant passages from your knowledge base for this turn:\n"
-            (lispm--truncate (lispm-characters--rag-format hits) 6000))))
+            (lispm-truncate (lispm-characters--rag-format hits) 6000))))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-characters--rag-prompt t)
 (add-hook 'lispm-request-context-functions #'lispm-characters--rag-context t)
@@ -516,10 +516,10 @@ hybrid vector embeddings and BM25 keyword retrieval."
                        :text ,(lispm-tr "Use a knowledge base (RAG & Lorebook)"))
                   (knowledge :type text :label ,(lispm-tr "Knowledge files")
                              :help ,(lispm-tr "Files or folders of its knowledge base, separated by commas.")
-                             :when ,(lispm-characters--when-checked 'rag))
+                             :when ,(lispm-characters-when-checked 'rag))
                   (embedding-model :type text :label ,(lispm-tr "Embedding model")
                                    :help ,(lispm-tr "For /v1/embeddings vector search; empty for local BM25.")
-                                   :when ,(lispm-characters--when-checked 'rag)))))
+                                   :when ,(lispm-characters-when-checked 'rag)))))
 
 (provide 'lispm-character-rag)
 ;;; lispm-character-rag.el ends here

@@ -130,10 +130,10 @@ of alists in Messages shape.  Returns a `lispm-api-envelope'."
 ON-DELTA, if non-nil, is called with KIND and a string as content
 arrives: `text', `thinking' or `tool' (a tool name)."
   (pcase-let ((`(,events . ,rest)
-               (lispm--sse-split (concat (lispm-anthropic-stream-pending stream) chunk))))
+               (lispm-sse-split (concat (lispm-anthropic-stream-pending stream) chunk))))
     (setf (lispm-anthropic-stream-pending stream) rest)
     (dolist (data events)
-      (lispm-anthropic--event stream (lispm--json-decode data) on-delta))))
+      (lispm-anthropic--event stream (lispm-json-decode data) on-delta))))
 
 (defun lispm-anthropic--finalize-block (stream index block)
   "Materialize accumulated chunk lists into BLOCK at INDEX of STREAM."
@@ -175,7 +175,7 @@ arrives: `text', `thinking' or `tool' (a tool name)."
                    (if (string-empty-p json)
                        (alist-get 'input block)
                      (condition-case nil
-                         (lispm--json-decode json)
+                         (lispm-json-decode json)
                        (error
                         (push (alist-get 'id block) (lispm-anthropic-stream-invalid stream))
                         nil))))

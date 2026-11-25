@@ -155,6 +155,10 @@ its program exited, or it was killed.")
   (mapcar #'cdr (seq-filter (lambda (entry) (eq (car entry) terminal))
                             lispm-agents-context--servers)))
 
+(defun lispm-agents-context-terminals ()
+  "Return live terminal buffers that own context servers."
+  (delete-dups (mapcar #'car lispm-agents-context--servers)))
+
 (defun lispm-agents-context-release-all ()
   "Stop every agent server."
   (mapc #'lispm-agents-context-release (mapcar #'car lispm-agents-context--servers)))

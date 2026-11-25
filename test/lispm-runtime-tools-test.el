@@ -85,7 +85,7 @@
       (let* ((result (lispm-test--call agent "runtime_status"
                                      '((libraries . ["lispm-test-runtime-probe" "lispm-no-such-library"])))))
         (should-not (cdr result))
-        (let* ((data (lispm--json-decode (car result)))
+        (let* ((data (lispm-json-decode (car result)))
                (libs (append (alist-get 'libraries data) nil)))
           (should (equal (alist-get 'emacs_version data) emacs-version))
           (should (equal (alist-get 'pid data) (emacs-pid)))
@@ -98,7 +98,7 @@
              (result (lispm-test--call agent "runtime_status" nil)))
         (should-not (cdr result))
         (should (<= (length (car result)) 500))
-        (should (eq (alist-get 'libraries_truncated (lispm--json-decode (car result))) t))))))
+        (should (eq (alist-get 'libraries_truncated (lispm-json-decode (car result))) t))))))
 
 (provide 'lispm-runtime-tools-test)
 ;;; lispm-runtime-tools-test.el ends here

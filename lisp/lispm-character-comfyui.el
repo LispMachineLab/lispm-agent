@@ -314,10 +314,10 @@ checkpoint) and return the generated image so the user sees it in the chat."
                            :text ,(lispm-tr "Generate images and portraits with ComfyUI"))
                   (appearance :type text :label ,(lispm-tr "Appearance")
                               :help ,(lispm-tr "What it looks like, for ComfyUI.")
-                              :when ,(lispm-characters--when-checked 'comfyui))
+                              :when ,(lispm-characters-when-checked 'comfyui))
                   (workflow :type text :label ,(lispm-tr "ComfyUI workflow")
                             :help ,(lispm-tr "Workflow name or file; empty for the open workflow.")
-                            :when ,(lispm-characters--when-checked 'comfyui)))))
+                            :when ,(lispm-characters-when-checked 'comfyui)))))
 
 (provide 'lispm-character-comfyui)
 ;;; lispm-character-comfyui.el ends here

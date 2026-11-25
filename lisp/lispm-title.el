@@ -73,7 +73,7 @@ topic, in %s. No quotes, no final punctuation."
         (widen)
         (cdr (assoc "title" (lispm-transcript-keywords)))))))
 
-(defun lispm-title--first-prompt (agent)
+(defun lispm-title-first-prompt (agent)
   "The text of the first message in AGENT's session, as requests carry it."
   (with-current-buffer (lispm-agent-buffer agent)
     (save-restriction
@@ -95,7 +95,7 @@ topic, in %s. No quotes, no final punctuation."
 
 (defun lispm-title--ask (agent reply)
   "Ask the model for a title of AGENT's session, which ended a turn with REPLY."
-  (let* ((prompt (lispm-title--first-prompt agent))
+  (let* ((prompt (lispm-title-first-prompt agent))
          (file (buffer-file-name (lispm-agent-buffer agent)))
          (backend (lispm-agent-backend* agent))
          (request (lispm-api-request
@@ -104,8 +104,8 @@ topic, in %s. No quotes, no final punctuation."
                    `(((role . "user")
                       (content . [((type . "text")
                                    (text . ,(format "The user wrote:\n%s\n\nThe agent replied:\n%s"
-                                                    (lispm--truncate (or prompt "") 3000)
-                                                    (lispm--truncate (or reply "") 2000))))]))))))
+                                                    (lispm-truncate (or prompt "") 3000)
+                                                    (lispm-truncate (or reply "") 2000))))]))))))
     (let (handle job)
       (setq job (lispm-job-register
                  agent 'title
@@ -121,7 +121,7 @@ topic, in %s. No quotes, no final punctuation."
                          (lambda (message)
                            (when (lispm-job-finish job)
                              (let ((title (lispm-title--clean
-                                           (lispm--reply-text
+                                           (lispm-content-text
                                             (append (alist-get 'content message) nil)))))
                                ;; Unless the user titled it meanwhile.
                                (when (and title file (file-exists-p file)

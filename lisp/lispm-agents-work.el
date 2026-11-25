@@ -60,7 +60,7 @@ cannot hide an entire group.  Starting agents need no invented key."
                        (cons directory (delq nil (mapcar (lambda (record)
                                                           (plist-get record :root))
                                                         records)))))
-         (roots (lispm-agents--resolve-roots directories))
+         (roots (lispm-agents-resolve-roots directories))
          (by-key (make-hash-table :test #'equal))
          (parents (make-hash-table :test #'eq))
          (visited (make-hash-table :test #'eq))

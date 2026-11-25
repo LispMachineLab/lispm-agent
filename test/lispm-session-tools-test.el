@@ -35,7 +35,7 @@
 
 (defun lispm-session-tools-test--jsonl (file objects)
   "Create FILE with JSON OBJECTS, one per line."
-  (lispm-test--write file (concat (mapconcat #'lispm--json-encode objects "\n") "\n"))
+  (lispm-test--write file (concat (mapconcat #'lispm-json-encode objects "\n") "\n"))
   file)
 
 (defun lispm-session-tools-test--claude (id project)
@@ -281,7 +281,7 @@
            opened)
       (lispm-session-tools-test--jsonl
        file (list `(:type "user" :cwd ,project :message (:content "Subagent task"))))
-      (lispm-test--write sidecar (lispm--json-encode `(:description ,(make-string 66000 ?x))))
+      (lispm-test--write sidecar (lispm-json-encode `(:description ,(make-string 66000 ?x))))
       (cl-letf (((symbol-function 'insert-file-contents)
                  (lambda (path &rest args)
                    (when (equal path sidecar) (setq opened t))

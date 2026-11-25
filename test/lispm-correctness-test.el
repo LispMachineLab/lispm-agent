@@ -111,9 +111,9 @@
              "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
     (let ((msg (lispm-anthropic-result ant)))
       (should (equal (alist-get 'text (aref (alist-get 'content msg) 0)) "AB"))))
-  ;; `lispm-tools--read-forms' allows comments/whitespace, rejects truncated forms.
-  (should (equal (lispm-tools--read-forms "(+ 1 2) ; trailing comment\n ") '((+ 1 2))))
-  (should-error (lispm-tools--read-forms "(+ 1 2) (unterminated") :type 'end-of-file))
+  ;; `lispm-tools-read-forms' allows comments/whitespace, rejects truncated forms.
+  (should (equal (lispm-tools-read-forms "(+ 1 2) ; trailing comment\n ") '((+ 1 2))))
+  (should-error (lispm-tools-read-forms "(+ 1 2) (unterminated") :type 'end-of-file))
 
 (ert-deftest lispm-correctness-test-runtime-and-core ()
   "`lispm-request-body' leaves `continuing' intact and role updates apply safely."
@@ -162,7 +162,7 @@
                        "https://k.example/v1")))
       ;; `lispm-character-rag-add' escapes leading `*' and `#+'.
       (let ((file (lispm-character-rag-add 'lyra "Escaping Test" "* Fake heading\n#+title: hijack")))
-        (should (string-match-p "^,\\* Fake heading" (lispm--file-text file)))
+        (should (string-match-p "^,\\* Fake heading" (lispm-file-text file)))
         (let ((hits (lispm-character-rag-search 'lyra "hijack" 2)))
           (should hits)
           (should (string-search "* Fake heading" (plist-get (car hits) :text)))))
@@ -195,7 +195,7 @@
     (let* ((lispm-memory-max-entries 1)
            (mem-file (expand-file-name "mem.org" project))
            (agent (lispm-defagent membot :root project))
-           (mem-buf (lispm-memory--buffer agent 'project t t)))
+           (mem-buf (lispm-memory-buffer agent 'project t t)))
       (lispm-memory-remember agent "First" "fact one")
       (lispm-memory-remember agent "Second" "fact two")
       (let ((tb (lispm-tasks--buffer agent t))
@@ -208,7 +208,7 @@
           (narrow-to-region (point-min) (point-min)))
         (lispm-tasks-update agent tid "DONE" "finished")
         (should (seq-some (lambda (e) (equal (plist-get e :title) "Third"))
-                          (lispm-memory--entries mem-buf)))
+                          (lispm-memory-entries mem-buf)))
         (ignore mem-file)))))
 
 (ert-deftest lispm-correctness-test-ui-lifecycle-title-and-batch ()

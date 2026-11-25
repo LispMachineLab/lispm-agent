@@ -392,7 +392,7 @@ async reply during that cleanup could also reopen its caller's buffer."
           (second (lispm-defagent second :root project)))
       (dolist (agent (list boss first second)) (lispm-session-buffer agent))
       (setq lispm-test--scripts '((first hang) (second hang)))
-      (cl-letf (((symbol-function 'lispm--new-id) (lambda () "20261029-222247-d3cd")))
+      (cl-letf (((symbol-function 'lispm-new-id) (lambda () "20261029-222247-d3cd")))
         (lispm-test--call boss "ask_agent" '((agent . "first") (request . "First")))
         (lispm-test--call boss "ask_agent" '((agent . "second") (request . "Second"))))
       (should (lispm-test--wait (lambda () (and (eq (lispm-agent-state first) 'requesting)

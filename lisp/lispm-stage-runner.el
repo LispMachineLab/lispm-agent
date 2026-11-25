@@ -86,7 +86,7 @@
 
 (defun lispm-stage-runner-header (agent summary status-str status-face)
   "Build a stage header line for AGENT, SUMMARY, STATUS-STR and STATUS-FACE."
-  (let* ((color (lispm-edits--color agent))
+  (let* ((color (lispm-edits-color agent))
          (label (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
          (short (truncate-string-to-width (or summary "") 52 nil nil "…")))
     (concat (propertize " " 'face `(:background ,color))
@@ -121,7 +121,7 @@ BUFFER; ON-SHOWN is called with the shown window when presented.
 Returns the stage window when presented, or nil."
   (when (and (buffer-live-p buffer)
              follow
-             (lispm-spotlight--follow-agent-p agent (float-time))
+             (lispm-spotlight-follow-agent-p agent (float-time))
              (not (lispm-edits-active-p)))
     (when-let* ((win (lispm-stage-window buffer t agent kind)))
       (unless (eq win (selected-window))

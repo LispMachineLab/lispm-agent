@@ -79,7 +79,7 @@ one by one through TRAMP.  Such a root has the in-memory journal only."
   (let ((dir (expand-file-name "journal.git/" (lispm-project-directory root))))
     (if (file-exists-p (expand-file-name "HEAD" dir))
         dir
-      (let ((process-environment (lispm--git-environment)))
+      (let ((process-environment (lispm-git-environment)))
         (when (zerop (call-process "git" nil nil nil "init" "-q" "--bare" dir))
           dir)))))
 
@@ -87,7 +87,7 @@ one by one through TRAMP.  Such a root has the in-memory journal only."
   "The environment of git commands on the journal DIR whose work tree is TOP."
   (append (list (concat "GIT_DIR=" (directory-file-name dir))
                 (concat "GIT_WORK_TREE=" (directory-file-name top)))
-          (lispm--git-environment)))
+          (lispm-git-environment)))
 
 (defun lispm-journal--git (dir top &rest args)
   "Run git with ARGS on the journal DIR, work tree TOP; return its output or nil."
@@ -146,7 +146,7 @@ made, or nil and nil if the snapshot failed.  An error in it, or in
 taking the snapshot, is reported, never signaled: it would be an
 error in a process sentinel, which ends a batch Emacs."
   (let ((files nil)
-        (process-environment (lispm--git-environment))
+        (process-environment (lispm-git-environment))
         (default-directory top))
     (make-process
      :name "lispm-journal-files" :buffer (generate-new-buffer " *lispm-journal*") :noquery t
@@ -315,7 +315,7 @@ Each has :ref, :commit, :subject, :time (its ref's name) and
 :finished, nil for a turn Emacs stopped in the middle of, whose
 :commit is then its beginning."
   (when-let* ((output (let ((process-environment (cons (concat "GIT_DIR=" (directory-file-name dir))
-                                                       (lispm--git-environment))))
+                                                       (lispm-git-environment))))
                         (with-temp-buffer
                           (when (zerop (call-process "git" nil '(t nil) nil "for-each-ref" "--sort=-refname"
                                                      "--format=%(refname)%09%(objectname)%09%(subject)"

@@ -176,7 +176,7 @@ TOOLS: an alist from a tool's name to `ask' or `deny', the strictest."
                            answer)
                           (_ (funcall every 'ask))))
            (setf (alist-get name answers nil nil #'equal)
-                 (lispm--stricter action (alist-get name answers 'auto nil #'equal)))))
+                 (lispm-stricter action (alist-get name answers 'auto nil #'equal)))))
        nil))
     answers))
 
@@ -201,7 +201,7 @@ Those `lispm-mcp-register-functions' deny are kept back."
           (push name names)
           (puthash name (cons server tool-name) lispm-mcp--origins)
           (lispm-register-tool
-           (lispm-tool--create
+           (lispm-make-tool
             :name name
             :description (or (plist-get tool :description) (format "%s of %s" tool-name server))
             :input-schema schema
@@ -223,7 +223,7 @@ Those `lispm-mcp-register-functions' deny are kept back."
 (defun lispm-mcp--unregister (server)
   "Remove SERVER's tools from those of LispM agents."
   (dolist (name (gethash server lispm-mcp--tools))
-    (remhash name lispm-tools--registry)
+    (lispm-tools-unregister name)
     (remhash name lispm-mcp--origins))
   (remhash server lispm-mcp--tools))
 
@@ -248,7 +248,7 @@ Images are saved in AGENT's session."
         ("resource_link" (push (format "[resource %s]" (plist-get item :uri)) texts))
         (type (push (format "[%s content left out]" type) texts))))
     (when (and (null texts) (plist-get result :structuredContent))
-      (push (lispm--json-pretty (lispm-mcp--json-in (plist-get result :structuredContent)))
+      (push (lispm-json-pretty (lispm-mcp--json-in (plist-get result :structuredContent)))
             texts))
     (list (string-join (nreverse texts) "\n")
           (eq (plist-get result :isError) t)
@@ -276,16 +276,28 @@ Images are saved in AGENT's session."
   "Non-nil if the server CONFIG describes is off until switched on."
   (if (plist-member config :defer) (plist-get config :defer) t))
 
-(defun lispm-mcp--running-p (server)
+(defun lispm-mcp-running-p (server)
   "Non-nil if SERVER's process runs."
   (when-let* ((connection (gethash server mcp-server-connections)))
     (jsonrpc-running-p connection)))
 
-(defun lispm-mcp--live-p (server)
+(defun lispm-mcp-live-p (server)
   "Non-nil if SERVER is running or starting."
   (or (gethash server lispm-mcp--starting)
       (when-let* ((connection (gethash server mcp-server-connections)))
         (and (jsonrpc-running-p connection) (gethash server lispm-mcp--tools)))))
+
+(defun lispm-mcp-connection-status (name)
+  "Return status plist `(:state STATE :tools COUNT :tool-names)' for NAME.
+STATE is `running', `starting', `failed', or `stopped'."
+  (let* ((tools (gethash name lispm-mcp--tools))
+         (running (lispm-mcp-running-p name))
+         (state (cond ((and tools running) 'running)
+                      ((gethash name lispm-mcp--starting) 'starting)
+                      ((gethash name lispm-mcp--failed) 'failed)
+                      (running 'running)
+                      (t 'stopped))))
+    (list :state state :tools (length tools) :tool-names tools)))
 
 (defun lispm-mcp--failed (server why)
   "Note that SERVER failed to start, because of WHY."
@@ -344,7 +356,7 @@ Deferred tools stay so: search_tools finds them."
   (interactive)
   (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
     (when (and (or (null server) (equal server name))
-               (not (lispm-mcp--live-p name)))
+               (not (lispm-mcp-live-p name)))
       (lispm-mcp--connect name config))))
 
 (defun lispm-mcp-refresh (&optional server)
@@ -355,7 +367,7 @@ changed its tools, or what those functions go by changed."
   (interactive)
   (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
     (when (and (or (null server) (equal server name))
-               (lispm-mcp--running-p name))
+               (lispm-mcp-running-p name))
       (lispm-mcp--connect name config))))
 
 (defun lispm-mcp-stop (&optional server)
@@ -391,14 +403,14 @@ changed its tools, or what those functions go by changed."
   (when lispm-mcp-autostart
     (pcase-dolist (`(,name . ,config) lispm-mcp-servers)
       (unless (or (lispm-mcp--deferred-p config)
-                  (lispm-mcp--live-p name)
+                  (lispm-mcp-live-p name)
                   (< (- (float-time) (gethash name lispm-mcp--failed 0)) lispm-mcp--retry-after))
         (lispm-mcp--connect name config)))))
 
 (defun lispm-mcp--activate (server callback)
   "Ready SERVER's tools, starting it if need be; then call CALLBACK.
 CALLBACK gets nil when the tools are there, or what went wrong."
-  (if (and (gethash server lispm-mcp--tools) (lispm-mcp--running-p server))
+  (if (and (gethash server lispm-mcp--tools) (lispm-mcp-running-p server))
       (funcall callback nil)
     (let ((since (float-time)) timer)
       (unless (gethash server lispm-mcp--starting)
@@ -426,7 +438,7 @@ CALLBACK gets nil when the tools are there, or what went wrong."
                            :description (or (plist-get config :description)
                                             (format "the tools of the MCP server %s" name))
                            :pending (not (and (gethash name lispm-mcp--tools)
-                                              (lispm-mcp--running-p name)))
+                                              (lispm-mcp-running-p name)))
                            :prepare (lambda (callback) (lispm-mcp--activate name callback))
                            :provides (lambda (tool) (string-prefix-p prefix tool))))))
 

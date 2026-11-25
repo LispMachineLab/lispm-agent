@@ -145,17 +145,17 @@ of the character's conversations."
   "File of the tasks of AGENT's project, or of the system's for a system agent."
   (expand-file-name "tasks.org" (lispm-home-directory agent)))
 
-(defun lispm-memory--visit (file header &optional to-change)
+(defun lispm-memory-visit (file header &optional to-change)
   "Buffer visiting FILE, created with HEADER if new.
 The user may change the file too, by hand or with git, so a buffer out
-of date is brought up to date first (see `lispm-tools--sync').  One
+of date is brought up to date first (see `lispm-tools-sync').  One
 with unsaved changes while the file changed on disk too is read as it
 is, being what the user sees, but cannot be changed: with TO-CHANGE,
 that is an error."
-  (let ((buffer (lispm-tools--visit file (not to-change))))
+  (let ((buffer (lispm-tools-visit file (not to-change))))
     (with-current-buffer buffer
       ;; Not over a file changed on disk: saving would ask.
-      (when (and (zerop (buffer-size)) (eq (lispm-tools--state buffer) 'current))
+      (when (and (zerop (buffer-size)) (eq (lispm-tools-state buffer) 'current))
         (insert header)
         (org-mode)
         (let ((inhibit-message t)
@@ -164,10 +164,12 @@ that is an error."
           (save-buffer))))
     buffer))
 
-(defun lispm-memory--buffer (agent &optional scope role to-change)
+(defalias 'lispm-memory--visit #'lispm-memory-visit)
+
+(defun lispm-memory-buffer (agent &optional scope role to-change)
   "Buffer of AGENT's memory in SCOPE, or of ROLE's (see `lispm-memory-file').
-TO-CHANGE is as for `lispm-memory--visit'."
-  (lispm-memory--visit (lispm-memory-file agent scope role)
+TO-CHANGE is as for `lispm-memory-visit'."
+  (lispm-memory-visit (lispm-memory-file agent scope role)
                        (pcase (lispm-memory--scope agent scope)
                          ('role (format "#+title: Memory of the %s role\n"
                                         (or role (lispm-agent-role agent))))
@@ -188,19 +190,19 @@ Each has its :scope (`project', `role', `system' or `self') and its
         (scope (lispm-memory--scope agent scope)))
     (and (file-exists-p file)
          (mapcar (lambda (e) (plist-put (plist-put e :scope scope) :file file))
-                 (lispm-memory--entries (lispm-memory--buffer agent scope role))))))
+                 (lispm-memory-entries (lispm-memory-buffer agent scope role))))))
 
 (defun lispm-tasks--buffer (agent &optional to-change)
   "Buffer of the tasks of AGENT's project, or of the system's.
-TO-CHANGE is as for `lispm-memory--visit'."
-  (lispm-memory--visit (lispm-tasks-file agent)
+TO-CHANGE is as for `lispm-memory-visit'."
+  (lispm-memory-visit (lispm-tasks-file agent)
                        (format "#+title: Tasks of %s\n#+todo: TODO NEXT BLOCKED | DONE CANCELLED\n"
                                (if (lispm-agent-system agent)
                                    "the system"
                                  (abbreviate-file-name (lispm-agent-root agent))))
                        to-change))
 
-(defun lispm-memory--entries (buffer)
+(defun lispm-memory-entries (buffer)
   "Top-level entries of the org BUFFER, as plists.
 Keys: :title :tags :todo :id :body :beg :end, and the properties
 :created :updated :recalled (timestamps, or nil) and :recalls (a
@@ -233,7 +235,9 @@ number)."
                                            (min (point) end) end))))
                            :beg beg :end end))))))))
 
-(defun lispm-memory--save (buffer)
+(defalias 'lispm-memory--entries #'lispm-memory-entries)
+
+(defun lispm-memory-save (buffer)
   "Save BUFFER quietly."
   (with-current-buffer buffer
     (let ((inhibit-message t)
@@ -245,15 +249,15 @@ number)."
   "TAG made valid for org."
   (replace-regexp-in-string "[^[:alnum:]_@#%]" "_" (format "%s" tag)))
 
-(defun lispm-memory--stamp (&optional time)
+(defun lispm-memory-stamp (&optional time)
   "An inactive org timestamp for TIME, or for now."
   (format-time-string "[%Y-%m-%d %a %H:%M]" time))
 
-(defun lispm-memory--entry-text (title tags properties content)
+(defun lispm-memory-entry-text (title tags properties content)
   "An entry of a memory file: TITLE with TAGS, PROPERTIES and CONTENT.
 PROPERTIES is an alist (NAME . VALUE); those whose VALUE is nil are
 left out."
-  (concat "* " (lispm--oneline title 120)
+  (concat "* " (lispm-oneline title 120)
           (if tags (format "  :%s:" (mapconcat #'lispm-memory--tag tags ":")) "")
           "\n:PROPERTIES:\n"
           (mapconcat (pcase-lambda (`(,name . ,value))
@@ -272,10 +276,10 @@ left out."
 An entry of that title is replaced; when it was saved and recalled
 stays on record."
   (let* ((scope (lispm-memory--scope agent scope))
-         (buffer (lispm-memory--buffer agent scope nil t))
-         (title (lispm--oneline title 120))
+         (buffer (lispm-memory-buffer agent scope nil t))
+         (title (lispm-oneline title 120))
          (existing (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
-                             (lispm-memory--entries buffer)))
+                             (lispm-memory-entries buffer)))
          ;; The past of the entry replaced: when it was saved, recalled, merged.
          (past (and existing
                     (with-current-buffer buffer
@@ -292,13 +296,13 @@ stays on record."
                      (goto-char (plist-get existing :beg)))
             (goto-char (point-max))
             (unless (bolp) (insert "\n")))
-          (insert (lispm-memory--entry-text
+          (insert (lispm-memory-entry-text
                    title tags
-                   `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory--stamp)))
-                     ("UPDATED" . ,(and existing (lispm-memory--stamp)))
+                   `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory-stamp)))
+                     ("UPDATED" . ,(and existing (lispm-memory-stamp)))
                      ,@(assoc-delete-all "CREATED" past))
                    content)))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: %s \"%s\"" (lispm-agent-name agent)
                                     (if existing "update memory" "remember") title))
     (format "%s %s memory \"%s\"." (if existing "Updated" "Saved") scope title)))
@@ -327,7 +331,7 @@ memory file whose buffer has changes of the user's is left as it is."
   (pcase-dolist (`(,file . ,recalled) (seq-group-by (lambda (e) (plist-get e :file)) entries))
     (when-let* ((buffer (and file (find-buffer-visiting file)))
                 ((not (buffer-modified-p buffer)))
-                ((eq (lispm-tools--state buffer) 'current)))
+                ((eq (lispm-tools-state buffer) 'current)))
       (with-current-buffer buffer
         (save-excursion
           (save-restriction
@@ -336,9 +340,9 @@ memory file whose buffer has changes of the user's is left as it is."
             (dolist (e (sort (copy-sequence recalled)
                              (lambda (a b) (> (plist-get a :beg) (plist-get b :beg)))))
               (goto-char (plist-get e :beg))
-              (org-entry-put nil "RECALLED" (lispm-memory--stamp))
+              (org-entry-put nil "RECALLED" (lispm-memory-stamp))
               (org-entry-put nil "RECALLS" (number-to-string (1+ (plist-get e :recalls))))))))
-      (lispm-memory--save buffer))))
+      (lispm-memory-save buffer))))
 
 (defun lispm-memory-recall (agent query &optional role)
   "Entries of AGENT's memory matching every word of QUERY.
@@ -372,13 +376,13 @@ A character's own memory comes first."
   (let* ((entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
                           (mapcan (lambda (scope) (lispm-memory--scope-entries agent scope))
                                   (lispm-memory--scopes agent))))
-         (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope) nil t))))
+         (buffer (and entry (lispm-memory-buffer agent (plist-get entry :scope) nil t))))
     (unless entry (error "No memory titled \"%s\"" title))
     (with-current-buffer buffer
       (save-restriction
         (widen)
         (delete-region (plist-get entry :beg) (plist-get entry :end))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: forget \"%s\"" (lispm-agent-name agent) title))
     (format "Forgot \"%s\" (it remains in git history)." title)))
 
@@ -389,13 +393,13 @@ A character's own memory comes first."
 (defun lispm-tasks--find (agent id)
   "The task of AGENT with ID, as an entry plist."
   (or (seq-find (lambda (e) (equal (plist-get e :id) id))
-                (lispm-memory--entries (lispm-tasks--buffer agent)))
+                (lispm-memory-entries (lispm-tasks--buffer agent)))
       (error "No task with ID %s" id)))
 
 (defun lispm-tasks-add (agent title &optional notes)
   "Add a TODO titled TITLE (with NOTES) to AGENT's tasks; return its ID."
   (let* ((buffer (lispm-tasks--buffer agent t))
-         (ids (mapcar (lambda (e) (plist-get e :id)) (lispm-memory--entries buffer)))
+         (ids (mapcar (lambda (e) (plist-get e :id)) (lispm-memory-entries buffer)))
          (id (cl-loop for id = (format "T%04x" (random #x10000))
                       unless (member id ids) return id)))
     (with-current-buffer buffer
@@ -404,13 +408,13 @@ A character's own memory comes first."
           (widen)
           (goto-char (point-max))
           (unless (bolp) (insert "\n"))
-          (insert "* TODO " (lispm--oneline title 120) "\n"
+          (insert "* TODO " (lispm-oneline title 120) "\n"
                   ":PROPERTIES:\n:ID:       " id "\n"
-                  ":CREATED:  " (lispm-memory--stamp) "\n:END:\n"
+                  ":CREATED:  " (lispm-memory-stamp) "\n:END:\n"
                   (if (and notes (not (string-blank-p notes)))
                       (concat (org-escape-code-in-string (string-trim notes)) "\n")
                     "")))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: add task %s" (lispm-agent-name agent) id))
     id))
 
@@ -427,14 +431,14 @@ A character's own memory comes first."
           (when note
             (goto-char (plist-get task :end))
             (unless (bolp) (insert "\n"))
-            (insert "- " (lispm-memory--stamp) " " (lispm--oneline note 500) "\n"))
+            (insert "- " (lispm-memory-stamp) " " (lispm-oneline note 500) "\n"))
           (when state
             (goto-char (plist-get task :beg))
             (let ((case-fold-search nil))
               (if (looking-at "\\* \\(?:\\(TODO\\|NEXT\\|BLOCKED\\|DONE\\|CANCELLED\\) \\)?")
                   (replace-match (concat "* " state " ") t t)
                 (error "Malformed task heading")))))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: task %s%s" (lispm-agent-name agent) id
                                     (if state (concat " -> " state) " note")))
     (format "Task %s updated." id)))
@@ -445,7 +449,7 @@ A character's own memory comes first."
                              (or include-done
                                  (not (member (plist-get e :todo) '("DONE" "CANCELLED")))))
                            (and (file-exists-p (lispm-tasks-file agent))
-                                (lispm-memory--entries (lispm-tasks--buffer agent))))))
+                                (lispm-memory-entries (lispm-tasks--buffer agent))))))
     (if tasks
         (mapconcat (lambda (e)
                      (format "%s %s %s%s" (plist-get e :id) (plist-get e :todo)
@@ -497,7 +501,7 @@ calls of one response, become one commit listing each of them."
       (setq lispm-git--queue nil)
       (make-directory default-directory t)
       (setq lispm-git--process
-            (let ((process-environment (lispm--git-environment)))
+            (let ((process-environment (lispm-git-environment)))
               (make-process
                :name "lispm-git" :buffer (get-buffer-create " *lispm-git*") :noquery t
                :command
@@ -625,10 +629,10 @@ of your plan. Reply with JSON only, in this form:
 ;; A pass costs a request holding the whole memory, so it is not made
 ;; again for a memory as it is: not before the memory says something
 ;; new, and, after a pass that failed or freed nothing, not for
-;; `lispm-memory--retry-after' seconds.  When an entry was recalled is
+;; `lispm-memory-retry-after' seconds.  When an entry was recalled is
 ;; not something new.
 
-(defconst lispm-memory--retry-after (* 6 3600)
+(defconst lispm-memory-retry-after (* 6 3600)
   "Seconds before a memory is tried again, after a consolidation that failed.")
 
 (defvar lispm-memory--consolidating (make-hash-table :test #'equal)
@@ -685,7 +689,7 @@ was last tried, once the time to wait after that is over."
   (and (lispm-git-p)
        (file-exists-p file)
        (not (gethash file lispm-memory--consolidating))
-       (let ((text (lispm--file-text file))
+       (let ((text (lispm-file-text file))
              (tried (gethash file lispm-memory--tried)))
          (and (lispm-memory--over-budget-p text)
               (or (null tried)
@@ -753,13 +757,13 @@ not under git (see `lispm-git-p'), nor once AGENT has ended.  See
                (lispm-git-p)
                (file-exists-p file)
                (not (gethash file lispm-memory--consolidating)))
-      (let* ((buffer (lispm-memory--buffer agent scope))
+      (let* ((buffer (lispm-memory-buffer agent scope))
              (text (lispm-memory--text buffer))
              (hash (lispm-memory--hash text))
-             (entries (lispm-memory--entries buffer))
+             (entries (lispm-memory-entries buffer))
              (failed (lambda (reason)
                        (remhash file lispm-memory--consolidating)
-                       (puthash file (cons hash (time-add nil lispm-memory--retry-after))
+                       (puthash file (cons hash (time-add nil lispm-memory-retry-after))
                                 lispm-memory--tried)
                        (message "%s" (lispm-tr "LispM: could not consolidate %s: %s"
                                                (abbreviate-file-name file) reason)))))
@@ -799,7 +803,7 @@ not under git (see `lispm-git-p'), nor once AGENT has ended.  See
                                              (lispm-memory--carry-out
                                               agent scope hash
                                               (lispm-memory--read-plan
-                                               (lispm--reply-text
+                                               (lispm-content-text
                                                 (append (alist-get 'content message) nil))
                                                (length entries)))
                                              (remhash file lispm-memory--consolidating))
@@ -822,7 +826,7 @@ A plan that is not so is an error, and nothing is changed."
   (let* ((start (string-search "{" reply))
          (end (cl-position ?} reply :from-end t))
          (plan (if (and start end (< start end))
-                   (lispm--json-decode (substring reply start (1+ end)))
+                   (lispm-json-decode (substring reply start (1+ end)))
                    (error "No plan in the reply")))
          (strings (lambda (value) (and (vectorp value) (seq-filter #'stringp value))))
          (text (lambda (value) (and (stringp value) (not (string-blank-p value)) value)))
@@ -858,13 +862,13 @@ in its MERGED property."
   (let ((stamps (lambda (key) (sort (delq nil (mapcar (lambda (e) (plist-get e key)) sources))
                                     #'string<)))
         (recalls (apply #'+ (mapcar (lambda (e) (plist-get e :recalls)) sources))))
-    (lispm-memory--entry-text
+    (lispm-memory-entry-text
      title tags
-     `(("CREATED" . ,(or (car (funcall stamps :created)) (lispm-memory--stamp)))
-       ("UPDATED" . ,(lispm-memory--stamp))
+     `(("CREATED" . ,(or (car (funcall stamps :created)) (lispm-memory-stamp)))
+       ("UPDATED" . ,(lispm-memory-stamp))
        ("RECALLED" . ,(car (last (funcall stamps :recalled))))
        ("RECALLS" . ,(and (> recalls 0) (number-to-string recalls)))
-       ("MERGED" . ,(mapconcat (lambda (e) (lispm--oneline (plist-get e :title) 120))
+       ("MERGED" . ,(mapconcat (lambda (e) (lispm-oneline (plist-get e :title) 120))
                                sources " | ")))
      content)))
 
@@ -879,9 +883,9 @@ they are, in their place; an entry replacing others takes the place
 of the first of them.  The change is one commit, which names every
 entry merged or dropped."
   (pcase-let* ((`(,replace . ,drop) plan)
-               (buffer (lispm-memory--buffer agent scope nil t))
+               (buffer (lispm-memory-buffer agent scope nil t))
                (old (lispm-memory--text buffer))
-               (entries (vconcat (lispm-memory--entries buffer)))
+               (entries (vconcat (lispm-memory-entries buffer)))
                (line (lambda (id) (format "\"%s\"" (plist-get (aref entries (1- id)) :title))))
                (parts nil)
                (titles nil))
@@ -928,7 +932,7 @@ entry merged or dropped."
             (erase-buffer)
             (insert new)
             (goto-char (min point (point-max))))))
-      (lispm-memory--save buffer)
+      (lispm-memory-save buffer)
       (puthash (buffer-file-name buffer) (cons (lispm-memory--hash new) 0) lispm-memory--tried)
       (lispm-git-commit
        agent
@@ -940,7 +944,7 @@ entry merged or dropped."
                           replace "\n")
                (if (and replace drop) "\n" "")
                (mapconcat (pcase-lambda (`(,id . ,reason))
-                            (format "drop %s: %s" (funcall line id) (lispm--oneline reason 200)))
+                            (format "drop %s: %s" (funcall line id) (lispm-oneline reason 200)))
                           drop "\n"))))))
 
 ;;;; Tools

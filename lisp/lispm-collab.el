@@ -126,6 +126,10 @@ whose names are those of no agent of LispM's.")
 PEER is the name of the peer asked; CALLBACK takes its reply and, when
 it ended without one, non-nil.  METADATA holds :from, :to and :queued.")
 
+(defun lispm-collab-pending-requests ()
+  "Return the list of in-flight collaboration requests."
+  lispm-collab--requests)
+
 (defvar lispm-collab-delivery-metadata nil
   "The message being given to a peer, as a plist, or nil.
 Bound around a peer's delivery function, without changing its calling
@@ -436,7 +440,7 @@ the request to the recipient.  Returns (TARGET . HELPER-P)."
            (run-at-time 0 nil #'lispm-collab--retire target))
          (funcall callback target reply))))
     (when inbox-p
-      (lispm--await-reply caller request-id))
+      (lispm-await-reply caller request-id))
     (cons target helper-p)))
 
 (cl-defun lispm-delegate (caller agent request callback &key root call request-id)
@@ -500,7 +504,7 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
               caller-id id (lispm-peer-name peer)
               (if ended reply (format "%s replied:\n%s" (lispm-peer-name peer) reply))))
            :id id)
-          (lispm--await-reply caller id (lispm-peer-name peer))
+          (lispm-await-reply caller id (lispm-peer-name peer))
           (lispm-collab--accepted id (lispm-peer-name peer)))
       (pcase-let ((`(,target . ,helper-p)
                    (lispm-collab--dispatch caller agent request
@@ -516,14 +520,14 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
 A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
   (concat (format "%s replied:\n%s" (lispm-agent-name agent) (substring-no-properties reply))
           (if-let* ((value (lispm-reply-value reply)))
-              (concat "\n\nValue:\n" (lispm--json-pretty value))
+              (concat "\n\nValue:\n" (lispm-json-pretty value))
             "")))
 
 (defun lispm-collab--record-asked (caller call target)
   "Record on the heading of CALLER's CALL that it asked TARGET."
   (when-let* ((marker (plist-get (gethash call (lispm-agent-pending caller)) :marker))
               ((marker-buffer marker)))
-    (lispm--in-session caller
+    (lispm-in-session caller
       (lispm-transcript-set-property marker "ASKED" (lispm-agent-id target)))))
 
 ;;;; Agents working on their own
@@ -532,7 +536,7 @@ A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
   "Root of the project around DIRECTORY, which is relative to CALLER's root.
 Nil if DIRECTORY is not a directory."
   (let ((directory (file-name-as-directory (expand-file-name directory (lispm-principal-root caller)))))
-    (and (file-directory-p directory) (lispm--project-root directory))))
+    (and (file-directory-p directory) (lispm-project-root directory))))
 
 (defun lispm-collab-start (caller role request &optional root)
   "Start an agent of ROLE in ROOT for CALLER, hand it REQUEST, and return it.
@@ -591,7 +595,7 @@ since it asked, and AGENT took the request up again."
           (cl-remove agent (lispm-agent-waiting-on caller) :count 1))
     (lispm-collab--wait-changed caller agent)
     (when (eq (plist-get (gethash call (lispm-agent-pending caller)) :status) 'run)
-      (lispm--call-finished caller call (lispm-collab--replied agent reply) nil nil))))
+      (lispm-call-finished caller call (lispm-collab--replied agent reply) nil nil))))
 
 (defun lispm-collab--callback (agent reply-to)
   "The callback of AGENT's input asked for by REPLY-TO, after Emacs restarted.
@@ -635,7 +639,7 @@ Emacs, and the call is recorded as interrupted."
           (progn
             (push target (lispm-agent-waiting-on caller))
             (lispm-collab--wait-changed caller target))
-        (lispm--call-finished caller call lispm--interrupted-result t nil)))))
+        (lispm-call-finished caller call lispm-interrupted-result t nil)))))
 
 (defun lispm-collab--take-up (caller call)
   "Take up CALLER's CALL of ask_agent, left running when Emacs stopped.
@@ -789,7 +793,7 @@ more than you."
             (abbreviate-file-name (lispm-agent-root agent)))))
 
 (lispm-register-tool
- (lispm-tool--create
+ (lispm-make-tool
   :name "return_value"
   :description
   "Return a value with your reply to the agent waiting for it, who asked you for something \(a [Message from agent X] request): data it can use as it is, such as a list of places as [[file:PATH::LINE]] links, the text of an org subtree, or any JSON.  Your reply still says what it is; a later call replaces the value."

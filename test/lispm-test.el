@@ -30,7 +30,7 @@
 
 ;; Git in any test, not only in `lispm-test-env', acts on the repository
 ;; of its directory, even when the suite runs under a git hook.
-(setq process-environment (lispm--git-environment))
+(setq process-environment (lispm-git-environment))
 
 (defvar lispm-test--dir (file-name-directory (or load-file-name buffer-file-name)))
 
@@ -122,7 +122,7 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm--idle-work (make-hash-table :test #'equal))
           ;; Run from git (a hook, rebase -x), the tests' git commands
           ;; would act on that repository rather than on their own.
-          (process-environment (lispm--git-environment)))
+          (process-environment (lispm-git-environment)))
      (make-directory project t)
      (unwind-protect
          (progn ,@body)
@@ -180,7 +180,7 @@ BODY can use `project', a scratch directory for agents to work in."
 
 (defun lispm-test--file (project name)
   "Contents of the file NAME in PROJECT."
-  (lispm--file-text (expand-file-name name project)))
+  (lispm-file-text (expand-file-name name project)))
 
 (defun lispm-test--transcript (agent)
   "AGENT's session buffer text."
@@ -246,7 +246,7 @@ So may diff be, which reads no input."
     (should (equal heard '((3 "done" ""))))))
 
 (ert-deftest lispm-test-diff-in-the-background ()
-  "Given a callback, `lispm--diff' runs diff in the background, through `lispm-exec'.
+  "Given a callback, `lispm-diff' runs diff in the background, through `lispm-exec'.
 The diff is the one made while Emacs waits; it comes later, never
 before the call returns, also when nothing changed.  A diff that could
 not be made says why.  No file is left behind."
@@ -255,21 +255,21 @@ not be made says why.  No file is left behind."
          (hear (lambda (&rest got) (setq heard got))))
     (unwind-protect
         (progn
-          (should-not (lispm--diff "a\nb\n" "a\nλ\n" "f.txt" hear))
+          (should-not (lispm-diff "a\nb\n" "a\nλ\n" "f.txt" hear))
           (should-not heard)
           (should (lispm-test--wait (lambda () heard)))
-          (should (equal heard (list (lispm--diff "a\nb\n" "a\nλ\n" "f.txt"))))
+          (should (equal heard (list (lispm-diff "a\nb\n" "a\nλ\n" "f.txt"))))
           (should (string-match-p "\\`--- a/f\\.txt\n\\+\\+\\+ b/f\\.txt\n@@ .* @@\n a\n-b\n\\+λ\n\\'" (car heard)))
           (should-not (directory-files temporary-file-directory nil "lispm-"))
           (setq heard nil)
-          (should-not (lispm--diff "same" "same" "f.txt" hear))
+          (should-not (lispm-diff "same" "same" "f.txt" hear))
           (should-not heard)
           (should (lispm-test--wait (lambda () heard)))
           (should (equal heard '("(no changes)")))
           (setq heard nil)
           (let ((lispm-exec-function (lambda (_program _args callback &rest _)
                                        (run-at-time 0 nil callback "diff did not run" "" ""))))
-            (lispm--diff "a" "b" "f.txt" hear)
+            (lispm-diff "a" "b" "f.txt" hear)
             (should (lispm-test--wait (lambda () heard)))
             (should (equal heard '(nil "diff did not run"))))
           (should-not (directory-files temporary-file-directory nil "lispm-")))
@@ -489,7 +489,7 @@ section's parts, a cleared result read back whole."
 
 (defun lispm-test--sse (&rest events)
   "EVENTS as a server-sent event stream."
-  (mapconcat (lambda (e) (format "event: %s\ndata: %s\n\n" (alist-get 'type e) (lispm--json-encode e)))
+  (mapconcat (lambda (e) (format "event: %s\ndata: %s\n\n" (alist-get 'type e) (lispm-json-encode e)))
              events ""))
 
 (ert-deftest lispm-test-sse-decoder ()
@@ -631,11 +631,11 @@ needs one."
                  (lambda (id &optional no-prompt)
                    (push (list id no-prompt) asked)
                    "sk-1")))
-        (should (equal (lispm-api--key backend) "sk-1"))
+        (should (equal (lispm-api-key backend) "sk-1"))
         ;; A request may have the store ask for the password.
         (should (equal asked '((lispm-backend-gateway nil))))))
     (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) nil)))
-      (should-error (lispm-api--key backend) :type 'user-error))))
+      (should-error (lispm-api-key backend) :type 'user-error))))
 
 (ert-deftest lispm-test-default-backend-secret ()
   "A backend whose key the secret store has is one whose key is at hand."
@@ -712,7 +712,7 @@ BODY can use `port' and `log', the file the server records requests in."
   "Requests the fake server recorded in LOG, oldest first."
   (with-temp-buffer
     (insert-file-contents log)
-    (mapcar #'lispm--json-decode (split-string (buffer-string) "\n" t))))
+    (mapcar #'lispm-json-decode (split-string (buffer-string) "\n" t))))
 
 (ert-deftest lispm-test-curl-stream ()
   "The curl transport streams, decodes UTF-8 split across chunks and reports errors."
@@ -736,7 +736,7 @@ BODY can use `port' and `log', the file the server records requests in."
                         (input (path . "a.txt"))))))
       (should (equal (mapconcat #'cdr (seq-filter (lambda (d) (eq (car d) 'text)) (reverse deltas)) "")
                      "Hello, λ→∀"))
-      (let* ((logged (lispm--json-decode (with-temp-buffer
+      (let* ((logged (lispm-json-decode (with-temp-buffer
                                            (insert-file-contents log)
                                            (buffer-substring (point-min) (line-end-position)))))
              (headers (alist-get 'headers logged))
@@ -758,7 +758,7 @@ BODY can use `port' and `log', the file the server records requests in."
                             :on-done #'ignore :on-error #'ignore)
           (should (stringp captured-payload))
           (should (multibyte-string-p captured-payload))
-          (should (equal (alist-get 'content (aref (alist-get 'messages (lispm--json-decode captured-payload)) 0))
+          (should (equal (alist-get 'content (aref (alist-get 'messages (lispm-json-decode captured-payload)) 0))
                          "我要你画一个蚂蚁骑自行车的网页图"))))
       (setq result nil err nil)
       (lispm-api-stream backend '((model . "fake") (stream . :false))
@@ -834,7 +834,7 @@ BODY can use `port' and `log', the file the server records requests in."
   (let ((stream
          (concat
           (mapconcat
-           (lambda (e) (format "data: %s\n\n" (lispm--json-encode e)))
+           (lambda (e) (format "data: %s\n\n" (lispm-json-encode e)))
            (list '((choices . [((index . 0) (delta (role . "assistant") (content . ""))
                                 (finish_reason . :null))]))
                  '((choices . [((index . 0) (delta (reasoning_content . "Think")))]))
@@ -1004,10 +1004,10 @@ BODY can use `port' and `log', the file the server records requests in."
                      ("a\\|b{x}" "a|b{x}" "a|b{x}" t)
                      ("\\w+@\\w+" "[[:alnum:]_]+@[[:alnum:]_]+" "assistant@lispm" t)
                      ("x{2,}" "x\\{2,\\}" "x" nil)))
-      (should (equal (lispm-tools--emacs-regexp pattern) emacs))
+      (should (equal (lispm-tools-emacs-regexp pattern) emacs))
       (should (eq (and (string-match-p emacs string) t) match))))
-  (should-error (lispm-tools--emacs-regexp "foo(?=bar)"))
-  (should-error (lispm-tools--emacs-regexp "a[b"))
+  (should-error (lispm-tools-emacs-regexp "foo(?=bar)"))
+  (should-error (lispm-tools-emacs-regexp "a[b"))
   (pcase-dolist (`(,glob ,file ,match)
                  '(("*.el" "/r/a/b.el" t) ("*.el" "/r/a/b.elc" nil)
                    ("src/**/*.ts" "/r/src/x/y.ts" t) ("src/**/*.ts" "/r/src/y.ts" t)
@@ -1235,7 +1235,7 @@ when none is next to the session; an absolute or a ~ link is itself."
           (setq default-directory sessions)
           (insert (format "#+lispm_root: %s\n* User\n[[file:a.png]]\n[[file:b.png]]\n[[file:%sc.png]]\n[[file:~/d.png]]\n"
                           root root))
-          (should (equal (lispm-transcript--images (point-min) (point-max))
+          (should (equal (lispm-transcript-images (point-min) (point-max))
                          (list (expand-file-name "a.png" root) (expand-file-name "b.png" sessions)
                                (expand-file-name "c.png" root) (expand-file-name "~/d.png")))))
       (delete-directory dir t))))
@@ -1374,7 +1374,7 @@ not one, has every tool ask."
       (lispm-mcp-refresh "fake")
       (should (lispm-test--wait (lambda () (not (lispm-get-tool "mcp__fake__snap"))) 15))
       (should (lispm-get-tool "mcp__fake__echo"))
-      (should (lispm-mcp--running-p "fake")))))
+      (should (lispm-mcp-running-p "fake")))))
 
 (ert-deftest lispm-test-tool-search ()
   "Deferred tools are found with search_tools, then offered, also after a resume."
@@ -1385,7 +1385,7 @@ not one, has every tool ask."
              (names (lambda (request) (mapcar (lambda (tool) (alist-get 'name tool))
                                               (alist-get 'tools request)))))
         ;; Nothing starts with the session.
-        (should-not (lispm-mcp--running-p "fake"))
+        (should-not (lispm-mcp-running-p "fake"))
         (setq lispm-test--scripts
               `((assistant@project
                  ,(lispm-test--msg "tool_use" (lispm-test--tool "t1" "search_tools" '((query . "echo text"))))
@@ -1552,7 +1552,7 @@ code that does not read is searched for the names."
   "apropos finds what Emacs can do; read_info reads its manuals."
   (lispm-test-env
     (let ((agent (lispm-defagent tester "Test agent." :root project)))
-      (should (string-match-p "^lispm-tools--emacs-regexp (function) "
+      (should (string-match-p "^lispm-tools-emacs-regexp (function) "
                               (car (lispm-test--call agent "apropos" '((pattern . "lispm emacs regexp"))))))
       (let ((variables (car (lispm-test--call agent "apropos" '((pattern . "lispm eval timeout") (kind . "variable"))))))
         (should (string-match-p "^lispm-eval-timeout (variable) Seconds eval_elisp waits" variables))
@@ -2017,7 +2017,7 @@ A failing source is passed over; a source's skills carry its origin."
            (file (expand-file-name "music.org" user-skills))
            (lispm-skill-directories (list user-skills)))
       (lispm-test--write file lispm-test--music-skill)
-      (let ((index (lispm-skills--index (lispm-skills--find "music" nil))))
+      (let ((index (lispm-skills-index (lispm-skills-find "music" nil))))
         (should (equal (plist-get index :tools)
                        '(("music_play" media "Play WHAT with EMMS.")
                          ("music_status" read "Say what plays.")
@@ -2030,7 +2030,7 @@ A failing source is passed over; a source's skills carry its origin."
                                       "* Broken\n#+begin_src emacs-lisp :lispm load\n"
                                       "(lispm-deftool music_play () \"Play.\"\n#+end_src\n"))
       (set-file-times file (time-add nil 10))
-      (let ((index (lispm-skills--index (lispm-skills--find "music" nil))))
+      (let ((index (lispm-skills-index (lispm-skills-find "music" nil))))
         (should-not (plist-get index :tools))
         (should (equal (plist-get index :headings) '("Broken"))))
       ;; A directory holding SKILL.md is read, indexed by its Markdown headings, and loaded without its frontmatter.
@@ -2043,13 +2043,13 @@ A failing source is passed over; a source's skills carry its origin."
                                    "# LispM Development & Decoupling Skill\n\n"
                                    "## Core Principles\n\n"
                                    "Keep repositories decoupled.\n"))
-        (let ((skill (lispm-skills--find "lispm-dev-skill" nil)))
+        (let ((skill (lispm-skills-find "lispm-dev-skill" nil)))
           (should skill)
           (should (equal (plist-get skill :title) "LispM Development & Decoupling Skill"))
           (should (equal (plist-get skill :description) "Develop and decouple LispM repositories."))
-          (should (equal (plist-get (lispm-skills--index skill) :headings)
+          (should (equal (plist-get (lispm-skills-index skill) :headings)
                          '("LispM Development & Decoupling Skill" "Core Principles")))
-          (should (equal (lispm-skills--text md-file)
+          (should (equal (lispm-skills-text md-file)
                          "# LispM Development & Decoupling Skill\n\n## Core Principles\n\nKeep repositories decoupled."))
           (should (= (lispm-skill-directory-count user-skills) 2)))))))
 
@@ -2082,10 +2082,10 @@ A failing source is passed over; a source's skills carry its origin."
   (let ((candidates '(("app-store" . "Find applications in the App Store and install them.")
                       ("eval_definition" . "Evaluate a definition again, to restore it.")))
         (fields (lambda (candidate) `((3 . ,(car candidate)) (1.5 . ,(cdr candidate))))))
-    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "install an app from the store")
+    (should (equal (mapcar #'car (lispm-tools-rank (lispm-tools-search-words "install an app from the store")
                                                     candidates 5 fields))
                    '("app-store")))
-    (should (equal (mapcar #'car (lispm-tools--rank (lispm-tools-search-words "restore") candidates 5 fields))
+    (should (equal (mapcar #'car (lispm-tools-rank (lispm-tools-search-words "restore") candidates 5 fields))
                    '("eval_definition")))))
 
 (ert-deftest lispm-test-search-finds-skills ()
@@ -2104,30 +2104,30 @@ a role is kept to; one without the skill tool is shown no skills."
                                                :deferred t :function #'ignore))
       (unwind-protect
           (progn
-            (let ((found (lispm-tools--discover agent "playing musik" 5)))
+            (let ((found (lispm-tools-discover agent "playing musik" 5)))
               (should (equal (funcall lines found)
                              '("- skill music (Test Store): Play music with EMMS: files, playlists and streams. Its tools: music_play, music_status, music_seek. Load it with skill.")))
               ;; A tool matching by chance, far below the skill, is left out ...
               (should-not (car found)))
             ;; ... and found when it matches.
             (should (member "test_playground"
-                            (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "play sandbox" 5)))))
+                            (mapcar #'lispm-tool-name (car (lispm-tools-discover agent "play sandbox" 5)))))
             ;; A tool of a skill's code is found by its name, as its skill.
-            (should (equal (length (funcall lines (lispm-tools--discover agent "music_status" 5))) 1))
-            (should (equal (length (funcall lines (lispm-tools--discover agent "select:music_seek" 5))) 1))
-            (should-not (car (lispm-tools--discover agent "select:music_seek" 5)))
+            (should (equal (length (funcall lines (lispm-tools-discover agent "music_status" 5))) 1))
+            (should (equal (length (funcall lines (lispm-tools-discover agent "select:music_seek" 5))) 1))
+            (should-not (car (lispm-tools-discover agent "select:music_seek" 5)))
             ;; Even registered, the tools of a skill come with it.
             (lispm-register-tool (lispm-tool--create :name "music_play" :description "Play." :deferred t
                                                      :function #'ignore))
-            (should-not (member "music_play" (mapcar #'lispm-tool-name (car (lispm-tools--discover agent "play" 5)))))
+            (should-not (member "music_play" (mapcar #'lispm-tool-name (car (lispm-tools-discover agent "play" 5)))))
             ;; A role gives the tools it names, and search_tools with skill.
             (setf (lispm-agent-tools agent) '(read_file skill))
             (should (member "search_tools" (mapcar #'lispm-tool-name (lispm-agent-tools* agent))))
-            (let ((found (lispm-tools--discover agent "play" 5)))
+            (let ((found (lispm-tools-discover agent "play" 5)))
               (should-not (car found))
               (should (cdr found)))
             (setf (lispm-agent-tools agent) '(read_file search_tools test_*))
-            (let ((found (lispm-tools--discover agent "play" 5)))
+            (let ((found (lispm-tools-discover agent "play" 5)))
               (should (equal (mapcar #'lispm-tool-name (car found)) '("test_playground")))
               (should-not (cdr found)))
             ;; A skill missed by name gets the nearest.
@@ -2384,7 +2384,7 @@ the agent's at once, deferred; a resumed session loads it again."
             (should (lispm-tool-deferred (lispm-get-tool "shout_tool")))
             (should-not (member "shout_tool" (mapcar #'lispm-tool-name
                                                      (lispm-agent-tools* (lispm-defagent other :root project)))))
-            (should (equal (plist-get (lispm-skills--find "shout" agent) :file) file))
+            (should (equal (plist-get (lispm-skills-find "shout" agent) :file) file))
             ;; A resumed session loads it again.
             (let ((session (buffer-file-name (lispm-agent-buffer agent))))
               (with-current-buffer (lispm-agent-buffer agent) (save-buffer))
@@ -2403,7 +2403,7 @@ and saves nothing whose code fails or does not read; a skill whose code does
 not read is loaded without it."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "user-skills/" project))
-           (lispm-skill-directories (list lispm-skills--builtin user-skills))
+           (lispm-skill-directories (list lispm-skills-builtin user-skills))
            (agent (lispm-defagent tester :root project :policy '((exec . auto))))
            (tool (lispm-get-tool "write_skill"))
            (input (lambda (name &optional code)
@@ -2566,7 +2566,7 @@ starts is, so its schema is made outside the call that loaded it."
                                             (setq port (match-string 1)))))))
             (should (seq-some (lambda (entry)
                                 (string-match-p "^- skill web:" (plist-get entry :line)))
-                              (cdr (lispm-tools--discover agent "javascript" 5))))
+                              (cdr (lispm-tools-discover agent "javascript" 5))))
             (should (string-match-p "tools now available: web_act, web_fetch, web_search"
                                     (car (lispm-test--call agent "skill" '((name . "web"))))))
             (let ((lispm-web-search-url (format "http://127.0.0.1:%s/search.html?q=%%s" port))
@@ -3531,10 +3531,10 @@ commands there; absolute paths name files there too."
       (setf (lispm-agent-policy agent) '((write . auto) (shell . auto)))
       (should (equal (lispm-agent-root agent) remote))
       (let ((lispm-current-agent agent))
-        (should (equal (lispm-tools--file "a.txt") (concat remote "a.txt")))
+        (should (equal (lispm-tools-file "a.txt") (concat remote "a.txt")))
         ;; An absolute path naming no machine is on the root's.
-        (should (equal (lispm-tools--file (expand-file-name "a.txt" project)) (concat remote "a.txt")))
-        (should (equal (lispm-tools--file "[[file:/etc/hosts::3]]")
+        (should (equal (lispm-tools-file (expand-file-name "a.txt" project)) (concat remote "a.txt")))
+        (should (equal (lispm-tools-file "[[file:/etc/hosts::3]]")
                        (concat (file-remote-p remote) "/etc/hosts"))))
       (should (string-match-p "1\talpha\n +2\tbeta"
                               (car (lispm-test--call agent "read_file" '((path . "a.txt"))))))
@@ -3614,8 +3614,8 @@ there: the names its .git file and commondir give are names on that machine."
            (linked (expand-file-name "../linked/" main))
            (host (file-remote-p remote)))
       (lispm-test--git main "worktree" "add" "-q" "-b" "side" linked)
-      (should (equal (lispm--main-worktree (concat host linked)) (concat host main)))
-      (should (equal (lispm--main-worktree (concat host linked "lisp/"))
+      (should (equal (lispm-main-worktree (concat host linked)) (concat host main)))
+      (should (equal (lispm-main-worktree (concat host linked "lisp/"))
                      (concat host main "lisp/"))))))
 
 (ert-deftest lispm-test-tool-interrupted ()
@@ -3628,9 +3628,9 @@ there: the names its .git file and commondir give are names on that machine."
       (unwind-protect
           (progn
             (should (equal (lispm-test--call agent "lispm_test_quit" nil)
-                           (cons lispm-tools--interrupted t)))
+                           (cons lispm-tools-interrupted t)))
             (should (equal (lispm-test--call agent "eval_elisp" '((code . "(signal 'quit nil)")))
-                           (cons lispm-tools--interrupted t)))
+                           (cons lispm-tools-interrupted t)))
             ;; Timers and process sentinels, where calls run, inhibit quitting.
             (should (equal (let ((inhibit-quit t))
                              (lispm-test--call agent "eval_elisp" '((code . "inhibit-quit"))))
@@ -3660,7 +3660,7 @@ there: the names its .git file and commondir give are names on that machine."
                             (prog1 (setq proc (apply make args))
                               (setq quit-flag t)))))
                 (should (equal (lispm-test--call agent "run_shell" '((command . "sleep 30")))
-                               (cons lispm-tools--interrupted t))))
+                               (cons lispm-tools-interrupted t))))
               (should-not quit-flag)
               (should-not (process-live-p proc)))
             ;; A C-g pressed before the call is left for what it was meant for.
@@ -3780,7 +3780,7 @@ there: the names its .git file and commondir give are names on that machine."
         (lispm-test--change-on-disk file "seven\n")
         (let ((lispm-current-agent agent)
               (edit '((path . "a.txt") (old_text . "seven") (new_text . "7"))))
-          (should (equal (lispm--file-text file) "seven\n"))
+          (should (equal (lispm-file-text file) "seven\n"))
           (should (string-match-p "^-seven\n\\+7"
                                   (lispm-tool-preview-text (lispm-get-tool "edit_file") edit)))
           (should-not (lispm-tool-would-change (lispm-get-tool "edit_file") edit))
@@ -4087,7 +4087,7 @@ are not saved: saving it would ask."
       (goto-char (point-min))
       (let (events)
         (while (re-search-forward "^\\*\\*\\* Approval$" nil t)
-          (push (lispm--json-decode
+          (push (lispm-json-decode
                  (lispm-transcript--block
                   (point) (lispm-transcript-subtree-end (line-beginning-position) 3)))
                 events))
@@ -4116,7 +4116,7 @@ are not saved: saving it would ask."
           (should (string-match-p "\\`[0-9-]+T[0-9:]+Z\\'" (alist-get 'time event))))
         (should-not (string-match-p "^\\*\\*\\* Preview" (lispm-test--transcript agent)))
         (should (equal (lispm-test--transcript agent)
-                       (lispm--file-text (buffer-file-name (lispm-agent-buffer agent))))))
+                       (lispm-file-text (buffer-file-name (lispm-agent-buffer agent))))))
       (lispm-allow agent "a1")
       (lispm-resolve agent "a3" 'deny "Use the earlier answer.")
       ;; A repeated answer has no effect and must not fabricate an event.
@@ -4133,7 +4133,7 @@ are not saved: saving it would ask."
         (should (equal (alist-get 'reason (nth 2 decisions)) "Use the earlier answer."))
         (should-not (seq-find (lambda (e) (equal (alist-get 'call_id e) "a4")) events)))
       (should (equal (lispm-test--transcript agent)
-                     (lispm--file-text (buffer-file-name (lispm-agent-buffer agent)))))
+                     (lispm-file-text (buffer-file-name (lispm-agent-buffer agent)))))
       ;; The model sees exactly the same messages with the audit removed.
       (let ((text (lispm-test--transcript agent))
             (messages (with-current-buffer (lispm-agent-buffer agent)
@@ -4515,7 +4515,7 @@ process died with Emacs, is recorded as interrupted."
       (let* ((file (lispm-test--crash agent))
              (revived (progn
                         ;; The file holds the turn as it was saved.
-                        (should (string-match-p "^\\*\\* RUNNING run_shell" (lispm--file-text file)))
+                        (should (string-match-p "^\\*\\* RUNNING run_shell" (lispm-file-text file)))
                         (lispm-resume-file file))))
         ;; The call awaiting approval is known again ...
         (should (equal (lispm-waiting-calls revived) '("t2")))
@@ -4603,7 +4603,7 @@ agents wrote, and the agents are forgotten, standing ones too."
 (defun lispm-test--inbox (root)
   "The text of the inbox file of the project at ROOT, or nil."
   (let ((file (lispm-inbox-file root)))
-    (and (file-exists-p file) (lispm--file-text file))))
+    (and (file-exists-p file) (lispm-file-text file))))
 
 (ert-deftest lispm-test-inbox-outlives-emacs ()
   "Inputs queued for a busy agent, and the one its turn handles, outlive Emacs.
@@ -4680,7 +4680,7 @@ stopped never reaches the file."
       (should (string-match-p "half an answer" (lispm-test--transcript agent)))
       (should-not (buffer-modified-p (lispm-agent-buffer agent)))
       (lispm--save-sessions)
-      (should-not (string-match-p "half an answer" (lispm--file-text file))))))
+      (should-not (string-match-p "half an answer" (lispm-file-text file))))))
 
 (ert-deftest lispm-test-delegation-outlives-emacs ()
   "A helper's reply settles its caller's call after Emacs restarted.
@@ -5324,9 +5324,9 @@ whatever their names, and leaves out larger ones and symbolic links."
         (should (equal text (concat "Wrong type argument: listp, 3\n\nBacktrace, innermost call first:\n"
                                     "  (car 3)\n  (lispm-test-f 3)\n  (lispm-test-g)"))))
       ;; An error the code handles itself is not one, and is not printed.
-      (let ((print (symbol-function 'lispm-tools--backtrace-text))
+      (let ((print (symbol-function 'lispm-tools-backtrace-text))
             (printed 0))
-        (cl-letf (((symbol-function 'lispm-tools--backtrace-text)
+        (cl-letf (((symbol-function 'lispm-tools-backtrace-text)
                    (lambda (frames) (cl-incf printed) (funcall print frames))))
           (should (equal (lispm-test--call agent "eval_elisp"
                                            '((code . "(dotimes (_ 50) (ignore-errors (car 3))) (condition-case nil (car 3) (error 'caught))")))
@@ -5628,7 +5628,7 @@ BODY can use `agent'."
       (should (lispm-test--wait (lambda () (lispm-get-agent 'reviewer@project t))))
       (let* ((helper (lispm-get-agent 'reviewer@project))
              (chat (lispm-chat helper))
-             (sessions (length (lispm--session-files-in "projects/*/sessions/*.org"))))
+             (sessions (length (lispm-session-files-in "projects/*/sessions/*.org"))))
         (lispm-test--condition-id helper)
         (lispm-test--chat-type chat "never mind")
         (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p boss))
@@ -5636,7 +5636,7 @@ BODY can use `agent'."
                                                   (string-match-p "Fine by me" (lispm-test--transcript helper))))))
         (should (memq helper (lispm-agents)))
         (should (buffer-live-p chat))
-        (should (= (length (lispm--session-files-in "projects/*/sessions/*.org")) sessions))
+        (should (= (length (lispm-session-files-in "projects/*/sessions/*.org")) sessions))
         (should (string-match-p "^\\* Note\nThe request failed (HTTP 500): api_error: Boom\n\\* User\nnever mind\n"
                                 (lispm-test--transcript helper)))))
     ;; In the org interface: under a new * User heading after the condition.
@@ -6175,7 +6175,7 @@ with NOCONFIRM it is not.  Code changed meanwhile is not installed, nor is code 
 does not read, a skill named as one of LispM's own, or one badly named."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "../user-skills/" project))
-           (lispm-skill-directories (list lispm-skills--builtin user-skills))
+           (lispm-skill-directories (list lispm-skills-builtin user-skills))
            (lispm-write-skill-directory nil)
            (download (expand-file-name "../download/" project))
            (greet (expand-file-name "greet.org" download))
@@ -6209,7 +6209,7 @@ does not read, a skill named as one of LispM's own, or one badly named."
               (setq answer t)
               (should (equal (lispm-install-skill greet) "greet"))
               (should (equal (lispm-test--disk (expand-file-name "greet.org" user-skills)) greet-text))
-              (let ((skill (lispm-skills--find "greet" agent)))
+              (let ((skill (lispm-skills-find "greet" agent)))
                 (should (equal (plist-get skill :file) (expand-file-name "greet.org" user-skills)))
                 (should (lispm-skill-trusted-p skill)))
               (should (string-prefix-p "Skill greet loaded."
@@ -6250,7 +6250,7 @@ does not read, a skill named as one of LispM's own, or one badly named."
             (lispm-test--never-asking
               (should (equal (lispm-install-skill (expand-file-name "again/greet/" download) t) "greet")))
             (should-not (file-exists-p (expand-file-name "greet.org" user-skills)))
-            (should (equal (plist-get (lispm-skills--find "greet" agent) :description) "Greet again."))
+            (should (equal (plist-get (lispm-skills-find "greet" agent) :description) "Greet again."))
             ;; What is not installed.
             (let ((problem (lambda (name text)
                              (let ((file (expand-file-name name download)))
@@ -6280,7 +6280,7 @@ is one badly named; interactively, it asks first."
   (lispm-test-env
     (let* ((user-skills (expand-file-name "../user-skills/" project))
            (other-skills (expand-file-name "../other-skills/" project))
-           (lispm-skill-directories (list lispm-skills--builtin other-skills user-skills))
+           (lispm-skill-directories (list lispm-skills-builtin other-skills user-skills))
            (lispm-write-skill-directory nil)
            (agent (lispm-defagent tester :root project))
            (problem (lambda (name)
@@ -6299,7 +6299,7 @@ is one badly named; interactively, it asks first."
         (should (equal (lispm-delete-skill "tools") "tools")))
       (should-not (file-exists-p (expand-file-name "greet.org" user-skills)))
       (should-not (file-exists-p (expand-file-name "tools/" user-skills)))
-      (should-not (lispm-skills--find "greet" agent))
+      (should-not (lispm-skills-find "greet" agent))
       (should (string-match-p "\\`Skill web is one of LispM" (funcall problem "web")))
       (should (string-match-p "\\`Skill theirs is in .*/other-skills/, not among" (funcall problem "theirs")))
       (should (string-match-p "\\`No skill named mine in" (funcall problem "mine")))
@@ -6307,7 +6307,7 @@ is one badly named; interactively, it asks first."
         (setq-local lispm-chat-agent agent)
         (should (string-match-p "\\`Skill mine is the project" (funcall problem "mine"))))
       (should (string-match-p "\\`The name of a skill is" (funcall problem "../other-skills/theirs")))
-      (should (lispm-skills--find "web" agent))
+      (should (lispm-skills-find "web" agent))
       (should (file-exists-p (expand-file-name "theirs.org" other-skills)))
       (should (file-exists-p (expand-file-name ".lispm/skills/mine.org" project))))))
 
@@ -6341,14 +6341,14 @@ is one badly named; interactively, it asks first."
            (module (expand-file-name "../module/" main)))
       (lispm-test--git main "worktree" "add" "-b" "side" linked)
       (should (file-regular-p (expand-file-name ".git" linked)))
-      (should (equal (lispm--main-worktree linked) main))
-      (should (equal (lispm--main-worktree (expand-file-name "lisp/" linked))
+      (should (equal (lispm-main-worktree linked) main))
+      (should (equal (lispm-main-worktree (expand-file-name "lisp/" linked))
                      (expand-file-name "lisp/" main)))
-      (should (equal (lispm--main-worktree main) main))
+      (should (equal (lispm-main-worktree main) main))
       (should (equal (lispm-project-directory linked) (lispm-project-directory main)))
       ;; A submodule's .git is a file too, but it is a project of its own.
       (lispm-test--write (expand-file-name ".git" module) "gitdir: ../project/.git/modules/module\n")
-      (should (equal (lispm--main-worktree module) module))
+      (should (equal (lispm-main-worktree module) module))
       (let ((here (lispm-defagent here :root main))
             (there (lispm-defagent there :root linked)))
         (lispm-test--call here "remember" '((title . "Shared") (content . "One project.")))
@@ -6502,10 +6502,10 @@ is one badly named; interactively, it asks first."
         (let ((new (buffer-file-name (lispm-agent-buffer agent))))
           (should-not (equal new old))
           (should (string-match-p (regexp-quote (format "#+lispm_previous: [[file:%s]]" old))
-                                  (lispm--file-text new)))
-          (should (string-match-p "\\* Note\nContinued in \\[\\[file:" (lispm--file-text old)))
-          (should (string-match-p "Booked\\." (lispm--file-text new)))
-          (should (string-match-p "\\* Trip\n" (lispm--file-text (lispm-memory-file agent))))
+                                  (lispm-file-text new)))
+          (should (string-match-p "\\* Note\nContinued in \\[\\[file:" (lispm-file-text old)))
+          (should (string-match-p "Booked\\." (lispm-file-text new)))
+          (should (string-match-p "\\* Trip\n" (lispm-file-text (lispm-memory-file agent))))
           ;; Still one session, listed by its newest file under its first title.
           (should (equal (mapcar (lambda (s) (list (plist-get s :file) (plist-get s :title)))
                                  (lispm-sessions))
@@ -6537,9 +6537,9 @@ is one badly named; interactively, it asks first."
       ;; character, where the old count by characters said a third.
       (lispm-session-buffer agent)
       (let ((before (lispm--estimated-tokens agent)))
-        (lispm--in-session agent (insert (make-string 300 ?∀)))
+        (lispm-in-session agent (insert (make-string 300 ?∀)))
         (should (= (- (lispm--estimated-tokens agent) before) 300))
-        (lispm--in-session agent (delete-char -300)))
+        (lispm-in-session agent (delete-char -300)))
       (lispm-tell agent "first")
       (should (lispm-test--wait (lispm-test--idle-p agent)))
       ;; Cached tokens count too; what was written since is estimated.
@@ -6943,7 +6943,7 @@ not with LispM's welcome; its replies are marked as its."
         (should (equal (lispm-character-model (lispm-get-character "notes")) "small-model"))
         (should-not (lispm-character-rag-enabled-p "notes"))
         (should-not (lispm-character-comfyui-enabled-p "notes"))
-        (should (equal (lispm--file-text (expand-file-name "characters/notes/character.org"
+        (should (equal (lispm-file-text (expand-file-name "characters/notes/character.org"
                                                            lispm-directory))
                        "#+model: small-model\n"))
         ;; Ticking the optional capabilities in an app character's form enables them.
@@ -7388,7 +7388,7 @@ when LispM starts without a model."
             ;; What the user chooses for it goes into its file, and comes first.
             (lispm-save-character 'notes :model "small-model")
             (let ((file (expand-file-name "characters/notes/character.org" lispm-directory)))
-              (should (equal (lispm--file-text file) "#+model: small-model\n")))
+              (should (equal (lispm-file-text file) "#+model: small-model\n")))
             (should (equal (lispm-character-model notes) "small-model"))
             (should (equal (lispm-character-title notes) "Notes"))
             (should (equal (lispm-character-skill notes) "notes"))
@@ -7584,7 +7584,7 @@ triggers and `/v1/embeddings' vectors) and generates images via ComfyUI."
       (let ((prompt (lispm-system-prompt agent)))
         (should (string-match-p "# Your long-term memory\n.*\n- indentation$" prompt)))
       (should (string-match-p "^\\* indentation$"
-                              (lispm--file-text (lispm-memory-file agent))))
+                              (lispm-file-text (lispm-memory-file agent))))
       (when lispm-git
         (let ((settled #'lispm-test--git-settled-p)
               (default-directory lispm-directory))
@@ -7612,7 +7612,7 @@ triggers and `/v1/embeddings' vectors) and generates images via ComfyUI."
            (lispm-git (executable-find "git"))
            (elsewhere (expand-file-name "../elsewhere/" project))
            (state (lambda () (cons (directory-files-recursively elsewhere "" t)
-                                   (lispm--file-text (expand-file-name ".git/config" elsewhere)))))
+                                   (lispm-file-text (expand-file-name ".git/config" elsewhere)))))
            before)
       (make-directory elsewhere)
       (let ((default-directory elsewhere))
@@ -7724,7 +7724,7 @@ is writing in is not compacted under them."
           (should-not (lispm--idle-handover-p agent))
           ;; Large again, but with a draft of the user's in it.
           (remhash agent lispm--idle-given-up)
-          (lispm--in-session agent (insert "a draft"))
+          (lispm-in-session agent (insert "a draft"))
           (setf (lispm-agent-context agent) (cons 4000 (lispm--session-bytes agent)))
           (lispm--compact-idle agent)
           (should (= (length summaries) 1))
@@ -7825,7 +7825,7 @@ Recalling an entry records when, and how often."
       (lispm-test--call agent "recall" '((query . "alpha")))
       (let ((alpha (car (lispm-memory--scope-entries agent 'project))))
         (should (= (plist-get alpha :recalls) 2))
-        (should (equal (plist-get alpha :recalled) (lispm-memory--stamp)))
+        (should (equal (plist-get alpha :recalled) (lispm-memory-stamp)))
         (should (equal (plist-get alpha :body) "About Alpha.")))
       (should (string-match-p "\n- Alpha\n- Gamma\n- (1 more, used less lately, not listed here: `recall` finds them)\\'"
                               (lispm-memory--prompt agent)))
@@ -7915,7 +7915,7 @@ every change named in a commit, and the rest left as it was."
                          '("[2026-01-05 Mon 10:00]" nil 0)))
           (should (equal (mapcar (lambda (key) (plist-get (nth 2 entries) key)) '(:recalls :body))
                          '(4 "Emacs 31."))))
-        (let ((text (lispm--file-text file)))
+        (let ((text (lispm-file-text file)))
           (should (string-match-p "^:MERGED: +Indent with spaces | Indentation$" text))
           (should (string-match-p "^:MERGED: +Build | Deploy$" text)))
         ;; One commit says what went where, and why; what was dropped stays in history.
@@ -7989,27 +7989,27 @@ entries were recalled is nothing new.  Without git, it is not tried."
           (lispm-memory-consolidate agent)
           (accept-process-output nil 0.1)
           (should (= asked 0)))
-        (setq before (lispm--file-text file))
+        (setq before (lispm-file-text file))
         ;; A plan doing nothing frees nothing: the memory stays, and is
         ;; not tried again for a while, though it says something new.
         (lispm-memory--maintain agent nil)
         (should (funcall tried 1))
-        (should (equal (lispm--file-text file) before))
+        (should (equal (lispm-file-text file) before))
         (lispm-memory-remember agent "D" "About D.")
         (lispm-memory--maintain agent nil)
         (accept-process-output nil 0.1)
         (should (= asked 1))
         ;; Once the while is over: a plan that does not hold.
         (funcall wait-over)
-        (setq before (lispm--file-text file)
+        (setq before (lispm-file-text file)
               reply "{\"drop\": [{\"id\": 3}]}")
         (lispm-memory--maintain agent nil)
         (should (funcall tried 2))
-        (should (equal (lispm--file-text file) before))
+        (should (equal (lispm-file-text file) before))
         ;; Recalling says nothing new.
         (funcall wait-over)
         (lispm-memory-recall agent "about")
-        (should-not (equal (lispm--file-text file) before))
+        (should-not (equal (lispm-file-text file) before))
         (lispm-memory--maintain agent nil)
         (accept-process-output nil 0.1)
         (should (= asked 2))
@@ -8024,7 +8024,7 @@ entries were recalled is nothing new.  Without git, it is not tried."
         (lispm-memory--maintain agent nil)
         (should (funcall tried 4))
         (should (equal (funcall titles) '("A" "B" "C" "D")))
-        (should (string-match-p "^About A\\.$" (lispm--file-text file)))
+        (should (string-match-p "^About A\\.$" (lispm-file-text file)))
         ;; The memory changed while the plan was made: nothing changes but that.
         (funcall wait-over)
         (lispm-memory-remember agent "D" "About D, at last.")
@@ -8048,9 +8048,9 @@ them."
       (should (equal (lispm-memory-file bar) memory))
       (should (equal (car (lispm-test--call bar "remember" '((title . "Wallpaper") (content . "Blue."))))
                      "Saved system memory \"Wallpaper\"."))
-      (should (string-match-p "\\`#\\+title: Memory of the system\n\\* Wallpaper\n" (lispm--file-text memory)))
+      (should (string-match-p "\\`#\\+title: Memory of the system\n\\* Wallpaper\n" (lispm-file-text memory)))
       (should (string-match-p "Added task T" (car (lispm-test--call bar "task_add" '((title . "Tidy the downloads"))))))
-      (should (string-match-p "\\`#\\+title: Tasks of the system\n" (lispm--file-text tasks)))
+      (should (string-match-p "\\`#\\+title: Tasks of the system\n" (lispm-file-text tasks)))
       (should (member tasks (lispm-agenda-files)))
       (should (equal (car (lispm-test--call bar "recall" '((query . "blue")))) "## Wallpaper\nBlue."))
       (let ((prompt (lispm-system-prompt bar)))
@@ -8059,7 +8059,7 @@ them."
       ;; A project's agent has its project's.
       (lispm-test--call coder "remember" '((title . "Build") (content . "make")))
       (should-not (string-match-p "Wallpaper\\|Tidy" (lispm-system-prompt coder)))
-      (should-not (string-match-p "Build" (lispm--file-text memory)))
+      (should-not (string-match-p "Build" (lispm-file-text memory)))
       (should (equal (car (lispm-test--call coder "recall" '((query . "blue")))) "Nothing matches. All memories:\n- Build"))
       ;; Its sessions say so, and one resumed from its file is again the system's.
       (let* ((agent (lispm-make-agent 'assistant project :system t))
@@ -8085,12 +8085,12 @@ latest; the one handed over to begins with it already."
         (should (lispm-test--wait (lambda () (and (funcall (lispm-test--idle-p bar))
                                                   (not (equal (buffer-file-name (lispm-agent-buffer bar)) old))))))
         (let* ((day (expand-file-name (format-time-string "system/episodes/%Y-%m-%d.org") lispm-directory))
-               (entries (lispm-episodes--entries day)))
+               (entries (lispm-episodes-entries day)))
           (should (= (length entries) 1))
           (should (string-match-p "\\`[0-9][0-9]:[0-9][0-9] bar\\'" (plist-get (car entries) :title)))
           (should (equal (plist-get (car entries) :body) "We said hello."))
           (should (string-match-p (regexp-quote (format ":SESSION:  [[file:%s]]" (abbreviate-file-name old)))
-                                  (lispm--file-text day))))
+                                  (lispm-file-text day))))
         (should-not (string-match-p "What happened lately" (lispm-test--transcript bar)))
         (should (string-match-p (concat "# What happened lately\nThe latest summary of your earlier conversations "
                                         "([0-9-]+ [0-9:]+ bar):\nWe said hello\\.")
@@ -8158,7 +8158,7 @@ this week stay as they are."
           (should (equal (lispm-test--last-text (nth 2 requests))
                          "## 2026-W02\nAll of 2026-W02.\n\n## 2026-W03\nAll of 2026-W03.")))
         (should (string-match-p "^:SOURCES: +2026-W02 | 2026-W03$"
-                                (lispm--file-text (expand-file-name "2026-01.org" dir))))
+                                (lispm-file-text (expand-file-name "2026-01.org" dir))))
         (should (equal (cdr (lispm-episodes-latest bar)) "Today's work."))
         (should (lispm-test--wait #'lispm-test--git-settled-p 10))
         (let* ((default-directory lispm-directory)
@@ -8243,7 +8243,7 @@ inside words, as in 2*3*4 or snake_case, nor inside code."
 
 (ert-deftest lispm-test-chat-streaming-markdown ()
   "A reply streaming in is drawn from its complete lines, kept as drawn,
-and its last line, as `lispm-chat--markdown' draws it whole with nothing
+and its last line, as `lispm-chat-markdown' draws it whole with nothing
 presented: at every step, inside code blocks and after them, and from
 the start again for another reply."
   (with-temp-buffer
@@ -8251,10 +8251,10 @@ the start again for another reply."
       (dotimes (k (1+ (length text)))
         (let ((part (substring text 0 k)))
           (should (equal-including-properties (lispm-chat--streaming-markdown part)
-                                              (lispm-chat--markdown part t)))))
+                                              (lispm-chat-markdown part t)))))
       (should (equal (car lispm-chat--streamed) (string-remove-suffix "Next" text)))
       (should (equal-including-properties (lispm-chat--streaming-markdown "Other\n*reply*")
-                                          (lispm-chat--markdown "Other\n*reply*" t))))))
+                                          (lispm-chat-markdown "Other\n*reply*" t))))))
 
 (ert-deftest lispm-test-chat-org-link-targets ()
   "Markdown rendering preserves the literal targets of Org links."
@@ -8264,14 +8264,14 @@ the start again for another reply."
                       "**double stars**" "`literal`_name"))
         (let* ((link (format "[[buffer:%s][Other session]]" name))
                (shown (lispm-chat--present
-                       (lispm-chat--markdown (concat "**Open** " link " and *continue*.")))))
+                       (lispm-chat-markdown (concat "**Open** " link " and *continue*.")))))
           (should (equal (substring-no-properties shown) (concat "Open " link " and continue.")))
           (should (equal (lispm-test--object shown "Other session") (list 'buffer name)))))
       (dolist (name '("*draft*.el" "**draft**.el" "`draft`.el" "_draft_.el"))
         (let* ((file (expand-file-name name project))
                (link (format "[[file:%s::2][Draft]]" name)))
           (lispm-test--write file "one\ntwo\n")
-          (let ((shown (lispm-chat--present (lispm-chat--markdown link))))
+          (let ((shown (lispm-chat--present (lispm-chat-markdown link))))
             (should (equal (substring-no-properties shown) link))
             (should (equal (lispm-test--object shown "Draft") (list 'file file 2)))))))))
 
@@ -8333,14 +8333,14 @@ when it is complete."
   "Each tool's calls are shown as the chat's table says: under their name,
 an MCP server's as SERVER:TOOL, a tool the table does not know by its own
 name; long results are cut to a few lines and say how many more there are."
-  (should (equal (lispm-chat--tool-name "read_file") "Read"))
-  (should (equal (lispm-chat--tool-name "mcp__fake__echo") "fake:echo"))
-  (should (equal (lispm-chat--tool-name "made_up") "made_up"))
-  (should (equal (lispm-chat--tool-text "edit_definition" :question '((name . "foo")) nil "foo")
+  (should (equal (lispm-chat-tool-name "read_file") "Read"))
+  (should (equal (lispm-chat-tool-name "mcp__fake__echo") "fake:echo"))
+  (should (equal (lispm-chat-tool-name "made_up") "made_up"))
+  (should (equal (lispm-chat-tool-text "edit_definition" :question '((name . "foo")) nil "foo")
                  "Do you want to make this edit to foo?"))
-  (should (equal (lispm-chat--tool-text "write_skill" :title '((name . "web")) nil nil)
+  (should (equal (lispm-chat-tool-text "write_skill" :title '((name . "web")) nil nil)
                  "Write the skill web"))
-  (should-not (lispm-chat--tool-text "read_file" :title nil nil nil))
+  (should-not (lispm-chat-tool-text "read_file" :title nil nil nil))
   (should (equal (lispm-chat--preview '("a" "b") 3 nil) '("a" "b")))
   (let ((cut (lispm-chat--preview '("a" "b" "c" "d") 2 nil)))
     (should (equal (seq-take cut 2) '("a" "b")))
@@ -9775,7 +9775,7 @@ variables it was asked to save, the last first."
            (lispm-memory-max-tokens 30000)
            (lispm-memory-model nil)
            (lispm-episodes t)
-           (lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/"))
+           (lispm-skill-directories (list lispm-skills-builtin "~/.lispm/skills/"))
            (lispm-default-role 'assistant)
            (lispm-model-choices-functions nil)
            (lispm-backend-status-functions nil)
@@ -10102,10 +10102,10 @@ last, once, and taken out, LispM's own told from the others."
             (should (equal (car (last lispm-skill-directories)) (abbreviate-file-name dir)))
             (should-error (lispm-add-skill-directory dir) :type 'user-error)
             (lispm-remove-skill-directory (directory-file-name dir) t)
-            (should (equal lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/")))
+            (should (equal lispm-skill-directories (list lispm-skills-builtin "~/.lispm/skills/")))
             (should (equal saved '(lispm-skill-directories lispm-default-role))))
         (delete-directory dir t)))
-    (should (lispm-skill-directory-builtin-p lispm-skills--builtin))
+    (should (lispm-skill-directory-builtin-p lispm-skills-builtin))
     (should-not (lispm-skill-directory-builtin-p "~/.lispm/skills/"))))
 
 (ert-deftest lispm-test-settings-mcp-servers ()
@@ -10117,7 +10117,7 @@ report their kind, tools and code, and new skills are created."
           (user-dir (file-name-as-directory (make-temp-file "lispm-user-skills-" t))))
       (unwind-protect
           (let ((lispm-write-skill-directory user-dir)
-                (lispm-skill-directories (list lispm-skills--builtin user-dir)))
+                (lispm-skill-directories (list lispm-skills-builtin user-dir)))
             (lispm-settings-mcp-add "peekaboo"
                                   '(:command " npx " :args ("-y" "@steipete/peekaboo" "mcp")
                                              :description " Screen tools " :sandbox none)
@@ -10142,7 +10142,7 @@ report their kind, tools and code, and new skills are created."
             ;; Creating a skill in the user's directory and inspecting it.
             (let ((file (lispm-create-skill "my-helper" "Help with notes." "* Steps\n\nDo it." "My Helper" t)))
               (should (file-regular-p file))
-              (let ((skill (lispm-skills--find "my-helper" nil)))
+              (let ((skill (lispm-skills-find "my-helper" nil)))
                 (should (eq (lispm-skill-kind skill) 'user))
                 (should (equal (plist-get skill :title) "My Helper"))
                 (should-not (lispm-skill-has-code-p skill))
@@ -10159,7 +10159,7 @@ the skill form creates a new skill file."
           (user-dir (file-name-as-directory (make-temp-file "lispm-form-skills-" t))))
       (unwind-protect
           (let ((lispm-write-skill-directory user-dir)
-                (lispm-skill-directories (list lispm-skills--builtin user-dir)))
+                (lispm-skill-directories (list lispm-skills-builtin user-dir)))
             (with-current-buffer (lispm-mcp-form)
               (should (equal (lispm-ui-form-title) (lispm-tr "Add MCP Server")))
               (lispm-mcp-form--apply-preset 'peekaboo)
@@ -10555,7 +10555,7 @@ project of its name; the Codex app's scratch tree holds chats."
       (unwind-protect
           (progn
             (make-directory claude t)
-            (let ((roots (lispm-agents--resolve-roots (list repo claude codex scratch))))
+            (let ((roots (lispm-agents-resolve-roots (list repo claude codex scratch))))
               (should (equal (cdr (assoc claude roots)) (directory-file-name repo)))
               (should (equal (cdr (assoc codex roots)) (directory-file-name repo)))
               (should (eq (cdr (assoc scratch roots)) 'chats)))
@@ -12657,14 +12657,14 @@ whole after that redisplay, which keeps the line between the panes."
 terminal; its tools enter the terminal, the listener showing the agent
 asked, and leave it, the frame as it was."
   (lispm-test-env
-    (let* ((lispm-skill-directories (list lispm-skills--builtin))
+    (let* ((lispm-skill-directories (list lispm-skills-builtin))
            (lispm-system-agent-root project)
            (lispm-terminal--frame nil) (lispm-terminal--saved nil)
            (lispm-terminal--listener nil) (lispm-terminal--agent nil)
            (agent (lispm-start nil project))
            (lines (lambda (words)
                     (mapconcat (lambda (found) (plist-get found :line))
-                               (cdr (lispm-tools--discover agent words 5)) "\n"))))
+                               (cdr (lispm-tools-discover agent words 5)) "\n"))))
       (unwind-protect
           (progn
             (dolist (words '("console mode" "tui mode" "terminal" "keyboard mode" "desktop mode"))

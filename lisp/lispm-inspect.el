@@ -241,8 +241,7 @@ or pressing RET on one supplies its `lispm-object-value' directly."
   (save-match-data
     (cond ((when-let* ((live (lispm-get-agent name t)))
              (lispm-agent-id live)))
-          ((when-let* ((id (and (stringp name)
-                                (alist-get name lispm--retired-agents nil nil #'equal)))
+          ((when-let* ((id (lispm-retired-agent-id name))
                        ((lispm-session-files id)))
              id))
           ((when (stringp name)
@@ -259,8 +258,7 @@ or pressing RET on one supplies its `lispm-object-value' directly."
                                       (when (re-search-forward re nil t)
                                         (let ((id (match-string-no-properties 1)))
                                           (when (lispm-session-files id)
-                                            (setf (alist-get name lispm--retired-agents nil nil #'equal) id)
-                                            id)))))))))))))
+                                            (lispm-remember-retired-agent name id))))))))))))))
 
 (defun lispm-known-agent-p (name)
   "Non-nil if NAME designates a live agent or a known retired session."
@@ -271,11 +269,8 @@ or pressing RET on one supplies its `lispm-object-value' directly."
   (or (lispm-get-agent name t)
       (when-let* ((id (lispm-known-agent-id name))
                   (agent (lispm-resume-session id)))
-        (when (and (stringp name) (not (alist-get (intern name) lispm--agents)))
-          (let ((sym (intern name)))
-            (when-let* ((cell (rassq agent lispm--agents)))
-              (setcar cell sym))
-            (setf (lispm-agent-name agent) sym)))
+        (when (stringp name)
+          (lispm-rename-agent agent name))
         agent)
       (lispm-get-agent name)))
 
@@ -388,7 +383,7 @@ Where none is, act as one of `lispm-act-functions' does."
       (ignore-errors (org-fold-show-subtree)))))
 
 (defvar lispm-present--project-cache (make-hash-table :test #'equal)
-  "Cache of (TIMESTAMP . BASENAME-HASH) per project root for `lispm-present--file'.")
+  "Cache of (TIMESTAMP . BASENAME-HASH) per project root for `lispm-present-file'.")
 
 (defun lispm-present--project-index (root)
   "Return a hash table mapping file basenames to relative paths under ROOT."
@@ -442,7 +437,7 @@ Where none is, act as one of `lispm-act-functions' does."
                (full (expand-file-name best dir)))
           (and (file-regular-p full) full))))))
 
-(defun lispm-present--file (path root)
+(defun lispm-present-file (path root)
   "The file PATH names, relative to ROOT, if it exists; else nil."
   (save-match-data
     (let ((file (expand-file-name path root)))
@@ -481,10 +476,10 @@ Return `(file FILE LINE)' or nil."
                    line (and (match-string 2 spec) (string-to-number (match-string 2 spec))))))
       (when-let* ((path)
                   ((or line (string-match-p "[./]" path)))
-                  (file (lispm-present--file path root)))
+                  (file (lispm-present-file path root)))
         (list 'file file line)))))
 
-(defconst lispm-present--link-re
+(defconst lispm-present-link-re
   "\\[\\[\\(file\\|buffer\\):\\([^]\n]+?\\)\\(?:::\\([0-9]+\\)\\)?\\]\\(?:\\[[^]\n]*\\]\\)?\\]"
   "Org links to files, with a line or not, and to buffers.")
 
@@ -514,13 +509,13 @@ left as it is."
                 (unless (text-property-not-all start end 'lispm-object nil text)
                   (lispm-present-in text start end object))))
       (let ((start 0))
-        (while (string-match lispm-present--link-re text start)
+        (while (string-match lispm-present-link-re text start)
           (let ((beg (match-beginning 0)) (end (match-end 0))
                 (kind (match-string 1 text)) (target (match-string 2 text))
                 (line (and (match-string 3 text) (string-to-number (match-string 3 text)))))
             (if (equal kind "buffer")
                 (mark beg end (list 'buffer target))
-              (when-let* ((file (lispm-present--file target root)))
+              (when-let* ((file (lispm-present-file target root)))
                 (mark beg end (list 'file file line))))
             (setq start end))))
       (let ((start 0))
@@ -545,7 +540,7 @@ left as it is."
             ;; A word is a file name only with a directory, an extension
             ;; or a line.
             (when-let* (((or line (string-match-p "[./]" path)))
-                        (file (lispm-present--file path root)))
+                        (file (lispm-present-file path root)))
               (unless (text-property-not-all beg end 'lispm-object nil text)
                 (lispm-present-in text beg end (list 'file file line))
                 (when suffix-beg
@@ -583,7 +578,7 @@ the reply defines."
                  ;; match data, through a file name handler.
                  (let* ((sbeg (match-beginning 2))
                         (line (and (match-string 3 code) (string-to-number (match-string 3 code))))
-                        (file (lispm-present--file (match-string 1 code) (or root default-directory))))
+                        (file (lispm-present-file (match-string 1 code) (or root default-directory))))
                    (when file
                      (setq suffix-beg sbeg)
                      (list 'file file line))))))
@@ -626,7 +621,7 @@ delegation) or `summary' (identity, state and pending calls only).")
   (concat (cond ((plist-get entry :from) (lispm-tr "[from %s] " (plist-get entry :from)))
                 ((plist-get entry :event) (format "[%s] " (plist-get entry :event)))
                 (t ""))
-          (lispm--oneline (or (plist-get entry :text) "") 70)))
+          (lispm-oneline (or (plist-get entry :text) "") 70)))
 
 (defun lispm-inspect-data (agent)
   "The sources the inspector shares with data readers, for AGENT.
@@ -685,7 +680,7 @@ objects: readers must not change them.  No transcript or diary is read."
      (mapconcat (lambda (s)
                   (let ((file (plist-get (cdr s) :file)))
                     (if file
-                        (lispm-present (lispm-tools--label file) (list 'file file nil))
+                        (lispm-present (lispm-tools-label file) (list 'file file nil))
                       (lispm-present (plist-get (cdr s) :name)
                                      (list 'buffer (plist-get (cdr s) :name))))))
                 snapshots ", "))))
@@ -721,7 +716,7 @@ objects: readers must not change them.  No transcript or diary is read."
     (lispm-inspect--section
      (lispm-tr "State")
      (lispm-inspect--line (lispm-tr "state")
-                          (format "%s%s" (lispm--state-name (lispm-agent-state agent))
+                          (format "%s%s" (lispm-state-name (lispm-agent-state agent))
                                   (if (lispm-agent-status agent)
                                       (concat ": " (lispm-agent-status agent))
                                     "")))
@@ -734,7 +729,7 @@ objects: readers must not change them.  No transcript or diary is read."
           (lispm-inspect--line (lispm-tr "condition")
                                (lispm-tr "%s: %s (restarts: %s)"
                                          (lispm-tr (plist-get condition :title))
-                                         (lispm--oneline (plist-get condition :message) 70)
+                                         (lispm-oneline (plist-get condition :message) 70)
                                          (mapconcat #'symbol-name
                                                     (plist-get condition :restarts) ", "))))
      (and (not summaryp)
@@ -839,7 +834,7 @@ a turn recovered from a session written without it."
   (when-let* (((> (lispm-agent-turn agent) 0))
               (buffer (lispm-agent-buffer agent))
               ((buffer-live-p buffer))
-              (turn-start (buffer-local-value 'lispm--turn-start buffer))
+              (turn-start (lispm-turn-start buffer))
               ((eql (car turn-start) (lispm-agent-turn agent)))
               (marker (cdr turn-start))
               ((and (markerp marker) (eq (marker-buffer marker) buffer))))

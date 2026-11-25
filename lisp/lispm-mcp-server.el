@@ -279,8 +279,8 @@ a request with HEADERS names, opened at first need."
     (lispm-tool-to-spec
      tool
      (lambda (session arguments id)
-       (lispm-agents-bridge--tool-call session `((name . ,name) (input . ,arguments)) id))
-     (lispm-tools--description tool))))
+       (lispm-agents-bridge-tool-call session `((name . ,name) (input . ,arguments)) id))
+     (lispm-tools-description tool))))
 
 (cl-defmethod lispm-agents-mcp-served-tools ((session lispm-mcp-server-session))
   "The tools SESSION's agent is served: the read tools, LispM's tools an
@@ -291,7 +291,7 @@ talking with the agents."
          (taken (append lispm-agents-mcp-tools bridge)))
     (append lispm-agents-mcp-tools
             (mapcar #'lispm-mcp-server--tool
-                    (seq-filter (lambda (tool) (and (lispm-agents-bridge--served-p tool)
+                    (seq-filter (lambda (tool) (and (lispm-agents-bridge-served-p tool)
                                                     (not (lispm-tool-spec-find (lispm-tool-name tool) taken))))
                                 (lispm-agent-tools* (lispm-agents-bridge-server-agent session))))
             bridge)))
@@ -346,16 +346,16 @@ POST /call/NAME answer bin/lispm-tool."
          ((not (equal method "POST")) '("405 Method Not Allowed"))
          ((and (consp message) (equal (alist-get 'method message) "initialize"))
           (let ((session (lispm-mcp-server--open headers message)))
-            (pcase-let ((`(,status ,answer ,type) (lispm-agents-mcp--respond session method path body)))
+            (pcase-let ((`(,status ,answer ,type) (lispm-agents-mcp-respond session method path body)))
               (list status answer type
                     `(("Mcp-Session-Id" . ,(lispm-mcp-server-session-id session)))))))
-         (session (lispm-agents-mcp--respond session method path body))
+         (session (lispm-agents-mcp-respond session method path body))
          ((not key)
           (lispm-mcp-server--refusal "400 Bad Request" message "Initialize a session first"))
          (t (lispm-mcp-server--refusal "404 Not Found" message
                                        "No such session: LispM has started again since; connect again")))))
      ((or (equal path "/tools") (string-prefix-p "/call/" path))
-      (lispm-agents-mcp--respond (lispm-mcp-server--shell headers) method path body))
+      (lispm-agents-mcp-respond (lispm-mcp-server--shell headers) method path body))
      (t '("404 Not Found")))))
 
 ;;;; The server

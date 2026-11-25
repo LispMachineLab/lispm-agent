@@ -176,7 +176,7 @@ This is process isolation, not a sandbox."
 (defun lispm-elisp-unload-function ()
   "Stop workers before unloading their callbacks."
   (lispm-job-cancel-kind 'elisp)
-  (remhash "run_elisp" lispm-tools--registry)
+  (lispm-tools-unregister "run_elisp")
   nil)
 
 (provide 'lispm-elisp)

@@ -290,7 +290,7 @@ definitions recorded for that file after reading the whole buffer."
                   (while (progn (forward-comment (buffer-size)) (not (eobp)))
                     (push (read (current-buffer)) forms))
                 (error (error "Cannot read %s: %s"
-                              (if file (lispm-tools--label file) (buffer-name))
+                              (if file (lispm-tools-label file) (buffer-name))
                               (error-message-string err))))))))
       (when file
         (let ((old-callers (gethash file lispm-develop--file-callers)))
@@ -335,7 +335,7 @@ When FILE is given, only edges from that file; otherwise across all files."
 ;; `find-function-library' or `symbol-file', the form in it by the
 ;; searches of `find-function-regexp-alist'.  But the search is made in
 ;; the text the tool goes by (a buffer brought up to date, or for a
-;; preview the file's text, see `lispm--file-text'), never by visiting
+;; preview the file's text, see `lispm-file-text'), never by visiting
 ;; the file with `find-file-noselect', which would ask about a buffer
 ;; out of date; and never by expanding every macro of the file, which
 ;; is find-function's last resort and would run the file's code.
@@ -435,7 +435,7 @@ the types of definition to look for in FILE, in order (see
   (let ((types (if kind (list (cdr (assoc kind lispm-develop--kinds))) '(nil defvar defface)))
         (symbol (intern-soft name)))
     (if path
-        (list (or symbol (make-symbol name)) (lispm-tools--file path) types)
+        (list (or symbol (make-symbol name)) (lispm-tools-file path) types)
       (or (and symbol
                (cl-loop for type in types
                         for source = (lispm-develop--source symbol type)
@@ -449,15 +449,15 @@ defines it, give that file as path"
 TYPES are the types of definition to look for.  An error if there is none."
   (or (lispm-develop--find symbol types)
       (error "%s has no definition of %s; read it to see where it went"
-             (lispm-tools--label file) symbol)))
+             (lispm-tools-label file) symbol)))
 
 (defun lispm-develop--buffer-of (file)
   "A buffer holding FILE's text as the user sees it, for reading.
 The buffer visiting FILE, brought up to date unless it has unsaved
 changes, or else FILE, visited now.  An error if FILE is not there."
-  (or (lispm-tools--visiting file t)
-      (and (file-regular-p file) (lispm-tools--find-file file))
-      (error "No such file: %s" (lispm-tools--label file))))
+  (or (lispm-tools-visiting file t)
+      (and (file-regular-p file) (lispm-tools-find-file file))
+      (error "No such file: %s" (lispm-tools-label file))))
 
 (defun lispm-develop--in-buffer (file function)
   "Call FUNCTION in a buffer holding FILE; return its value.
@@ -467,7 +467,7 @@ it: tools that only read leave no buffers behind."
   (if (null file)
       (with-temp-buffer
         (delay-mode-hooks (emacs-lisp-mode))
-        (setq default-directory (file-name-as-directory (lispm-tools--root)))
+        (setq default-directory (file-name-as-directory (lispm-tools-root)))
         (funcall function))
     (let* ((open (find-buffer-visiting file))
            (buffer (lispm-develop--buffer-of file)))
@@ -517,7 +517,7 @@ NEW-TEXT replaces it, trimmed; TYPES are the types of definition to look
 for.  Return (TEXT BEG END TYPE): the whole new text, where the new form
 is in it, and what type of definition it replaced."
   (pcase-let* ((`(,type ,beg . ,end) (lispm-develop--located symbol types file))
-               (old (lispm-tools--buffer-text (current-buffer)))
+               (old (lispm-tools-buffer-text (current-buffer)))
                (new (string-trim new-text)))
     (list (concat (substring old 0 (1- beg)) new (substring old (1- end)))
           beg (+ beg (length new)) type)))
@@ -527,12 +527,12 @@ is in it, and what type of definition it replaced."
 The definition is replaced with NEW-TEXT; KIND and PATH are
 edit_definition's arguments."
   (pcase-let* ((`(,symbol ,file ,types) (lispm-develop--definition name kind path))
-               (old (lispm--file-text file)))
+               (old (lispm-file-text file)))
     (with-temp-buffer
       (insert old)
       (pcase-let ((`(,text ,_beg ,_end ,type) (lispm-develop--edit symbol types file new-text)))
         (lispm-develop--new-form new-text symbol type)
-        (list old text (lispm-tools--label file))))))
+        (list old text (lispm-tools-label file))))))
 
 (lispm-deftool edit_definition
     ((name string "Name of the function, macro, variable or face to redefine.")
@@ -555,12 +555,12 @@ eval_definition; then run the tests with ert_run."
   :changes (lambda (name new-text &optional kind path)
              (pcase-let ((`(,symbol ,file ,types) (lispm-develop--definition name kind path)))
                ;; No buffer is visited to show a file that cannot be written.
-               (lispm-tools--check-writable file)
-               (when-let* ((buffer (lispm-tools--to-show file)))
+               (lispm-tools-check-writable file)
+               (when-let* ((buffer (lispm-tools-to-show file)))
                  (with-current-buffer buffer
                    (cons buffer (car (lispm-develop--edit symbol types file new-text)))))))
   (pcase-let* ((`(,symbol ,file ,types) (lispm-develop--definition name kind path))
-               (buffer (lispm-tools--existing file)))
+               (buffer (lispm-tools-existing file)))
     (with-current-buffer buffer
       (pcase-let* ((`(,_otype ,obeg . ,oend) (lispm-develop--located symbol types file))
                    (old-form (save-restriction
@@ -569,7 +569,7 @@ eval_definition; then run the tests with ert_run."
                    (`(,text ,beg ,end ,type) (lispm-develop--edit symbol types file new-text))
                    (clean-new (lispm-develop--new-form new-text symbol type))
                    (canonical (intern (symbol-name symbol))))
-        (lispm-tools--set-text buffer text)
+        (lispm-tools-set-text buffer text)
         (push (list :agent lispm-current-agent
                     :turn (and lispm-current-agent (lispm-agent-turn lispm-current-agent))
                     :symbol canonical :name (symbol-name canonical) :type type :file file
@@ -581,7 +581,7 @@ eval_definition; then run the tests with ert_run."
 the old one: evaluate this one with eval_definition."
                 symbol
                 (if (equal (symbol-name symbol) name) "" (format " (%s is an alias of it)" name))
-                (lispm-tools--label file)
+                (lispm-tools-label file)
                 (lispm-develop--line beg) (lispm-develop--line (1- end)))))))
 
 ;;;; Evaluating definitions
@@ -639,9 +639,9 @@ ert_run.  Returns the value: the name defined, or a variable's value."
   :preview (lambda (name &optional kind path)
              (pcase-let ((`(,symbol ,file ,types) (lispm-develop--definition name kind path)))
                (with-temp-buffer
-                 (insert (lispm--file-text file))
+                 (insert (lispm-file-text file))
                  (pcase-let ((`(,_type ,beg . ,end) (lispm-develop--located symbol types file)))
-                   (format "%s:%d\n%s" (lispm-tools--label file) (lispm-develop--line beg)
+                   (format "%s:%d\n%s" (lispm-tools-label file) (lispm-develop--line beg)
                            (buffer-substring-no-properties beg end))))))
   (pcase-let ((`(,symbol ,file ,types) (lispm-develop--definition name kind path)))
     (lispm-develop--in-buffer
@@ -656,8 +656,8 @@ ert_run.  Returns the value: the name defined, or a variable's value."
                     (callers (and old-arity new-arity (not (equal old-arity new-arity))
                                   (lispm-develop-who-calls symbol))))
          (concat (format "Evaluated the definition of %s in %s, line %d.\n%s"
-                         symbol (lispm-tools--label file) (lispm-develop--line beg)
-                         (lispm-tools--eval-result "" value))
+                         symbol (lispm-tools-label file) (lispm-develop--line beg)
+                         (lispm-tools-eval-result "" value))
                  (if callers
                      (format "\nCaller notice: arity changed from %S to %S; called by: %s"
                              old-arity new-arity
@@ -716,13 +716,13 @@ TEST's body, without the special forms and without the `signal' and
         (append
          (mapcar (lambda (info) (format "  %s%s" (car info) (cdr info)))
                  (ert-test-result-with-condition-infos result))
-         (list (concat "  " (lispm--truncate
+         (list (concat "  " (lispm-truncate
                              (prin1-to-string (ert-test-result-with-condition-condition result))
                              1500)))
          (and frames
               (cons "  Backtrace, innermost call first:"
                     (mapcar (lambda (line) (concat "  " line))
-                            (split-string (lispm-tools--backtrace-text (seq-take frames 8))
+                            (split-string (lispm-tools-backtrace-text (seq-take frames 8))
                                           "\n")))))))))
 
 (defun lispm-develop--ert-report (tests seconds)
@@ -736,7 +736,7 @@ TEST's body, without the special forms and without the `signal' and
               ((ert-test-skipped-p result)
                (push (format "SKIPPED %s: %s" name
                              (let ((print-length 8) (print-level 4))
-                               (lispm--oneline (prin1-to-string
+                               (lispm-oneline (prin1-to-string
                                                 (cadr (ert-test-result-with-condition-condition result)))
                                                200)))
                      skipped))
@@ -776,10 +776,10 @@ once eval_definition has loaded it; give file to load tests first."
   :permission exec
   :deferred t
   (when file
-    (let ((file (lispm-tools--file file)))
+    (let ((file (lispm-tools-file file)))
       (condition-case err
           (load file nil t t)
-        (error (error "Loading %s failed: %s" (lispm-tools--label file) (error-message-string err))))))
+        (error (error "Loading %s failed: %s" (lispm-tools-label file) (error-message-string err))))))
   (let* ((selector (lispm-develop--selector selector))
          (tests (ert-select-tests selector t)))
     (if (null tests)
@@ -800,7 +800,7 @@ edit_definition finds it."
          (let ((file (xref-location-group location)))
            (when (and (stringp file) (file-readable-p file))
              (with-temp-buffer
-               (insert (lispm--file-text file))
+               (insert (lispm-file-text file))
                (when-let* ((bounds (lispm-develop--search (xref-elisp-location-symbol location)
                                                           (xref-elisp-location-type location))))
                  (line-number-at-pos (car bounds)))))))
@@ -820,10 +820,10 @@ given once, and at most `lispm-xref-max-results' of them."
              (line (ignore-errors (lispm-develop--xref-line location)))
              (text (format "%s:%s %s"
                            (if (and (stringp group) (file-name-absolute-p group))
-                               (lispm-tools--label group)
+                               (lispm-tools-label group)
                              group)
                            (if line (format "%d:" line) "")
-                           (lispm--oneline (substring-no-properties (xref-item-summary item)) 200))))
+                           (lispm-oneline (substring-no-properties (xref-item-summary item)) 200))))
         (unless (member text lines)
           (push text lines))))
     (setq lines (nreverse lines))
@@ -841,7 +841,7 @@ on LINE of PATH if given, where the backend is asked about the
 identifier at point, else at its first occurrence, as a language server
 answers about a position."
   (lispm-develop--in-buffer
-   (and path (lispm-tools--file path))
+   (and path (lispm-tools-file path))
    (lambda ()
      (save-excursion
        (save-restriction
@@ -931,7 +931,7 @@ as path: its xref backend answers, a language server's with eglot."
       (goto-char (flymake-diagnostic-beg diagnostic))
       (format "%d:%d: %s: %s" (line-number-at-pos) (1+ (current-column))
               (lispm-develop--severity (flymake-diagnostic-type diagnostic))
-              (lispm--oneline (flymake-diagnostic-text diagnostic) 500)))))
+              (lispm-oneline (flymake-diagnostic-text diagnostic) 500)))))
 
 (defun lispm-develop--not-run (backend)
   "Why the flymake BACKEND of the current buffer did not run, as a note."
@@ -985,7 +985,7 @@ asynchronously; the agent's turn in which the check started may end
 meanwhile, and then no result is given."
   (let* ((agent lispm-current-agent)
          (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
-         (label (if (buffer-file-name buffer) (lispm-tools--label (buffer-file-name buffer))
+         (label (if (buffer-file-name buffer) (lispm-tools-label (buffer-file-name buffer))
                   (buffer-name buffer)))
          (was-on (buffer-local-value 'flymake-mode buffer))
          (deadline (+ (float-time) lispm-diagnostics-timeout))
@@ -1039,11 +1039,11 @@ language server.  Check code after changing it."
   :deferred t
   :spotlight (lambda (result &optional path buffer)
                (list :kind 'flymake-diagnostics
-                     :file (and path (lispm-tools--file path))
-                     :buffer (and buffer (lispm-tools--buffer buffer))
+                     :file (and path (lispm-tools-file path))
+                     :buffer (and buffer (lispm-tools-buffer buffer))
                      :result result))
-  (cond (buffer (lispm-develop--diagnose (lispm-tools--buffer buffer) nil done))
-        (path (let* ((file (lispm-tools--file path))
+  (cond (buffer (lispm-develop--diagnose (lispm-tools-buffer buffer) nil done))
+        (path (let* ((file (lispm-tools-file path))
                      (open (find-buffer-visiting file))
                      (visited (lispm-develop--buffer-of file)))
                 (lispm-develop--diagnose visited (not open) done)))
@@ -1061,24 +1061,24 @@ language server.  Check code after changing it."
 
 (defun lispm-develop--index-path (path)
   "Index Emacs Lisp file or directory PATH into the `who-calls' database."
-  (let ((target (lispm-tools--file path)))
+  (let ((target (lispm-tools-file path)))
     (cond
      ((file-directory-p target)
       (dolist (file (lispm-develop--el-files target))
         (with-temp-buffer
-          (insert (lispm--file-text file))
+          (insert (lispm-file-text file))
           (lispm-develop-index-buffer (current-buffer) file))))
      ((file-regular-p target)
       (with-temp-buffer
-        (insert (lispm--file-text target))
+        (insert (lispm-file-text target))
         (lispm-develop-index-buffer (current-buffer) target)))
-     (t (error "No such file or directory: %s" (lispm-tools--label target))))))
+     (t (error "No such file or directory: %s" (lispm-tools-label target))))))
 
 (defun lispm-develop--history-entry (name &optional kind path agent)
   "Latest history entry for NAME (matching KIND, PATH and AGENT when given)."
   (let* ((name-str (if (symbolp name) (symbol-name name) (format "%s" name)))
          (target-type (and kind (cdr (assoc kind lispm-develop--kinds))))
-         (target-file (and path (lispm-tools--file path))))
+         (target-file (and path (lispm-tools-file path))))
     (seq-find (lambda (h)
                 (and (equal (or (plist-get h :name)
                                 (symbol-name (plist-get h :symbol)))
@@ -1118,7 +1118,7 @@ definition into Emacs."
            (file (plist-get entry :file))
            (old-form (plist-get entry :old-form))
            (new-form (plist-get entry :new-form))
-           (buffer (lispm-tools--existing file)))
+           (buffer (lispm-tools-existing file)))
       (with-current-buffer buffer
         (pcase-let* ((`(,_t ,cbeg . ,cend) (lispm-develop--located symbol (list type) file))
                      (current (string-trim (save-restriction
@@ -1126,14 +1126,14 @@ definition into Emacs."
                                              (buffer-substring-no-properties cbeg cend)))))
           (when (and new-form (not (equal current (string-trim new-form))))
             (error "The definition of %s in %s has changed since that edit"
-                   symbol (lispm-tools--label file)))
+                   symbol (lispm-tools-label file)))
           (pcase-let ((`(,text ,beg ,end ,_t)
                        (lispm-develop--edit symbol (list type) file old-form)))
-            (lispm-tools--set-text buffer text)
+            (lispm-tools-set-text buffer text)
             (setq lispm-develop--history (delq entry lispm-develop--history))
             (format "Restored the definition of %s in %s (lines %d-%d).  If the newer \
 definition was evaluated, evaluate this one with eval_definition."
-                    symbol (lispm-tools--label file)
+                    symbol (lispm-tools-label file)
                     (lispm-develop--line beg) (lispm-develop--line (1- end)))))))))
 
 (defun lispm-develop--module-deps (text)
@@ -1173,12 +1173,12 @@ Reads forms without evaluating them so strings and comments are ignored."
 Return a plist `(:root ROOT :modules MODULES :modified MODIFIED)' where
 each module has `:file', `:provides', `:requires' and `:loaded'."
   (let* ((root (file-name-as-directory
-                (if root (lispm-tools--file root) (lispm-tools--root))))
+                (if root (lispm-tools-file root) (lispm-tools-root))))
          (files (lispm-develop--el-files root))
          modules)
     (dolist (file files)
       (pcase-let ((`(,provides . ,requires)
-                   (lispm-develop--module-deps (lispm--file-text file))))
+                   (lispm-develop--module-deps (lispm-file-text file))))
         (push (list :file (file-relative-name file root)
                     :provides provides
                     :requires requires
@@ -1215,7 +1215,7 @@ definition just as `eval_definition' (`C-M-x') does."
 Includes the latest modified definition per `(FILE NAME TYPE)' from
 `lispm-develop--history', preserving each file's lexical or dynamic
 binding semantics."
-  (let* ((root (and root (file-name-as-directory (lispm-tools--file root))))
+  (let* ((root (and root (file-name-as-directory (lispm-tools-file root))))
          (seen (make-hash-table :test #'equal))
          entries)
     (dolist (h lispm-develop--history)

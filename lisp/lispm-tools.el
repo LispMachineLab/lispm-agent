@@ -84,7 +84,7 @@ this says, a tool brings a buffer it uses up to date first."
 No buffers are reverted after their calls.  A Lisp program changes
 files only through the tools it calls, which revert them.")
 
-(cl-defstruct (lispm-tool (:constructor lispm-tool--create) (:copier nil))
+(cl-defstruct (lispm-tool (:constructor lispm-make-tool) (:copier nil))
   "A tool callable by agents.
 Tools defined with `lispm-deftool' have PARAMS, from which their schema
 is made and their arguments checked.  Tools from elsewhere, such as
@@ -107,6 +107,8 @@ a list of strings; they do not change the tool's name or schema."
   ;; Last: packages compiled before it read the others where they were.
   diff for class keywords spotlight param-schema)
 
+(defalias 'lispm-tool--create #'lispm-make-tool)
+
 (defvar lispm-tools--registry (make-hash-table :test #'equal)
   "Tool name -> `lispm-tool'.")
 
@@ -118,6 +120,18 @@ a list of strings; they do not change the tool's name or schema."
 (defun lispm-get-tool (name)
   "The tool called NAME (a string or symbol), or nil."
   (gethash (format "%s" name) lispm-tools--registry))
+
+(defun lispm-tools-unregister (name)
+  "Remove any tool called NAME (a string or symbol) from the registry."
+  (remhash (format "%s" name) lispm-tools--registry))
+
+(defun lispm-tools-count ()
+  "Return the number of currently registered tools."
+  (hash-table-count lispm-tools--registry))
+
+(defun lispm-tools-registered ()
+  "Return a list of all registered `lispm-tool' structs."
+  (hash-table-values lispm-tools--registry))
 
 (defmacro lispm-deftool (name params docstring &rest body)
   "Define a tool NAME that agents can call.
@@ -182,7 +196,7 @@ the model sees too.  Signal an error to report a failure to the model."
            (debug (&define name sexp stringp [&rest keywordp form] def-body)))
   (let ((permission 'read) async preview diff changes edit targets deferred always-ask for class
         keywords spotlight
-        (compiled (lispm-tools--compile-params name params))
+        (compiled (lispm-tools-compile-params name params))
         (args (mapcar #'car params)))
     (while (keywordp (car body))
       (let ((opt (pop body)))
@@ -210,13 +224,13 @@ the model sees too.  Signal an error to report a failure to the model."
         (error "`:edit' in `lispm-deftool' %s cannot combine with `:async', `:diff' or `:changes'"
                name))
       (pcase-let ((`(,ediff ,echanges ,etargets ,ebody)
-                   (lispm-tools--expand-edit name args edit body)))
+                   (lispm-tools-expand-edit name args edit body)))
         (setq diff ediff
               changes echanges
               targets (or targets etargets)
               body (list ebody))))
     `(lispm-register-tool
-      (lispm-tool--create
+      (lispm-make-tool
        :name ,(symbol-name name)
        :description ,docstring
        :params ',params
@@ -243,7 +257,7 @@ the model sees too.  Signal an error to report a failure to the model."
   "Return a canonical `lispm-tool-spec' representing TOOL.
 FUNCTION, when non-nil, overrides TOOL's handler function in the spec.
 DESCRIPTION, when non-nil, overrides TOOL's description (for example a
-short summary from `lispm-tools--description')."
+short summary from `lispm-tools-description')."
   (let ((name (lispm-tool-name tool))
         (desc (or description (lispm-tool-description tool)))
         (fn (or function (lispm-tool-function tool)))
@@ -252,7 +266,7 @@ short summary from `lispm-tools--description')."
         (lispm-tool-spec-create name desc :function fn :input-schema raw-schema)
       (pcase-let* ((`(,base-props . ,base-req)
                     (or (condition-case nil (lispm-tool-param-schema tool) (args-out-of-range nil))
-                        (lispm-tools--compile-params name (lispm-tool-params tool))))
+                        (lispm-tools-compile-params name (lispm-tool-params tool))))
                    (why-p (memq (lispm-tool-permission tool) lispm-rationale-permissions))
                    (props (if why-p
                               (cons '(why (type . "string")
@@ -320,7 +334,7 @@ did: a list of strings."
             :input (plist-get call :input)
             :reasons (plist-get call :reasons))))
 
-(defun lispm-tools--argument (key type value opts)
+(defun lispm-tools-argument (key type value opts)
   "Check VALUE of parameter KEY against TYPE and OPTS; return it for Lisp."
   (let ((ok (pcase type
               ('string (stringp value))
@@ -352,14 +366,14 @@ A tool with a schema of its own gets INPUT whole."
   "INPUT checked against TOOL's parameters, as an argument list."
   (mapcar (lambda (param)
             (pcase-let* ((`(,arg ,type ,_doc . ,opts) param)
-                         (key (lispm-tools--key arg))
+                         (key (lispm-tools-key arg))
                          (value (alist-get key input)))
               (if (memq value '(nil :null))
                   (if (plist-get opts :optional)
                       nil
                     (signal 'lispm-tool-argument-error
                             (list (format "Missing required parameter `%s'" key))))
-                (lispm-tools--argument key type value opts))))
+                (lispm-tools-argument key type value opts))))
           (lispm-tool-params tool)))
 
 (cl-defstruct (lispm-tool-result (:constructor lispm-tool-result (text &optional images)))
@@ -388,14 +402,14 @@ links and the chat shows.  A tool returns one, or hands one to `done'."
                     ((null result) "OK")
                     (t (let ((print-length 200) (print-level 8))
                          (prin1-to-string result))))))
-    (lispm--truncate (if (string-empty-p text) "(no output)" text)
+    (lispm-truncate (if (string-empty-p text) "(no output)" text)
                      lispm-tool-output-limit)))
 
-(defconst lispm-tools--interrupted
+(defconst lispm-tools-interrupted
   "Interrupted: the user pressed C-g while the call ran.  What it did until then stands."
   "Result of a call the user interrupted.")
 
-(defun lispm-tools--interruptibly (function args)
+(defun lispm-tools-interruptibly (function args)
   "Apply FUNCTION to ARGS so that C-g interrupts it, signaling `quit'.
 Calls run from process sentinels and timers, where Emacs inhibits
 quitting: without this, a runaway call could not be stopped.  A C-g
@@ -429,7 +443,7 @@ must not leave half done, so quitting is inhibited meanwhile."
         ;; Hooks the reverts run are the agent's doing.
         (let ((lispm-current-agent agent))
           (condition-case err
-              (lispm-tools--interruptibly #'lispm-tools--revert-changed
+              (lispm-tools-interruptibly #'lispm-tools--revert-changed
                                           (list (lispm-principal-root agent)))
             (quit nil)
             (error
@@ -461,7 +475,7 @@ Synchronous tools call DONE before returning.  An asynchronous tool's
 `done' takes the same arguments.
 
 C-g interrupts what the tool does while Emacs runs it, a loop in
-eval_elisp say, and the call fails (see `lispm-tools--interruptibly').
+eval_elisp say, and the call fails (see `lispm-tools-interruptibly').
 What an asynchronous tool waits for afterwards, a process or another
 agent, is stopped by aborting the turn.  Only the tool is
 interruptible: what comes after it, the result and the rest of the
@@ -492,10 +506,10 @@ runs."
         (lispm-in-english
           (let ((args (lispm-tools--arguments tool input)))
             (if (lispm-tool-async tool)
-                (lispm-tools--interruptibly (lispm-tool-function tool) (cons finish args))
-              (funcall finish (lispm-tools--interruptibly (lispm-tool-function tool) args)))))
+                (lispm-tools-interruptibly (lispm-tool-function tool) (cons finish args))
+              (funcall finish (lispm-tools-interruptibly (lispm-tool-function tool) args)))))
       (error (funcall finish (error-message-string err) t))
-      (quit (funcall finish lispm-tools--interrupted t)))
+      (quit (funcall finish lispm-tools-interrupted t)))
     (setq running nil)
     (when result
       (apply #'lispm-tools--deliver done agent tool result))))
@@ -514,8 +528,8 @@ Emacs waits for that program."
         (cond (diff
                (pcase-let ((`(,old ,new ,label) (apply diff (lispm-tools--arguments tool input))))
                  (if (not callback)
-                     (setq text (lispm--diff old new label))
-                   (lispm--diff old new label
+                     (setq text (lispm-diff old new label))
+                   (lispm-diff old new label
                                 (lambda (made &optional why)
                                   (funcall callback (or made (format "(no preview: %s)" why)))))
                    (setq later t))))
@@ -559,7 +573,7 @@ Nil for a tool without `:spotlight'."
 ;; A tool an agent defines itself, with eval_elisp or the code of a
 ;; skill it loads, is deferred too, and loaded for that agent at once:
 ;; it is the agent's from its next step on, other agents find it with
-;; search_tools, and it joins no one's core layer (`lispm-tools--adopt').
+;; search_tools, and it joins no one's core layer (`lispm-tools-adopt').
 
 (defcustom lispm-tool-search-results 5
   "How many tools search_tools loads for a search by keywords."
@@ -588,7 +602,7 @@ one per thing it can find:
            it and does not load itself, as a skill's tools, which
            come with the skill")
 
-(defun lispm-tools--sources ()
+(defun lispm-tools-sources ()
   "The sources of deferred tools, from `lispm-tool-sources'."
   (apply #'append (mapcar #'funcall lispm-tool-sources)))
 
@@ -607,14 +621,14 @@ one per thing it can find:
 
 (defun lispm-tools--searchable-p ()
   "Non-nil if there are tools, sources of them, or more to find."
-  (or (lispm-tools--sources)
+  (or (lispm-tools-sources)
       lispm-tool-search-functions
       (catch 'found
         (maphash (lambda (name _tool) (unless (equal name "search_tools") (throw 'found t)))
                  lispm-tools--registry)
         nil)))
 
-(defun lispm-tools--prepare (sources callback)
+(defun lispm-tools-prepare (sources callback)
   "Prepare SOURCES, all at once; call CALLBACK with their problems."
   (if (null sources)
       (funcall callback nil)
@@ -626,7 +640,7 @@ one per thing it can find:
                    (when (zerop (cl-decf waiting))
                      (funcall callback (nreverse problems)))))))))
 
-(defun lispm-tools--description (tool &optional full)
+(defun lispm-tools-description (tool &optional full)
   "The first line of TOOL's description, or all of it if FULL."
   (let ((description (lispm-tool-description tool)))
     (setq description (if (functionp description) (funcall description) description))
@@ -702,20 +716,20 @@ may be nil."
           (cl-incf sum best))))
     (if (zerop matched) 0 (/ (* sum matched) (float (length words))))))
 
-(defun lispm-tools--fields (tool)
+(defun lispm-tools-fields (tool)
   "What a search finds TOOL by, as `lispm-tools-search-score' takes it."
   `((3 . ,(lispm-tool-name tool))
     ;; Older compiled tool definitions construct records without this slot.
     (3 . ,(string-join (condition-case nil (lispm-tool-keywords tool)
                          (args-out-of-range nil)) " "))
-    (1.5 . ,(lispm-tools--description tool t))))
+    (1.5 . ,(lispm-tools-description tool t))))
 
 (defconst lispm-tools--search-cutoff 0.3
   "The least share of the best score a thing a search finds must score.
 What scores less matches by chance, as a word found inside another
 does, and would cost a request room for nothing.")
 
-(defun lispm-tools--rank (words candidates limit fields)
+(defun lispm-tools-rank (words candidates limit fields)
   "The CANDIDATES the search WORDS match best, at most LIMIT, best first.
 FIELDS is a function of a candidate, what it is found by.  Those
 scoring less than `lispm-tools--search-cutoff' of the best are left
@@ -762,8 +776,8 @@ tools are found."
       (let ((names (split-string (substring query 7) "[, ]+" t)))
         (seq-filter (lambda (tool) (member (lispm-tool-name tool) names)) tools))
     (pcase-let ((`(,named . ,words) (lispm-tools--named-sources query sources)))
-      (lispm-tools--rank words (if named (lispm-tools--of-sources tools named) tools)
-                         limit #'lispm-tools--fields))))
+      (lispm-tools-rank words (if named (lispm-tools--of-sources tools named) tools)
+                         limit #'lispm-tools-fields))))
 
 (defun lispm-tools-load (agent names)
   "Offer AGENT the deferred tools NAMES from its next request on."
@@ -776,13 +790,13 @@ tools are found."
       (setf (lispm-principal-loaded-tools agent) (append (lispm-principal-loaded-tools agent) new))
       (run-hook-with-args 'lispm-tools-changed-functions agent))))
 
-(defun lispm-tools--snapshot ()
-  "The tools registered now, for `lispm-tools--adopt' to tell those defined since."
+(defun lispm-tools-snapshot ()
+  "The tools registered now, for `lispm-tools-adopt' to tell those defined since."
   (copy-hash-table lispm-tools--registry))
 
-(defun lispm-tools--adopt (agent before)
+(defun lispm-tools-adopt (agent before)
   "Make the tools defined since BEFORE deferred tools of AGENT.
-BEFORE is the registry as `lispm-tools--snapshot' took it.  A tool
+BEFORE is the registry as `lispm-tools-snapshot' took it.  A tool
 new since then is deferred, so that it is offered to no other agent
 until search_tools finds it; one defined again keeps its place,
 deferred or in the core layer, unless it is defined as deferred now.
@@ -805,7 +819,7 @@ request on.  Return their names, sorted."
 (defconst lispm-tools--loaded-prefix "Tools now available: "
   "How a search_tools result starts its list of available tool names.")
 
-(defun lispm-tools--discover (agent query limit &optional predicate)
+(defun lispm-tools-discover (agent query limit &optional predicate)
   "What AGENT's search QUERY finds, at most LIMIT things: (TOOLS . OTHERS).
 TOOLS are registered tools AGENT's role gives it, including those
 already available; OTHERS are plists of `lispm-tool-search-functions',
@@ -834,25 +848,25 @@ is non-nil, only tools it accepts are considered, before ranking."
                (names (seq-difference (split-string (substring query 7) "[, ]+" t)
                                       (mapcar #'lispm-tool-name found))))
           (cons found (seq-filter (lambda (other) (seq-intersection names (plist-get other :tools))) others)))
-      (pcase-let ((`(,named . ,words) (lispm-tools--named-sources query (lispm-tools--sources))))
+      (pcase-let ((`(,named . ,words) (lispm-tools--named-sources query (lispm-tools-sources))))
         (if named
-            (cons (lispm-tools--rank words (lispm-tools--of-sources tools named) limit #'lispm-tools--fields)
+            (cons (lispm-tools-rank words (lispm-tools--of-sources tools named) limit #'lispm-tools-fields)
                   nil)
-          (let ((found (lispm-tools--rank words
+          (let ((found (lispm-tools-rank words
                                           (append (mapcar (lambda (tool) (cons 'tool tool)) tools)
                                                   (mapcar (lambda (other) (cons 'other other)) others))
                                           limit
                                           (lambda (candidate)
                                             (if (eq (car candidate) 'tool)
-                                                (lispm-tools--fields (cdr candidate))
+                                                (lispm-tools-fields (cdr candidate))
                                               (plist-get (cdr candidate) :fields))))))
             (cons (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'tool)) found))
                   (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) 'other)) found)))))))))
 
-(defun lispm-tools--selection-help (agent query found others &optional predicate)
+(defun lispm-tools-selection-help (agent query found others &optional predicate)
   "Explain unknown names in AGENT's selection QUERY after FOUND and OTHERS.
 Suggestions are canonical tool names, never implicit selections.
-PREDICATE restricts suggested tools as in `lispm-tools--discover'."
+PREDICATE restricts suggested tools as in `lispm-tools-discover'."
   (when (string-prefix-p "select:" query)
     (when-let* ((missing (seq-difference
                          (split-string (substring query 7) "[, ]+" t)
@@ -862,7 +876,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
              (seq-uniq
               (mapcan (lambda (name)
                         (mapcar #'lispm-tool-name
-                                (car (lispm-tools--discover
+                                (car (lispm-tools-discover
                                       agent (replace-regexp-in-string "[_-]+" " " name) 3 predicate))))
                       missing))))
         (concat "No accessible tool named " (string-join missing ", ") "."
@@ -871,7 +885,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
                           "; use select: with a canonical name to select one.")))))))
 
 (lispm-register-tool
- (lispm-tool--create
+ (lispm-make-tool
   :name "search_tools"
   :description
   (lambda ()
@@ -885,7 +899,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
             "Sources of tools:\n"
             (mapconcat (lambda (source)
                          (format "- %s: %s" (plist-get source :name) (plist-get source :description)))
-                       (lispm-tools--sources) "\n")))
+                       (lispm-tools-sources) "\n")))
   :input-schema
   '((type . "object")
     (properties (query (type . "string")
@@ -901,11 +915,11 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
           (query (alist-get 'query input))
           (limit (alist-get 'max_results input)))
       (unless (stringp query) (error "Say what to search for"))
-      (lispm-tools--prepare
-       (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools--sources))
+      (lispm-tools-prepare
+       (seq-filter (lambda (source) (plist-get source :pending)) (lispm-tools-sources))
        (lambda (problems)
          (pcase-let ((`(,found . ,others)
-                      (lispm-tools--discover agent query
+                      (lispm-tools-discover agent query
                                              (if (integerp limit) limit lispm-tool-search-results))))
            (lispm-tools-load agent (mapcar #'lispm-tool-name found))
            (funcall done
@@ -917,7 +931,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
                                                           (mapconcat #'lispm-tool-name found ", ") ".\n"
                                                           (mapconcat (lambda (tool)
                                                                        (format "- %s: %s" (lispm-tool-name tool)
-                                                                               (lispm-tools--description tool)))
+                                                                               (lispm-tools-description tool)))
                                                                      found "\n")))
                                              (and others
                                                   (mapconcat (lambda (other) (plist-get other :line))
@@ -928,7 +942,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
                                              (lispm-principal-loaded-tools agent))))
                                 (format "Nothing matches %S; you have loaded: %s." query
                                         (if loaded (string-join loaded ", ") "none"))))
-                            (when-let* ((help (lispm-tools--selection-help agent query found others)))
+                            (when-let* ((help (lispm-tools-selection-help agent query found others)))
                               (concat "\n" help))
                             (if problems (concat "\n" (string-join problems "\n")) ""))))))))))
 
@@ -957,7 +971,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
 They count as loaded at once, so the session's next request has them,
 waiting for them if a server has to start."
   (when-let* ((agent (and (bound-and-true-p lispm-session-mode) lispm-session-agent)))
-    (let* ((sources (lispm-tools--sources))
+    (let* ((sources (lispm-tools-sources))
            (names (seq-filter (lambda (name)
                                 (let ((tool (lispm-get-tool name)))
                                   (if tool
@@ -968,7 +982,7 @@ waiting for them if a server has to start."
       (when names
         (setf (lispm-principal-loaded-tools agent)
               (seq-uniq (append (lispm-principal-loaded-tools agent) names)))
-        (lispm-tools--prepare
+        (lispm-tools-prepare
          (seq-filter (lambda (source)
                        (and (plist-get source :pending)
                             (seq-some (plist-get source :provides) names)))
@@ -1059,7 +1073,7 @@ never approving the next."
       (cons (lispm-tool-name tool) (lispm-tools--call-key input tool))
     (lispm-tool-name tool)))
 
-(defun lispm-tools--allowed-p (agent tool input)
+(defun lispm-tools-invocation-allowed-p (agent tool input)
   "Non-nil if the user allowed AGENT this call of TOOL on INPUT for good.
 A tool of class `shell' allowed as a whole was allowed while AGENT's
 commands could not reach Emacs (see `lispm-tools-allowance'), and
@@ -1110,7 +1124,7 @@ change any file."
         (condition-case nil
             (delq nil (list (and (stringp path)
                                  (let ((lispm-current-agent agent))
-                                   (lispm-tools--file path)))
+                                   (lispm-tools-file path)))
                             (and buffer (buffer-file-name buffer))))
           (error t))))))
 
@@ -1164,7 +1178,7 @@ none."
                         (lambda (function)
                           (when-let* ((answer (lispm-tools--answer function agent tool input)))
                             (push answer answers)
-                            (setq action (lispm--stricter action (car answer))))
+                            (setq action (lispm-stricter action (car answer))))
                           nil)))
     (cons action (delq nil (mapcar (lambda (answer) (and (eq (car answer) action) (cdr answer)))
                                    (nreverse answers))))))
@@ -1216,7 +1230,7 @@ outside the agent's root when the policy for their class is `auto'.")
 See `lispm-tool-action'."
   (let ((action (lispm-policy-action agent (lispm-tool-call-permission tool input))))
     (cond ((eq action 'deny) 'deny)
-          ((lispm-tools--allowed-p agent tool input) 'auto)
+          ((lispm-tools-invocation-allowed-p agent tool input) 'auto)
           ((and (eq action 'auto) (not lispm-auto-approve-all)
                 (lispm-tool-always-ask tool))
            'ask)
@@ -1250,7 +1264,7 @@ See `lispm-tool-action'."
 
 ;;;; Helpers
 
-(defun lispm-tools--root ()
+(defun lispm-tools-root ()
   "Root directory of the acting agent."
   (if lispm-current-agent (lispm-principal-root lispm-current-agent) default-directory))
 
@@ -1271,18 +1285,18 @@ description or not, or file:FILE::LINE."
       (match-string 1 name)
     name))
 
-(defun lispm-tools--file (path)
+(defun lispm-tools-file (path)
   "PATH expanded against the acting agent's root.
 PATH may be a reference to a file (see `lispm-tools-reference').  On a
 remote root, an absolute PATH that names no machine names a file on the
-root's (see `lispm--expand-file-name'): the agent works there."
-  (lispm--expand-file-name (substitute-in-file-name (car (lispm-tools-reference path)))
-                           (lispm-tools--root)))
+root's (see `lispm-expand-file-name'): the agent works there."
+  (lispm-expand-file-name (substitute-in-file-name (car (lispm-tools-reference path)))
+                           (lispm-tools-root)))
 
-(defun lispm-tools--label (file)
+(defun lispm-tools-label (file)
   "FILE as shown in diffs: relative to the root when inside it."
-  (if (file-in-directory-p file (lispm-tools--root))
-      (file-relative-name file (lispm-tools--root))
+  (if (file-in-directory-p file (lispm-tools-root))
+      (file-relative-name file (lispm-tools-root))
     (abbreviate-file-name file)))
 
 (defun lispm-tools--number-lines (text offset limit)
@@ -1331,11 +1345,11 @@ root's (see `lispm--expand-file-name'): the agent works there."
 ;; unsaved changes is reverted; one with them is in conflict with its
 ;; file, which a change reports to the model as an error.  Previews,
 ;; and the changes shown while a call is written, change nothing: they
-;; go by `lispm--file-text'.  After a call that may have changed files,
+;; go by `lispm-file-text'.  After a call that may have changed files,
 ;; the buffers of those under the agent's root that changed on disk are
 ;; reverted, so the user sees what it did (`lispm-revert-after-calls').
 
-(defun lispm-tools--state (buffer)
+(defun lispm-tools-state (buffer)
   "What BUFFER is with respect to the file it visits; nothing is changed.
 `current': up to date with it, or visiting no file.
 `stale': out of date, without unsaved changes: reverting brings it
@@ -1351,11 +1365,11 @@ runtime holds positions in it, so it is kept as it is.
           ((file-exists-p buffer-file-name) 'stale)
           (t 'gone))))
 
-(defun lispm-tools--sync (buffer)
+(defun lispm-tools-sync (buffer)
   "Bring BUFFER up to date with the file it visits, if that changed on disk.
 A `stale' buffer is reverted; return its state then, as
-`lispm-tools--state' tells it: `current', `conflict', `held' or `gone'."
-  (let ((state (lispm-tools--state buffer)))
+`lispm-tools-state' tells it: `current', `conflict', `held' or `gone'."
+  (let ((state (lispm-tools-state buffer)))
     (if (not (eq state 'stale))
         state
       (with-current-buffer buffer
@@ -1373,7 +1387,7 @@ ask the user which to keep"
 LispM keeps as it is; ask the user which to keep")
          (abbreviate-file-name (buffer-file-name buffer))))
 
-(defun lispm-tools--find-file (file)
+(defun lispm-tools-find-file (file)
   "Visit FILE, asking nothing; an error if it is too large to.
 Emacs asks before it visits a file larger than
 `large-file-warning-threshold'; tools refuse instead."
@@ -1383,21 +1397,21 @@ Emacs asks before it visits a file larger than
              (abbreviate-file-name file) (file-size-human-readable size)))
     (find-file-noselect file t)))
 
-(defun lispm-tools--visiting (file &optional conflicts)
+(defun lispm-tools-visiting (file &optional conflicts)
   "The buffer visiting FILE, up to date with it, or nil.
 Nil too if FILE was deleted on disk.  A buffer in conflict with FILE,
-or held as it is (see `lispm-tools--state'), is an error, unless
+or held as it is (see `lispm-tools-state'), is an error, unless
 CONFLICTS is non-nil: then it is returned as it is."
   (when-let* ((buffer (find-buffer-visiting file)))
-    (pcase (lispm-tools--sync buffer)
+    (pcase (lispm-tools-sync buffer)
       ('current buffer)
       ((or 'conflict 'held) (if conflicts buffer (lispm-tools--conflict buffer))))))
 
-(defun lispm-tools--visit (file &optional conflicts)
+(defun lispm-tools-visit (file &optional conflicts)
   "A buffer visiting FILE, up to date with it; FILE is visited if need be.
 A buffer whose file was deleted on disk is emptied, as the buffer of a
-new file.  CONFLICTS is as for `lispm-tools--visiting'."
-  (or (lispm-tools--visiting file conflicts)
+new file.  CONFLICTS is as for `lispm-tools-visiting'."
+  (or (lispm-tools-visiting file conflicts)
       (when-let* ((buffer (find-buffer-visiting file)))
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
@@ -1405,38 +1419,38 @@ new file.  CONFLICTS is as for `lispm-tools--visiting'."
           (set-buffer-modified-p nil)
           (clear-visited-file-modtime))
         buffer)
-      (lispm-tools--find-file file)))
+      (lispm-tools-find-file file)))
 
-(defun lispm-tools--existing (file)
+(defun lispm-tools-existing (file)
   "A buffer holding FILE's text, for a change to it; an error if there is none.
 That is the buffer visiting FILE, up to date with it, which may hold a
 new file's text not saved yet; else FILE, visited now.  A FILE that
 cannot be written is an error, before it is visited (see
-`lispm-tools--check-writable')."
-  (lispm-tools--check-writable file)
-  (or (lispm-tools--visiting file)
-      (and (file-exists-p file) (lispm-tools--find-file file))
+`lispm-tools-check-writable')."
+  (lispm-tools-check-writable file)
+  (or (lispm-tools-visiting file)
+      (and (file-exists-p file) (lispm-tools-find-file file))
       (error "No such file: %s" (abbreviate-file-name file))))
 
-(defun lispm-tools--to-show (file &optional new)
+(defun lispm-tools-to-show (file &optional new)
   "A buffer to show a change to FILE in while it is proposed, or nil.
 Nothing is changed for it: the buffer visiting FILE if it is up to
 date with it; else, if no buffer visits FILE, FILE visited now, if it
 exists or NEW is non-nil."
   (if-let* ((buffer (find-buffer-visiting file)))
-      (and (eq (lispm-tools--state buffer) 'current) buffer)
+      (and (eq (lispm-tools-state buffer) 'current) buffer)
     (and (or new (file-exists-p file))
-         (lispm-tools--find-file file))))
+         (lispm-tools-find-file file))))
 
-(defun lispm-tools--buffer-file-text (buffer)
+(defun lispm-tools-buffer-file-text (buffer)
   "BUFFER's text, or its file's if BUFFER is out of date with it.
-See `lispm--file-text'."
+See `lispm-file-text'."
   (if-let* ((file (buffer-file-name buffer)))
-      (lispm--file-text file)
-    (lispm-tools--buffer-text buffer)))
+      (lispm-file-text file)
+    (lispm-tools-buffer-text buffer)))
 
 (defun lispm-tools--revert-changed (root)
-  "Revert the stale buffers of files under ROOT (see `lispm-tools--state').
+  "Revert the stale buffers of files under ROOT (see `lispm-tools-state').
 Run after a call that may have changed files (a shell command, Lisp,
 an MCP server), so that the buffers the user and the agents see hold
 what is on disk; see `lispm-revert-after-calls'.  Remote files are
@@ -1449,24 +1463,24 @@ remote: then those under it are checked through its connection."
                    (not (buffer-modified-p buffer))
                    (string-prefix-p root file)
                    (or (file-remote-p root) (not (file-remote-p file)))
-                   (eq (lispm-tools--state buffer) 'stale))
+                   (eq (lispm-tools-state buffer) 'stale))
           (with-demoted-errors "LispM: reverting a buffer: %S"
-            (let ((old (lispm-tools--buffer-text buffer)))
-              (lispm-tools--sync buffer)
-              (let ((new (lispm-tools--buffer-text buffer)))
+            (let ((old (lispm-tools-buffer-text buffer)))
+              (lispm-tools-sync buffer)
+              (let ((new (lispm-tools-buffer-text buffer)))
                 (unless (equal old new)
                   (run-hook-with-args 'lispm-buffer-change-functions buffer old new))))))))))
 
-(defun lispm-tools--set-text (buffer text)
+(defun lispm-tools-set-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved.
 Then tell `lispm-buffer-change-functions'.  A BUFFER in conflict with
-its file, or held as it is, is an error (see `lispm-tools--state'), and
+its file, or held as it is, is an error (see `lispm-tools-state'), and
 so is a read-only one, before anything is journaled."
-  (when (memq (lispm-tools--sync buffer) '(conflict held))
+  (when (memq (lispm-tools-sync buffer) '(conflict held))
     (lispm-tools--conflict buffer))
   (when (and (buffer-local-value 'buffer-read-only buffer) (not inhibit-read-only))
     (error "Cannot change buffer %s: it is read-only" (buffer-name buffer)))
-  (let ((old (lispm-tools--buffer-text buffer)))
+  (let ((old (lispm-tools-buffer-text buffer)))
     (lispm-tools--replace-text buffer text)
     ;; The change is made: whatever shows it must not undo the call.
     (with-demoted-errors "LispM: showing a change: %S"
@@ -1506,25 +1520,25 @@ so is a read-only one, before anything is journaled."
                       buffer-file-coding-system))))
           (save-buffer))))))
 
-(defun lispm-tools--buffer (name)
+(defun lispm-tools-buffer (name)
   "The live buffer NAME refers to (see `lispm-tools-buffer-name')."
   (let ((name (lispm-tools-buffer-name name)))
     (or (get-buffer name) (error "No buffer named %s" name))))
 
-(defun lispm-tools--buffer-to-change (name)
+(defun lispm-tools-buffer-to-change (name)
   "The live buffer called NAME, up to date with its file if it visits one.
 An error if it is in conflict with its file, or its file was deleted,
-or cannot be written (see `lispm-tools--check-writable')."
-  (let ((buffer (lispm-tools--buffer name)))
-    (pcase (lispm-tools--sync buffer)
+or cannot be written (see `lispm-tools-check-writable')."
+  (let ((buffer (lispm-tools-buffer name)))
+    (pcase (lispm-tools-sync buffer)
       ((or 'conflict 'held) (lispm-tools--conflict buffer))
       ('gone (error "%s was deleted on disk; buffer %s holds its old text"
                     (abbreviate-file-name (buffer-file-name buffer)) name))
       (_ (when-let* ((file (buffer-file-name buffer)))
-           (lispm-tools--check-writable file))
+           (lispm-tools-check-writable file))
          buffer))))
 
-(defun lispm-tools--buffer-text (buffer)
+(defun lispm-tools-buffer-text (buffer)
   "All of BUFFER's text."
   (with-current-buffer buffer
     (save-restriction
@@ -1560,16 +1574,16 @@ the user sees.  Other agents name places as org links,
 [[file:PATH::LINE]]: pass one as the path to read there."
   :permission read
   :spotlight (lambda (_result path &optional offset limit)
-               (let ((file (lispm-tools--file path)))
+               (let ((file (lispm-tools-file path)))
                  (unless (or (lispm-media-kind file) (file-directory-p file))
                    (list :kind 'read-file
                          :file file
                          :start-line (or offset (cdr (lispm-tools-reference path)) 1)
                          :limit (or limit 2000)))))
-  (let* ((file (lispm-tools--file path))
+  (let* ((file (lispm-tools-file path))
          (offset (or offset (cdr (lispm-tools-reference path))))
          (open (find-buffer-visiting file))
-         (state (and open (lispm-tools--sync open))))
+         (state (and open (lispm-tools-sync open))))
     (cond ((and (lispm-media-kind file) (file-readable-p file))
            (lispm-tools--media file))
           ((memq state '(current conflict held))
@@ -1579,10 +1593,10 @@ the user sees.  Other agents name places as org links,
                      ('conflict "[open in Emacs, unsaved changes; the file changed on disk too]\n")
                      ('held "[the session of an agent, as LispM holds it; the file changed on disk]\n")
                      (_ (if (buffer-modified-p open) "[open in Emacs, unsaved changes]\n" "")))
-                   (lispm-tools--number-lines (lispm-tools--buffer-text open) offset limit)))
+                   (lispm-tools--number-lines (lispm-tools-buffer-text open) offset limit)))
           ((file-directory-p file) (error "%s is a directory; use list_directory" path))
           ((file-readable-p file)
-           (lispm-tools--number-lines (lispm--file-text file) offset limit))
+           (lispm-tools--number-lines (lispm-file-text file) offset limit))
           (t (error "No such file: %s" file)))))
 
 (lispm-deftool list_directory
@@ -1590,7 +1604,7 @@ the user sees.  Other agents name places as org links,
            :optional t))
   "List a directory's entries; subdirectories end with a slash."
   :permission read
-  (let* ((dir (file-name-as-directory (lispm-tools--file (or path "."))))
+  (let* ((dir (file-name-as-directory (lispm-tools-file (or path "."))))
          ;; With their attributes: on a remote directory, one round trip
          ;; rather than one per entry.
          (entries (directory-files-and-attributes dir nil directory-files-no-dot-files-regexp)))
@@ -1615,7 +1629,7 @@ the user sees.  Other agents name places as org links,
 ;; buffers, a file's own buffer when Emacs visits it, so unsaved edits
 ;; are found, as read_file shows them.  The search runs in slices
 ;; between which Emacs stays responsive.  Models write regexps in the
-;; syntax of ripgrep and grep -E; `lispm-tools--emacs-regexp' translates.
+;; syntax of ripgrep and grep -E; `lispm-tools-emacs-regexp' translates.
 
 (defcustom lispm-search-max-matches 200
   "Matching lines after which search_files stops."
@@ -1670,7 +1684,7 @@ Return (EMACS-REGEXP . END), END being the position after it."
                     (if caret "^" "") (if dash "-" "") "]"))
           i)))
 
-(defun lispm-tools--emacs-regexp (pattern)
+(defun lispm-tools-emacs-regexp (pattern)
   "PATTERN, a regexp in the syntax of ripgrep and grep -E, as an Emacs regexp.
 Groups, alternation and intervals lose their backslashes' meaning in
 the translation; \\d, \\s and \\w become character classes.  Signal an
@@ -1855,7 +1869,7 @@ slices; only those matching GLOB, if given."
                       (error "No such file or directory: %s" target))
                      ((and (file-remote-p target) ere)
                       (lispm-tools--remote-search-files target ere case-fold))
-                     ((let ((process-environment (lispm--git-environment)))
+                     ((let ((process-environment (lispm-git-environment)))
                         (when-let* ((project (project-current nil target))
                                     ((and (eq (car-safe project) 'vc)
                                           (cadr project)
@@ -1925,7 +1939,7 @@ non-binary, or the list of match lines (at most LIMIT)."
           (label (funcall label-fn file)))
       ;; A buffer is searched for its unsaved changes, unless it
       ;; is out of date: then the file is.
-      (if (and (buffer-live-p open) (lispm--buffer-current-p open))
+      (if (and (buffer-live-p open) (lispm-buffer-current-p open))
           (with-current-buffer open
             (let ((case-fold-search case-fold))
               (lispm-tools--matches regexp label limit)))
@@ -1964,7 +1978,7 @@ a time within the slices, descending into subdirectories that satisfy
 `lispm-tools--searchable-directory-p' and keeping files that satisfy
 GLOB-PREDICATE, if given.  CASE-FOLD non-nil ignores case.  The search
 is abandoned if the turn of AGENT in which it started ends meanwhile."
-  (let* ((label-fn (lispm-tools--relative-labeler (lispm-tools--root)))
+  (let* ((label-fn (lispm-tools--relative-labeler (lispm-tools-root)))
          (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
          (buffer (generate-new-buffer " *lispm-search*" t))
          (visiting (make-hash-table :test #'equal))
@@ -2029,7 +2043,7 @@ Return non-nil when the kernel took the search, or nil to fall back."
              (not (string-search "\\n" clean-pat)))
     (let ((host (file-remote-p (car files))))
       (when (cl-every (lambda (f) (and (stringp f) (equal (file-remote-p f) host))) files)
-        (let ((label-fn (lispm-tools--relative-labeler (lispm-tools--root)))
+        (let ((label-fn (lispm-tools--relative-labeler (lispm-tools-root)))
               (turn (and agent (lispm-agent-busy-p agent) (lispm-agent-turn agent)))
               (visiting (make-hash-table :test #'equal))
               (open-files nil))
@@ -2037,7 +2051,7 @@ Return non-nil when the kernel took the search, or nil to fall back."
             (when-let* ((file (buffer-file-name b))
                         (full (expand-file-name file)))
               (when (and (equal (file-remote-p full) host)
-                         (lispm--buffer-current-p b))
+                         (lispm-buffer-current-p b))
                 (puthash full b visiting)
                 (push full open-files))))
           (lispm-kernel-search-files
@@ -2062,7 +2076,7 @@ Return non-nil when the kernel took the search, or nil to fall back."
                                (cl-incf large))
                               ((plist-get item :open)
                                (let ((open (gethash file visiting)))
-                                 (when (and (buffer-live-p open) (lispm--buffer-current-p open))
+                                 (when (and (buffer-live-p open) (lispm-buffer-current-p open))
                                    (let ((found (with-current-buffer open
                                                   (let ((case-fold-search case-fold))
                                                     (lispm-tools--matches regexp label limit)))))
@@ -2101,9 +2115,9 @@ the unsaved contents of files open in Emacs."
   (let* ((agent lispm-current-agent)
          (case-fold (or ignore-case (string-prefix-p "(?i)" pattern)))
          (clean-pat (string-remove-prefix "(?i)" pattern))
-         (regexp (lispm-tools--emacs-regexp clean-pat))
+         (regexp (lispm-tools-emacs-regexp clean-pat))
          (ere (lispm-tools--ere-regexp clean-pat))
-         (target (lispm-tools--file (or path ".")))
+         (target (lispm-tools-file (or path ".")))
          (remote-kernel (and (file-remote-p target)
                              (fboundp 'lispm-kernel-exec--runtime)
                              (lispm-kernel-exec--runtime :search-files target)))
@@ -2150,12 +2164,12 @@ Reading preserves point, narrowing and unsaved edits. Output is bounded."
   :permission read
   :spotlight (lambda (_result buffer &optional offset limit tail query)
                (list :kind 'read-buffer
-                     :buffer (lispm-tools--buffer buffer)
+                     :buffer (lispm-tools-buffer buffer)
                      :start-line offset
                      :limit (or limit 2000)
                      :tail tail
                      :query query))
-  (let ((b (lispm-tools--buffer buffer))
+  (let ((b (lispm-tools-buffer buffer))
         (limit (or limit 2000)))
     (unless (and (integerp limit) (<= 1 limit 2000))
       (error "limit must be from 1 to 2000"))
@@ -2209,7 +2223,7 @@ locations, or runtime_status for loaded library paths and capabilities.
 Nothing is loaded or evaluated; use this before writing live-editor Elisp."
   :permission read
   (let ((sym (intern-soft name))
-        (context (and buffer (lispm-tools--buffer buffer))) parts)
+        (context (and buffer (lispm-tools-buffer buffer))) parts)
     (unless sym (error "No symbol named %s" name))
     (when (fboundp sym)
       (push (format "Function %s %s\n%s" name
@@ -2222,7 +2236,7 @@ Nothing is loaded or evaluated; use this before writing live-editor Elisp."
                         (format "%s in %s" (if (local-variable-p sym context) "buffer-local" "default")
                                 (buffer-name context))
                       "default")
-                    (lispm--truncate (let ((print-length 50) (print-level 5))
+                    (lispm-truncate (let ((print-length 50) (print-level 5))
                                        (prin1-to-string (if context
                                                             (buffer-local-value sym context)
                                                           (default-value sym))))
@@ -2241,7 +2255,7 @@ Nothing is loaded or evaluated; use this before writing live-editor Elisp."
 
 ;;;; Built-in tools: writing
 
-(defun lispm-tools--check-writable (file)
+(defun lispm-tools-check-writable (file)
   "Signal an error if FILE is there and cannot be written; change nothing.
 The error names FILE and the cause: it is a directory, or not writable.
 Emacs visits a file that is not writable in a read-only buffer, and
@@ -2249,7 +2263,7 @@ asks before saving it once the user made that buffer writable, while
 tools never ask.  But with `lispm-save-edits' off, edits are left to
 the user to save: a buffer visiting FILE that is not read-only is no
 error then."
-  (let ((label (lispm-tools--label file)))
+  (let ((label (lispm-tools-label file)))
     (cond ((file-directory-p file)
            (error "Cannot write %s: it is a directory" label))
           ((or (not (file-exists-p file)) (file-writable-p file)))
@@ -2272,7 +2286,7 @@ current contents exactly, so read the file first."
          :bind (count label))
   (format "Replaced %d occurrence%s in %s." count (if (= count 1) "" "s") label))
 
-(defun lispm-tools--check-new-file (file)
+(defun lispm-tools-check-new-file (file)
   "Signal an error if FILE is new and cannot be written; change nothing.
 The error names FILE and the cause: a parent is not a directory, or
 the directory to write FILE in, or to make that directory in, is not
@@ -2284,17 +2298,17 @@ writable.  A missing directory that can be made is no error."
       (while (not (or (file-exists-p parent) (file-symlink-p parent)
                       (equal parent (file-name-directory parent))))
         (setq parent (directory-file-name (file-name-directory parent))))
-      (let ((label (lispm-tools--label file))
-            (where (lispm-tools--label (file-name-as-directory parent))))
+      (let ((label (lispm-tools-label file))
+            (where (lispm-tools-label (file-name-as-directory parent))))
         (cond ((not (file-directory-p parent))
                (error "Cannot write %s: %s is not a directory"
-                      label (lispm-tools--label parent)))
+                      label (lispm-tools-label parent)))
               ((file-writable-p (file-name-as-directory parent)))
               ((file-directory-p directory)
                (error "Cannot write %s: %s is not writable" label where))
               (t
                (error "Cannot write %s: %s does not exist, and cannot be made: %s is not writable"
-                      label (lispm-tools--label directory) where)))))))
+                      label (lispm-tools-label directory) where)))))))
 
 (lispm-deftool write_file
     ((path string "File to create or overwrite, absolute or relative to your root.")
@@ -2933,7 +2947,7 @@ allows."
     (let* ((agent lispm-current-agent)
            (log-buffer (get-buffer-create
                         (format "*lispm-shell: %s*" (if agent (lispm-principal-name agent) "?"))))
-           (default-directory (lispm-tools--root)))
+           (default-directory (lispm-tools-root)))
       (cl-labels
           ((run-locally ()
              (let* ((proc-buffer (generate-new-buffer
@@ -3034,7 +3048,7 @@ allows."
                  agent command timeout log-buffer done #'run-locally)
           (run-locally))))))
 
-(defun lispm-tools--read-forms (code)
+(defun lispm-tools-read-forms (code)
   "All Lisp forms in the string CODE."
   (with-temp-buffer
     (with-syntax-table emacs-lisp-mode-syntax-table
@@ -3197,7 +3211,7 @@ gets the value once it is resolved:
       (funcall function (lispm-async-value promise) (lispm-async-failed promise))
     (push function (lispm-async-waiters promise))))
 
-(defun lispm-tools--eval-result (printed value)
+(defun lispm-tools-eval-result (printed value)
   "What eval_elisp returns: PRINTED output, then VALUE."
   (let ((print-length 100) (print-level 10))
     (concat (if (string-empty-p printed) "" (concat printed "\n"))
@@ -3234,11 +3248,11 @@ at most: they are printed if the error reaches eval_elisp."
          #'lispm-tools--note-backtrace))
       (setq lispm-tools--backtrace (nreverse frames)))))
 
-(defun lispm-tools--backtrace-text (frames)
+(defun lispm-tools-backtrace-text (frames)
   "FRAMES, each (FUNCTION . ARGS), innermost first, as text.
 Past `lispm-tools--backtrace-frames' of them, \"...\" stands for the rest."
   (let ((print-length 6) (print-level 3) (print-escape-newlines t))
-    (lispm--truncate
+    (lispm-truncate
      (string-join
       (append (mapcar (lambda (frame)
                         (concat "  " (truncate-string-to-width (prin1-to-string frame)
@@ -3285,12 +3299,12 @@ a file gets no such review: it is for what the edit tools cannot do."
   (let* ((agent lispm-current-agent)
          (output (generate-new-buffer " *lispm-eval*" t))
          (standard-output output)
-         (default-directory (lispm-tools--root))
-         (before (lispm-tools--snapshot))
+         (default-directory (lispm-tools-root))
+         (before (lispm-tools-snapshot))
          value printed failure note)
     (unwind-protect
         (condition-case err
-            (dolist (form (lispm-tools--read-forms code))
+            (dolist (form (lispm-tools-read-forms code))
               (let ((lispm-tools--eval-form form)
                     (lispm-tools--backtrace nil))
                 (condition-case err
@@ -3301,17 +3315,17 @@ a file gets no such review: it is for what the edit tools cannot do."
                        (signal (car err) (cdr err))
                      (error "%s\n\nBacktrace, innermost call first:\n%s"
                             (error-message-string err)
-                            (lispm-tools--backtrace-text lispm-tools--backtrace)))))))
+                            (lispm-tools-backtrace-text lispm-tools--backtrace)))))))
           (error (setq failure (error-message-string err))))
       (setq printed (with-current-buffer output (buffer-string)))
       (kill-buffer output)
       ;; Tools the code defined, also before an error or a C-g, are
       ;; the agent's, deferred: in no other agent's core layer.
-      (setq note (lispm-tools--defined-note (lispm-tools--adopt agent before))))
+      (setq note (lispm-tools--defined-note (lispm-tools-adopt agent before))))
     (cond
      (failure (error "%s%s" failure note))
      ((not (lispm-async-p value))
-      (funcall done (concat (lispm-tools--eval-result printed value) note)))
+      (funcall done (concat (lispm-tools-eval-result printed value) note)))
      (t
       (let ((timer (run-at-time
                     lispm-eval-timeout nil
@@ -3322,7 +3336,7 @@ a file gets no such review: it is for what the edit tools cannot do."
         (lispm-async-then value
                           (lambda (result failed)
                             (cancel-timer timer)
-                            (funcall done (concat (lispm-tools--eval-result printed result) note)
+                            (funcall done (concat (lispm-tools-eval-result printed result) note)
                                      failed))))))))
 
 (provide 'lispm-tools)

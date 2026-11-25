@@ -261,7 +261,7 @@
   "Verify RAG auth, Markdown skills, resume parsing, and sandbox batch policy."
   (lispm-test-env
     ;; Curl header newline injection refused.
-    (should-error (lispm-api--curl-config '("Authorization: Bearer a\nEvil: 1")))
+    (should-error (lispm-api-curl-config '("Authorization: Bearer a\nEvil: 1")))
     ;; `lispm-characters--fetch-embeddings' passes `--config -' on stdin without `-H Authorization:...'.
     (let (captured-args captured-stdin)
       (cl-letf (((symbol-function 'call-process-region)

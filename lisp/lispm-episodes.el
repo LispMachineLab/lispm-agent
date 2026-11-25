@@ -87,7 +87,7 @@ A character's conversations, wherever they are, have the character's."
           ((string-match-p "\\`[0-9]\\{4\\}-W[0-9]\\{2\\}\\.org\\'" name) 'week)
           ((string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}\\.org\\'" name) 'month))))
 
-(defun lispm-episodes--files (agent kind)
+(defun lispm-episodes-files (agent kind)
   "AGENT's files of episodes of KIND, oldest first."
   (let ((dir (lispm-episodes-directory agent)))
     (and (file-directory-p dir)
@@ -120,12 +120,12 @@ over, `week' or `month', and the files to roll up into it."
         due)
     (pcase-dolist (`(,week . ,days)
                    (seq-group-by (lambda (file) (lispm-episodes--week (file-name-base file)))
-                                 (lispm-episodes--files agent 'day)))
+                                 (lispm-episodes-files agent 'day)))
       (when (string< week this-week)
         (push (cons week (cons 'week days)) due)))
     (pcase-dolist (`(,month . ,weeks)
                    (seq-group-by (lambda (file) (lispm-episodes--month (file-name-base file)))
-                                 (lispm-episodes--files agent 'week)))
+                                 (lispm-episodes-files agent 'week)))
       (when (string< month this-month)
         (push (cons month (cons 'month weeks)) due)))
     ;; Weeks first: rolled up, they may make a month due.
@@ -135,12 +135,12 @@ over, `week' or `month', and the files to roll up into it."
 
 ;;;; Episodes
 
-(defun lispm-episodes--entries (file)
-  "The episodes in FILE, as `lispm-memory--entries' gives them."
+(defun lispm-episodes-entries (file)
+  "The episodes in FILE, as `lispm-memory-entries' gives them."
   (with-temp-buffer
-    (insert (lispm--file-text file))
+    (insert (lispm-file-text file))
     (delay-mode-hooks (org-mode))
-    (lispm-memory--entries (current-buffer))))
+    (lispm-memory-entries (current-buffer))))
 
 (defun lispm-episodes-add (agent text file &optional what)
   "Add TEXT to the episodes of the day, as what AGENT's session in FILE did.
@@ -148,20 +148,20 @@ WHAT names it in the commit message: \"episode\" by default."
   (let* ((dir (lispm-episodes-directory agent))
          (day (progn (make-directory dir t)
                      (expand-file-name (format-time-string "%Y-%m-%d.org") dir)))
-         (buffer (lispm-memory--visit day (format-time-string "#+title: Episodes of %Y-%m-%d\n") t)))
+         (buffer (lispm-memory-visit day (format-time-string "#+title: Episodes of %Y-%m-%d\n") t)))
     (with-current-buffer buffer
       (save-excursion
         (save-restriction
           (widen)
           (goto-char (point-max))
           (unless (bolp) (insert "\n"))
-          (insert (lispm-memory--entry-text
+          (insert (lispm-memory-entry-text
                    (format "%s %s" (format-time-string "%H:%M") (lispm-agent-name agent)) nil
                    `(("AGENT" . ,(format "%s" (lispm-agent-name agent)))
                      ("SESSION" . ,(and file (format "[[file:%s]]" (abbreviate-file-name file))))
-                     ("CREATED" . ,(lispm-memory--stamp)))
+                     ("CREATED" . ,(lispm-memory-stamp)))
                    text)))))
-    (lispm-memory--save buffer)
+    (lispm-memory-save buffer)
     (lispm-git-commit agent (format "%s: %s of %s" (lispm-agent-name agent) (or what "episode")
                                     (file-name-base day)))))
 
@@ -178,8 +178,8 @@ It joins the episodes of the day."
 That is the latest summary of a day, if any is left, else that of the
 latest week, else that of the latest month."
   (seq-some (lambda (kind)
-              (when-let* ((file (car (last (lispm-episodes--files agent kind))))
-                          (entry (car (last (lispm-episodes--entries file)))))
+              (when-let* ((file (car (last (lispm-episodes-files agent kind))))
+                          (entry (car (last (lispm-episodes-entries file)))))
                 (cons (if (eq kind 'day)
                           (format "%s %s" (file-name-base file) (plist-get entry :title))
                         (file-name-base file))
@@ -192,7 +192,7 @@ Not that of a session it is handed over to, which begins with it."
   (when (and lispm-episodes (lispm-agent-system agent) (not (lispm-agent-compacting agent)))
     (when-let* ((latest (lispm-episodes-latest agent)))
       (format "# What happened lately\nThe latest summary of your earlier conversations (%s):\n%s"
-              (car latest) (lispm--truncate (cdr latest) 12000)))))
+              (car latest) (lispm-truncate (cdr latest) 12000)))))
 
 ;; After the memory titles.
 (add-hook 'lispm-system-prompt-functions #'lispm-episodes--prompt t)
@@ -234,13 +234,13 @@ See lispm-episodes.el."
                    (sources (if (file-exists-p file) (cons file sources) sources))
                    (failed (lambda (reason)
                              (remhash dir lispm-episodes--rolling)
-                             (puthash dir (time-add nil lispm-memory--retry-after)
+                             (puthash dir (time-add nil lispm-memory-retry-after)
                                       lispm-episodes--failed)
                              (message "%s" (lispm-tr "LispM: could not roll up the episodes of %s: %s"
                                                      (abbreviate-file-name file) reason)))))
         (puthash dir t lispm-episodes--rolling)
         (condition-case err
-            (let* ((texts (mapcar (lambda (source) (cons source (lispm--file-text source))) sources))
+            (let* ((texts (mapcar (lambda (source) (cons source (lispm-file-text source))) sources))
                    (text (mapconcat (lambda (source)
                                       (mapconcat (lambda (entry)
                                                    (let ((name (file-name-base source))
@@ -249,7 +249,7 @@ See lispm-episodes.el."
                                                              (if (equal title name) name
                                                                (concat name " " title))
                                                              (plist-get entry :body))))
-                                                 (lispm-episodes--entries source) "\n\n"))
+                                                 (lispm-episodes-entries source) "\n\n"))
                                     sources "\n\n"))
                    (backend (lispm-agent-backend* agent))
                    (request (lispm-api-request
@@ -263,7 +263,7 @@ See lispm-episodes.el."
               (funcall lispm-api-function backend request
                        :on-done
                        (lambda (message)
-                         (let ((summary (lispm--reply-text (append (alist-get 'content message) nil))))
+                         (let ((summary (lispm-content-text (append (alist-get 'content message) nil))))
                            (if (string-blank-p summary)
                                (funcall failed "the summary came back empty")
                              (condition-case err
@@ -289,13 +289,13 @@ changed.  That is one commit, by AGENT."
     (when-let* ((edited (lispm-episodes--unsaved (mapcar #'car sources))))
       (error "%s has unsaved changes" (abbreviate-file-name edited)))
     (pcase-dolist (`(,source . ,text) sources)
-      (unless (equal (lispm--file-text source) text)
+      (unless (equal (lispm-file-text source) text)
         (error "%s changed meanwhile" (abbreviate-file-name source))))
     (write-region
      (concat (format "#+title: Episodes of the %s %s\n" kind target)
-             (lispm-memory--entry-text
+             (lispm-memory-entry-text
               target nil
-              `(("CREATED" . ,(lispm-memory--stamp))
+              `(("CREATED" . ,(lispm-memory-stamp))
                 ("SOURCES" . ,(string-join names " | ")))
               summary))
      nil file nil 'silent)

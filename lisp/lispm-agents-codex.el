@@ -88,7 +88,7 @@ when its head holds none.")
   (or (equal (plist-get payload :originator) "codex_exec")
       (equal (plist-get payload :source) "exec")))
 
-(defun lispm-agents-codex--session (file objects)
+(defun lispm-agents-codex-session (file objects)
   "Return the Codex session recorded in FILE given its head/tail OBJECTS.
 Its title is the first prompt, or nil when there is none: Codex may record
 tools and instructions over the whole head before it, so it is looked for
@@ -185,7 +185,7 @@ SESSION is nil or has neither a name nor a title of its own to show."
                          (plist-get session :title))))
     (plist-put (copy-sequence session) :title title)))
 
-(defun lispm-agents-codex--files ()
+(defun lispm-agents-codex-files ()
   "Return every Codex rollout transcript file."
   (when (file-directory-p lispm-agents-codex-sessions-directory)
     (directory-files-recursively lispm-agents-codex-sessions-directory
@@ -195,8 +195,8 @@ SESSION is nil or has neither a name nor a title of its own to show."
   "Return every recorded Codex session.
 Forked threads share their session's id; the newest is listed."
   (let ((names (lispm-agents-codex--thread-names)))
-    (lispm-agents-file-sessions (lispm-agents-codex--files)
-                                #'lispm-agents-codex--session
+    (lispm-agents-file-sessions (lispm-agents-codex-files)
+                                #'lispm-agents-codex-session
                                 (lambda (session)
                                   (lispm-agents-codex--named session names)))))
 
@@ -306,7 +306,7 @@ session's."
         (setq lispm-agents-codex--rollout
               (or (lispm-agents-codex--known-rollout id)
                   (car (sort (seq-filter (lambda (file) (string-suffix-p (concat id ".jsonl") file))
-                                         (lispm-agents-codex--files))
+                                         (lispm-agents-codex-files))
                              (lambda (a b) (> (lispm-agents-file-time a) (lispm-agents-file-time b))))))))
       lispm-agents-codex--rollout)))
 

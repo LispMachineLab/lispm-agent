@@ -158,15 +158,15 @@ Return asks LispM, naming the skill chosen."
 Return asks LispM, naming the tool chosen."
   (let ((agent (lispm-system-agent))
         tools)
-    (maphash (lambda (name tool)
-               (when (lispm-tools-allowed-p agent name)
-                 (push (list :kind 'tool
-                             :name name
-                             :detail (lispm-tools--description tool)
-                             :fields (lispm-tools--fields tool)
-                             :ask (format "Use the tool %s." name))
-                       tools)))
-             lispm-tools--registry)
+    (dolist (tool (lispm-tools-registered))
+      (let ((name (lispm-tool-name tool)))
+        (when (lispm-tools-allowed-p agent name)
+          (push (list :kind 'tool
+                      :name name
+                      :detail (lispm-tools-description tool)
+                      :fields (lispm-tools-fields tool)
+                      :ask (format "Use the tool %s." name))
+                tools))))
     (sort tools (lambda (a b) (string< (plist-get a :name) (plist-get b :name))))))
 
 (defvar lispm-bar--things nil
@@ -188,7 +188,7 @@ The things are plists, as `lispm-bar-source-functions' give them, ranked
 as search_tools ranks what it finds; none for TEXT without a word.
 While the bar is open, they are what the sources gave as it opened."
   (when-let* ((words (lispm-tools-search-words text)))
-    (lispm-tools--rank words (if (and (lispm-bar-open-p) lispm-bar--things)
+    (lispm-tools-rank words (if (and (lispm-bar-open-p) lispm-bar--things)
                                  lispm-bar--things
                                (lispm-bar--gather))
                        (or limit lispm-bar-results)
@@ -243,7 +243,7 @@ when it opens next."
     (lispm-bar-ask (cdr waiting) (car waiting))
     (unless lispm-bar--open
       (message "%s" (lispm-tr "LispM is answering “%s”: %s shows the reply"
-                              (lispm--oneline (car waiting) 40)
+                              (lispm-oneline (car waiting) 40)
                               (substitute-command-keys "\\[lispm-ai]"))))))
 
 (defun lispm-bar--settings-changed ()
@@ -373,7 +373,7 @@ model is ready, or `Evaluate Lisp' when falling back without a model)."
   (list :kind 'setup
         :label (lispm-tr "Model")
         :name (lispm-tr "Set up a model…")
-        :detail (lispm-tr "then LispM is asked “%s”" (lispm--oneline text 40))
+        :detail (lispm-tr "then LispM is asked “%s”" (lispm-oneline text 40))
         :icon (if (functionp lispm-bar-ask-icon) (funcall lispm-bar-ask-icon) lispm-bar-ask-icon)
         :setup t))
 
@@ -442,7 +442,7 @@ ICON, a string, goes before NAME."
          (room (- (lispm-bar--width) (string-width kind) (if icon 8 6)))
          (name (truncate-string-to-width name (max 8 room) nil nil "…"))
          (detail (and detail (> (- room (string-width name)) 10)
-                      (truncate-string-to-width (lispm--oneline detail)
+                      (truncate-string-to-width (lispm-oneline detail)
                                                 (- room (string-width name) 3) nil nil "…")))
          (line (concat (if selected "❯ " "  ")
                        (if icon (concat icon " ") "")
@@ -459,8 +459,8 @@ ICON, a string, goes before NAME."
 model is configured."
   (lispm-bar--line 0
                    (if lispm-bar--ready
-                       (lispm-tr "Ask LispM “%s”" (lispm--oneline lispm-bar--text 60))
-                     (lispm-tr "Evaluate Lisp “%s”" (lispm--oneline lispm-bar--text 60)))
+                       (lispm-tr "Ask LispM “%s”" (lispm-oneline lispm-bar--text 60))
+                     (lispm-tr "Evaluate Lisp “%s”" (lispm-oneline lispm-bar--text 60)))
                    nil
                    "↩"
                    (if (functionp lispm-bar-ask-icon) (funcall lispm-bar-ask-icon) lispm-bar-ask-icon)))
@@ -487,7 +487,7 @@ Opened out, they come under headings, a kind each."
 
 (defun lispm-bar--indent (text prefix)
   "TEXT, its first line after PREFIX, the others indented as far."
-  (lispm-chat--indent text (make-string (string-width prefix) ?\s) prefix))
+  (lispm-chat-indent text (make-string (string-width prefix) ?\s) prefix))
 
 (defun lispm-bar--reply-text (agent)
   "What AGENT has replied to what was last asked, so far, or nil."
@@ -508,7 +508,7 @@ Opened out, they come under headings, a kind each."
                 (propertize (concat "  ⎿  " (lispm-tr "queued; sent when the agent is free") "\n")
                             'face 'lispm-bar-dim))
               (when (and reply (not (string-blank-p reply)))
-                (concat (lispm-bar--indent (lispm-chat--markdown (string-trim reply)) "⏺ ") "\n"))))))
+                (concat (lispm-bar--indent (lispm-chat-markdown (string-trim reply)) "⏺ ") "\n"))))))
 
 (defun lispm-bar--history-lines (agent)
   "The conversation with AGENT so far, as the bar opened out shows it."
@@ -525,16 +525,16 @@ Opened out, they come under headings, a kind each."
           (pcase (plist-get item :kind)
             ('user (propertize (concat (lispm-bar--indent (plist-get item :text) "λ ") "\n")
                                'face 'lispm-bar-dim))
-            ('text (concat (lispm-bar--indent (lispm-chat--markdown (string-trim (plist-get item :text))) "⏺ ")
+            ('text (concat (lispm-bar--indent (lispm-chat-markdown (string-trim (plist-get item :text))) "⏺ ")
                            "\n"))
-            ('tool (propertize (concat "  ⎿  " (lispm-chat--tool-name (plist-get item :name))
+            ('tool (propertize (concat "  ⎿  " (lispm-chat-tool-name (plist-get item :name))
                                        (if-let* ((summary (lispm-transcript-summary (plist-get item :input))))
                                            (format "(%s)" summary)
                                          "")
                                        "\n")
                                'face 'lispm-bar-dim))
             ((or 'note 'summary)
-             (propertize (concat (lispm-bar--indent (lispm--oneline (plist-get item :text) 200) "  ") "\n")
+             (propertize (concat (lispm-bar--indent (lispm-oneline (plist-get item :text) 200) "  ") "\n")
                          'face 'lispm-bar-dim))
             (_ "")))
         items "")))))
@@ -567,12 +567,12 @@ first phrase given is shown.")
                        ((and call (run-hook-with-args-until-success 'lispm-bar-activity-functions
                                                                     (car call) (cdr call))))
                        (call (lispm-tr "Running %s…"
-                                       (concat (lispm-chat--tool-name (car call))
+                                       (concat (lispm-chat-tool-name (car call))
                                                (if-let* ((summary (lispm-transcript-summary (cdr call))))
                                                    (format "(%s)" summary)
                                                  ""))))
                        (t (pcase (lispm-agent-activity agent)
-                            (`(writing . ,tool) (lispm-tr "Writing a call of %s…" (lispm-chat--tool-name tool)))
+                            (`(writing . ,tool) (lispm-tr "Writing a call of %s…" (lispm-chat-tool-name tool)))
                             (_ (lispm-tr "Thinking…")))))))
       (propertize (concat frame " " verb "\n") 'face 'lispm-bar-activity))))
 
@@ -584,7 +584,7 @@ way to go on from where its turn stopped; nil if it asks nothing."
       (let ((restarts (plist-get condition :restarts)))
         (propertize
          (concat "▌ " (lispm-tr (plist-get condition :title)) "\n"
-                 (lispm-bar--indent (lispm--oneline (or (plist-get condition :message) "") 200) "  ") "\n"
+                 (lispm-bar--indent (lispm-oneline (or (plist-get condition :message) "") 200) "  ") "\n"
                  "  " (lispm-tr "y: %s · n: %s"
                                 (lispm-restart-description condition (car restarts))
                                 (lispm-restart-description condition (lispm-stop-restart condition)))
@@ -596,8 +596,8 @@ way to go on from where its turn stopped; nil if it asks nothing."
              (name (plist-get asked :name))
              (input (and (consp (plist-get asked :input)) (plist-get asked :input)))
              (summary (lispm-transcript-summary input))
-             (title (or (lispm-chat--tool-text name :title input nil (or (alist-get 'path input) summary))
-                        (lispm-tr "Use %s" (lispm-chat--tool-name name))))
+             (title (or (lispm-chat-tool-text name :title input nil (or (alist-get 'path input) summary))
+                        (lispm-tr "Use %s" (lispm-chat-tool-name name))))
              (why (alist-get 'why input)))
         (concat
          (propertize (concat "▌ " title (if summary (concat ": " summary) "") "\n") 'face 'lispm-bar-question)
@@ -745,7 +745,7 @@ This is a `lispm-approval-message-functions' function."
     (if lispm-bar--open
         t
       (lispm-tr "LispM asks to use %s: %s to answer"
-                (lispm-chat--tool-name tool) (substitute-command-keys "\\[lispm-ai]")))))
+                (lispm-chat-tool-name tool) (substitute-command-keys "\\[lispm-ai]")))))
 
 (add-hook 'lispm-state-change-functions #'lispm-bar--state-changed)
 (add-hook 'lispm-response-delta-functions #'lispm-bar--agent-changed)

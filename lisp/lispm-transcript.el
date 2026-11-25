@@ -83,7 +83,7 @@
   "#+todo: WAITING(w) APPROVED(a) RUNNING(r) | DONE(d) DENIED(n) FAILED(f)\n"
   "TODO keywords of a session: the life cycle of a tool call.")
 
-(defconst lispm-transcript--state-re
+(defconst lispm-transcript-state-re
   "\\(WAITING\\|APPROVED\\|RUNNING\\|DONE\\|DENIED\\|FAILED\\)"
   "Regexp matching a tool-call state keyword.")
 
@@ -198,7 +198,7 @@ non-nil records that it stopped a turn in the middle, not between two."
                      (cl-loop for (key . value) in input
                               when (and (stringp value) (not (eq key 'why)))
                               return value))))
-      (and value (lispm--oneline value 60)))))
+      (and value (lispm-oneline value 60)))))
 
 (defun lispm-transcript--tool-use (block state)
   "Section text for the tool_use BLOCK, in TODO STATE."
@@ -211,9 +211,9 @@ non-nil records that it stopped a turn in the middle, not between two."
             ":TOOL_ID:  " (alist-get 'id block) "\n"
             ":TOOL:     " name "\n"
             ":END:\n"
-            (if (stringp why) (concat "- why :: " (lispm--oneline why 200) "\n") "")
+            (if (stringp why) (concat "- why :: " (lispm-oneline why 200) "\n") "")
             "#+begin_src json\n"
-            (lispm-transcript-body (lispm--json-pretty input))
+            (lispm-transcript-body (lispm-json-pretty input))
             "#+end_src\n")))
 
 (defun lispm-transcript--raw-title (block)
@@ -221,7 +221,7 @@ non-nil records that it stopped a turn in the middle, not between two."
   (cond
    ((lispm-thought-block-p block)
     (if-let* ((text (lispm-thought-block-text block)))
-        (concat "Thinking: " (lispm--oneline text 70))
+        (concat "Thinking: " (lispm-oneline text 70))
       "Thinking"))
    (t
     (let ((type (alist-get 'type block)))
@@ -240,7 +240,7 @@ non-nil records that it stopped a turn in the middle, not between two."
           ":BLOCK:    " (format "%s" (alist-get 'type block)) "\n"
           ":END:\n"
           "#+begin_src json\n"
-          (lispm-transcript-body (lispm--json-encode block))
+          (lispm-transcript-body (lispm-json-encode block))
           "#+end_src\n"))
 
 (defun lispm-transcript-result (text errorp &optional images directory)
@@ -297,7 +297,7 @@ Nil, or one not installed, and videos are named to the model instead."
   :type '(choice (string :tag "Program") (const :tag "None" nil))
   :group 'lispm)
 
-(defconst lispm-transcript--image-types
+(defconst lispm-transcript-image-types
   '(("png" . "image/png") ("jpg" . "image/jpeg") ("jpeg" . "image/jpeg")
     ("gif" . "image/gif") ("webp" . "image/webp"))
   "Image file extensions and their media types: those models take.")
@@ -310,7 +310,7 @@ Nil, or one not installed, and videos are named to the model instead."
 (defun lispm-media-kind (file)
   "What FILE is by its extension: `image', `video' or nil."
   (let ((extension (downcase (or (file-name-extension file) ""))))
-    (cond ((assoc extension lispm-transcript--image-types) 'image)
+    (cond ((assoc extension lispm-transcript-image-types) 'image)
           ((assoc extension lispm-transcript--video-types) 'video))))
 
 (defconst lispm-transcript--media-link-re
@@ -325,7 +325,7 @@ nothing else on the line; F is returned as written."
              (lispm-media-kind (or (match-string 1 line) (match-string 2 line))))
     (or (match-string 1 line) (match-string 2 line))))
 
-(defun lispm-transcript--images (beg end)
+(defun lispm-transcript-images (beg end)
   "Image and video files linked alone on a line between BEG and END.
 A relative link is a file next to the session, as tools link theirs;
 one not there is under the session's root, as the user and the model
@@ -383,7 +383,7 @@ blocks inside tool results."
   `((type . "image")
     (source (type . "base64")
             (media_type . ,(cdr (assoc (downcase (file-name-extension file))
-                                       lispm-transcript--image-types)))
+                                       lispm-transcript-image-types)))
             (data . ,(with-temp-buffer
                        (set-buffer-multibyte nil)
                        (insert-file-contents-literally file)
@@ -539,9 +539,9 @@ RESTART, once one is chosen, is named in its heading."
   (let ((summary (lispm-transcript-summary input))
         (why (and (consp input) (alist-get 'why input))))
     (concat "*** Asks: " name (if summary (concat "  " summary) "") "\n"
-            (if (stringp why) (concat "- why :: " (lispm--oneline why 200) "\n") "")
+            (if (stringp why) (concat "- why :: " (lispm-oneline why 200) "\n") "")
             "#+begin_src json\n"
-            (lispm-transcript-body (lispm--json-pretty input))
+            (lispm-transcript-body (lispm-json-pretty input))
             "#+end_src\n")))
 
 (defun lispm-transcript-preview (diff &optional reasons)
@@ -549,7 +549,7 @@ RESTART, once one is chosen, is named in its heading."
 DIFF may be nil; REASONS are why it asks, a list of strings, each an
 item of a list before DIFF (see `lispm-tool-decision')."
   (concat "*** Preview\n"
-          (mapconcat (lambda (reason) (concat "- " (lispm--oneline reason 1000) "\n")) reasons "")
+          (mapconcat (lambda (reason) (concat "- " (lispm-oneline reason 1000) "\n")) reasons "")
           (if diff
               (concat "#+begin_src diff\n" (lispm-transcript-body diff) "#+end_src\n")
             "")))
@@ -557,7 +557,7 @@ item of a list before DIFF (see `lispm-tool-decision')."
 (defun lispm-transcript-approval (event)
   "An approval EVENT alist as an audit subsection, never sent to the model."
   (concat "*** Approval\n#+begin_src json\n"
-          (lispm-transcript-body (lispm--json-pretty event))
+          (lispm-transcript-body (lispm-json-pretty event))
           "#+end_src\n"))
 
 (defun lispm-transcript--reasons (beg end)
@@ -614,7 +614,7 @@ Return an alist (TOOL-ID . MARKER) locating each tool-call heading."
     (save-excursion
       (goto-char pos)
       (let ((case-fold-search nil))
-        (when (looking-at (concat "\\*+ " lispm-transcript--state-re "\\_>"))
+        (when (looking-at (concat "\\*+ " lispm-transcript-state-re "\\_>"))
           (replace-match state t t nil 1))))))
 
 (defun lispm-transcript-set-property (pos name value)
@@ -679,7 +679,7 @@ it, and where the section ends."
     (let ((line (buffer-substring-no-properties pos (line-end-position)))
           (case-fold-search nil))
       (when (string-match
-             (concat "\\`\\*+ +\\(?:" lispm-transcript--state-re " +\\)?"
+             (concat "\\`\\*+ +\\(?:" lispm-transcript-state-re " +\\)?"
                      "\\(.*?\\)\\(?:[ \t]+\\(:\\(?:[[:alnum:]_@#%]+:\\)+\\)\\)?[ \t]*\\'")
              line)
         (list :todo (match-string 1 line)
@@ -768,7 +768,7 @@ substantially smaller than TEXT."
           lines)
       (dolist (line (split-string text "\n" t))
         (when (string-match-p lispm-transcript--outline-line-re line)
-          (push (lispm--oneline line 120) lines)))
+          (push (lispm-oneline line 120) lines)))
       (setq lines (nreverse lines))
       (if (null lines)
           lispm-transcript-cleared-text
@@ -810,7 +810,7 @@ See `lispm-transcript-parts'."
         (cond
          ((assoc "TOOL_ID" props)
           (let* ((json (lispm-transcript--block bbeg own-end))
-                 (input (and json (condition-case nil (lispm--json-decode json) (json-error nil))))
+                 (input (and json (condition-case nil (lispm-json-decode json) (json-error nil))))
                  result preview reasons stopped)
             (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
               (let* ((kid (lispm-transcript--heading kbeg))
@@ -819,7 +819,7 @@ See `lispm-transcript-parts'."
                        (setq result (list :result (or (lispm-transcript--block kbody kend) "")
                                           :error (equal title "Error")
                                           :cleared (and (member "cleared" (plist-get kid :tags)) t)
-                                          :images (lispm-transcript--images kbody kend))))
+                                          :images (lispm-transcript-images kbody kend))))
                       ((and (equal title "Preview") (not preview) (not reasons))
                        (setq preview (lispm-transcript--block kbody kend)
                              reasons (lispm-transcript--reasons kbody kend)))
@@ -841,7 +841,7 @@ See `lispm-transcript-parts'."
           (push (list :kind 'block
                       :type (cdr (assoc "BLOCK" props))
                       :block (when-let* ((json (lispm-transcript--block bbeg own-end)))
-                               (condition-case nil (lispm--json-decode json) (json-error nil)))
+                               (condition-case nil (lispm-json-decode json) (json-error nil)))
                       :pos hbeg)
                 parts))
          ((equal (plist-get heading :title) "Reply")
@@ -927,7 +927,7 @@ one chosen, once it is) and :value (the value it was given, if any),
               :message (lispm-transcript--text text end)
               :pos hbeg)))))
 
-(defun lispm-transcript--normalize (messages)
+(defun lispm-transcript-normalize (messages)
   "Merge consecutive MESSAGES of one role; drop leading non-user ones."
   (let (out)
     (dolist (m messages)
@@ -1107,7 +1107,7 @@ read it all at every step."
                  (push `((role . "user")
                          (content . ,(vconcat (cons (lispm-transcript--text-block text)
                                                     (mapcar #'lispm-transcript--image-block
-                                                            (lispm-transcript--images
+                                                            (lispm-transcript-images
                                                              (plist-get section :body)
                                                              (plist-get section :end)))))))
                        messages)))
@@ -1121,7 +1121,7 @@ read it all at every step."
                    (push `((role . "user") (content . ,(vconcat results))) messages))
                  (setq pending (append pending calls)))))))
         (setq messages (lispm-transcript--load-images
-                        (lispm-transcript--normalize (reverse messages))))
+                        (lispm-transcript-normalize (reverse messages))))
         (list :system system
               :messages messages
               :pending (mapcar (lambda (call) (plist-get call :id)) pending)

@@ -80,11 +80,11 @@ transcript is under, besides what that file holds."
                       (insert-file-contents meta)
                       (json-parse-buffer :object-type 'plist)))))))))
 
-(defun lispm-agents-claude--session (file objects)
+(defun lispm-agents-claude-session (file objects)
   "Return the Claude session recorded in FILE given its head/tail OBJECTS.
 The title is the last custom title or summary, else the first human prompt;
 a custom title file overrides it later, see
-`lispm-agents-claude--titled'.  Return nil for a transcript without
+`lispm-agents-claude-titled'.  Return nil for a transcript without
 any prompt or title.  A subagent's transcript, see
 `lispm-agents-claude--subagent', is the session of the agent that ran
 it: its :parent is the session, or the subagent, that started it, and
@@ -142,7 +142,7 @@ cannot be read or KEY holds no string, or a blank one."
                 ((not (string-blank-p value))))
       value)))
 
-(defun lispm-agents-claude--title-file (session)
+(defun lispm-agents-claude-title-file (session)
   "Return the file holding Claude SESSION's custom title.
 Claude Code keeps a session's chosen name beside its transcript, in the
 session's own directory, rather than in the transcript, which it rewrites."
@@ -152,10 +152,10 @@ session's own directory, rather than in the transcript, which it rewrites."
 
 (defun lispm-agents-claude--custom-title (session)
   "Return the custom title chosen for Claude SESSION, or nil when none is."
-  (lispm-agents-claude--json-string (lispm-agents-claude--title-file session)
+  (lispm-agents-claude--json-string (lispm-agents-claude-title-file session)
                                    :customTitle))
 
-(defun lispm-agents-claude--titled (session)
+(defun lispm-agents-claude-titled (session)
   "Return SESSION titled by its custom title, when one was chosen.
 The title file changes without the transcript, so it is no part of the
 transcript memo and is read after it; SESSION, shared with the memo, is
@@ -166,7 +166,7 @@ title of its own to show."
                          (plist-get session :title))))
     (plist-put (copy-sequence session) :title title)))
 
-(defun lispm-agents-claude--files ()
+(defun lispm-agents-claude-files ()
   "Return every Claude Code transcript file: the sessions' own, and
 those of the subagents they ran, see `lispm-agents-claude--subagent'."
   (when (file-directory-p lispm-agents-claude-projects-directory)
@@ -177,9 +177,9 @@ those of the subagents they ran, see `lispm-agents-claude--subagent'."
 
 (defun lispm-agents-claude-sessions ()
   "Return every recorded Claude Code session."
-  (lispm-agents-file-sessions (lispm-agents-claude--files)
-                              #'lispm-agents-claude--session
-                              #'lispm-agents-claude--titled))
+  (lispm-agents-file-sessions (lispm-agents-claude-files)
+                              #'lispm-agents-claude-session
+                              #'lispm-agents-claude-titled))
 
 (defun lispm-agents-claude--normalize-sessions (sessions)
   "Ensure custom-titled parent sessions are present for SESSIONS."
@@ -199,8 +199,8 @@ those of the subagents they ran, see `lispm-agents-claude--subagent'."
         (push parent-file missing)))
     (if missing
         (append (lispm-agents-file-sessions (nreverse missing)
-                                            #'lispm-agents-claude--session
-                                            #'lispm-agents-claude--titled)
+                                            #'lispm-agents-claude-session
+                                            #'lispm-agents-claude-titled)
                 sessions)
       sessions)))
 
@@ -208,7 +208,7 @@ those of the subagents they ran, see `lispm-agents-claude--subagent'."
   "Give Claude SESSION the TITLE, in its custom title file.
 A record appended to the transcript itself would be lost when a running
 Claude rewrites it."
-  (let ((file (lispm-agents-claude--title-file session))
+  (let ((file (lispm-agents-claude-title-file session))
         (coding-system-for-write 'utf-8-unix))
     (make-directory (file-name-directory file) t)
     (write-region (decode-coding-string (json-serialize (list :customTitle title)) 'utf-8)

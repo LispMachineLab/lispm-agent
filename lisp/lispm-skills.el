@@ -41,7 +41,7 @@
 ;;
 ;; Agents find skills with search_tools, which reads every skill's
 ;; title, description, headings and the tools its code defines, without
-;; evaluating anything (`lispm-skills--index'), and load one with the
+;; evaluating anything (`lispm-skills-index'), and load one with the
 ;; skill tool when a request calls for it: its text becomes the call's
 ;; result, so the conversation holds it from then on, and its code is
 ;; evaluated, so its functions exist and its tools are the agent's:
@@ -71,7 +71,9 @@
 (require 'lispm-transcript)
 (require 'lispm-runtime)
 
-(defconst lispm-skills--builtin
+(defvaralias 'lispm-skills--builtin 'lispm-skills-builtin)
+
+(defconst lispm-skills-builtin
   (let ((here (file-name-directory (or load-file-name buffer-file-name))))
     ;; skills/ is beside lisp/ in a checkout, and beside the Lisp files
     ;; in a package built from it (as MELPA builds them).
@@ -80,7 +82,7 @@
               (expand-file-name "../skills/" here)))
   "The skills of LispM itself.")
 
-(defcustom lispm-skill-directories (list lispm-skills--builtin "~/.lispm/skills/")
+(defcustom lispm-skill-directories (list lispm-skills-builtin "~/.lispm/skills/")
   "Directories of skills, a later one's skill replacing an earlier one's.
 After these come the .lispm/skills/ of the agent's project, whose
 skills' code is evaluated only once the user trusts it (see
@@ -137,7 +139,7 @@ theirs of the same name.")
                                          (error-message-string err)))))))
     (nreverse directories)))
 
-(defun lispm-skills--md-p (file)
+(defun lispm-skills-md-p (file)
   "Non-nil if FILE is a Markdown skill file."
   (and (stringp file) (string-suffix-p ".md" (downcase file))))
 
@@ -162,7 +164,7 @@ SKILL.md, else the file's own, without its extension."
   (with-temp-buffer
     (insert-file-contents file nil 0 4096)
     (let ((name (lispm-skill-name file)))
-      (if (lispm-skills--md-p file)
+      (if (lispm-skills-md-p file)
           (let ((case-fold-search t)
                 keywords heading)
             (goto-char (point-min))
@@ -209,7 +211,7 @@ SKILL.md, else the file's own, without its extension."
                                   (seq-filter #'file-directory-p
                                               (directory-files directory t "\\`[^.]"))))))))
 
-(defun lispm-skills--write-directory ()
+(defun lispm-skills-write-directory ()
   "The directory write_skill saves skills in (see `lispm-write-skill-directory')."
   (file-name-as-directory
    (expand-file-name (or lispm-write-skill-directory (car (last lispm-skill-directories))
@@ -225,9 +227,9 @@ it is one of the others, as it is for an agent working in the home
 directory: what the user keeps there is theirs."
   (let* ((directories (mapcar (lambda (directory) (file-name-as-directory (expand-file-name directory)))
                               lispm-skill-directories))
-         (directories (if (member (lispm-skills--write-directory) directories)
+         (directories (if (member (lispm-skills-write-directory) directories)
                           directories
-                        (append directories (list (lispm-skills--write-directory)))))
+                        (append directories (list (lispm-skills-write-directory)))))
          (directories (append (seq-remove (lambda (directory) (member directory directories))
                                           (seq-uniq (mapcar #'car (lispm-skills--sourced))))
                               directories))
@@ -251,22 +253,24 @@ is evaluated only once the user trusts it (see `lispm-skill-trusted-p')."
     (sort (mapcar #'cdr skills)
           (lambda (a b) (string< (plist-get a :name) (plist-get b :name))))))
 
-(defun lispm-skills--find (name agent)
+(defun lispm-skills-find (name agent)
   "The skill called NAME that AGENT can load, or nil."
   (seq-find (lambda (skill) (equal (plist-get skill :name) name)) (lispm-skills agent)))
 
+(defalias 'lispm-skills--find #'lispm-skills-find)
+
 ;;;; Code
 
-(defun lispm-skills--file-text (file)
+(defun lispm-skills-file-text (file)
   "The text of FILE."
   (with-temp-buffer
     (insert-file-contents file)
     (buffer-string)))
 
-(defun lispm-skills--blocks (text &optional file)
+(defun lispm-skills-blocks (text &optional file)
   "The `:lispm load' code blocks of skill TEXT, as strings.
 Markdown skills (when FILE names a `.md' file) never carry code blocks."
-  (unless (lispm-skills--md-p file)
+  (unless (lispm-skills-md-p file)
     (with-temp-buffer
       (insert text)
       (goto-char (point-min))
@@ -299,15 +303,15 @@ code is evaluated as written or not at all."
                   forms)))
         (nreverse forms)))))
 
-(defun lispm-skills--forms (text &optional file)
+(defun lispm-skills-forms (text &optional file)
   "The Lisp forms of `:lispm load' blocks in TEXT (none for Markdown FILE)."
-  (unless (lispm-skills--md-p file)
-    (mapcan #'lispm-skills--read-code (lispm-skills--blocks text file))))
+  (unless (lispm-skills-md-p file)
+    (mapcan #'lispm-skills--read-code (lispm-skills-blocks text file))))
 
 ;;;; What searches find skills by
 
 (defvar lispm-skills--indexed (make-hash-table :test #'equal)
-  "File -> (STAMP . ENTRY), what `lispm-skills--index' read of a skill's file.")
+  "File -> (STAMP . ENTRY), what `lispm-skills-index' read of a skill's file.")
 
 (defun lispm-skills--stamp (file)
   "What changes when FILE does: its modification time and size, or nil."
@@ -344,7 +348,12 @@ line of the tool's description."
                (setq permission (pop body))
              (pop body)))
          (list (list (symbol-name name) permission (funcall summary doc)))))
-      (`(lispm-register-tool (lispm-tool--create . ,(and spec (pred plistp))))
+      (`(lispm-register-tool
+         (,(or 'lispm-make-tool
+               (pred (lambda (fn)
+                       (and (symbolp fn)
+                            (equal (symbol-name fn) "lispm-tool--create")))))
+          . ,(and spec (pred plistp))))
        (when (stringp (plist-get spec :name))
          (list (list (plist-get spec :name)
                      (pcase (plist-get spec :permission) (`(quote ,class) class) (_ 'read))
@@ -353,7 +362,7 @@ line of the tool's description."
       (`(,(or 'with-eval-after-load 'when 'unless) ,_ . ,body)
        (mapcan #'lispm-skills--tool-forms body)))))
 
-(defun lispm-skills--index (skill)
+(defun lispm-skills-index (skill)
   "What a search finds SKILL by, read from its file, its code not evaluated.
 A plist: :headings, the titles of its headings, and :tools, the tools
 its code defines, as `lispm-skills--tool-forms' tells them; code that
@@ -363,15 +372,17 @@ does not read defines none.  Kept until the file changes."
          (kept (gethash file lispm-skills--indexed)))
     (if (and kept (equal (car kept) stamp))
         (cdr kept)
-      (let* ((text (lispm-skills--file-text file))
-             (md-p (lispm-skills--md-p file))
+      (let* ((text (lispm-skills-file-text file))
+             (md-p (lispm-skills-md-p file))
              (entry (list :headings (lispm-skills--headings text md-p)
                           :tools (unless md-p
                                    (condition-case nil
-                                       (mapcan #'lispm-skills--tool-forms (lispm-skills--forms text))
+                                       (mapcan #'lispm-skills--tool-forms (lispm-skills-forms text))
                                      (error nil))))))
         (puthash file (cons stamp entry) lispm-skills--indexed)
         entry))))
+
+(defalias 'lispm-skills--index #'lispm-skills-index)
 
 (defun lispm-skills--found-line (skill tools)
   "How a search_tools result tells of SKILL, whose code defines TOOLS."
@@ -387,7 +398,7 @@ does not read defines none.  Kept until the file changes."
   "What a search finds SKILL by, as `lispm-tools-search-score' takes it:
 its name, title and description, its headings, and its tools' names
 and descriptions."
-  (let ((index (lispm-skills--index skill)))
+  (let ((index (lispm-skills-index skill)))
     `((3 . ,(plist-get skill :name))
       (2 . ,(plist-get skill :title))
       (1.5 . ,(plist-get skill :description))
@@ -400,7 +411,7 @@ and descriptions."
 See `lispm-tool-search-functions'.  None if AGENT may not load skills."
   (when (lispm-tools-allowed-p agent "skill")
     (mapcar (lambda (skill)
-              (let ((tools (plist-get (lispm-skills--index skill) :tools)))
+              (let ((tools (plist-get (lispm-skills-index skill) :tools)))
                 (list :fields (lispm-skills-search-fields skill)
                       :line (lispm-skills--found-line skill tools)
                       :tools (mapcar #'car tools))))
@@ -408,7 +419,7 @@ See `lispm-tool-search-functions'.  None if AGENT may not load skills."
 
 (add-hook 'lispm-tool-search-functions #'lispm-skills--search)
 
-(defun lispm-skills--nearest (name agent)
+(defun lispm-skills-nearest (name agent)
   "The names of the skills AGENT can load nearest to NAME, at most five.
 Those a search for NAME finds, and those whose names are NAME a few
 letters off, as a name mistyped is."
@@ -427,20 +438,20 @@ letters off, as a name mistyped is."
                                    #'> :key #'cdr))
                       5))))
 
-(defun lispm-skills--evaluate (skill agent forms)
+(defun lispm-skills-evaluate (skill agent forms)
   "Evaluate FORMS, the code of SKILL, for AGENT; return the tools it defines.
 Their names, that is: they become deferred tools, loaded for AGENT,
 also those defined before an error in the code, which goes on (see
-`lispm-tools--adopt').  The code is that of the text the caller read
+`lispm-tools-adopt').  The code is that of the text the caller read
 and checked: SKILL's file is not read again."
   (let ((name (plist-get skill :name))
         (default-directory (file-name-directory (plist-get skill :file)))
-        (before (lispm-tools--snapshot))
+        (before (lispm-tools-snapshot))
         tools)
     (unwind-protect
         (dolist (form forms)
           (eval form t))
-      (let ((defined (lispm-tools--adopt agent before))
+      (let ((defined (lispm-tools-adopt agent before))
             ;; Those it defined when loaded before, if not again now.
             (earlier (seq-filter (lambda (tool)
                                    (and (equal (lispm-tool-skill-of tool) name)
@@ -458,12 +469,12 @@ and checked: SKILL's file is not read again."
   "The skill that defined the tool NAME, or nil."
   (get (intern name) 'lispm-skill))
 
-(defun lispm-skills--text (file)
+(defun lispm-skills-text (file)
   "The text of the skill in FILE, without its #+ keywords or YAML frontmatter."
   (with-temp-buffer
     (insert-file-contents file)
     (goto-char (point-min))
-    (if (lispm-skills--md-p file)
+    (if (lispm-skills-md-p file)
         (when (looking-at "\\`---[ \t]*\r?\n")
           (forward-line 1)
           (when (re-search-forward "^\\(?:---\\|\\.\\.\\.\\)[ \t]*\r?\n?" nil t)
@@ -471,7 +482,9 @@ and checked: SKILL's file is not read again."
       (while (looking-at "#\\+\\(title\\|description\\):.*\n") (replace-match "")))
     (string-trim (buffer-string))))
 
-(defun lispm-skills--loaded-text (skill tools &optional unevaluated extra)
+(defalias 'lispm-skills--text #'lispm-skills-text)
+
+(defun lispm-skills-loaded-text (skill tools &optional unevaluated extra)
   "The result of loading SKILL: that it was, and its text.
 TOOLS are those its code defined.  UNEVALUATED, if non-nil, says why
 its code was not evaluated; EXTRA, if non-nil, follows."
@@ -480,7 +493,7 @@ its code was not evaluated; EXTRA, if non-nil, follows."
                         (tools (format "; tools now available: %s" (string-join tools ", ")))
                         (t ""))
                   (or extra ""))
-          (lispm--truncate (lispm-skills--text (plist-get skill :file)) 30000)))
+          (lispm-truncate (lispm-skills-text (plist-get skill :file)) 30000)))
 
 ;;;; Trusting a project's skills
 
@@ -504,7 +517,7 @@ part is preceded by its length, so that no two skills hash alike."
     (with-temp-buffer
       (set-buffer-multibyte nil)
       (let ((part (lambda (bytes) (insert (format "%d:" (length bytes)) bytes))))
-        (dolist (block (lispm-skills--blocks (or text (lispm-skills--file-text file)) file))
+        (dolist (block (lispm-skills-blocks (or text (lispm-skills-file-text file)) file))
           (funcall part (encode-coding-string block 'utf-8)))
         (dolist (other (lispm-skills--beside file))
           (funcall part (encode-coding-string (file-relative-name other directory) 'utf-8))
@@ -514,7 +527,7 @@ part is preceded by its length, so that no two skills hash alike."
                           (buffer-string)))))
       (secure-hash 'sha256 (current-buffer)))))
 
-(defun lispm-skills--same-file-p (a b)
+(defun lispm-skills-same-file-p (a b)
   "Non-nil if the file names A and B name the same file."
   (equal (expand-file-name a) (expand-file-name b)))
 
@@ -526,19 +539,19 @@ without code has nothing to trust.  TEXT is that of SKILL's file, read
 again unless given."
   (or (not (plist-get skill :project))
       (let* ((file (plist-get skill :file))
-             (text (or text (lispm-skills--file-text file))))
-        (or (null (lispm-skills--blocks text file))
-            (equal (cdr (seq-find (lambda (entry) (lispm-skills--same-file-p (car entry) file))
+             (text (or text (lispm-skills-file-text file))))
+        (or (null (lispm-skills-blocks text file))
+            (equal (cdr (seq-find (lambda (entry) (lispm-skills-same-file-p (car entry) file))
                                   lispm-trusted-skills))
                    (lispm-skills--hash file text))))))
 
-(defun lispm-skills--trust (file hash)
+(defun lispm-skills-trust (file hash)
   "Trust the code of the skill in FILE while its hash is HASH, or no longer.
 HASH nil withdraws the trust.  The change is saved with Customize."
   (customize-save-variable
    'lispm-trusted-skills
    (append (and hash (list (cons (abbreviate-file-name (expand-file-name file)) hash)))
-           (seq-remove (lambda (entry) (lispm-skills--same-file-p (car entry) file))
+           (seq-remove (lambda (entry) (lispm-skills-same-file-p (car entry) file))
                        lispm-trusted-skills))))
 
 (defun lispm-skills--trust-diff (input)
@@ -546,11 +559,11 @@ HASH nil withdraws the trust.  The change is saved with Customize."
 As nothing, the code, and the skill's label: its diff adds it all, as a
 new file's would."
   (let ((file (expand-file-name (alist-get 'file input))))
-    (list "" (string-join (lispm-skills--blocks (lispm-skills--file-text file) file) "\n")
-          (lispm-tools--label file))))
+    (list "" (string-join (lispm-skills-blocks (lispm-skills-file-text file) file) "\n")
+          (lispm-tools-label file))))
 
 (defconst lispm-skills--trust-tool
-  (lispm-tool--create
+  (lispm-make-tool
    :name "trust_skill"
    :description "Evaluate the code of a project's skill."
    :input-schema '((type . "object")
@@ -586,7 +599,7 @@ code."
                   (hash . ,hash)
                   ,@(and beside `((files . ,(vconcat beside))))))
          (unevaluated (lambda (why &optional extra)
-                        (funcall done (lispm-skills--loaded-text
+                        (funcall done (lispm-skills-loaded-text
                                        skill nil (concat "a project's skill: " why) extra)))))
     (unless (and agent id
                  (lispm-call-ask
@@ -596,19 +609,19 @@ code."
                      ((eq decision 'deny)
                       (funcall unevaluated "the user did not let its code run, so it was not evaluated"
                                (lispm-skills--reason denial)))
-                     ((not (equal (lispm-skills--hash file (setq text (lispm-skills--file-text file)))
+                     ((not (equal (lispm-skills--hash file (setq text (lispm-skills-file-text file)))
                                   hash))
                       (funcall unevaluated "its code changed while the user was asked, so it was not \
 evaluated; load the skill again for them to see the new code"))
                      (t
                       (when (eq decision 'allow)
-                        (lispm-skills--trust file hash))
+                        (lispm-skills-trust file hash))
                       (condition-case err
                           ;; The code the user saw, as the hash says.
-                          (funcall done (lispm-skills--loaded-text
+                          (funcall done (lispm-skills-loaded-text
                                          skill (let ((lispm-current-agent agent))
-                                                 (lispm-skills--evaluate
-                                                  skill agent (lispm-skills--forms text file)))))
+                                                 (lispm-skills-evaluate
+                                                  skill agent (lispm-skills-forms text file)))))
                         (error (funcall done (format "The code of skill %s failed: %s"
                                                      (plist-get skill :name) (error-message-string err))
                                         t))))))
@@ -623,7 +636,7 @@ asked only in a turn, or M-x lispm-trust-skill"))))
   (with-current-buffer (get-buffer-create "*LispM skill code*")
     (let ((inhibit-read-only t)
           (beside (lispm-skills--beside file))
-          (blocks (lispm-skills--blocks (lispm-skills--file-text file) file)))
+          (blocks (lispm-skills-blocks (lispm-skills-file-text file) file)))
       (erase-buffer)
       ;; Lisp data mode, not Emacs Lisp mode: no hook of the user's,
       ;; such as one byte-compiling the buffer, runs on code not trusted.
@@ -645,7 +658,7 @@ asked only in a turn, or M-x lispm-trust-skill"))))
 (defun lispm-skills--read-trust (distrust)
   "Read a skill of this project for `lispm-trust-skill'; DISTRUST is passed on."
   (let* ((agent (or (bound-and-true-p lispm-session-agent) (bound-and-true-p lispm-chat-agent)))
-         (root (if agent (lispm-principal-root agent) (lispm--project-root)))
+         (root (if agent (lispm-principal-root agent) (lispm-project-root)))
          (skills (lispm-skills--in (expand-file-name ".lispm/skills/" root))))
     (unless skills
       (user-error "%s" (lispm-tr "No skills in %s" (abbreviate-file-name (expand-file-name ".lispm/skills/" root)))))
@@ -668,7 +681,7 @@ is shown before you decide."
   (let ((name (plist-get (lispm-skills--read file) :name)))
     (if distrust
         (progn
-          (lispm-skills--trust file nil)
+          (lispm-skills-trust file nil)
           (message "%s" (lispm-tr "LispM: the code of skill %s is asked about again" name)))
       (let ((hash (lispm-skills--hash file)))
         (when (called-interactively-p 'any)
@@ -676,13 +689,13 @@ is shown before you decide."
             (lispm-skills--show-code file)
             (unless (yes-or-no-p (lispm-tr "Trust the code of the skill %s, as shown? " name))
               (user-error "%s" (lispm-tr "The code of skill %s is not trusted" name)))))
-        (lispm-skills--trust file hash)
+        (lispm-skills-trust file hash)
         (message "%s" (lispm-tr "LispM: the code of skill %s is trusted, until it changes" name))))))
 
 ;;;; The skill tool
 
 (lispm-register-tool
- (lispm-tool--create
+ (lispm-make-tool
   :name "skill"
   :description
   (concat "Load a skill that search_tools found, by its name. A skill is the manual of a part of "
@@ -702,24 +715,24 @@ is shown before you decide."
   (lambda (done input)
     (let* ((agent lispm-current-agent)
            (name (alist-get 'name input))
-           (skill (lispm-skills--find name agent)))
+           (skill (lispm-skills-find name agent)))
       (unless skill
-        (let ((nearest (and (stringp name) (lispm-skills--nearest name agent))))
+        (let ((nearest (and (stringp name) (lispm-skills-nearest name agent))))
           (error "No skill named %s%s; search_tools finds skills by what they do" name
                  (if nearest (format " (nearest: %s)" (string-join nearest ", ")) ""))))
       (let* ((file (plist-get skill :file))
-             (text (lispm-skills--file-text file))
+             (text (lispm-skills-file-text file))
              (problem nil)
              (forms (condition-case err
-                        (lispm-skills--forms text file)
+                        (lispm-skills-forms text file)
                       (error (setq problem (error-message-string err))))))
         (cond
          ;; Its text may still serve.
          (problem
-          (funcall done (lispm-skills--loaded-text
+          (funcall done (lispm-skills-loaded-text
                          skill nil (concat "its code was not evaluated: " problem))))
          ((lispm-skill-trusted-p skill text)
-          (funcall done (lispm-skills--loaded-text skill (lispm-skills--evaluate skill agent forms))))
+          (funcall done (lispm-skills-loaded-text skill (lispm-skills-evaluate skill agent forms))))
          (t (lispm-skills--load-asking agent lispm-current-call skill done))))))))
 
 ;;;; Writing skills
@@ -739,8 +752,8 @@ and _), or if the skill of that name AGENT would load is not in
 `lispm-write-skill-directory': one of LispM's own, say, or of AGENT's
 project, which the skill saved would not replace."
   (lispm-skills--check-name name)
-  (let ((directory (lispm-skills--write-directory))
-        (existing (lispm-skills--find name agent)))
+  (let ((directory (lispm-skills-write-directory))
+        (existing (lispm-skills-find name agent)))
     (cond ((null existing) (expand-file-name (concat name ".org") directory))
           ((file-in-directory-p (plist-get existing :file) directory) (plist-get existing :file))
           (t (error "There is a skill named %s already, in %s, which a skill saved in %s would \
@@ -766,9 +779,9 @@ CODE and TITLE may be nil.  See write_skill."
   "The skill file there now, the one write_skill would write, and its label.
 NAME, DESCRIPTION, INSTRUCTIONS, CODE and TITLE are its arguments."
   (let ((file (lispm-skills--target name lispm-current-agent)))
-    (list (lispm--file-text file)
+    (list (lispm-file-text file)
           (lispm-skills--compose name description instructions code title)
-          (lispm-tools--label file))))
+          (lispm-tools-label file))))
 
 (lispm-deftool write_skill
     ((name string "The skill's name: lowercase letters, digits, - and _, such as \"org-tables\".")
@@ -793,18 +806,18 @@ with eval_elisp first."
          (file (lispm-skills--target name agent))
          (text (lispm-skills--compose name description instructions code title))
          (forms (condition-case err
-                    (lispm-skills--forms text)
+                    (lispm-skills-forms text)
                   (error (error "Skill %s was not saved: %s" name (error-message-string err)))))
          (open (find-buffer-visiting file)))
     (when (and open (buffer-modified-p open))
       (error "%s is open in Emacs with unsaved changes; ask the user to save or discard them"
              (abbreviate-file-name file)))
-    (lispm-tools--check-writable file)
-    (lispm-tools--check-new-file file)
+    (lispm-tools-check-writable file)
+    (lispm-tools-check-new-file file)
     ;; The code runs there, as it will when the skill is loaded.
     (make-directory (file-name-directory file) t)
     (let ((tools (condition-case err
-                     (lispm-skills--evaluate (list :name name :file file) agent forms)
+                     (lispm-skills-evaluate (list :name name :file file) agent forms)
                    (error (error "The code of skill %s failed, so the skill was not saved: %s
 What the code defined before the error stays in Emacs until it exits; fix the code and \
 write the skill again"
@@ -812,7 +825,7 @@ write the skill again"
       (let ((coding-system-for-write 'utf-8))
         (write-region text nil file nil 'silent))
       (when open
-        (lispm-tools--sync open))
+        (lispm-tools-sync open))
       (run-hooks 'lispm-skills-change-hook)
       (concat (format "Skill %s loaded%s.\n" name
                       (if tools (format "; tools now available: %s" (string-join tools ", ")) ""))
@@ -858,12 +871,12 @@ them are compared too."
          (new-beside (funcall beside new))
          (text-of (lambda (files relative)
                     (if-let* ((file (cdr (assoc relative files))))
-                        (lispm-skills--file-text file)
+                        (lispm-skills-file-text file)
                       "")))
          (diffs (delete "(no changes)"
-                        (cons (lispm--diff (lispm-skills--file-text old) text (lispm-skills--label name new))
+                        (cons (lispm-diff (lispm-skills-file-text old) text (lispm-skills--label name new))
                               (mapcar (lambda (relative)
-                                        (lispm--diff (funcall text-of old-beside relative)
+                                        (lispm-diff (funcall text-of old-beside relative)
                                                      (funcall text-of new-beside relative)
                                                      (concat name "/" relative)))
                                       (sort (seq-uniq (mapcar #'car (append old-beside new-beside)))
@@ -900,20 +913,20 @@ skill installed would not replace."
          (entry-name (file-name-nondirectory file))
          (directory-p (member entry-name '("SKILL.org" "SKILL.md")))
          (name (plist-get (lispm-skills--read file) :name))
-         (text (lispm-skills--file-text file))
+         (text (lispm-skills-file-text file))
          (hash (lispm-skills--hash file text))
          (installed (let ((existing (lispm-skills--target name nil)))
                       (and (file-exists-p existing) existing)))
-         (directory (lispm-skills--write-directory))
+         (directory (lispm-skills-write-directory))
          (target (expand-file-name (concat name (if directory-p "/" ".org")) directory))
          (target-file (if directory-p (expand-file-name entry-name target) target))
          (other (expand-file-name (concat name (if directory-p ".org" "/")) directory)))
-    (unless (lispm-skills--md-p file)
+    (unless (lispm-skills-md-p file)
       (condition-case err
-          (lispm-skills--forms text)
+          (lispm-skills-forms text)
         (error (user-error "%s" (lispm-tr "Skill %s was not installed: %s" name (error-message-string err))))))
     (cond
-     ((lispm-skills--same-file-p file target-file))
+     ((lispm-skills-same-file-p file target-file))
      ((and directory-p (or (file-in-directory-p target (file-name-directory file))
                            (file-in-directory-p (file-name-directory file) target)))
       (user-error "%s" (lispm-tr "Skill %s is not installed in %s from inside it, nor from a directory holding it"
@@ -967,7 +980,7 @@ as it is now" name))))
                       (file-exists-p (expand-file-name "SKILL.md" other))))
              (delete-directory other t)))
       (when-let* ((open (find-buffer-visiting target-file)))
-        (lispm-tools--sync open))
+        (lispm-tools-sync open))
       (run-hooks 'lispm-skills-change-hook)
       (when (called-interactively-p 'any)
         (message "%s" (lispm-tr "LispM: skill %s installed in %s" name (abbreviate-file-name directory))))))
@@ -1011,23 +1024,23 @@ exits.  Interactively, you are asked first."
   (interactive
    (list (completing-read (lispm-tr "Delete the skill: ")
                           (or (mapcar (lambda (skill) (plist-get skill :name))
-                                      (lispm-skills--in (lispm-skills--write-directory)))
+                                      (lispm-skills--in (lispm-skills-write-directory)))
                               (user-error "%s" (lispm-tr "No skills in %s"
-                                                         (abbreviate-file-name (lispm-skills--write-directory)))))
+                                                         (abbreviate-file-name (lispm-skills-write-directory)))))
                           nil t)))
   (lispm-skills--check-name name)
-  (let* ((directory (lispm-skills--write-directory))
+  (let* ((directory (lispm-skills-write-directory))
          (file (expand-file-name (concat name ".org") directory))
          (skill-directory (expand-file-name (concat name "/") directory))
          (dir-p (or (file-regular-p (expand-file-name "SKILL.org" skill-directory))
                     (file-regular-p (expand-file-name "SKILL.md" skill-directory)))))
-    (when (or (file-in-directory-p directory lispm-skills--builtin)
+    (when (or (file-in-directory-p directory lispm-skills-builtin)
               (not (or (file-regular-p file) dir-p)))
-      (let ((other (lispm-skills--find name (or (bound-and-true-p lispm-session-agent)
+      (let ((other (lispm-skills-find name (or (bound-and-true-p lispm-session-agent)
                                                 (bound-and-true-p lispm-chat-agent)))))
         (cond ((null other)
                (user-error "%s" (lispm-tr "No skill named %s in %s" name (abbreviate-file-name directory))))
-              ((file-in-directory-p (plist-get other :file) lispm-skills--builtin)
+              ((file-in-directory-p (plist-get other :file) lispm-skills-builtin)
                (user-error "%s" (lispm-tr "Skill %s is one of LispM's own; it is not deleted" name)))
               ((plist-get other :project)
                (user-error "%s" (lispm-tr "Skill %s is the project's, in %s; it is not deleted" name
@@ -1077,12 +1090,12 @@ exits.  Interactively, you are asked first."
 That of a project's skill only while the user trusts it as it is now."
   (when-let* ((agent (and (bound-and-true-p lispm-session-mode) lispm-session-agent)))
     (dolist (name (lispm-skills--loaded))
-      (when-let* ((skill (lispm-skills--find name agent)))
+      (when-let* ((skill (lispm-skills-find name agent)))
         (condition-case err
             (let* ((file (plist-get skill :file))
-                   (text (lispm-skills--file-text file)))
+                   (text (lispm-skills-file-text file)))
               (if (lispm-skill-trusted-p skill text)
-                  (lispm-skills--evaluate skill agent (lispm-skills--forms text file))
+                  (lispm-skills-evaluate skill agent (lispm-skills-forms text file))
                 (message "%s" (lispm-tr "LispM: skill %s: a project's skill whose code you have not trusted as \
 it is now, so it was not evaluated again (see `lispm-trust-skill')" name))))
           (error (message "%s" (lispm-tr "LispM: skill %s: %s" name (error-message-string err)))))))))

@@ -639,10 +639,10 @@ and forget it once PROCESS has exited."
   (add-function :after (process-sentinel process)
                 (lambda (process _event)
                   (unless (process-live-p process)
-                    (lispm-sandbox--forget run))))
+                    (lispm-sandbox-forget run))))
   run)
 
-(defun lispm-sandbox--forget (run)
+(defun lispm-sandbox-forget (run)
   "Close RUN's control channel, its process having exited."
   (setq lispm-sandbox--runs (delq run lispm-sandbox--runs))
   (when-let* ((writer (lispm-sandbox-run-writer run)))

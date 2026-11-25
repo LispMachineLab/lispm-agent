@@ -83,7 +83,7 @@ of a type including `lispm-agents-mcp', taking :token and
                   (equal (cdr (assoc "authorization" headers))
                          (concat "Bearer " (lispm-agents-mcp-token server)))))
            (lambda (method path _headers body)
-             (lispm-agents-mcp--respond server method path body))))
+             (lispm-agents-mcp-respond server method path body))))
     (setf (lispm-agents-mcp-port server) (process-contact (lispm-agents-mcp-server server) :service))
     server))
 
@@ -233,7 +233,7 @@ of the JSON object BODY, empty for none; return its result as text."
           (lispm-agents-mcp--text (if failed "422 Unprocessable Entity" "200 OK")
                                   (funcall text result))))))))
 
-(defun lispm-agents-mcp--respond (server method path body)
+(defun lispm-agents-mcp-respond (server method path body)
   "Answer the HTTP request METHOD PATH carrying the JSON-RPC BODY for SERVER.
 A request gets its response, or `deferred' when a tool answers later; a
 notification is acknowledged without one.  GET /tools and POST

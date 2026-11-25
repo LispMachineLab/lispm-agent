@@ -259,7 +259,7 @@ With a prefix argument, choose its ROLE as well."
                        (lispm-agent-root agent)
                      (lispm-agents-default-directory)))
            (and current-prefix-arg (lispm-read-role (lispm-tr "Role"))))))
-  (lispm-terminal-show (lispm-start role (lispm--project-root directory))))
+  (lispm-terminal-show (lispm-start role (lispm-project-root directory))))
 
 (defun lispm-terminal--session-ended (agent)
   "List the sessions again now that AGENT's closed; if the listener showed
@@ -303,7 +303,7 @@ edge: a terminal shows `$' in the last one when something reaches it."
           :id (or id (format "live:%s" (lispm-agent-name agent)))
           :parent (unless (eq (plist-get entry :kind) 'system)
                     (if agent (lispm-agent-parent agent) (plist-get session :parent)))
-          :started (if agent (lispm--session-started id) (plist-get session :started))
+          :started (if agent (lispm-session-started id) (plist-get session :started))
           :entry entry)))
 
 (defun lispm-terminal--entries ()
@@ -367,7 +367,7 @@ it parses the whole session.")
   (or (lispm-session-title agent)
       (gethash (lispm-agent-id agent) lispm-terminal--first-prompts)
       (when-let* (((buffer-live-p (lispm-agent-buffer agent)))
-                  (prompt (lispm-title--first-prompt agent)))
+                  (prompt (lispm-title-first-prompt agent)))
         (puthash (lispm-agent-id agent) prompt lispm-terminal--first-prompts))))
 
 (defun lispm-terminal--title (entry)
@@ -384,7 +384,7 @@ it parses the whole session.")
     ('system (lispm-terminal--conversation (plist-get entry :agent)))
     ('agent (symbol-name (lispm-agent-name (plist-get entry :agent))))
     (_ (let ((session (plist-get entry :session)))
-         (or (plist-get session :agent) (lispm--project-name (plist-get session :root)))))))
+         (or (plist-get session :agent) (lispm-project-name (plist-get session :root)))))))
 
 (defun lispm-terminal--mark (entry)
   "What the sessions show on the right of ENTRY: an agent's state, a
@@ -393,7 +393,7 @@ recorded session's age."
       (cond ((lispm-awaiting agent) (propertize "!" 'face 'lispm-chat-pending))
             ((lispm-agent-working-p agent) (propertize "✻" 'face 'lispm-chat-accent))
             (t ""))
-    (propertize (lispm--age (plist-get (plist-get entry :session) :time))
+    (propertize (lispm-age (plist-get (plist-get entry :session) :time))
                 'face 'lispm-terminal-dim)))
 
 (defun lispm-terminal-activate ()
@@ -413,7 +413,7 @@ recorded session's age."
 listener shows it."
   (let* ((indent (make-string (* 2 (or (plist-get entry :depth) 0)) ?\s))
          (mark (lispm-terminal--mark entry))
-         (title (lispm--oneline (lispm-terminal--title entry)
+         (title (lispm-oneline (lispm-terminal--title entry)
                                 (max 4 (- width 5 (length indent) (string-width mark)))))
          (detail (lispm-terminal--detail entry)))
     (propertize
@@ -421,7 +421,7 @@ listener shows it."
              (if current (propertize title 'face 'lispm-terminal-current) title)
              (lispm-terminal--align-right mark) mark "\n"
              (if (and detail (not (string-empty-p detail)))
-                 (concat indent "    " (propertize (lispm--oneline detail (max 4 (- width 5 (length indent))))
+                 (concat indent "    " (propertize (lispm-oneline detail (max 4 (- width 5 (length indent))))
                                                    'face 'lispm-terminal-dim)
                          "\n")
                ""))
@@ -588,7 +588,7 @@ on record."
   (let* ((table (make-hash-table :test #'equal))
          (labels (mapcar (lambda (entry)
                            (let ((label (format "%s  %s"
-                                                (lispm--oneline (lispm-terminal--title entry) 60)
+                                                (lispm-oneline (lispm-terminal--title entry) 60)
                                                 (propertize (or (lispm-terminal--detail entry) "")
                                                             'face 'shadow))))
                              (while (gethash label table)
@@ -731,7 +731,7 @@ the listener."
   "What AGENT is doing, as the who line says it."
   (cond ((lispm-agent-condition agent) (lispm-tr "stopped"))
         ((lispm-waiting-calls agent) (lispm-tr "awaiting approval"))
-        (t (lispm--state-name (lispm-agent-state agent)))))
+        (t (lispm-state-name (lispm-agent-state agent)))))
 
 (defun lispm-terminal--who-line ()
   "The text of the who line."
