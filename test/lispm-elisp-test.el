@@ -20,7 +20,7 @@
 KERNEL-SUBMISSIONS holds (RUNTIME JOB INPUT KEYS), newest first;
 KERNEL-CALLBACKS maps request ids to callbacks."
   (declare (indent 0))
-  `(let ((lispm-elisp--jobs nil)
+  `(let ((lispm-job--active nil)
          (lispm-state-change-functions (copy-sequence lispm-state-change-functions))
          (lispm-session-end-functions (copy-sequence lispm-session-end-functions))
          (lispm-agents-context-release-functions
@@ -43,7 +43,8 @@ KERNEL-CALLBACKS maps request ids to callbacks."
                ((symbol-function 'lispm-exec) (lambda (&rest _) (ert-fail "Local fallback")))
                ((symbol-function 'lispm-exec-locally) (lambda (&rest _) (ert-fail "Local fallback")))
                ((symbol-function 'make-process) (lambda (&rest _) (ert-fail "Editor-owned process"))))
-       ,@body)))
+       (unwind-protect (progn ,@body)
+         (lispm-job-cancel-all)))))
 
 (ert-deftest lispm-elisp-test-structured-submission ()
   "Code travels as data on stdin, with the agent's directory and environment."
@@ -79,7 +80,7 @@ KERNEL-CALLBACKS maps request ids to callbacks."
         (funcall (alist-get 1 kernel-callbacks) 'success '(:exit 0 :stderr ""))
         (should (= (length results) 1))
         (should-not (cadar results))
-        (should-not lispm-elisp--jobs)))))
+        (should-not (lispm-job-active nil 'elisp))))))
 
 (ert-deftest lispm-elisp-test-default-timeout ()
   "An omitted timeout still gives the child a finite execution deadline."
@@ -103,7 +104,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (setf (lispm-agent-root agent) (expand-file-name "missing-root/" project))
         (should-error (lispm-elisp--start agent "1" 1 #'ignore))
         (should-not kernel-submissions)
-        (should-not lispm-elisp--jobs))))
+        (should-not (lispm-job-active nil 'elisp)))))
   (lispm-test-with-remote
     (lispm-elisp-test--with-kernel
       (let ((agent (lispm-make-agent 'assistant remote)))
@@ -148,7 +149,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
                    (lambda (&rest _) (error "Kernel disappeared"))))
           (should-error (lispm-elisp--start agent "1" 1 #'ignore)))
         (should-not kernel-submissions)
-        (should-not lispm-elisp--jobs)))))
+        (should-not (lispm-job-active nil 'elisp))))))
 
 (ert-deftest lispm-elisp-test-quit-during-submit-releases-bookkeeping ()
   "A submission which signals quit leaves no job or lifecycle hook behind."
@@ -166,10 +167,10 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
             (quit (setq caught t))))
         (should caught)
         (should-not kernel-cancelled)
-        (should-not lispm-elisp--jobs)
-        (should-not (memq #'lispm-elisp--state-changed lispm-state-change-functions))
-        (should-not (memq #'lispm-elisp--session-ended lispm-session-end-functions))
-        (should-not (memq #'lispm-elisp--terminal-ended lispm-agents-context-release-functions))
+        (should-not (lispm-job-active nil 'elisp))
+        (should-not (memq #'lispm-job--state-changed lispm-state-change-functions))
+        (should-not (memq #'lispm-job--session-ended lispm-session-end-functions))
+        (should-not (memq #'lispm-job--terminal-ended lispm-agents-context-release-functions))
         (funcall callback 'success '(:exit 0 :stderr ""))
         (should-not results)))))
 
@@ -195,10 +196,10 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
               (should protected)
               (should caught)
               (should (equal kernel-cancelled '((test-kernel 42))))
-              (should-not lispm-elisp--jobs)
-              (should-not (memq #'lispm-elisp--state-changed lispm-state-change-functions))
-              (should-not (memq #'lispm-elisp--session-ended lispm-session-end-functions))
-              (should-not (memq #'lispm-elisp--terminal-ended lispm-agents-context-release-functions))
+              (should-not (lispm-job-active nil 'elisp))
+              (should-not (memq #'lispm-job--state-changed lispm-state-change-functions))
+              (should-not (memq #'lispm-job--session-ended lispm-session-end-functions))
+              (should-not (memq #'lispm-job--terminal-ended lispm-agents-context-release-functions))
               (funcall callback 'cancelled nil)
               (funcall callback 'success '(:exit 0 :stderr ""))
               (should-not results))
@@ -219,7 +220,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
           (should (= (length results) 1))
           (should (string-match-p (regexp-quote "first λ\n=> 3\n") (caar results)))
           (should-not (cadar results))
-          (should-not lispm-elisp--jobs)
+          (should-not (lispm-job-active nil 'elisp))
           (let ((saved (copy-tree results)))
             (funcall callback 'chunk "late")
             (funcall callback 'success '(:exit 0 :stderr ""))
@@ -243,7 +244,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
             (should (cadar results))
             (should (string-match-p "before failure" (caar results)))
             (should (string-match-p (regexp-quote (plist-get outcome :stderr)) (caar results)))
-            (should-not lispm-elisp--jobs)))))))
+            (should-not (lispm-job-active nil 'elisp))))))))
 
 (ert-deftest lispm-elisp-test-kernel-terminal-failures ()
   "Every terminal kernel failure settles once without a local retry."
@@ -263,7 +264,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
             (should (= (length results) 1))
             (should (cadar results))
             (should (string-match-p "partial result" (caar results)))
-            (should-not lispm-elisp--jobs)))))))
+            (should-not (lispm-job-active nil 'elisp))))))))
 
 (ert-deftest lispm-elisp-test-output-is-bounded-during-execution ()
   "A noisy worker cannot accumulate unbounded chunks before it exits."
@@ -275,16 +276,16 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (lispm-elisp--start agent "1" 1
                             (lambda (text errorp) (push (list text errorp) results)))
         (let ((callback (alist-get 1 kernel-callbacks))
-              (job (car lispm-elisp--jobs)))
+              (job (car (lispm-elisp--active-jobs))))
           (funcall callback 'chunk (make-string 1000 ?a))
           (dotimes (_ 4) (funcall callback 'chunk (make-string 1000 ?b)))
-          (should (<= (length (apply #'concat (lispm-elisp--job-chunks job))) 80))
+          (should (<= (length (lispm-chunk-collector-string (lispm-elisp--job-collector job))) 80))
           (funcall callback 'success '(:exit 0 :stderr ""))
           (should (= (length results) 1))
           (should-not (cadar results))
           (should (string-prefix-p (make-string 80 ?a) (caar results)))
           (should (< (length (caar results)) 400))
-          (should-not lispm-elisp--jobs))))))
+          (should-not (lispm-job-active nil 'elisp)))))))
 
 (ert-deftest lispm-elisp-test-abort-cancels-only-own-job ()
   "Stopping one agent cancels its child and ignores that child's late reply."
@@ -298,13 +299,13 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (lispm-elisp--start second "2" 1
                             (lambda (text errorp) (push (list text errorp) second-results)))
         (setf (lispm-agent-state first) 'acting)
-        (lispm-elisp--state-changed first)
+        (lispm-job--state-changed first)
         (should-not kernel-cancelled)
         (setf (lispm-agent-state first) 'aborting)
-        (lispm-elisp--state-changed first)
-        (lispm-elisp--state-changed first)
+        (lispm-job--state-changed first)
+        (lispm-job--state-changed first)
         (should (equal kernel-cancelled '((test-kernel 1))))
-        (should (= (length lispm-elisp--jobs) 1))
+        (should (= (lispm-job-active-count nil 'elisp) 1))
         (funcall (alist-get 1 kernel-callbacks) 'cancelled nil)
         (funcall (alist-get 1 kernel-callbacks) 'chunk "late")
         (funcall (alist-get 1 kernel-callbacks) 'success '(:exit 0 :stderr ""))
@@ -313,7 +314,7 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (funcall (alist-get 2 kernel-callbacks) 'success '(:exit 0 :stderr ""))
         (should (= (length second-results) 1))
         (should-not (cadar second-results))
-        (should-not lispm-elisp--jobs)))))
+        (should-not (lispm-job-active nil 'elisp))))))
 
 (ert-deftest lispm-elisp-test-session-close-cancels-all-jobs ()
   "Closing a session cancels all its workers without reviving its callbacks."
@@ -323,11 +324,11 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
         (dotimes (_ 2)
           (lispm-elisp--start agent "1" 1
                               (lambda (text errorp) (push (list text errorp) results))))
-        (lispm-elisp--session-ended agent)
+        (lispm-job--session-ended agent)
         (should (= (length kernel-cancelled) 2))
         (should (member '(test-kernel 1) kernel-cancelled))
         (should (member '(test-kernel 2) kernel-cancelled))
-        (should-not lispm-elisp--jobs)
+        (should-not (lispm-job-active nil 'elisp))
         (dolist (entry kernel-callbacks)
           (funcall (cdr entry) 'cancelled nil)
           (funcall (cdr entry) 'success '(:exit 0 :stderr "")))
@@ -356,14 +357,14 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
                                     (lambda (text errorp) (push (list text errorp) first-results)))
                 (lispm-elisp--start second "2" 1
                                     (lambda (text errorp) (push (list text errorp) second-results))))
-              (should (memq #'lispm-elisp--terminal-ended lispm-agents-context-release-functions))
+              (should (memq #'lispm-job--terminal-ended lispm-agents-context-release-functions))
               ;; A terminal which never called a tool has no bridge agent.
               (lispm-agents-context-release unused-terminal)
               (should-not kernel-cancelled)
               (lispm-agents-context-release first-terminal)
               (lispm-agents-context-release first-terminal)
               (should (equal kernel-cancelled '((test-kernel 1))))
-              (should (= (length lispm-elisp--jobs) 1))
+              (should (= (lispm-job-active-count nil 'elisp) 1))
               (should (lispm-agents-context-servers second-terminal))
               (should-not (lispm-agents-context-servers first-terminal))
               (funcall (alist-get 1 kernel-callbacks) 'cancelled nil)
@@ -373,10 +374,10 @@ valid remote TRAMP roots pass `temporary-file-directory' as `:cwd' and
               (funcall (alist-get 2 kernel-callbacks) 'success '(:exit 0 :stderr ""))
               (should (= (length second-results) 1))
               (should-not (cadar second-results))
-              (should-not lispm-elisp--jobs)
-              (should-not (memq #'lispm-elisp--state-changed lispm-state-change-functions))
-              (should-not (memq #'lispm-elisp--session-ended lispm-session-end-functions))
-              (should-not (memq #'lispm-elisp--terminal-ended lispm-agents-context-release-functions))
+              (should-not (lispm-job-active nil 'elisp))
+              (should-not (memq #'lispm-job--state-changed lispm-state-change-functions))
+              (should-not (memq #'lispm-job--session-ended lispm-session-end-functions))
+              (should-not (memq #'lispm-job--terminal-ended lispm-agents-context-release-functions))
               (lispm-agents-context-release second-terminal)
               (should (equal kernel-cancelled '((test-kernel 1)))))
           (dolist (terminal (list first-terminal second-terminal unused-terminal))

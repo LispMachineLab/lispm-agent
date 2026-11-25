@@ -29,6 +29,7 @@
 ;;; Code:
 
 (require 'lispm-core)
+(require 'lispm-job)
 (require 'lispm-transcript)
 (require 'lispm-api)
 (require 'lispm-runtime)
@@ -105,18 +106,33 @@ topic, in %s. No quotes, no final punctuation."
                                    (text . ,(format "The user wrote:\n%s\n\nThe agent replied:\n%s"
                                                     (lispm--truncate (or prompt "") 3000)
                                                     (lispm--truncate (or reply "") 2000))))]))))))
-    (funcall lispm-api-function backend (car request) (cdr request)
-             :on-done
-             (lambda (message)
-               (let ((title (lispm-title--clean
-                             (lispm--reply-text (append (alist-get 'content message) nil)))))
-                 ;; Unless the user titled it meanwhile.
-                 (when (and title file (file-exists-p file)
-                            (not (or (lispm-session-title agent)
-                                     (lispm-title--file-title file))))
-                   (lispm-rename-session file title)
-                   (run-hook-with-args 'lispm-title-change-functions agent))))
-             :on-error #'ignore)))
+    (let (handle job)
+      (setq job (lispm-job-register
+                 agent 'title
+                 (lambda ()
+                   (cond ((functionp handle) (funcall handle))
+                         ((and (processp handle) (process-live-p handle))
+                          (process-put handle 'lispm-aborted t)
+                          (lispm-exec-delete handle))))))
+      (condition-case err
+          (setq handle
+                (funcall lispm-api-function backend (car request) (cdr request)
+                         :on-done
+                         (lambda (message)
+                           (when (lispm-job-finish job)
+                             (let ((title (lispm-title--clean
+                                           (lispm--reply-text
+                                            (append (alist-get 'content message) nil)))))
+                               ;; Unless the user titled it meanwhile.
+                               (when (and title file (file-exists-p file)
+                                          (not (or (lispm-session-title agent)
+                                                   (lispm-title--file-title file))))
+                                 (lispm-rename-session file title)
+                                 (run-hook-with-args 'lispm-title-change-functions agent)))))
+                         :on-error (lambda (&rest _) (lispm-job-finish job))))
+        (error
+         (lispm-job-finish job)
+         (signal (car err) (cdr err)))))))
 
 (defun lispm-title--maybe (agent reply)
   "Title AGENT's session, untitled until its turn ended with REPLY."

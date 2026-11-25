@@ -107,6 +107,11 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm--characters nil)
           (lispm-character-home (expand-file-name "character-home/" tmp))
           (lispm-api-function #'lispm-test--fake-api)
+          (lispm-job--active nil)
+          (lispm-state-change-functions (copy-sequence lispm-state-change-functions))
+          (lispm-session-end-functions (copy-sequence lispm-session-end-functions))
+          (lispm-agents-context-release-functions
+           (copy-sequence lispm-agents-context-release-functions))
           (lispm-test--scripts nil)
           (lispm-test--requests nil)
           ;; Work waiting for idle time stays in the test, never to run
@@ -118,6 +123,7 @@ BODY can use `project', a scratch directory for agents to work in."
      (make-directory project t)
      (unwind-protect
          (progn ,@body)
+       (lispm-job-cancel-all)
        (dolist (a (lispm-agents)) (lispm-unwatch a))
        (maphash (lambda (_ timer) (cancel-timer timer)) lispm--idle-work)
        (when lispm-git--timer
@@ -12025,8 +12031,10 @@ but none of those talking with the agents."
                                             "describe_symbol" '((name . "lispm-mcp-server-mode"))))))
       ;; It acts as an agent in its directory, none of LispM's running ones.
       (let ((agent (lispm-agents-bridge-server-agent (gethash session lispm-mcp-server--sessions))))
-        (should (equal (lispm-agent-root agent) project))
-        (should (eq (lispm-agent-name agent) 'claude-code)))
+        (should (lispm-principal-p agent))
+        (should-not (lispm-agent-p agent))
+        (should (equal (lispm-principal-root agent) project))
+        (should (eq (lispm-principal-name agent) 'claude-code)))
       (should-not (lispm-agents))
       ;; Ended, it is gone.
       (should (= (car (lispm-test--http port "DELETE" "/mcp" (cons (cons "Mcp-Session-Id" session) auth))) 200))

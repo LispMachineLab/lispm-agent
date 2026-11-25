@@ -265,7 +265,7 @@ With a prefix argument, choose its ROLE as well."
   "List the sessions again now that AGENT's closed; if the listener showed
 it, show another."
   (let ((window (and (frame-live-p lispm-terminal--frame) (lispm-terminal--listener-window))))
-    (when (and window (eq (window-buffer window) (lispm-agent-view agent)))
+    (when (and window (lispm-agent-p agent) (eq (window-buffer window) (lispm-agent-view agent)))
       ;; Once its chat is gone, which this hook's other functions see to.
       (run-at-time 0 nil (lambda ()
                            (when (and (lispm-terminal-p lispm-terminal--frame)

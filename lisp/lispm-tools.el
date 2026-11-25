@@ -39,6 +39,7 @@
 (require 'seq)
 (require 'project)
 (require 'lispm-core)
+(require 'lispm-job)
 (require 'lispm-transcript)
 (require 'lispm-sandbox)
 (require 'lispm-deftool-macros)
@@ -270,7 +271,7 @@ In a role's list of tools, a name ending with * stands for every
 tool whose name starts with the rest, such as mcp__peekaboo__*.  A
 role giving the skill tool gives search_tools too, which finds skills.
 A tool for some agents only (its :for) is never another's."
-  (let ((spec (lispm-agent-tools agent))
+  (let ((spec (lispm-principal-tools agent))
         (for (when-let* ((tool (gethash name lispm-tools--registry)))
                (lispm-tool-for tool))))
     (and (or (null for) (funcall for agent))
@@ -294,7 +295,7 @@ search_tools itself is there when there is anything to find."
     (maphash (lambda (name tool)
                (when (and (lispm-tools-allowed-p agent name)
                           (or (not (lispm-tool-deferred tool))
-                              (member name (lispm-agent-loaded-tools agent)))
+                              (member name (lispm-principal-loaded-tools agent)))
                           (or searchable (not (equal name "search_tools"))))
                  (push tool tools)))
              lispm-tools--registry)
@@ -406,19 +407,19 @@ must not leave half done, so quitting is inhibited meanwhile."
   (let ((inhibit-quit t))
     (when (and agent (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions)))
       (with-demoted-errors "LispM: forgetting remote file attributes: %S"
-        (lispm-tools--flush-remote (lispm-agent-root agent)))
+        (lispm-tools--flush-remote (lispm-principal-root agent)))
       (when lispm-revert-after-calls
         ;; Hooks the reverts run are the agent's doing.
         (let ((lispm-current-agent agent))
           (condition-case err
               (lispm-tools--interruptibly #'lispm-tools--revert-changed
-                                          (list (lispm-agent-root agent)))
+                                          (list (lispm-principal-root agent)))
             (quit nil)
             (error
              (message "LispM: reverting changed buffers: %S" err))))))
     (with-demoted-errors "LispM: tool call hook: %S"
       (let ((lispm-current-agent agent)
-            (default-directory (if agent (lispm-agent-root agent) default-directory)))
+            (default-directory (if agent (lispm-principal-root agent) default-directory)))
         (run-hook-with-args 'lispm-tool-call-functions
                             agent 'finish tool input text errorp)))
     (apply done text errorp (and images (list images)))))
@@ -750,12 +751,12 @@ tools are found."
 (defun lispm-tools-load (agent names)
   "Offer AGENT the deferred tools NAMES from its next request on."
   (let ((new (seq-filter (lambda (name)
-                           (and (not (member name (lispm-agent-loaded-tools agent)))
+                           (and (not (member name (lispm-principal-loaded-tools agent)))
                                 (when-let* ((tool (lispm-get-tool name)))
                                   (lispm-tool-deferred tool))))
                          (seq-uniq names))))
     (when new
-      (setf (lispm-agent-loaded-tools agent) (append (lispm-agent-loaded-tools agent) new))
+      (setf (lispm-principal-loaded-tools agent) (append (lispm-principal-loaded-tools agent) new))
       (run-hook-with-args 'lispm-tools-changed-functions agent))))
 
 (defun lispm-tools--snapshot ()
@@ -806,7 +807,7 @@ is non-nil, only tools it accepts are considered, before ranking."
                                 (or (and (equal name "search_tools")
                                          (not (string-prefix-p "select:" query)))
                                     (and (lispm-tool-deferred tool)
-                                         (not (member name (lispm-agent-loaded-tools agent)))
+                                         (not (member name (lispm-principal-loaded-tools agent)))
                                          (member name held))
                                     (not (lispm-tools-allowed-p agent name))
                                     (and predicate (not (funcall predicate tool))))))
@@ -907,7 +908,7 @@ PREDICATE restricts suggested tools as in `lispm-tools--discover'."
                                  "\n")
                               (let ((loaded (seq-filter
                                              (lambda (name) (lispm-tools-allowed-p agent name))
-                                             (lispm-agent-loaded-tools agent))))
+                                             (lispm-principal-loaded-tools agent))))
                                 (format "Nothing matches %S; you have loaded: %s." query
                                         (if loaded (string-join loaded ", ") "none"))))
                             (when-let* ((help (lispm-tools--selection-help agent query found others)))
@@ -948,8 +949,8 @@ waiting for them if a server has to start."
                                               sources))))
                               (lispm-tools--used))))
       (when names
-        (setf (lispm-agent-loaded-tools agent)
-              (seq-uniq (append (lispm-agent-loaded-tools agent) names)))
+        (setf (lispm-principal-loaded-tools agent)
+              (seq-uniq (append (lispm-principal-loaded-tools agent) names)))
         (lispm-tools--prepare
          (seq-filter (lambda (source)
                        (and (plist-get source :pending)
@@ -965,8 +966,8 @@ waiting for them if a server has to start."
 
 (defun lispm-tools--in-root-p (agent file)
   "Non-nil if FILE lies under AGENT's root directory."
-  (file-in-directory-p (expand-file-name file (lispm-agent-root agent))
-                       (lispm-agent-root agent)))
+  (file-in-directory-p (expand-file-name file (lispm-principal-root agent))
+                       (lispm-principal-root agent)))
 
 (defvar tramp-local-host-regexp)
 
@@ -993,7 +994,7 @@ one in the sandbox, which keeps Emacs's server socket and configuration
 from them (see `lispm-sandbox-confines-p').  Such commands cannot change
 the agent's policy, so the user may allow every later one at once."
   (when agent
-    (let ((root (lispm-agent-root agent)))
+    (let ((root (lispm-principal-root agent)))
       (if (file-remote-p root)
           (lispm-tools-elsewhere-p root)
         (lispm-sandbox-confines-p)))))
@@ -1048,7 +1049,7 @@ commands could not reach Emacs (see `lispm-tools-allowance'), and
 holds only while that is so: with the sandbox off again, each command
 asks, as it did before.  Writes outside AGENT's root and `always-ask'
 tools require a per-call allowance rather than a bare tool name."
-  (let ((allowed (lispm-agent-allowed agent))
+  (let ((allowed (lispm-principal-allowed agent))
         (name (lispm-tool-name tool))
         (key (lispm-tools--call-key input tool)))
     (or (and (member name allowed)
@@ -1081,7 +1082,7 @@ change any file."
   (if-let* ((targets (lispm-tool-targets tool)))
       (condition-case nil
           (let ((lispm-current-agent agent)
-                (default-directory (lispm-agent-root agent)))
+                (default-directory (lispm-principal-root agent)))
             (apply targets (lispm-tools--arguments tool input)))
         (error t))
     (when (listp input)
@@ -1158,7 +1159,7 @@ denied it."
   (if reasons
       (concat "Denied: " (string-join reasons " "))
     (format "Denied by policy: %s may not use %s tools."
-            (lispm-agent-name agent) (lispm-tool-permission tool))))
+            (lispm-principal-name agent) (lispm-tool-permission tool))))
 
 (defun lispm-tool-action (agent tool input)
   "Whether AGENT may run TOOL on INPUT: `auto', `ask' or `deny'.
@@ -1211,7 +1212,8 @@ See `lispm-tool-action'."
 
 (defun lispm-journal-snapshot (buffer)
   "Record BUFFER's contents before the acting agent first changes it this turn."
-  (when-let* ((agent lispm-current-agent))
+  (when-let* ((agent lispm-current-agent)
+              ((lispm-agent-p agent)))
     (let* ((turn (lispm-agent-turn agent))
            (cell (or (assq turn (lispm-agent-journal agent))
                      (car (push (list turn) (lispm-agent-journal agent))))))
@@ -1233,7 +1235,7 @@ See `lispm-tool-action'."
 
 (defun lispm-tools--root ()
   "Root directory of the acting agent."
-  (if lispm-current-agent (lispm-agent-root lispm-current-agent) default-directory))
+  (if lispm-current-agent (lispm-principal-root lispm-current-agent) default-directory))
 
 (defun lispm-tools-reference (path)
   "The file and line PATH refers to, as (FILE . LINE), LINE nil if none.
@@ -2803,32 +2805,6 @@ If `C-g' was pressed while BODY registered an asynchronous job, signal
 (defvar lispm-tools--shell-seq 0
   "Monotonic counter for unique `run_shell' process names.")
 
-(defvar lispm-tools--kernel-shells nil
-  "Active kernel `run_shell' jobs as (AGENT . CANCEL) pairs.")
-
-(defun lispm-tools--cancel-kernel-shells (agent)
-  "Cancel all active kernel `run_shell' jobs belonging to AGENT."
-  (dolist (entry (copy-sequence lispm-tools--kernel-shells))
-    (when (eq (car entry) agent)
-      (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
-      (ignore-errors (funcall (cdr entry)))))
-  (unless lispm-tools--kernel-shells
-    (remove-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
-    (remove-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
-    (remove-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended)))
-
-(defun lispm-tools--kernel-shell-state-changed (agent)
-  "Cancel AGENT's kernel `run_shell' jobs when its turn is aborted."
-  (when (eq (lispm-agent-state agent) 'aborting)
-    (lispm-tools--cancel-kernel-shells agent)))
-
-(defun lispm-tools--kernel-shell-terminal-ended (terminal)
-  "Cancel kernel `run_shell' jobs of the external agent whose TERMINAL closes."
-  (when (and (buffer-live-p terminal)
-             (local-variable-p 'lispm-agents-bridge--agent terminal))
-    (lispm-tools--cancel-kernel-shells
-     (buffer-local-value 'lispm-agents-bridge--agent terminal))))
-
 (defun lispm-tools--effective-shell-timeout (timeout)
   "Effective shell command timeout in seconds for requested TIMEOUT.
 When `lispm-turn-deadline' is bound to a positive `float-time', clamp
@@ -2859,60 +2835,58 @@ Return non-nil when the kernel took the command, or nil to run FALLBACK."
                  (if remote "-c" shell-command-switch)
                  command nil))
            (effective-timeout (lispm-tools--effective-shell-timeout timeout))
-           (entry (cons agent nil))
-           (cancel
-            (lispm-kernel-exec--submit
-             (car cmd) (cdr cmd)
-             (lambda (exit printed said)
-               (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
-               (unless lispm-tools--kernel-shells
-                 (remove-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
-                 (remove-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
-                 (remove-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended))
-               (let* ((output (concat printed said))
-                      (timed-out (and (stringp exit)
-                                      (or (string-match-p "did not finish" exit)
-                                          (string-match-p "timed out" exit))
-                                      t))
-                      (status (cond ((integerp exit) exit)
-                                    ((and (stringp exit)
-                                          (string-match "ended by signal \\([0-9]+\\)" exit))
-                                     (+ 128 (string-to-number (match-string 1 exit))))
-                                    (t 1))))
-                 (run-at-time
-                  0 nil done
-                  (concat output
-                          "\n["
-                          (if timed-out
-                              "killed: timeout"
-                            (format "exit status %d" status))
-                          "]")
-                  timed-out)))
-             (lambda (&rest _)
-               (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
-               (funcall fallback))
-             :timeout effective-timeout
-             :combine-error t
-             :on-output (lambda (chunk)
-                          (when (buffer-live-p log-buffer)
-                            (with-current-buffer log-buffer
-                              (save-excursion
-                                (goto-char (point-max))
-                                (insert chunk))))))))
-      (when cancel
-        (setcdr entry cancel)
-        (push entry lispm-tools--kernel-shells)
-        (add-hook 'lispm-state-change-functions #'lispm-tools--kernel-shell-state-changed)
-        (add-hook 'lispm-session-end-functions #'lispm-tools--cancel-kernel-shells)
-        (add-hook 'lispm-agents-context-release-functions #'lispm-tools--kernel-shell-terminal-ended)
+           (cancel nil)
+           (job (lispm-job-register
+                 agent 'kernel-shell
+                 (lambda () (when (functionp cancel) (funcall cancel))))))
+      (setq cancel
+            (condition-case err
+                (lispm-kernel-exec--submit
+                 (car cmd) (cdr cmd)
+                 (lambda (exit printed said)
+                   (when (lispm-job-finish job)
+                     (let* ((output (concat printed said))
+                            (timed-out (and (stringp exit)
+                                            (or (string-match-p "did not finish" exit)
+                                                (string-match-p "timed out" exit))
+                                            t))
+                            (status (cond ((integerp exit) exit)
+                                          ((and (stringp exit)
+                                                (string-match "ended by signal \\([0-9]+\\)" exit))
+                                           (+ 128 (string-to-number (match-string 1 exit))))
+                                          (t 1))))
+                       (run-at-time
+                        0 nil done
+                        (concat output
+                                "\n["
+                                (if timed-out
+                                    "killed: timeout"
+                                  (format "exit status %d" status))
+                                "]")
+                        timed-out))))
+                 (lambda (&rest _)
+                   (when (lispm-job-finish job)
+                     (funcall fallback)))
+                 :timeout effective-timeout
+                 :combine-error t
+                 :on-output (lambda (chunk)
+                              (when (buffer-live-p log-buffer)
+                                (with-current-buffer log-buffer
+                                  (save-excursion
+                                    (goto-char (point-max))
+                                    (insert chunk))))))
+              (error
+               (lispm-job-finish job)
+               (signal (car err) (cdr err)))))
+      (if (not cancel)
+          (progn (lispm-job-finish job) nil)
         (when (buffer-live-p log-buffer)
           (with-current-buffer log-buffer
             (goto-char (point-max))
             (insert (format "\n$ %s\n" command))))
         (when quit-flag
           (setq quit-flag nil)
-          (setq lispm-tools--kernel-shells (delq entry lispm-tools--kernel-shells))
-          (ignore-errors (funcall cancel))
+          (lispm-job-cancel job)
           (signal 'quit nil))
         t))))
 
@@ -2938,12 +2912,12 @@ allows."
   (let ((inhibit-quit t))
     (let* ((agent lispm-current-agent)
            (log-buffer (get-buffer-create
-                        (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?"))))
+                        (format "*lispm-shell: %s*" (if agent (lispm-principal-name agent) "?"))))
            (default-directory (lispm-tools--root)))
       (cl-labels
           ((run-locally ()
              (let* ((proc-buffer (generate-new-buffer
-                                  (format " *lispm-shell-proc: %s*" (if agent (lispm-agent-name agent) "?"))
+                                  (format " *lispm-shell-proc: %s*" (if agent (lispm-principal-name agent) "?"))
                                   t))
                     (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
                     (output-chunks nil)

@@ -335,7 +335,7 @@ ERRORP marks an execution or timeout failure."
 (defun lispm-shell-stage--buffer (agent)
   "Return or create the shell stage buffer for AGENT."
   (let* ((name (format "*lispm-stage-shell: %s*"
-                       (if agent (lispm-agent-name agent) "LispM")))
+                       (if agent (lispm-principal-name agent) "LispM")))
          (buf (get-buffer-create name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'lispm-shell-stage-mode)
@@ -345,7 +345,7 @@ ERRORP marks an execution or timeout failure."
 (defun lispm-shell-stage--format-header (agent spec status-str status-face)
   "Build the header line for AGENT, command SPEC, STATUS-STR and STATUS-FACE."
   (let* ((color (lispm-edits--color agent))
-         (label (if agent (symbol-name (lispm-agent-name agent)) "LispM"))
+         (label (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
          (cmd (truncate-string-to-width (lispm-shell-stage-spec-display spec) 52 nil nil "…")))
     (concat (propertize " " 'face `(:background ,color))
             " "
@@ -597,11 +597,11 @@ ERRORP marks an execution or timeout failure."
   "Begin staging AGENT's execution of `lispm-shell-stage-spec' SPEC."
   (lispm-shell-stage--retire-session agent)
   (let* ((now (float-time))
-         (root (if agent (lispm-agent-root agent) default-directory))
+         (root (if agent (lispm-principal-root agent) default-directory))
          (buf (lispm-shell-stage--buffer agent))
          (log (and (equal (lispm-shell-stage-spec-tool-name spec) "run_shell")
                    (get-buffer-create
-                    (format "*lispm-shell: %s*" (if agent (lispm-agent-name agent) "?")))))
+                    (format "*lispm-shell: %s*" (if agent (lispm-principal-name agent) "?")))))
          (session (lispm-shell-stage--session-create
                    :agent agent
                    :spec spec
@@ -637,7 +637,7 @@ ERRORP marks an execution or timeout failure."
                       (lispm-shell-stage--session-create
                        :agent agent
                        :spec spec
-                       :root (if agent (lispm-agent-root agent) default-directory)
+                       :root (if agent (lispm-principal-root agent) default-directory)
                        :stage-buffer (lispm-shell-stage--buffer agent)
                        :started-at (float-time))))
          (elapsed (max 0.0 (- (float-time) (lispm-shell-stage--session-started-at session))))

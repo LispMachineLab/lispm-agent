@@ -212,12 +212,14 @@ An error if no request ID awaits PEER's reply."
 
 (defun lispm-collab--name (sender)
   "The name of SENDER, an agent or the name of a peer, as a string."
-  (if (lispm-agent-p sender) (symbol-name (lispm-agent-name sender)) sender))
+  (if (lispm-principal-p sender) (symbol-name (lispm-principal-name sender)) sender))
 
 (defun lispm-collab--place (sender)
   "Where SENDER, an agent or a peer's name, works, for a character it asks:
 its project's root, or nil for none, as for an agent of the whole system."
-  (cond ((lispm-agent-p sender) (unless (lispm-agent-system sender) (lispm-agent-root sender)))
+  (cond ((lispm-principal-p sender)
+         (unless (and (lispm-agent-p sender) (lispm-agent-system sender))
+           (lispm-principal-root sender)))
         ((lispm-get-peer sender) (lispm-peer-root (lispm-get-peer sender)))))
 
 (defun lispm-collab--character-agent (name sender)
@@ -268,7 +270,7 @@ as a message: [Reply from X to request ID]."
                       :id id))
      (t (lispm-delegate caller target request
                         (lambda (agent reply)
-                          (funcall answer (symbol-name (lispm-agent-name agent)) reply))
+                          (funcall answer (symbol-name (lispm-principal-name agent)) reply))
                         :root root :request-id id)))
     id))
 
@@ -320,7 +322,7 @@ conversation where CALLER works it then designates."
                   (or (eq agent from)
                       (unless (memq agent seen)
                         (push agent seen)
-                        (seq-some #'reaches (lispm-agent-waiting-on agent))))))
+                        (seq-some #'reaches (lispm-principal-waiting-on agent))))))
       (reaches to))))
 
 (defun lispm-collab--wait-changed (caller target &optional event)
@@ -345,11 +347,11 @@ A role starts a helper in ROOT or CALLER's root, bounded by CALLER.
 An existing agent or character keeps its own conversation."
   (let* ((role (and (lispm-collab--starts-role-p agent)
                     (if (lispm-role-p agent) agent (lispm-get-role agent t))))
-         (helper (and role (lispm-start role (or root (lispm-agent-root caller)))))
+         (helper (and role (lispm-start role (or root (lispm-principal-root caller)))))
          (target (or helper (lispm-collab--target agent caller))))
     (when helper
       (lispm-set-ceiling helper (lispm-policy caller))
-      (lispm-set-parent helper (lispm-agent-id caller)))
+      (lispm-set-parent helper (lispm-principal-id caller)))
     (cons target (and helper t))))
 
 (cl-defun lispm-delegate (caller agent request callback &key root call request-id)
@@ -366,24 +368,25 @@ it does not replace CALL or change the durable reply-to route.
 Return the agent asked."
   (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root)))
     (when (lispm-collab--cycle-p caller target)
-      (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-agent-name target)))
-    (push target (lispm-agent-waiting-on caller))
+      (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-principal-name target)))
+    (push target (lispm-principal-waiting-on caller))
     (lispm-collab--wait-changed caller target)
-    (when call
+    (when (and call (lispm-agent-p caller))
       (lispm-collab--record-asked caller call target))
     (lispm-tell target request
-                :from (lispm-agent-name caller)
+                :from (lispm-principal-name caller)
                 :request-id request-id
-                :reply-to (and call (concat (lispm-agent-id caller) " " call (if helper-p " retire" "")))
+                :reply-to (and call (lispm-agent-p caller)
+                               (concat (lispm-principal-id caller) " " call (if helper-p " retire" "")))
                 :callback (lambda (reply)
-                            (setf (lispm-agent-waiting-on caller)
-                                  (cl-remove target (lispm-agent-waiting-on caller) :count 1))
+                            (setf (lispm-principal-waiting-on caller)
+                                  (cl-remove target (lispm-principal-waiting-on caller) :count 1))
                             (lispm-collab--wait-changed
                              caller target
                              (when request-id
                                (list :type 'request-settled :request-id request-id
-                                     :from (lispm-agent-name target)
-                                     :to (lispm-agent-name caller))))
+                                     :from (lispm-principal-name target)
+                                     :to (lispm-principal-name caller))))
                             (when helper-p
                               (run-at-time 0 nil #'lispm-collab--retire target))
                             (funcall callback target reply)))
@@ -416,15 +419,16 @@ Native requests and replies survive Emacs through the inbox; peer
 requests, as with `lispm-ask-peer', last only while Emacs runs."
   ;; A standing caller may take up an older session when first opened;
   ;; capture that session's identity for the durable reply route.
-  (lispm-session-buffer caller)
+  (when (lispm-agent-p caller)
+    (lispm-session-buffer caller))
   (let ((id (concat "q" (org-id-uuid)))
-        (caller-id (lispm-agent-id caller)))
+        (caller-id (lispm-principal-id caller)))
     (if-let* ((peer (and (not (lispm-get-agent agent t))
                          (not (lispm-get-character agent t))
                          (lispm-get-peer agent))))
         (progn
           (lispm-ask-peer
-           peer request (symbol-name (lispm-agent-name caller))
+           peer request (symbol-name (lispm-principal-name caller))
            (lambda (reply &optional ended)
              (lispm-collab--reply-message
               caller-id id (lispm-peer-name peer)
@@ -434,13 +438,13 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
           (lispm-collab--accepted id (lispm-peer-name peer)))
       (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root))
                    (route (concat caller-id " " id " inbox" (if helper-p " retire" ""))))
-        (lispm-tell target request :from (lispm-agent-name caller)
+        (lispm-tell target request :from (lispm-principal-name caller)
                     :request-id id :reply-to route
                     :callback (lispm-collab--callback target route))
         (lispm--await-reply caller id)
         (when call
           (lispm-collab--record-asked caller call target))
-        (lispm-collab--accepted id (lispm-agent-name target) (lispm-agent-id target) helper-p)))))
+        (lispm-collab--accepted id (lispm-principal-name target) (lispm-principal-id target) helper-p)))))
 
 (defun lispm-collab--replied (agent reply)
   "The text delivered when AGENT replied REPLY.
@@ -462,7 +466,7 @@ A value AGENT returned with it (see `lispm-reply-value') follows, as JSON."
 (defun lispm-collab-root (caller directory)
   "Root of the project around DIRECTORY, which is relative to CALLER's root.
 Nil if DIRECTORY is not a directory."
-  (let ((directory (file-name-as-directory (expand-file-name directory (lispm-agent-root caller)))))
+  (let ((directory (file-name-as-directory (expand-file-name directory (lispm-principal-root caller)))))
     (and (file-directory-p directory) (lispm--project-root directory))))
 
 (defun lispm-collab-start (caller role request &optional root)
@@ -476,10 +480,10 @@ policy, for the rest of its life."
   (let ((agent (lispm-start (or (lispm-get-role role t)
                                 (error "No role named %s; list_agents, which search_tools finds, shows the roles"
                                        role))
-                            (or root (lispm-agent-root caller)))))
+                            (or root (lispm-principal-root caller)))))
     (lispm-set-ceiling agent (lispm-policy caller))
-    (lispm-set-parent agent (lispm-agent-id caller))
-    (lispm-tell agent request :from (lispm-agent-name caller))
+    (lispm-set-parent agent (lispm-principal-id caller))
+    (lispm-tell agent request :from (lispm-principal-name caller))
     agent))
 
 (defun lispm-collab-resolve-project (caller project)
@@ -505,9 +509,9 @@ AGENT may do in its own, as AGENT's writes there, which always ask
               (project (and (listp input) (alist-get 'project input)))
               ((stringp project))
               (root (lispm-collab-root agent project))
-              ((not (file-in-directory-p root (lispm-agent-root agent)))))
+              ((not (file-in-directory-p root (lispm-principal-root agent)))))
     (cons 'ask (format "It starts an agent in %s, outside the project of %s, that may do there what %s may do in its own."
-                       (abbreviate-file-name root) (lispm-agent-name agent) (lispm-agent-name agent)))))
+                       (abbreviate-file-name root) (lispm-principal-name agent) (lispm-principal-name agent)))))
 
 (add-hook 'lispm-tool-action-functions #'lispm-collab--start-elsewhere)
 
@@ -588,9 +592,9 @@ does a new turn that started before this retirement timer ran."
 Apps among them only with APPS non-nil, marked as such; else a line
 says how many there are."
   (let* ((characters (seq-remove (lambda (character)
-                                   (and (lispm-agent-p self)
+                                   (and (lispm-principal-p self)
                                         (eq (lispm-character-name character)
-                                            (lispm-agent-character self))))
+                                            (lispm-principal-character self))))
                                  (lispm-characters)))
          (left-out (if apps 0 (seq-count #'lispm-character-skill characters))))
     (when characters

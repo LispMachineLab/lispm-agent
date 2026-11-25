@@ -389,8 +389,8 @@ time.  ID selects one session; without it this is a bounded search."
          (seen (make-hash-table :test #'equal))
          (agent lispm-current-agent)
          (call-id lispm-current-call)
-         (call (and agent call-id (gethash call-id (lispm-agent-pending agent))))
-         (buffer (and agent (lispm-agent-buffer agent)))
+         (call (and (lispm-agent-p agent) call-id (gethash call-id (lispm-agent-pending agent))))
+         (buffer (and (lispm-agent-p agent) (lispm-agent-buffer agent)))
          (scanned 0) (skipped 0) (matched 0) (tail-only 0) (invalid 0) results found)
     (cl-labels
         ((step ()

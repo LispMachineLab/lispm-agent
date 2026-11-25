@@ -141,7 +141,7 @@ agent, a role or another terminal has it already."
       (let* ((base (format "%s" (or (buffer-local-value 'lispm-agents-buffer-agent terminal)
                                     (lispm-agents-terminal-agent terminal)
                                     "agent")))
-             (taken (append (mapcar (lambda (agent) (symbol-name (lispm-agent-name agent)))
+             (taken (append (mapcar (lambda (agent) (symbol-name (lispm-principal-name agent)))
                                     (lispm-agents))
                             (mapcar (lambda (role) (symbol-name (lispm-role-name role)))
                                     (lispm-roles))
@@ -372,17 +372,17 @@ This is one of `lispm-peer-functions'."
   (mapcar #'lispm-agents-bridge--peer (lispm-agents-bridge-terminals)))
 
 (defun lispm-agents-bridge-agent (terminal)
-  "Return the LispM agent the agent of TERMINAL acts as, made at first need.
+  "Return the LispM principal the agent of TERMINAL acts as, made at first need.
 It has the role `lispm-agents-bridge-role' names, and works in the
 terminal's directory; it is none of LispM's running agents."
   (or (buffer-local-value 'lispm-agents-bridge--agent terminal)
-      (let ((agent (lispm--apply-role
-                    (lispm-agent--create :name (intern (lispm-agents-bridge-name terminal))
-                                         :id (lispm-agents-uuid)
-                                         :root (lispm-agents-bridge--root terminal))
-                    (lispm-get-role (or lispm-agents-bridge-role lispm-default-role)))))
+      (let ((principal (lispm-make-principal
+                        (intern (lispm-agents-bridge-name terminal))
+                        (lispm-agents-bridge--root terminal)
+                        :id (lispm-agents-uuid)
+                        :role (or lispm-agents-bridge-role lispm-default-role))))
         (with-current-buffer terminal
-          (setq lispm-agents-bridge--agent agent)))))
+          (setq lispm-agents-bridge--agent principal)))))
 
 (defun lispm-agents-bridge--ended (terminal)
   "Settle what was asked of the agent of TERMINAL, whose servers stop.
@@ -479,9 +479,9 @@ about its calls.")
          (project (alist-get 'project arguments))
          (root (when (and (stringp project) (not (string-empty-p project)))
                  (let ((resolved (lispm-collab-resolve-project caller project)))
-                   (unless (file-in-directory-p resolved (lispm-agent-root caller))
+                   (unless (file-in-directory-p resolved (lispm-principal-root caller))
                      (error "Project %s is outside %s; use call_tool with start_agent"
-                            project (abbreviate-file-name (lispm-agent-root caller))))
+                            project (abbreviate-file-name (lispm-principal-root caller))))
                    resolved)))
          (id (lispm-collab-ask-for-peer caller
                                         (lispm-agents-bridge--peer terminal)
@@ -612,7 +612,7 @@ When SERVER is given, do not execute a call after its session ends."
       (funcall answer '("Cancelled: the session has ended.") t)
     (let ((lispm-current-agent agent)
           (lispm-current-call nil)
-          (default-directory (lispm-agent-root agent)))
+          (default-directory (lispm-principal-root agent)))
       (lispm-tool-invoke tool input
 			 (lambda (text errorp &optional images)
                            (funcall answer
@@ -622,7 +622,7 @@ When SERVER is given, do not execute a call after its session ends."
 (defun lispm-agents-bridge--detail (agent tool input reasons)
   "What the user is shown of AGENT's call of TOOL on INPUT, held for REASONS."
   (let ((preview (let ((lispm-current-agent agent)
-                       (default-directory (lispm-agent-root agent)))
+                       (default-directory (lispm-principal-root agent)))
                    (lispm-tool-preview-text tool input))))
     (lispm--truncate (string-join (delq nil (append reasons
                                                     (list (or preview

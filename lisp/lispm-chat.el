@@ -1435,11 +1435,12 @@ the hints, or the menu of / commands."
 
 (defun lispm-chat--session-ended (agent)
   "Close the chat of AGENT, whose session has closed."
-  (let ((chat (lispm-agent-view agent)))
-    (when (buffer-live-p chat)
-      (setf (lispm-agent-view agent) nil)
-      (with-current-buffer chat (setq lispm-chat--closing t))
-      (kill-buffer chat))))
+  (when (lispm-agent-p agent)
+    (let ((chat (lispm-agent-view agent)))
+      (when (buffer-live-p chat)
+        (setf (lispm-agent-view agent) nil)
+        (with-current-buffer chat (setq lispm-chat--closing t))
+        (kill-buffer chat)))))
 
 (defun lispm-chat--sandbox-changed ()
   "Show the sandbox level now set in every chat."

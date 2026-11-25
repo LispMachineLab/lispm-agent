@@ -231,7 +231,7 @@ directory: what the user keeps there is theirs."
          (directories (append (seq-remove (lambda (directory) (member directory directories))
                                           (seq-uniq (mapcar #'car (lispm-skills--sourced))))
                               directories))
-         (project (and agent (expand-file-name ".lispm/skills/" (lispm-agent-root agent)))))
+         (project (and agent (expand-file-name ".lispm/skills/" (lispm-principal-root agent)))))
     (append (mapcar (lambda (directory) (cons directory nil)) directories)
             (and project (not (member project directories)) (list (cons project t))))))
 
@@ -645,7 +645,7 @@ asked only in a turn, or M-x lispm-trust-skill"))))
 (defun lispm-skills--read-trust (distrust)
   "Read a skill of this project for `lispm-trust-skill'; DISTRUST is passed on."
   (let* ((agent (or (bound-and-true-p lispm-session-agent) (bound-and-true-p lispm-chat-agent)))
-         (root (if agent (lispm-agent-root agent) (lispm--project-root)))
+         (root (if agent (lispm-principal-root agent) (lispm--project-root)))
          (skills (lispm-skills--in (expand-file-name ".lispm/skills/" root))))
     (unless skills
       (user-error "%s" (lispm-tr "No skills in %s" (abbreviate-file-name (expand-file-name ".lispm/skills/" root)))))

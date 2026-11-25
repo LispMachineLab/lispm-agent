@@ -63,6 +63,7 @@
 (require 'org)
 (require 'seq)
 (require 'lispm-core)
+(require 'lispm-job)
 (require 'lispm-api)
 (require 'lispm-tools)
 
@@ -780,20 +781,38 @@ not under git (see `lispm-git-p'), nor once AGENT has ended.  See
                                                               (lispm-memory--describe entries))))]))))))
               (when (buffer-modified-p buffer)
                 (error "Its buffer has unsaved changes"))
-              (funcall lispm-api-function backend (car request) (cdr request)
-                       :on-done
-                       (lambda (message)
-                         (condition-case err
-                             (progn
-                               (lispm-memory--carry-out
-                                agent scope hash
-                                (lispm-memory--read-plan
-                                 (lispm--reply-text (append (alist-get 'content message) nil))
-                                 (length entries)))
-                               (remhash file lispm-memory--consolidating))
-                           (error (funcall failed (error-message-string err)))))
-                       :on-error
-                       (lambda (err) (funcall failed (plist-get err :message)))))
+              (let (handle job)
+                (setq job (lispm-job-register
+                           agent 'memory-consolidate
+                           (lambda ()
+                             (remhash file lispm-memory--consolidating)
+                             (cond ((functionp handle) (funcall handle))
+                                   ((and (processp handle) (process-live-p handle))
+                                    (process-put handle 'lispm-aborted t)
+                                    (lispm-exec-delete handle))))))
+                (condition-case err
+                    (setq handle
+                          (funcall lispm-api-function backend (car request) (cdr request)
+                                   :on-done
+                                   (lambda (message)
+                                     (when (lispm-job-finish job)
+                                       (condition-case err
+                                           (progn
+                                             (lispm-memory--carry-out
+                                              agent scope hash
+                                              (lispm-memory--read-plan
+                                               (lispm--reply-text
+                                                (append (alist-get 'content message) nil))
+                                               (length entries)))
+                                             (remhash file lispm-memory--consolidating))
+                                         (error (funcall failed (error-message-string err))))))
+                                   :on-error
+                                   (lambda (err)
+                                     (when (lispm-job-finish job)
+                                       (funcall failed (plist-get err :message))))))
+                  (error
+                   (lispm-job-finish job)
+                   (signal (car err) (cdr err))))))
           (error (funcall failed (error-message-string err))))))))
 
 (defun lispm-memory--read-plan (reply count)

@@ -375,18 +375,30 @@ memory, its past and what it learned of itself are in its directory
   description                ; one line: what other agents are told of it
   soul                       ; who it is: nature, voice, values; the user's words
   avatar                     ; its picture, a file, or nil
-  appearance                 ; visual prompt prefix for ComfyUI image generation, or nil
-  workflow                   ; ComfyUI workflow name or file for image generation, or nil
-  knowledge                  ; extra RAG knowledge paths (comma-separated string or list), or nil
-  embedding-model            ; model name for /v1/embeddings vector retrieval, or nil
   role                       ; role whose instructions, tools and policy it works with
   backend                    ; a backend of `lispm-backends' it uses, or nil
   endpoint                   ; a model endpoint of its own, as an entry of `lispm-backends'
   model effort
   skill                      ; for an app: the name of its skill, which is what it is for
   file                       ; the file it was read from, if any
-  rag                        ; non-nil when RAG knowledge base is enabled
-  comfyui)                   ; non-nil when ComfyUI image generation is enabled
+  extensions)                ; plist of optional capability properties
+
+(defconst lispm-character--core-keys
+  '(:title :description :soul :avatar :role :backend :endpoint :model :effort :skill :file)
+  "Property keys stored directly on `lispm-character' core slots.")
+
+(defun lispm-character-extension (character key)
+  "Return extension property KEY from CHARACTER's extension plist."
+  (plist-get (lispm-character-extensions character) key))
+
+(defun lispm-character--set-extension (character key value)
+  "Set extension property KEY on CHARACTER to VALUE and return VALUE."
+  (let ((plist (copy-sequence (lispm-character-extensions character))))
+    (setf (lispm-character-extensions character) (plist-put plist key value))
+    value))
+
+(gv-define-setter lispm-character-extension (value character key)
+  `(lispm-character--set-extension ,character ,key ,value))
 
 (defvar lispm--characters nil
   "Alist of (NAME . CHARACTER) in definition order.")
@@ -395,19 +407,29 @@ memory, its past and what it learned of itself are in its directory
   "Abnormal hook run when a character is defined, changed or removed.
 Each is called with the character's name and `defined' or `removed'.")
 
-(cl-defstruct (lispm-agent (:constructor lispm-agent--create)
+;; Basis: (name id role root tools policy ceiling allowed loaded-tools character waiting-on)
+;; Span: All tool-execution and policy subjects -- both native conversation sessions
+;;       (`lispm-agent') and external bridge / MCP clients (`lispm-principal').
+;; Minimality: Every slot is required for tool lookup, root confinement, policy/ceiling
+;;             evaluation, session allowance, deferred tool loading, character identity,
+;;             or delegation wait-graph tracking; none can be derived from the others.
+;; Tightness: External principals cannot hold native conversation buffers, inbox queues,
+;;            or turn counters; native `lispm-agent' subtypes extend this basis via
+;;            `(:include lispm-principal)'.
+(cl-defstruct (lispm-principal (:constructor lispm-principal--create)
+                               (:copier nil))
+  "A policy and tool-execution principal: native session or external client."
+  name id role root tools policy ceiling allowed loaded-tools character waiting-on)
+
+(cl-defstruct (lispm-agent (:include lispm-principal)
+                           (:constructor lispm-agent--create)
                            (:copier nil))
   "An agent: one conversation, in one project, carried on by a role."
-  ;; Identity.
-  name                       ; symbol, unique among live agents
-  id                         ; session id, kept across continuation files
-  role                       ; name of the role it was started from
-  root                       ; project directory it works in
+  ;; Identity (inherits name id role root character waiting-on from `lispm-principal').
   standing                   ; non-nil for agents declared with `lispm-defagent'
-  ;; Capabilities, copied from its role.
-  description instructions tools policy backend model effort
-  ceiling                    ; policy it may not exceed: its caller's, for a helper
-  ;; Runtime state.
+  ;; Capabilities, copied from its role (inherits tools policy ceiling from `lispm-principal').
+  description instructions backend model effort
+  ;; Runtime state (inherits allowed loaded-tools from `lispm-principal').
   (state 'idle)              ; idle, requesting, acting, waiting
   status                     ; short description of the current activity
   activity                   ; that activity as data: VERB or (VERB . OBJECT)
@@ -426,9 +448,6 @@ Each is called with the character's name and `defined' or `removed'.")
   (turn 0)                   ; turn counter
   journal                    ; alist TURN -> edit snapshots
   snapshots                  ; alist TURN -> snapshots of its project (lispm-journal.el)
-  allowed                    ; tool names approved for this Emacs session
-  loaded-tools               ; deferred tools loaded for it, by name
-  waiting-on                 ; agents this one awaits (lispm-delegate)
   condition                  ; condition its turn stopped at, awaiting a restart
   auto-restarts              ; alist TYPE or (TYPE . CALL) -> restarts chosen by handlers this turn
   attended                   ; non-nil if the user started the current turn
@@ -441,7 +460,6 @@ Each is called with the character's name and `defined' or `removed'.")
   (usage (list 0 0 0))       ; input, output, cache-read tokens
   ;; Last, so that code compiled against fewer slots still reads the others.
   system                     ; non-nil for an agent of the whole system, in no project
-  character                  ; name of the character whose conversation it is, if any
   parent)                    ; session id of the agent that started it, for a helper or an agent started for another
 
 (defvar lispm--agents nil
@@ -477,28 +495,50 @@ Signal an error if there is none, unless NOERROR."
         (noerror nil)
         (t (user-error "%s" (lispm-tr "No agent named %s" agent)))))
 
+(defun lispm-principal-apply-role (principal role)
+  "Give PRINCIPAL the policy and tool capabilities of ROLE.
+When PRINCIPAL is a native `lispm-agent', also copy conversation
+settings and apply character overrides, if any."
+  (setf (lispm-principal-role principal) (lispm-role-name role)
+        (lispm-principal-tools principal) (lispm-role-tools role)
+        (lispm-principal-policy principal) (lispm-role-policy role))
+  (when (lispm-agent-p principal)
+    (setf (lispm-agent-description principal) (lispm-role-description role)
+          (lispm-agent-instructions principal) (lispm-role-instructions role)
+          (lispm-agent-backend principal) (lispm-role-backend role)
+          (lispm-agent-model principal) (lispm-role-model role)
+          (lispm-agent-effort principal) (lispm-role-effort role))
+    (when-let* ((character (lispm-agent-character* principal)))
+      (setf (lispm-agent-description principal) (or (lispm-character-description character)
+                                                    (lispm-agent-description principal))
+            (lispm-agent-backend principal) (or (lispm-character-backend-name character)
+                                                (lispm-agent-backend principal))
+            (lispm-agent-model principal) (or (lispm-character-model character)
+                                              (lispm-agent-model principal))
+            (lispm-agent-effort principal) (or (lispm-character-effort character)
+                                               (lispm-agent-effort principal)))))
+  principal)
+
 (defun lispm--apply-role (agent role)
   "Give AGENT the capabilities of ROLE, and those of its character, if any.
 What a character says of itself, its description and its model,
 overrides what its role says."
-  (setf (lispm-agent-role agent) (lispm-role-name role)
-        (lispm-agent-description agent) (lispm-role-description role)
-        (lispm-agent-instructions agent) (lispm-role-instructions role)
-        (lispm-agent-tools agent) (lispm-role-tools role)
-        (lispm-agent-policy agent) (lispm-role-policy role)
-        (lispm-agent-backend agent) (lispm-role-backend role)
-        (lispm-agent-model agent) (lispm-role-model role)
-        (lispm-agent-effort agent) (lispm-role-effort role))
-  (when-let* ((character (lispm-agent-character* agent)))
-    (setf (lispm-agent-description agent) (or (lispm-character-description character)
-                                              (lispm-agent-description agent))
-          (lispm-agent-backend agent) (or (lispm-character-backend-name character)
-                                          (lispm-agent-backend agent))
-          (lispm-agent-model agent) (or (lispm-character-model character)
-                                        (lispm-agent-model agent))
-          (lispm-agent-effort agent) (or (lispm-character-effort character)
-                                         (lispm-agent-effort agent))))
-  agent)
+  (lispm-principal-apply-role agent role))
+
+(cl-defun lispm-make-principal (name root &key id role ceiling character)
+  "Create and return a policy principal NAME rooted in ROOT.
+ID is its session identifier, ROLE defaults to `lispm-default-role',
+CEILING bounds its effective policy, and CHARACTER names an associated
+character, if any.  Unlike `lispm-make-agent', this does not register a
+live conversation or allocate session state."
+  (let* ((role-obj (lispm-get-role (or role lispm-default-role)))
+         (principal (lispm-principal--create
+                     :name name
+                     :id id
+                     :root (file-name-as-directory (expand-file-name root))
+                     :ceiling ceiling
+                     :character character)))
+    (lispm-principal-apply-role principal role-obj)))
 
 (defun lispm-register-role (name &rest props)
   "Define or redefine the role NAME from PROPS.
@@ -577,6 +617,15 @@ PROPS are as for `lispm-register-role'.
       (setq name (format "%s<%d>" base (cl-incf n))))
     (intern name)))
 
+(defun lispm-agent-scope (agent)
+  "Return AGENT's canonical ownership scope tag.
+One of `system', `character', `standing', `child', or `session'."
+  (cond ((lispm-agent-system agent) 'system)
+        ((lispm-agent-character agent) 'character)
+        ((lispm-agent-standing agent) 'standing)
+        ((lispm-agent-parent agent) 'child)
+        (t 'session)))
+
 (cl-defun lispm-make-agent (role root &key name id standing system character)
   "Make a live agent of ROLE working in ROOT, and return it.
 NAME defaults to ROLE@PROJECT, made unique; ID to a fresh session id.
@@ -586,6 +635,8 @@ a system-wide prompt is: it works in no project, and its memory, tasks
 and episodes are the system's (see `lispm-system-directory').
 CHARACTER, the name of a character, makes it that character's
 conversation (see `lispm-character-agent')."
+  (when (and system character)
+    (error "An agent cannot be both system and character scoped"))
   (let* ((role (lispm-get-role role))
          (agent (lispm-agent--create
                  :name (or name (lispm--free-name
@@ -619,23 +670,28 @@ PROPS are :root (default home), :system, non-nil for an agent of the
 whole system (see `lispm-make-agent'), and either :role, the name of a
 role, or role properties as for `lispm-register-role', which then
 define a role NAME.  Redeclaring a live agent keeps its runtime state."
-  (let* ((role (if (plist-get props :role)
-                   (lispm-get-role (plist-get props :role))
-                 (apply #'lispm-register-role name
-                        (cl-loop for (key value) on props by #'cddr
-                                 unless (memq key '(:role :root :system))
-                                 append (list key value)))))
-         (root (file-name-as-directory (expand-file-name (or (plist-get props :root) "~/"))))
-         (agent (or (alist-get name lispm--agents)
-                    (lispm-make-agent role root :name name :standing t))))
-    (setf (lispm-agent-root agent) root
-          (lispm-agent-standing agent) t
-          (lispm-agent-system agent) (and (plist-get props :system) t))
-    (lispm--apply-role agent role)
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify agent '(root)))
-    (run-hook-with-args 'lispm-agent-declared-functions agent)
-    agent))
+  (let* ((existing (alist-get name lispm--agents))
+         (sys (and (plist-get props :system) t)))
+    (when (and sys (or (plist-get props :character)
+                       (and existing (lispm-agent-character existing))))
+      (error "An agent cannot be both system and character scoped"))
+    (let* ((role (if (plist-get props :role)
+                     (lispm-get-role (plist-get props :role))
+                   (apply #'lispm-register-role name
+                          (cl-loop for (key value) on props by #'cddr
+                                   unless (memq key '(:role :root :system))
+                                   append (list key value)))))
+           (root (file-name-as-directory (expand-file-name (or (plist-get props :root) "~/"))))
+           (agent (or existing
+                      (lispm-make-agent role root :name name :standing t :system sys))))
+      (setf (lispm-agent-root agent) root
+            (lispm-agent-standing agent) t
+            (lispm-agent-system agent) sys)
+      (lispm--apply-role agent role)
+      (when (fboundp 'lispm-agents-roster-notify)
+        (lispm-agents-roster-notify agent '(root)))
+      (run-hook-with-args 'lispm-agent-declared-functions agent)
+      agent)))
 
 (defmacro lispm-defagent (name &rest props)
   "Declare a standing agent NAME: one conversation that goes on.
@@ -651,6 +707,45 @@ PROPS are as for `lispm-register-agent'.
   (when (stringp (car props))
     (setq props (cons :description props)))
   `(lispm-register-agent ',name ,@props))
+
+(defcustom lispm-system-agent-name 'lispm
+  "Name of LispM itself, the system's own agent that the bar talks to."
+  :type 'symbol
+  :group 'lispm)
+
+(defcustom lispm-system-agent-root "~/"
+  "Directory LispM itself works in: relative paths are relative to it."
+  :type 'directory
+  :group 'lispm)
+
+(defvaralias 'lispm-bar--instructions 'lispm-system-agent-instructions)
+
+(defconst lispm-system-agent-instructions
+  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar (a one-line field with a small window for your reply), from a Listener command prompt, from a chat window, or from the LispM terminal; all share this one conversation. Check `[Current LispM scenario]' when present on a turn to know which surface the user is currently using, what windows or buffers are active, and what recent commands ran. You act for the user across Emacs and the computer: find what the system and what is installed can do (search_tools finds their skills, the manuals with their tools), open and change things, introspect live Emacs state when asked about UI behavior, and answer questions. When answering in the LispM bar or inline in a Listener, lead with the answer or with what you did, and keep it short unless asked for more."
+  "What LispM itself is told it is, beyond what every agent is told.")
+
+(lispm-defrole system
+  "LispM itself: the agent of the whole system, which the LispM bar talks to."
+  :instructions lispm-system-agent-instructions)
+
+(defun lispm-system-agent ()
+  "LispM itself: the standing agent of the whole system.
+It is declared when first needed.  It works in `lispm-system-agent-root',
+the home directory, with the role `system', and keeps one conversation
+going across Emacs sessions, which the bar and the chat both show.  It
+is not one of a project's agents: its memory, tasks and episodes are
+the system's (see `lispm-system-directory')."
+  (let ((agent (lispm-get-agent lispm-system-agent-name t)))
+    (if (and agent (lispm-agent-standing agent))
+        agent
+      (lispm-register-agent lispm-system-agent-name :role 'system :root lispm-system-agent-root
+                            :system t))))
+
+(defun lispm-system-agent-p (agent)
+  "Non-nil if AGENT is LispM itself, see `lispm-system-agent'."
+  (and (lispm-agent-p agent)
+       (lispm-agent-standing agent)
+       (eq (lispm-principal-name agent) lispm-system-agent-name)))
 
 ;;;; Characters
 
@@ -684,7 +779,7 @@ the name it goes by, in any case, with or without a leading @, as
 
 (defun lispm-agent-character* (agent)
   "The character whose conversation AGENT is, or nil."
-  (when-let* ((name (lispm-agent-character agent)))
+  (when-let* ((name (lispm-principal-character agent)))
     (lispm-get-character name t)))
 
 (defun lispm-character-title* (character)
@@ -723,19 +818,20 @@ conversations take on the new definition at once."
           (lispm-character-description character) (plist-get props :description)
           (lispm-character-soul character) (plist-get props :soul)
           (lispm-character-avatar character) (plist-get props :avatar)
-          (lispm-character-appearance character) (plist-get props :appearance)
-          (lispm-character-workflow character) (plist-get props :workflow)
-          (lispm-character-knowledge character) (plist-get props :knowledge)
-          (lispm-character-embedding-model character) (plist-get props :embedding-model)
           (lispm-character-role character) (plist-get props :role)
           (lispm-character-backend character) (plist-get props :backend)
           (lispm-character-endpoint character) (plist-get props :endpoint)
           (lispm-character-model character) (plist-get props :model)
           (lispm-character-effort character) (plist-get props :effort)
           (lispm-character-skill character) (plist-get props :skill)
-          (lispm-character-file character) (plist-get props :file)
-          (lispm-character-rag character) (plist-get props :rag)
-          (lispm-character-comfyui character) (plist-get props :comfyui))
+          (lispm-character-file character) (plist-get props :file))
+    (let (ext seen)
+      (cl-loop for (key value) on props by #'cddr
+               unless (memq key seen)
+               do (push key seen)
+                  (when (and value (not (memq key lispm-character--core-keys)))
+                    (setq ext (plist-put ext key value))))
+      (setf (lispm-character-extensions character) ext))
     (dolist (agent (lispm-agents))
       (when (eq (lispm-agent-character agent) name)
         (when-let* ((role (lispm-get-role (or (lispm-character-role character)
@@ -814,7 +910,7 @@ A backend that needs no key does not count: it must be named."
 (defun lispm-backend-name (&optional agent)
   "Name of the backend AGENT uses, or that agents use by default; or nil.
 See `lispm-backend'."
-  (or (and agent (lispm-agent-backend agent))
+  (or (and (lispm-agent-p agent) (lispm-agent-backend agent))
       lispm-backend
       (car (seq-find (lambda (entry) (lispm--backend-key-at-hand-p (cdr entry)))
                      lispm-backends))))
@@ -964,10 +1060,10 @@ and the ceiling's.  A class that implies others (see
 `lispm--implied-permissions') gets the strictest of their actions.
 Each policy looked at gives a class it does not name the action of the
 class it was split from, if any (see `lispm--permission-fallbacks')."
-  (let ((action (or (lispm--policy-lookup permission (lispm-agent-policy agent))
+  (let ((action (or (lispm--policy-lookup permission (lispm-principal-policy agent))
                     (lispm--policy-lookup permission lispm-default-policy)
                     'ask))
-        (ceiling (lispm-agent-ceiling agent)))
+        (ceiling (lispm-principal-ceiling agent)))
     (dolist (other (alist-get permission lispm--implied-permissions))
       (setq action (lispm--stricter action (lispm-policy-action agent other))))
     (if ceiling
@@ -979,8 +1075,8 @@ class it was split from, if any (see `lispm--permission-fallbacks')."
   (mapcar (lambda (class) (cons class (lispm-policy-action agent class)))
           (delete-dups (mapcar #'car (append lispm-default-policy
                                              lispm--permission-fallbacks
-                                             (lispm-agent-policy agent)
-                                             (lispm-agent-ceiling agent))))))
+                                             (lispm-principal-policy agent)
+                                             (lispm-principal-ceiling agent))))))
 
 (defconst lispm--state-names
   `((idle . ,(lispm-tr-noop "idle" "agent state"))
@@ -1011,11 +1107,13 @@ way: `thinking', `retry' or `waiting' (for what STATUS names), or
 
 (defun lispm-agent-busy-p (agent)
   "Non-nil if AGENT is in the middle of a turn."
-  (not (eq (lispm-agent-state agent) 'idle)))
+  (and (lispm-agent-p agent)
+       (not (eq (lispm-agent-state agent) 'idle))))
 
 (defun lispm-agent-working-p (agent)
   "Non-nil while AGENT works: in a turn, and not waiting for an answer."
-  (not (memq (lispm-agent-state agent) '(idle waiting))))
+  (and (lispm-agent-p agent)
+       (not (memq (lispm-agent-state agent) '(idle waiting)))))
 
 ;;;; Utilities
 
