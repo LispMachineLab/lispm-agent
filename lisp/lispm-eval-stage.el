@@ -36,10 +36,8 @@
 (require 'lispm-core)
 (require 'lispm-i18n)
 (require 'lispm-tools)
-(require 'lispm-edits)
-(require 'lispm-spotlight)
 (require 'lispm-inspect)
-(require 'lispm-shell-stage)
+(require 'lispm-stage-runner)
 
 (defvar lispm-web--webkit-session)
 (declare-function lispm-web--fit-xwidget "ext:lispm-web" (buf xw))
@@ -64,8 +62,7 @@
 
 (defun lispm-eval-stage--live-p ()
   "Return non-nil if the eval and web stage is active in this Emacs session."
-  (and lispm-show-eval-stage
-       (or (not noninteractive) lispm-eval-stage--in-batch)))
+  (lispm-stage-runner-live-p lispm-show-eval-stage lispm-eval-stage--in-batch))
 
 ;;;; Pure parsers & summaries
 
@@ -143,39 +140,15 @@
 (define-derived-mode lispm-eval-stage-mode special-mode "LispM-Stage"
   "Major mode for Lisp, ERT and web stage buffers."
   :interactive nil
-  (setq-local buffer-read-only t
-              truncate-lines nil
-              header-line-format '(:eval lispm-eval-stage--header))
-  (if (fboundp 'lispm-disable-line-numbers)
-      (lispm-disable-line-numbers)
-    (setq-local display-line-numbers nil)
-    (when (bound-and-true-p display-line-numbers-mode)
-      (display-line-numbers-mode -1))))
+  (lispm-stage-runner-setup-mode 'lispm-eval-stage--header))
 
 (defun lispm-eval-stage--buffer (agent kind)
   "Return or create AGENT's stage buffer for KIND (`lisp' or `web')."
-  (let* ((tag (if (eq kind 'web) "web" "lisp"))
-         (name (format "*lispm-stage-%s: %s*"
-                       tag (if agent (lispm-principal-name agent) "LispM")))
-         (buf (get-buffer-create name)))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'lispm-eval-stage-mode)
-        (lispm-eval-stage-mode)))
-    buf))
+  (lispm-stage-runner-buffer (if (eq kind 'web) "web" "lisp") agent 'lispm-eval-stage-mode))
 
 (defun lispm-eval-stage--header-text (agent summary status-str face)
   "Format a stage header line for AGENT, SUMMARY, STATUS-STR and FACE."
-  (let ((color (lispm-edits--color agent))
-        (label (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
-        (short (truncate-string-to-width (or summary "") 52 nil nil "…")))
-    (concat (propertize " " 'face `(:background ,color))
-            " "
-            (propertize (concat " λ " label " ")
-                        'face `(:background ,color :foreground "#1e1e2e" :weight bold))
-            " "
-            (propertize short 'face 'bold)
-            " · "
-            (propertize status-str 'face face))))
+  (lispm-stage-runner-header agent summary status-str face))
 
 (defun lispm-eval-stage--fontify-elisp (code)
   "Return CODE fontified with `emacs-lisp-mode' syntax faces."
@@ -197,18 +170,15 @@
 
 (defun lispm-eval-stage--show-buffer (agent buffer &optional kind)
   "Project BUFFER of KIND onto AGENT's stage window unless edits animate."
-  (when (and (buffer-live-p buffer)
-             lispm-eval-stage-follow
-             (lispm-spotlight--follow-agent-p agent (float-time))
-             (not (lispm-edits-active-p)))
-    (when-let* ((win (lispm-stage-window buffer t agent (or kind 'lisp))))
-      (unless (eq win (selected-window))
-        (set-window-point win (with-current-buffer buffer (point-min)))
-        (set-window-start win (with-current-buffer buffer (point-min))))
-      (when (and (bound-and-true-p lispm-web--webkit-session)
-                 (eq buffer (plist-get lispm-web--webkit-session :buffer))
-                 (fboundp 'lispm-web--fit-xwidget))
-        (lispm-web--fit-xwidget buffer (plist-get lispm-web--webkit-session :xwidget))))))
+  (lispm-stage-runner-present
+   agent buffer (or kind 'lisp)
+   :follow lispm-eval-stage-follow
+   :top-p t
+   :on-shown (lambda (_win)
+               (when (and (bound-and-true-p lispm-web--webkit-session)
+                          (eq buffer (plist-get lispm-web--webkit-session :buffer))
+                          (fboundp 'lispm-web--fit-xwidget))
+                 (lispm-web--fit-xwidget buffer (plist-get lispm-web--webkit-session :xwidget))))))
 
 ;;;; Content renderers
 
@@ -222,14 +192,14 @@
    (running-p
     (insert (propertize "…" 'face 'shadow) "\n"))
    (errorp
-    (insert (propertize (or result "") 'face 'lispm-shell-stage-fail) "\n"))
+    (insert (propertize (or result "") 'face 'lispm-stage-runner-fail) "\n"))
    ((or (null result) (string-empty-p result))
     (insert (propertize "=> nil" 'face 'font-lock-constant-face) "\n"))
    (t
     (let ((lines (split-string result "\n")))
       (dolist (line lines)
         (if (string-prefix-p "=> " line)
-            (insert (propertize "=> " 'face 'lispm-shell-stage-ok)
+            (insert (propertize "=> " 'face 'lispm-stage-runner-ok)
                     (lispm-eval-stage--fontify-elisp (substring line 3))
                     "\n")
           (insert line "\n")))))))
@@ -239,12 +209,12 @@
   (insert (propertize (format ";; ERT %s\n\n" (or selector "t"))
                       'face 'font-lock-comment-face))
   (if errorp
-      (insert (propertize (or result "") 'face 'lispm-shell-stage-fail) "\n")
+      (insert (propertize (or result "") 'face 'lispm-stage-runner-fail) "\n")
     (when-let* ((stats (lispm-eval-stage--parse-ert-summary result)))
       (let* ((passed (min 24 (plist-get stats :passed)))
              (failed (min 24 (plist-get stats :failed)))
-             (bar (concat (propertize (make-string passed ?●) 'face 'lispm-shell-stage-ok)
-                          (propertize (make-string failed ?✗) 'face 'lispm-shell-stage-fail))))
+             (bar (concat (propertize (make-string passed ?●) 'face 'lispm-stage-runner-ok)
+                          (propertize (make-string failed ?✗) 'face 'lispm-stage-runner-fail))))
         (unless (string-empty-p bar)
           (insert bar "\n\n"))))
     (dolist (line (split-string (or result "") "\n"))
@@ -252,7 +222,7 @@
        ((string-match "\\`\\(FAILED\\)[ \t]+\\([^ \t\n]+\\)" line)
         (let* ((sym-name (match-string 2 line))
                (sym (intern-soft sym-name)))
-          (insert (propertize "FAILED  " 'face 'lispm-shell-stage-fail)
+          (insert (propertize "FAILED  " 'face 'lispm-stage-runner-fail)
                   (if sym (lispm-present sym-name (list 'symbol sym)) sym-name)
                   (substring line (match-end 2))
                   "\n")))
@@ -282,11 +252,11 @@
   (cond
    (running-p
     (insert (propertize (lispm-eval-stage--summarize-call tool-name input)
-                        'face 'lispm-shell-stage-prompt)
+                        'face 'lispm-stage-runner-prompt)
             "\n\n"
             (propertize "…" 'face 'shadow) "\n"))
    (errorp
-    (insert (propertize (or result "") 'face 'lispm-shell-stage-fail) "\n"))
+    (insert (propertize (or result "") 'face 'lispm-stage-runner-fail) "\n"))
    ((equal tool-name "web_search")
     (insert (propertize (format "Search: %s\n\n" (or (alist-get 'query input) ""))
                         'face 'bold)
@@ -304,7 +274,7 @@
         (insert (lispm-present url (list 'url url)) "\n"))
       (when (and action (not (string-empty-p action)))
         (insert "\n"
-                (propertize (concat "⚡ " action) 'face 'lispm-shell-stage-ok)
+                (propertize (concat "⚡ " action) 'face 'lispm-stage-runner-ok)
                 "\n"))
       (insert "\n" body "\n")
       (lispm-eval-stage--link-urls)))))
@@ -328,32 +298,24 @@
 (defvar lispm-eval-stage--ticker nil
   "Timer updating elapsed times in active Lisp and web stage headers.")
 
-(defun lispm-eval-stage--refresh-running (session now)
+(defun lispm-eval-stage--refresh-running (session &optional now)
   "Update SESSION's running header line at time NOW."
-  (let ((buf (lispm-eval-stage--session-buffer session)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((hdr (lispm-eval-stage--header-text
-                    (lispm-eval-stage--session-agent session)
-                    (lispm-eval-stage--session-summary session)
-                    (lispm-tr "running %.1fs"
-                              (max 0.0 (- now (lispm-eval-stage--session-started-at session))))
-                    'font-lock-constant-face)))
-          (if (derived-mode-p 'lispm-eval-stage-mode)
-              (setq lispm-eval-stage--header hdr)
-            (setq-local header-line-format hdr))
-          (force-mode-line-update))))))
+  (lispm-stage-runner-set-header
+   (lispm-eval-stage--session-buffer session)
+   'lispm-eval-stage-mode
+   'lispm-eval-stage--header
+   (lispm-stage-runner-running-header
+    (lispm-eval-stage--session-agent session)
+    (lispm-eval-stage--session-summary session)
+    (lispm-eval-stage--session-started-at session)
+    (or now (float-time)))))
 
 (defun lispm-eval-stage--tick ()
   "Refresh elapsed durations for all running eval and web stage sessions."
-  (if (zerop (hash-table-count lispm-eval-stage--sessions))
-      (when (timerp lispm-eval-stage--ticker)
-        (cancel-timer lispm-eval-stage--ticker)
-        (setq lispm-eval-stage--ticker nil))
-    (let ((now (float-time)))
-      (maphash (lambda (_agent session)
-                 (lispm-eval-stage--refresh-running session now))
-               lispm-eval-stage--sessions))))
+  (lispm-stage-runner-tick
+   lispm-eval-stage--sessions
+   'lispm-eval-stage--ticker
+   #'lispm-eval-stage--refresh-running))
 
 (defun lispm-eval-stage--start (agent kind tool-name input)
   "Stage AGENT's starting call of TOOL-NAME (classified as KIND) on INPUT."
@@ -379,8 +341,8 @@
             ('web (lispm-eval-stage--render-web tool-name input nil nil t))))))
     (puthash agent session lispm-eval-stage--sessions)
     (lispm-eval-stage--refresh-running session now)
-    (unless (timerp lispm-eval-stage--ticker)
-      (setq lispm-eval-stage--ticker (run-at-time 0.2 0.2 #'lispm-eval-stage--tick)))
+    (lispm-stage-runner-ensure-ticker
+     lispm-eval-stage--sessions 'lispm-eval-stage--ticker #'lispm-eval-stage--tick)
     (lispm-eval-stage--show-buffer agent buf (if (eq kind 'web) 'web 'lisp))))
 
 (defun lispm-eval-stage--finish (agent kind tool-name input result errorp)
@@ -408,18 +370,14 @@
             ('lisp (lispm-eval-stage--render-lisp (alist-get 'code input) result errorp nil))
             ('ert (lispm-eval-stage--render-ert (alist-get 'selector input) result errorp))
             ('web (lispm-eval-stage--render-web tool-name input result errorp nil))))))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((hdr (lispm-eval-stage--header-text
-                    agent summary
-                    (if failed
-                        (format "✗ %s · %.1fs" (lispm-tr "failed") elapsed)
-                      (format "✓ %.1fs" elapsed))
-                    (if failed 'lispm-shell-stage-fail 'lispm-shell-stage-ok))))
-          (if (derived-mode-p 'lispm-eval-stage-mode)
-              (setq lispm-eval-stage--header hdr)
-            (setq-local header-line-format hdr))
-          (force-mode-line-update))))
+    (lispm-stage-runner-set-header
+     buf 'lispm-eval-stage-mode 'lispm-eval-stage--header
+     (lispm-eval-stage--header-text
+      agent summary
+      (if failed
+          (format "✗ %s · %.1fs" (lispm-tr "failed") elapsed)
+        (format "✓ %.1fs" elapsed))
+      (if failed 'lispm-stage-runner-fail 'lispm-stage-runner-ok)))
     (lispm-eval-stage--show-buffer agent buf (if (eq kind 'web) 'web 'lisp))))
 
 (defun lispm-eval-stage--on-tool-call (agent phase tool input result errorp)

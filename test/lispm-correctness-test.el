@@ -95,7 +95,8 @@
              "data: [DONE]\n\n")
      (lambda (k v) (push (cons k v) deltas)))
     (let ((msg (lispm-openai-result oai)))
-      (should (equal (alist-get 'text (aref (alist-get 'content msg) 0)) "th"))
+      (should (equal (lispm-thought-block-text (aref (alist-get 'content msg) 0)) "th"))
+      (should (eq (alist-get 'ephemeral (aref (alist-get 'content msg) 0)) t))
       (should (equal (alist-get 'text (aref (alist-get 'content msg) 1)) "hi there"))
       (should deltas)))
   ;; Anthropic stream chunk lists assemble cleanly across blocks.
@@ -255,9 +256,9 @@
     (lispm-agents-context-stop server)
     (should-not (lispm-agents-bridge-server-live-p server))
     (should (car settled)))
-  ;; Error messages for `lispm-create-skill' and `lispm-mcp-server--check*'.
-  (should-error (lispm-mcp-server--check-name "bad name") :type 'user-error)
-  (let ((err-msg (condition-case err (lispm-mcp-server--check '(:url "ftp://x")) (error (cadr err)))))
+  ;; Error messages for `lispm-create-skill' and `lispm-settings-mcp--check*'.
+  (should-error (lispm-settings-mcp--check-name "bad name") :type 'user-error)
+  (let ((err-msg (condition-case err (lispm-settings-mcp--check '(:url "ftp://x")) (error (cadr err)))))
     (should (string-search "MCP server" err-msg))
     (should-not (string-search "backend" (downcase err-msg))))
   ;; `lispm-title--ask' does not overwrite an on-disk title after buffer is killed.
@@ -273,7 +274,7 @@
         (save-buffer))
       (cl-letf (((symbol-function 'lispm-api-function) #'ignore)
                 (lispm-api-function
-                 (lambda (_b _body _betas &rest plist)
+                 (lambda (_b _request &rest plist)
                    (setq on-done (plist-get plist :on-done)))))
         (lispm-title--ask agent "hi"))
       ;; User sets title on disk and closes buffer before async title reply returns.

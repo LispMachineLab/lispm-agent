@@ -274,27 +274,25 @@ a request with HEADERS names, opened at first need."
 ;;;; Tools
 
 (defun lispm-mcp-server--tool (tool)
-  "LispM's TOOL, served under its own name: a call runs as call_tool runs it."
-  (let ((name (lispm-tool-name tool))
-        (schema (alist-get 'input_schema (lispm-tool-schema tool))))
-    (list name
-          (lambda (session arguments id)
-            (lispm-agents-bridge--tool-call session `((name . ,name) (input . ,arguments)) id))
-          (alist-get 'properties schema)
-          (alist-get 'required schema)
-          (lispm-tools--description tool))))
+  "LispM's TOOL as a `lispm-tool-spec' served under its own name."
+  (let ((name (lispm-tool-name tool)))
+    (lispm-tool-to-spec
+     tool
+     (lambda (session arguments id)
+       (lispm-agents-bridge--tool-call session `((name . ,name) (input . ,arguments)) id))
+     (lispm-tools--description tool))))
 
 (cl-defmethod lispm-agents-mcp-served-tools ((session lispm-mcp-server-session))
   "The tools SESSION's agent is served: the read tools, LispM's tools an
 agent of its role has from the start, and the bridge's, but for those
 talking with the agents."
-  (let* ((bridge (seq-remove (lambda (tool) (member (car tool) lispm-mcp-server-unserved-tools))
-                             lispm-agents-mcp-extra-tools))
+  (let* ((bridge (lispm-tool-spec-remove lispm-mcp-server-unserved-tools
+                                        lispm-agents-mcp-extra-tools))
          (taken (append lispm-agents-mcp-tools bridge)))
     (append lispm-agents-mcp-tools
             (mapcar #'lispm-mcp-server--tool
                     (seq-filter (lambda (tool) (and (lispm-agents-bridge--served-p tool)
-                                                    (not (assoc (lispm-tool-name tool) taken))))
+                                                    (not (lispm-tool-spec-find (lispm-tool-name tool) taken))))
                                 (lispm-agent-tools* (lispm-agents-bridge-server-agent session))))
             bridge)))
 

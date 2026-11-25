@@ -42,10 +42,9 @@
 (require 'lispm-core)
 (require 'lispm-i18n)
 (require 'lispm-tools)
-(require 'lispm-edits)
-(require 'lispm-spotlight)
 (require 'lispm-inspect)
 (require 'lispm-process-tools)
+(require 'lispm-stage-runner)
 
 (defgroup lispm-shell-stage nil
   "Agents' shell and Git commands, shown live on the stage."
@@ -71,19 +70,17 @@ commands and failures show immediately."
   :group 'lispm-shell-stage)
 
 (defface lispm-shell-stage-prompt
-  '((t :inherit font-lock-keyword-face :weight bold))
+  '((t :inherit lispm-stage-runner-prompt))
   "Command prompt line at the top of a shell stage buffer."
   :group 'lispm-shell-stage)
 
 (defface lispm-shell-stage-ok
-  '((((background dark)) :foreground "#a6e3a1" :weight bold)
-    (t :foreground "#1e662d" :weight bold))
+  '((t :inherit lispm-stage-runner-ok))
   "Badge face for commands exiting with status 0."
   :group 'lispm-shell-stage)
 
 (defface lispm-shell-stage-fail
-  '((((background dark)) :foreground "#f38ba8" :weight bold)
-    (t :foreground "#b42318" :weight bold))
+  '((t :inherit lispm-stage-runner-fail))
   "Badge face for commands exiting non-zero or timing out."
   :group 'lispm-shell-stage)
 
@@ -112,8 +109,7 @@ commands and failures show immediately."
 
 (defun lispm-shell-stage--live-p ()
   "Return non-nil if the shell stage is active in this Emacs session."
-  (and lispm-show-shell-stage
-       (or (not noninteractive) lispm-shell-stage--in-batch)))
+  (lispm-stage-runner-live-p lispm-show-shell-stage lispm-shell-stage--in-batch))
 
 ;;;; Pure command & output parsers
 
@@ -303,14 +299,7 @@ ERRORP marks an execution or timeout failure."
 (define-derived-mode lispm-shell-stage-mode special-mode "LispM-Shell"
   "Major mode for viewing agents' live shell and Git executions on stage."
   :interactive nil
-  (setq-local buffer-read-only t
-              truncate-lines nil
-              header-line-format '(:eval lispm-shell-stage--header))
-  (if (fboundp 'lispm-disable-line-numbers)
-      (lispm-disable-line-numbers)
-    (setq-local display-line-numbers nil)
-    (when (bound-and-true-p display-line-numbers-mode)
-      (display-line-numbers-mode -1))))
+  (lispm-stage-runner-setup-mode 'lispm-shell-stage--header))
 
 (cl-defstruct (lispm-shell-stage--session
                (:constructor lispm-shell-stage--session-create) (:copier nil))
@@ -334,58 +323,35 @@ ERRORP marks an execution or timeout failure."
 
 (defun lispm-shell-stage--buffer (agent)
   "Return or create the shell stage buffer for AGENT."
-  (let* ((name (format "*lispm-stage-shell: %s*"
-                       (if agent (lispm-principal-name agent) "LispM")))
-         (buf (get-buffer-create name)))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'lispm-shell-stage-mode)
-        (lispm-shell-stage-mode)))
-    buf))
+  (lispm-stage-runner-buffer "shell" agent 'lispm-shell-stage-mode))
 
 (defun lispm-shell-stage--format-header (agent spec status-str status-face)
   "Build the header line for AGENT, command SPEC, STATUS-STR and STATUS-FACE."
-  (let* ((color (lispm-edits--color agent))
-         (label (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
-         (cmd (truncate-string-to-width (lispm-shell-stage-spec-display spec) 52 nil nil "…")))
-    (concat (propertize " " 'face `(:background ,color))
-            " "
-            (propertize (concat " λ " label " ")
-                        'face `(:background ,color :foreground "#1e1e2e" :weight bold))
-            " "
-            (propertize cmd 'face 'bold)
-            " · "
-            (propertize status-str 'face status-face))))
+  (lispm-stage-runner-header
+   agent (lispm-shell-stage-spec-display spec) status-str status-face))
 
-(defun lispm-shell-stage--update-running-header (session now)
+(defun lispm-shell-stage--update-running-header (session &optional now)
   "Refresh SESSION's header line with elapsed time at NOW."
-  (let ((buf (lispm-shell-stage--session-stage-buffer session)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (setq lispm-shell-stage--header
-              (lispm-shell-stage--format-header
-               (lispm-shell-stage--session-agent session)
-               (lispm-shell-stage--session-spec session)
-               (lispm-tr "running %.1fs"
-                         (max 0.0 (- now (lispm-shell-stage--session-started-at session))))
-               'font-lock-constant-face))
-        (force-mode-line-update)))))
+  (lispm-stage-runner-set-header
+   (lispm-shell-stage--session-stage-buffer session)
+   'lispm-shell-stage-mode
+   'lispm-shell-stage--header
+   (lispm-stage-runner-running-header
+    (lispm-shell-stage--session-agent session)
+    (lispm-shell-stage-spec-display (lispm-shell-stage--session-spec session))
+    (lispm-shell-stage--session-started-at session)
+    (or now (float-time)))))
 
 (defun lispm-shell-stage--show (session &optional top-p)
   "Bring SESSION's stage buffer into view; keep point at top if TOP-P."
-  (let ((agent (lispm-shell-stage--session-agent session))
-        (buf (lispm-shell-stage--session-stage-buffer session)))
-    (when (and (buffer-live-p buf)
-               lispm-shell-stage-follow
-               (lispm-spotlight--follow-agent-p agent (float-time))
-               (not (lispm-edits-active-p)))
-      (setf (lispm-shell-stage--session-staged-p session) t)
-      (when-let* ((win (lispm-stage-window buf t agent 'shell)))
-        (when (not (eq win (selected-window)))
-          (with-current-buffer buf
-            (let ((pos (if top-p (point-min) (point-max))))
-              (set-window-point win pos)
-              (when top-p
-                (set-window-start win (point-min))))))))))
+  (lispm-stage-runner-present
+   (lispm-shell-stage--session-agent session)
+   (lispm-shell-stage--session-stage-buffer session)
+   'shell
+   :follow lispm-shell-stage-follow
+   :top-p top-p
+   :on-shown (lambda (_win)
+               (setf (lispm-shell-stage--session-staged-p session) t))))
 
 ;;;; Semantic Git & terminal rendering
 
@@ -564,21 +530,17 @@ ERRORP marks an execution or timeout failure."
 
 (defun lispm-shell-stage--tick ()
   "Update running elapsed headers across active shell stage sessions."
-  (if (zerop (hash-table-count lispm-shell-stage--sessions))
-      (when (timerp lispm-shell-stage--ticker)
-        (cancel-timer lispm-shell-stage--ticker)
-        (setq lispm-shell-stage--ticker nil))
-    (let ((now (float-time)))
-      (maphash (lambda (_agent session)
-                 (lispm-shell-stage--update-running-header session now))
-               lispm-shell-stage--sessions))))
+  (lispm-stage-runner-tick
+   lispm-shell-stage--sessions
+   'lispm-shell-stage--ticker
+   #'lispm-shell-stage--update-running-header))
 
 (defun lispm-shell-stage--ensure-ticker ()
   "Ensure the elapsed-time header ticker runs while sessions are active."
-  (when (and (> (hash-table-count lispm-shell-stage--sessions) 0)
-             (not (timerp lispm-shell-stage--ticker)))
-    (setq lispm-shell-stage--ticker
-          (run-at-time 0.2 0.2 #'lispm-shell-stage--tick))))
+  (lispm-stage-runner-ensure-ticker
+   lispm-shell-stage--sessions
+   'lispm-shell-stage--ticker
+   #'lispm-shell-stage--tick))
 
 (defun lispm-shell-stage--retire-session (agent)
   "Detach timers and hooks for AGENT's active shell stage session."
@@ -678,18 +640,18 @@ ERRORP marks an execution or timeout failure."
             (setq top-p t)
             (lispm-shell-stage--render-git-log spec stdout))
            (t
-            (lispm-shell-stage--render-terminal spec stdout stderr root)))
-          (setq lispm-shell-stage--header
-                (lispm-shell-stage--format-header
-                 agent spec
-                 (format "%s · %.1fs"
-                         (cond
-                          (timed-out (concat "✗ " (lispm-tr "timed out")))
-                          (failed (concat "✗ " (lispm-tr "exit %d" (or exit 1))))
-                          (t (concat "✓ " (lispm-tr "exit %d" (or exit 0)))))
-                         elapsed)
-                 (if failed 'lispm-shell-stage-fail 'lispm-shell-stage-ok)))
-          (force-mode-line-update)))
+            (lispm-shell-stage--render-terminal spec stdout stderr root))))
+        (lispm-stage-runner-set-header
+         buf 'lispm-shell-stage-mode 'lispm-shell-stage--header
+         (lispm-shell-stage--format-header
+          agent spec
+          (format "%s · %.1fs"
+                  (cond
+                   (timed-out (concat "✗ " (lispm-tr "timed out")))
+                   (failed (concat "✗ " (lispm-tr "exit %d" (or exit 1))))
+                   (t (concat "✓ " (lispm-tr "exit %d" (or exit 0)))))
+                  elapsed)
+          (if failed 'lispm-shell-stage-fail 'lispm-shell-stage-ok))))
       ;; Show on stage unless it was a fast probe that succeeded silently.
       (when (or failed
                 (lispm-shell-stage--session-staged-p session)

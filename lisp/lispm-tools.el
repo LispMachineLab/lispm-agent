@@ -39,6 +39,7 @@
 (require 'seq)
 (require 'project)
 (require 'lispm-core)
+(require 'lispm-agents-context)
 (require 'lispm-job)
 (require 'lispm-transcript)
 (require 'lispm-sandbox)
@@ -238,32 +239,35 @@ the model sees too.  Signal an error to report a failure to the model."
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
                     `(lambda ,args (ignore ,@args) ,@body))))))
 
+(defun lispm-tool-to-spec (tool &optional function description)
+  "Return a canonical `lispm-tool-spec' representing TOOL.
+FUNCTION, when non-nil, overrides TOOL's handler function in the spec.
+DESCRIPTION, when non-nil, overrides TOOL's description (for example a
+short summary from `lispm-tools--description')."
+  (let ((name (lispm-tool-name tool))
+        (desc (or description (lispm-tool-description tool)))
+        (fn (or function (lispm-tool-function tool)))
+        (raw-schema (lispm-tool-input-schema tool)))
+    (if raw-schema
+        (lispm-tool-spec-create name desc :function fn :input-schema raw-schema)
+      (pcase-let* ((`(,base-props . ,base-req)
+                    (or (condition-case nil (lispm-tool-param-schema tool) (args-out-of-range nil))
+                        (lispm-tools--compile-params name (lispm-tool-params tool))))
+                   (why-p (memq (lispm-tool-permission tool) lispm-rationale-permissions))
+                   (props (if why-p
+                              (cons '(why (type . "string")
+                                          (description . "One short sentence for the human reviewing this call: why it is needed."))
+                                    base-props)
+                            base-props))
+                   (required (vconcat (if why-p (cons "why" base-req) base-req))))
+        (lispm-tool-spec-create name desc
+                                :function fn
+                                :properties props
+                                :required required)))))
+
 (defun lispm-tool-schema (tool)
   "The API definition of TOOL."
-  (if-let* ((schema (lispm-tool-input-schema tool)))
-      `((name . ,(lispm-tool-name tool))
-        (description . ,(let ((description (lispm-tool-description tool)))
-                          (if (functionp description) (funcall description) description)))
-        (input_schema . ,(if (functionp schema) (funcall schema) schema)))
-    (lispm-tools--params-schema tool)))
-
-(defun lispm-tools--params-schema (tool)
-  "The API definition of TOOL, made from its parameters."
-  (pcase-let* ((`(,base-props . ,base-req)
-                (or (condition-case nil (lispm-tool-param-schema tool) (args-out-of-range nil))
-                    (lispm-tools--compile-params (lispm-tool-name tool) (lispm-tool-params tool))))
-               (why-p (memq (lispm-tool-permission tool) lispm-rationale-permissions))
-               (props (if why-p
-                          (cons '(why (type . "string")
-                                      (description . "One short sentence for the human reviewing this call: why it is needed."))
-                                base-props)
-                        base-props))
-               (required (vconcat (if why-p (cons "why" base-req) base-req))))
-    `((name . ,(lispm-tool-name tool))
-      (description . ,(lispm-tool-description tool))
-      (input_schema (type . "object")
-                    (properties . ,props)
-                    (required . ,required)))))
+  (lispm-tool-spec-to-api (lispm-tool-to-spec tool)))
 
 (defun lispm-tools-allowed-p (agent name)
   "Non-nil if AGENT's role gives it the tool NAME, offered or deferred.

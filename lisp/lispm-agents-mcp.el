@@ -172,10 +172,10 @@ it the requests to these servers too, which it refuses."
   "The read tools served to the agents.")
 
 (defvar lispm-agents-mcp-extra-tools nil
-  "Tools served to the agents besides the read tools, in the form of
-`lispm-agents-context-tools': (NAME FUNCTION PROPERTIES REQUIRED
-DESCRIPTION), FUNCTION taking the server, the arguments and the request
-id.  LispM adds its own when it runs, see lispm-agents-bridge.el.")
+  "Tools served to the agents besides the read tools.
+A list of `lispm-tool-spec' structs whose handler functions take the
+server, the arguments and the request id.  LispM adds its own when it
+runs; see lispm-agents-bridge.el.")
 
 (cl-defgeneric lispm-agents-mcp-served-tools (server)
   "Return the tools SERVER serves: the read tools and the extra ones."
@@ -193,11 +193,12 @@ tools, each with its input's schema."
               (concat instructions "\n\n")
             "")
           "Tools:\n"
-          (mapconcat (pcase-lambda (`(,name ,_ ,properties ,required ,description))
-                       (format "- %s: %s\n  input: %s" name description
-                               (json-serialize `((type . "object")
-                                                 (properties . ,(or properties (make-hash-table)))
-                                                 ,@(when required `((required . ,required)))))))
+          (mapconcat (lambda (entry)
+                       (let ((spec (lispm-tool-spec-normalize entry)))
+                         (format "- %s: %s\n  input: %s"
+                                 (lispm-tool-spec-name spec)
+                                 (lispm-tool-spec-resolved-description spec)
+                                 (json-serialize (lispm-tool-spec-resolved-schema spec)))))
                      (lispm-agents-mcp-served-tools server) "\n")
           "\n"))
 
@@ -209,7 +210,7 @@ of the JSON object BODY, empty for none; return its result as text."
                      (condition-case nil
                          (json-parse-string body :object-type 'alist :null-object nil :false-object :false)
                        (error 'malformed))))
-        (tool (assoc name (lispm-agents-mcp-served-tools server)))
+        (tool (lispm-tool-spec-find name (lispm-agents-mcp-served-tools server)))
         (respond lispm-local-http-respond)
         (text (lambda (texts) (concat (string-join texts "\n") "\n"))))
     (cond
@@ -224,7 +225,7 @@ of the JSON object BODY, empty for none; return its result as text."
                                   (funcall text texts)))))
              (failed nil)
              (result (condition-case err
-                         (funcall (nth 1 tool) server arguments nil)
+                         (funcall (lispm-tool-spec-function tool) server arguments nil)
                        (error (setq failed t)
                               (list (error-message-string err))))))
         (if (eq result 'deferred)

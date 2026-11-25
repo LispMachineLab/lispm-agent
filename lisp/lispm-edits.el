@@ -270,7 +270,7 @@ If it is cut short, return what it holds so far, or nil if WHOLE."
 (defun lispm-edits--color (agent)
   "The color of AGENT's cursor."
   (if (and agent lispm-edits-colors)
-      (nth (mod (sxhash-equal (symbol-name (lispm-agent-name agent))) (length lispm-edits-colors))
+      (nth (mod (sxhash-equal (symbol-name (lispm-principal-name agent))) (length lispm-edits-colors))
            lispm-edits-colors)
     (or (face-foreground 'cursor nil t) "gray")))
 
@@ -279,7 +279,7 @@ If it is cut short, return what it holds so far, or nil if WHOLE."
   (let ((color (lispm-edits--color agent)))
     (concat (propertize " " 'face `(:background ,color))
             (propertize " " 'face 'default)
-            (propertize (concat " λ " (if agent (symbol-name (lispm-agent-name agent)) "LispM")
+            (propertize (concat " λ " (if agent (symbol-name (lispm-principal-name agent)) "LispM")
                                 (if note (concat " · " note) "")
                                 " ")
                         'face `(:background ,color :foreground "#1e1e2e"

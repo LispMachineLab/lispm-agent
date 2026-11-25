@@ -612,7 +612,7 @@ Values containing spaces or commas may be enclosed in single or double quotes."
   "Keep the MCP server VALUES describe; NAME nil adds one, else changes it."
   (let* ((new (null name))
          (name (or name (string-trim (or (alist-get 'name values) ""))))
-         (old (and (not new) (lispm-mcp-server-get name)))
+         (old (and (not new) (lispm-settings-mcp-get name)))
          (transport (or (alist-get 'transport values) 'stdio))
          (command (string-trim (or (alist-get 'command values) "")))
          (args (and (eq transport 'stdio)
@@ -650,8 +650,8 @@ Values containing spaces or commas may be enclosed in single or double quotes."
     (unless (eq permission 'mcp)
       (setq config (plist-put config :permission permission)))
     (if new
-        (lispm-mcp-server-add name config t)
-      (lispm-mcp-server-change name config t))))
+        (lispm-settings-mcp-add name config t)
+      (lispm-settings-mcp-change name config t))))
 
 (defun lispm-mcp-form--new-fields ()
   "Return the preset and name fields used when adding a new MCP server."
@@ -674,7 +674,7 @@ Values containing spaces or commas may be enclosed in single or double quotes."
 (defun lispm-mcp-form (&optional name)
   "Make the form that adds an MCP server, or changes MCP server NAME;
 return its buffer."
-  (let* ((config (and name (lispm-mcp-server-get name)))
+  (let* ((config (and name (lispm-settings-mcp-get name)))
          (transport (if (plist-get config :url) 'http 'stdio))
          (stdio-p (lambda (values) (eq (alist-get 'transport values) 'stdio)))
          (http-p (lambda (values) (eq (alist-get 'transport values) 'http)))

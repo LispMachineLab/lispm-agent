@@ -510,8 +510,7 @@ about its calls.")
   "TOOL, its description and its input's schema, for an agent to call."
   (format "- %s: %s\n  input: %s" (lispm-tool-name tool) (lispm-tools--description tool)
           (condition-case nil
-              (json-serialize (or (alist-get 'input_schema (lispm-tool-schema tool))
-                                  '((type . "object"))))
+              (json-serialize (lispm-tool-spec-resolved-schema (lispm-tool-to-spec tool)))
             (error "an object"))))
 
 (defun lispm-agents-bridge--tool-search (server arguments _id)
@@ -670,7 +669,7 @@ policy of the agent acting in LispM decides."
            (error "There is no LispM tool named %s; search_tools finds them" name))
           ((member name lispm-agents-bridge-unserved-tools)
            (error "%s is not called with call_tool%s" name
-                  (if (assoc name (lispm-agents-mcp-served-tools server))
+                  (if (lispm-tool-spec-find name (lispm-agents-mcp-served-tools server))
                       ": it is a tool of your own"
                     "")))
           ((not (lispm-agents-bridge--served-p tool))
@@ -689,61 +688,61 @@ policy of the agent acting in LispM decides."
 ;;;; Serving them
 
 (defconst lispm-agents-bridge-tools
-  '(("list_agents" lispm-agents-bridge--tool-list-agents nil nil
-     "List the agents working in this Emacs: LispM's own agents (role, project, state), \
+  (lispm-tool-spec-from-rows
+   '(("list_agents" lispm-agents-bridge--tool-list-agents nil nil
+      "List the agents working in this Emacs: LispM's own agents (role, project, state), \
 the agents of other programs, such as you, and the roles LispM starts helpers from.")
-    ("send_message" lispm-agents-bridge--tool-send-message
-     ((to . ((type . "string") (description . "Name of the receiving agent or LispM character, as \
+     ("send_message" lispm-agents-bridge--tool-send-message
+      ((to . ((type . "string") (description . "Name of the receiving agent or LispM character, as \
 list_agents gives it.")))
-      (text . ((type . "string")
-               (description . "The message, self-contained: they cannot see your conversation. \
+       (text . ((type . "string")
+                (description . "The message, self-contained: they cannot see your conversation. \
 Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]]."))))
-     ["to" "text"]
-     "Send a message to another agent without waiting for an answer.  It reaches them as soon \
+      ["to" "text"]
+      "Send a message to another agent without waiting for an answer.  It reaches them as soon \
 as they are free.  Use ask_agent when you need an answer.")
-    ("ask_agent" lispm-agents-bridge--tool-ask-agent
-     ((agent . ((type . "string")
-                (description . "A running agent, a LispM character (by its name, as Ada), or a role to \
+     ("ask_agent" lispm-agents-bridge--tool-ask-agent
+      ((agent . ((type . "string")
+                 (description . "A running agent, a LispM character (by its name, as Ada), or a role to \
 start a helper from: list_agents shows them.")))
-      (request . ((type . "string")
-                  (description . "What you need, self-contained: they cannot see your conversation. \
+       (request . ((type . "string")
+                   (description . "What you need, self-contained: they cannot see your conversation. \
 Name places as [[file:PATH::LINE]], buffers as [[buffer:NAME]].")))
-      (project . ((type . "string")
-                  (description . "Optional subdirectory within your workspace root for a helper started from a role."))))
-     ["agent" "request"]
-     "Ask another agent for something.  Its reply comes to you later as a message, \
+       (project . ((type . "string")
+                   (description . "Optional subdirectory within your workspace root for a helper started from a role."))))
+      ["agent" "request"]
+      "Ask another agent for something.  Its reply comes to you later as a message, \
 [Reply from NAME to request ID].  Naming a role starts a LispM helper of that role in your \
 project (or PROJECT subdirectory), which retires once it has replied.")
-    ("reply" lispm-agents-bridge--tool-reply
-     ((request . ((type . "string") (description . "The request's id, as R1.")))
-      (text . ((type . "string") (description . "Your answer, self-contained."))))
-     ["request" "text"]
-     "Answer a request another agent sent you, [Request ID from NAME]: your text becomes \
+     ("reply" lispm-agents-bridge--tool-reply
+      ((request . ((type . "string") (description . "The request's id, as R1.")))
+       (text . ((type . "string") (description . "Your answer, self-contained."))))
+      ["request" "text"]
+      "Answer a request another agent sent you, [Request ID from NAME]: your text becomes \
 their reply.  They wait for it.")
-    ("search_tools" lispm-agents-bridge--tool-search
-     ((query . ((type . "string")
-                (description . "Keywords, as \"play music\" or \"sticky note\"; a word may be \
+     ("search_tools" lispm-agents-bridge--tool-search
+      ((query . ((type . "string")
+                 (description . "Keywords, as \"play music\" or \"sticky note\"; a word may be \
 part of a longer one, or misspelt.")))
-      (max_results . ((type . "integer")
-                      (description . "How many skills and tools to find (default 5)."))))
-     ["query"]
-     "Find what LispM can do for you: its skills, the manuals of the parts and apps of this \
+       (max_results . ((type . "integer")
+                       (description . "How many skills and tools to find (default 5)."))))
+      ["query"]
+      "Find what LispM can do for you: its skills, the manuals of the parts and apps of this \
 system, each with its tools, and its tools.  Search whenever a request needs something you \
 lack in Emacs or its apps.  Load a skill with skill; call a tool with call_tool.")
-    ("skill" lispm-agents-bridge--tool-skill
-     ((name . ((type . "string") (description . "The skill to load, as search_tools names it."))))
-     ["name"]
-     "Load a LispM skill that search_tools found: how to do a kind of thing in this system, \
+     ("skill" lispm-agents-bridge--tool-skill
+      ((name . ((type . "string") (description . "The skill to load, as search_tools names it."))))
+      ["name"]
+      "Load a LispM skill that search_tools found: how to do a kind of thing in this system, \
 and its tools with their inputs, which you call with call_tool.")
-    ("call_tool" lispm-agents-bridge--tool-call
-     ((name . ((type . "string") (description . "The LispM tool, as search_tools or a skill names it.")))
-      (input . ((type . "object") (description . "Its input, as its schema says."))))
-     ["name"]
-     "Run a LispM tool.  It runs under LispM's permission policy: reading runs at once, while \
+     ("call_tool" lispm-agents-bridge--tool-call
+      ((name . ((type . "string") (description . "The LispM tool, as search_tools or a skill names it.")))
+       (input . ((type . "object") (description . "Its input, as its schema says."))))
+      ["name"]
+      "Run a LispM tool.  It runs under LispM's permission policy: reading runs at once, while \
 changing files, running shell commands and the like wait for the user's approval in Emacs, \
-which may take a while."))
-  "The tools LispM serves the editor's agents, in the form of
-`lispm-agents-context-tools'.")
+which may take a while.")))
+  "The tools LispM serves the editor's agents, as `lispm-tool-spec' structs.")
 
 (cl-defmethod lispm-agents-context-instructions ((server lispm-agents-mcp))
   "Tell SERVER's agent that LispM is here, and how to work with it."
@@ -768,8 +767,9 @@ your directory.%s"
                 "")))))
 
 (setq lispm-agents-mcp-extra-tools
-      (append (seq-remove (lambda (tool) (assoc (car tool) lispm-agents-bridge-tools))
-                          lispm-agents-mcp-extra-tools)
+      (append (lispm-tool-spec-remove
+               (mapcar #'lispm-tool-spec-name lispm-agents-bridge-tools)
+               lispm-agents-mcp-extra-tools)
               lispm-agents-bridge-tools))
 
 (add-hook 'lispm-peer-functions #'lispm-agents-bridge-peers)

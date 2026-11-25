@@ -51,8 +51,9 @@
 
 (defvar lispm-api-function #'lispm-api-stream
   "Function performing a model request.
-Called with BACKEND, BODY, BETAS and the keyword callbacks :on-delta,
-:on-done and :on-error, as `lispm-api-stream'.  Tests replace it.")
+Called with BACKEND, REQUEST (a `lispm-api-envelope') and the keyword
+callbacks :on-delta, :on-done and :on-error, as `lispm-api-stream'.
+Tests replace it.")
 
 (defconst lispm-api-shapes
   '((openai :path "/chat/completions"
@@ -77,8 +78,8 @@ Called with BACKEND, BODY, BETAS and the keyword callbacks :on-delta,
                :whole lispm-anthropic-whole))
   "API shapes, by name.  Each is a plist of:
   :path      appended to the backend's URL
-  :request   (BACKEND MODEL EFFORT SYSTEM TOOLS MESSAGES) -> (BODY . BETAS)
-  :headers   (KEY BETAS) -> list of \"Name: value\" strings
+  :request   (BACKEND MODEL EFFORT SYSTEM TOOLS MESSAGES) -> envelope
+  :headers   (KEY EXTRA-HEADERS) -> list of \"Name: value\" strings
   :stream    () -> a fresh decoding state
   :feed      (STATE CHUNK ON-DELTA) decodes part of an event stream
   :started   (STATE) -> non-nil once events were decoded
@@ -120,9 +121,9 @@ Called with BACKEND, BODY, BETAS and the keyword callbacks :on-delta,
           (t (user-error "Bad :key in backend: %S" key)))))
 
 (defun lispm-api-request (backend model effort system tools messages)
-  "Build a request for BACKEND in the shape it speaks; return (BODY . BETAS).
+  "Build a request for BACKEND in the shape it speaks.
 MODEL, EFFORT and SYSTEM are strings; TOOLS and MESSAGES are lists of
-alists in Messages shape."
+alists in Messages shape.  Returns a `lispm-api-envelope'."
   (funcall (plist-get (lispm-api--shape backend) :request)
            backend model effort system tools messages))
 
@@ -198,20 +199,26 @@ It is fed on stdin, so keys stay off the command line."
           (delete-process proc))
         (ignore-errors (delete-file file))))))
 
-(cl-defun lispm-api-stream (backend body betas &key on-delta on-done on-error)
-  "POST BODY to BACKEND and stream the response.
-Responses that are not streamed (BODY asks for none) arrive whole.
-BETAS are beta feature names, for APIs that have them.  ON-DELTA
-receives (KIND STRING) as content streams in: KIND text, thinking or
-tool (STRING being the tool's name); and (tool-input PLIST) as a tool
-call's input arrives, PLIST holding its :id, :name and the :json
-received so far.  ON-DONE receives the final message, in Messages
-shape; ON-ERROR a plist with :status, :type and :message.  Return the
-curl process or kernel cancellation function."
-  (let* ((shape (lispm-api--shape backend))
+(cl-defun lispm-api-stream (backend request &key on-delta on-done on-error)
+  "POST REQUEST to BACKEND and stream the response.
+REQUEST is a `lispm-api-envelope' (or a bare request body alist for
+direct transport callers).  Responses that are not streamed arrive
+whole.  ON-DELTA receives (KIND STRING) as content streams in: KIND
+text, thinking or tool (STRING being the tool's name); and
+\(tool-input PLIST) as a tool call's input arrives, PLIST holding
+its :id, :name and the :json received so far.  ON-DONE receives the
+final message, in Messages shape; ON-ERROR a plist with :status,
+:type and :message.  Return the curl process or kernel cancellation
+function."
+  (let* ((env (if (lispm-api-envelope-p request)
+                  request
+                (lispm-api-make-envelope request)))
+         (shape (lispm-api--shape backend))
          (state (funcall (plist-get shape :stream)))
-         (headers (funcall (plist-get shape :headers) (lispm-api--key backend) betas))
-         (payload (lispm--json-encode body))
+         (headers (funcall (plist-get shape :headers)
+                           (lispm-api--key backend)
+                           (lispm-api-envelope-headers env)))
+         (payload (lispm--json-encode (lispm-api-envelope-body env)))
          (url (concat (string-remove-suffix "/" (plist-get backend :url))
                       (plist-get shape :path)))
          (client-error nil))

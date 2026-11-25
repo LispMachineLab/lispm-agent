@@ -52,10 +52,13 @@ returning one, (error . PLIST), a failure with the :status, :type and
          (string-match "You are \"\\([^\"]+\\)\"" system)
          (intern (match-string 1 system)))))
 
-(defun lispm-test--fake-api (_backend body _betas &rest callbacks)
-  "Answer BODY from `lispm-test--scripts' through CALLBACKS."
-  (push body lispm-test--requests)
-  (let* ((script (assq (lispm-test--agent-name body) lispm-test--scripts))
+(defun lispm-test--fake-api (_backend request &rest callbacks)
+  "Answer REQUEST from `lispm-test--scripts' through CALLBACKS."
+  (let* ((body (if (lispm-api-envelope-p request)
+                   (lispm-api-envelope-body request)
+                 request))
+         (_ (push body lispm-test--requests))
+         (script (assq (lispm-test--agent-name body) lispm-test--scripts))
          (step (pop (cdr script))))
     (unless (eq step 'hang)
       (run-at-time 0.01 nil
@@ -655,22 +658,27 @@ needs one."
         (messages (list `((role . "user")
                           (content . [((type . "tool_result") (tool_use_id . "x")
                                        (content . "boom") (is_error . t))])))))
-    (pcase-let ((`(,body . ,betas)
-                 (lispm-api-request (alist-get 'anthropic lispm-backends)
-                                    "claude-opus-5-5" "high" "sys" tools messages)))
+    (let* ((env (lispm-api-request (alist-get 'anthropic lispm-backends)
+                                   "claude-opus-5-5" "high" "sys" tools messages))
+           (body (lispm-api-envelope-body env))
+           (betas (plist-get (lispm-api-envelope-meta env) :betas)))
+      (should (lispm-api-envelope-p env))
       (should (equal (alist-get 'thinking body)
                      '((type . "adaptive") (display . "updates")
                        (block_binding (prefix_mismatch_behavior . "drop_block")))))
       (should (equal (alist-get 'fallbacks body) "default"))
       (should (member "server-side-fallback-2026-07-01" betas))
+      (should (equal (lispm-api-envelope-headers env)
+                     (list (concat "anthropic-beta: " (string-join betas ",")))))
       (should (eq (alist-get 'eager_input_streaming (aref (alist-get 'tools body) 0)) t))
       (should (equal (aref (alist-get 'messages body) 0) (car messages))))
-    (pcase-let ((`(,body . ,betas)
-                 (lispm-api-request '(:api anthropic :model "m")
-                                    "gpt-5.5" "high" "sys" tools messages)))
+    (let* ((env (lispm-api-request '(:api anthropic :model "m")
+                                   "gpt-5.5" "high" "sys" tools messages))
+           (body (lispm-api-envelope-body env)))
+      (should (lispm-api-envelope-p env))
       (should-not (assq 'thinking body))
       (should-not (assq 'fallbacks body))
-      (should-not betas)
+      (should-not (lispm-api-envelope-headers env))
       (should (eq (alist-get 'stream body) :false))
       (should (equal (alist-get 'output_config body) '((effort . "high"))))
       (should-not (assq 'eager_input_streaming (aref (alist-get 'tools body) 0)))
@@ -712,8 +720,10 @@ BODY can use `port' and `log', the file the server records requests in."
     (let ((backend (list :url (format "http://127.0.0.1:%d" port)
                          :key "test-key"))
           result err deltas)
-      (lispm-api-stream backend '((model . "fake") (messages . [((role . "user") (content . "你好 λ→∀"))]))
-                        '("beta-a" "beta-b")
+      (lispm-api-stream backend
+                        (lispm-api-make-envelope
+                         '((model . "fake") (messages . [((role . "user") (content . "你好 λ→∀"))]))
+                         :headers '("anthropic-beta: beta-a,beta-b"))
                         :on-delta (lambda (kind text) (push (cons kind text) deltas))
                         :on-done (lambda (m) (setq result m))
                         :on-error (lambda (e) (setq err e)))
@@ -745,13 +755,13 @@ BODY can use `port' and `log', the file the server records requests in."
                      (setq captured-payload payload)
                      #'ignore)))
           (lispm-api-stream backend '((model . "fake") (messages . [((role . "user") (content . "我要你画一个蚂蚁骑自行车的网页图"))]))
-                            nil :on-done #'ignore :on-error #'ignore)
+                            :on-done #'ignore :on-error #'ignore)
           (should (stringp captured-payload))
           (should (multibyte-string-p captured-payload))
           (should (equal (alist-get 'content (aref (alist-get 'messages (lispm--json-decode captured-payload)) 0))
                          "我要你画一个蚂蚁骑自行车的网页图"))))
       (setq result nil err nil)
-      (lispm-api-stream backend '((model . "fake") (stream . :false)) nil
+      (lispm-api-stream backend '((model . "fake") (stream . :false))
                         :on-done (lambda (m) (setq result m))
                         :on-error (lambda (e) (setq err e)))
       (should (lispm-test--wait (lambda () (or result err)) 10))
@@ -759,7 +769,7 @@ BODY can use `port' and `log', the file the server records requests in."
       (should (equal (mapcar (lambda (b) (alist-get 'input b)) (alist-get 'content result))
                      '(nil ((x . 1)) nil)))
       (setq result nil err nil)
-      (lispm-api-stream backend '((model . "overloaded")) nil
+      (lispm-api-stream backend '((model . "overloaded"))
                         :on-done (lambda (m) (setq result m))
                         :on-error (lambda (e) (setq err e)))
       (should (lispm-test--wait (lambda () (or result err)) 10))
@@ -783,14 +793,15 @@ BODY can use `port' and `log', the file the server records requests in."
 
 (ert-deftest lispm-test-openai-request ()
   "Messages-shape conversations become Chat Completions requests."
-  (pcase-let ((`(,body . ,betas)
-               (lispm-api-request '(:api openai :max-tokens 1000
-                                    :features (streaming reasoning-effort stream-usage
-                                               max-completion-tokens))
-                                  "gpt-x" "low" "Be brief."
-                                  (list (lispm-tool-schema (lispm-get-tool "read_file")))
-                                  lispm-test--conversation)))
-    (should-not betas)
+  (let* ((env (lispm-api-request '(:api openai :max-tokens 1000
+                                  :features (streaming reasoning-effort stream-usage
+                                             max-completion-tokens))
+                                 "gpt-x" "low" "Be brief."
+                                 (list (lispm-tool-schema (lispm-get-tool "read_file")))
+                                 lispm-test--conversation))
+         (body (lispm-api-envelope-body env)))
+    (should (lispm-api-envelope-p env))
+    (should-not (lispm-api-envelope-headers env))
     (should (eq (alist-get 'stream body) t))
     (should (equal (alist-get 'max_completion_tokens body) 1000))
     (should (equal (alist-get 'reasoning_effort body) "low"))
@@ -811,8 +822,10 @@ BODY can use `port' and `log', the file the server records requests in."
                     ((role . "tool") (tool_call_id . "c2") (content . "Error: boom"))
                     ((role . "user") (content . "and then?"))])))
   ;; Without features: the most widely understood request.
-  (pcase-let ((`(,body . ,_) (lispm-api-request '(:api openai) "m" "low" nil nil
-                                                (list (car lispm-test--conversation)))))
+  (let* ((env (lispm-api-request '(:api openai) "m" "low" nil nil
+                                 (list (car lispm-test--conversation))))
+         (body (lispm-api-envelope-body env)))
+    (should-not (lispm-api-envelope-headers env))
     (should (equal body `((model . "m") (max_tokens . ,lispm-max-tokens) (stream . :false)
                           (messages . [((role . "user") (content . "hi"))]))))))
 
@@ -850,7 +863,7 @@ BODY can use `port' and `log', the file the server records requests in."
         (should (lispm-openai-stream-complete-p state))
         (let ((message (lispm-openai-result state)))
           (should (equal (alist-get 'content message)
-                         [((type . "reasoning") (text . "Think"))
+                         [((type . "thinking") (thinking . "Think") (ephemeral . t))
                           ((type . "text") (text . "Hello"))
                           ((type . "tool_use") (id . "c1") (name . "read_file") (input (path . 1)))
                           ((type . "tool_use") (id . "c2") (name . "x") (input))]))
@@ -888,7 +901,7 @@ BODY can use `port' and `log', the file the server records requests in."
             (should (string-match-p " | .*project/?\na\\.txt\\'" reply))
             (should (equal (lispm-agent-usage agent) usage))
             (let ((text (lispm-test--transcript agent)))
-              (should (string-match-p "^\\*\\* Reasoning: Plan: read, then list\\.$" text))
+              (should (string-match-p "^\\*\\* Thinking: Plan: read, then list\\.$" text))
               (should (string-match-p "^\\*\\* Reply\nLooking λ→∀\\.\n" text))
               (should (string-match-p "^\\*\\* DONE read_file  a\\.txt$" text))
               (should (string-match-p "^\\*\\* DONE list_directory  \\.$" text)))
@@ -1440,16 +1453,17 @@ not one, has every tool ask."
            (agent (lispm-defagent tester "Test agent." :root project))
            (asked 0)
            (lispm-api-function
-            (lambda (backend body betas &rest callbacks)
-              (if (not (string-prefix-p "You title conversations" (alist-get 'system body)))
-                  (apply #'lispm-test--fake-api backend body betas callbacks)
-                (cl-incf asked)
-                (should-not (alist-get 'tools body))
-                (should (string-match-p "Say hello to Lisp"
-                                        (alist-get 'text (aref (alist-get 'content (aref (alist-get 'messages body) 0)) 0))))
-                (run-at-time 0.01 nil (plist-get callbacks :on-done)
-                             (lispm-test--msg "end_turn" (lispm-test--text "“向 Lisp 问好”。")))
-                nil))))
+            (lambda (backend request &rest callbacks)
+              (let ((body (lispm-api-envelope-body request)))
+                (if (not (string-prefix-p "You title conversations" (alist-get 'system body)))
+                    (apply #'lispm-test--fake-api backend request callbacks)
+                  (cl-incf asked)
+                  (should-not (alist-get 'tools body))
+                  (should (string-match-p "Say hello to Lisp"
+                                          (alist-get 'text (aref (alist-get 'content (aref (alist-get 'messages body) 0)) 0))))
+                  (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                               (lispm-test--msg "end_turn" (lispm-test--text "“向 Lisp 问好”。")))
+                  nil)))))
       (setq lispm-test--scripts
             `((tester ,(lispm-test--msg "end_turn" (lispm-test--text "Hello, Lisp."))
                       ,(lispm-test--msg "end_turn" (lispm-test--text "Again.")))))
@@ -7687,10 +7701,10 @@ is writing in is not compacted under them."
              (agent (lispm-defagent tester "Test agent." :root project))
              (summaries nil)
              (lispm-api-function
-              (lambda (backend body betas &rest callbacks)
-                (if (equal (lispm-test--last-text body) lispm--summary-prompt)
+              (lambda (backend request &rest callbacks)
+                (if (equal (lispm-test--last-text (lispm-api-envelope-body request)) lispm--summary-prompt)
                     (progn (push (plist-get callbacks :on-done) summaries) nil)
-                  (apply #'lispm-test--fake-api backend body betas callbacks)))))
+                  (apply #'lispm-test--fake-api backend request callbacks)))))
         (setq lispm-test--scripts
               `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Long.")) 4000)
                         ,(lispm-test--msg "end_turn" (lispm-test--text "Short.")))))
@@ -7757,10 +7771,10 @@ idle waits for that summary, and memory is not saved again."
              (agent (lispm-defagent tester "Test agent." :root project))
              (summaries nil)
              (lispm-api-function
-              (lambda (backend body betas &rest callbacks)
-                (if (equal (lispm-test--last-text body) lispm--summary-prompt)
+              (lambda (backend request &rest callbacks)
+                (if (equal (lispm-test--last-text (lispm-api-envelope-body request)) lispm--summary-prompt)
                     (progn (push (plist-get callbacks :on-done) summaries) nil)
-                  (apply #'lispm-test--fake-api backend body betas callbacks)))))
+                  (apply #'lispm-test--fake-api backend request callbacks)))))
         (setq lispm-test--scripts
               `((tester ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Long.")) 7000)
                         ,(lispm-test--sized (lispm-test--msg "end_turn" (lispm-test--text "Saved.")) 7000)
@@ -7852,15 +7866,16 @@ every change named in a commit, and the rest left as it was."
                      \"drop\": [{\"id\": 6, \"reason\": \"The staging server is gone.\"}]}")
              (asked nil)
              (lispm-api-function
-              (lambda (backend body betas &rest callbacks)
-                (if (not (string-prefix-p "You keep the long-term memory" (alist-get 'system body)))
-                    (apply #'lispm-test--fake-api backend body betas callbacks)
-                  (push body asked)
-                  ;; Recalled while the plan is made: the plan still holds.
-                  (lispm-memory-recall agent "emacs")
-                  (run-at-time 0.01 nil (plist-get callbacks :on-done)
-                               (lispm-test--msg "end_turn" (lispm-test--text (concat "The plan:\n" plan))))
-                  nil))))
+              (lambda (backend request &rest callbacks)
+                (let ((body (lispm-api-envelope-body request)))
+                  (if (not (string-prefix-p "You keep the long-term memory" (alist-get 'system body)))
+                      (apply #'lispm-test--fake-api backend request callbacks)
+                    (push body asked)
+                    ;; Recalled while the plan is made: the plan still holds.
+                    (lispm-memory-recall agent "emacs")
+                    (run-at-time 0.01 nil (plist-get callbacks :on-done)
+                                 (lispm-test--msg "end_turn" (lispm-test--text (concat "The plan:\n" plan))))
+                    nil)))))
         (with-temp-file file
           (insert "#+title: Memory\n"
                   (lispm-test--memory-entry "Indent with spaces  :style:" "[2026-01-02 Fri 10:00]"
@@ -7953,7 +7968,7 @@ entries were recalled is nothing new.  Without git, it is not tried."
              (reply "{\"replace\": [], \"drop\": []}")
              (meanwhile nil)
              (lispm-api-function
-              (lambda (_backend _body _betas &rest callbacks)
+              (lambda (_backend _request &rest callbacks)
                 (cl-incf asked)
                 (when meanwhile (funcall meanwhile))
                 (run-at-time 0.01 nil (plist-get callbacks :on-done)
@@ -8103,10 +8118,11 @@ this week stay as they are."
              (today (format-time-string "%Y-%m-%d.org"))
              (asked nil)
              (lispm-api-function
-              (lambda (backend body betas &rest callbacks)
-                (let ((system (alist-get 'system body)))
+              (lambda (backend request &rest callbacks)
+                (let* ((body (lispm-api-envelope-body request))
+                       (system (alist-get 'system body)))
                   (if (not (string-prefix-p "You condense" system))
-                      (apply #'lispm-test--fake-api backend body betas callbacks)
+                      (apply #'lispm-test--fake-api backend request callbacks)
                     (push body asked)
                     (string-match "summary of the \\(?:week\\|month\\) \\([0-9W-]+\\)," system)
                     (run-at-time 0.01 nil (plist-get callbacks :on-done)
@@ -9353,7 +9369,7 @@ first chosen; C-n and C-p choose, TAB completes, RET runs the one chosen."
                      "xt\": \"deux\\nzw"
                      "ei\\n\"}"))
            (lispm-api-function
-            (lambda (_backend _body _betas &rest callbacks)
+            (lambda (_backend _request &rest callbacks)
               ;; Stream the call's input, and never finish.
               (let ((json ""))
                 (dolist (piece pieces)
@@ -10102,26 +10118,26 @@ report their kind, tools and code, and new skills are created."
       (unwind-protect
           (let ((lispm-write-skill-directory user-dir)
                 (lispm-skill-directories (list lispm-skills--builtin user-dir)))
-            (lispm-mcp-server-add "peekaboo"
+            (lispm-settings-mcp-add "peekaboo"
                                   '(:command " npx " :args ("-y" "@steipete/peekaboo" "mcp")
                                              :description " Screen tools " :sandbox none)
                                   t)
-            (let ((config (lispm-mcp-server-get "peekaboo")))
+            (let ((config (lispm-settings-mcp-get "peekaboo")))
               (should (equal (plist-get config :command) "npx"))
               (should (equal (plist-get config :description) "Screen tools"))
               (should (eq (plist-get config :sandbox) 'none)))
-            (should (equal (lispm-mcp-server-status "peekaboo")
+            (should (equal (lispm-settings-mcp-status "peekaboo")
                            '(:state stopped :tools 0 :tool-names nil)))
-            (should-error (lispm-mcp-server-add "peekaboo" '(:command "npx")) :type 'user-error)
-            (should-error (lispm-mcp-server-add "bad name" '(:command "npx")) :type 'user-error)
-            (should-error (lispm-mcp-server-add "empty" '(:description "none")) :type 'user-error)
-            (lispm-mcp-server-change "peekaboo"
+            (should-error (lispm-settings-mcp-add "peekaboo" '(:command "npx")) :type 'user-error)
+            (should-error (lispm-settings-mcp-add "bad name" '(:command "npx")) :type 'user-error)
+            (should-error (lispm-settings-mcp-add "empty" '(:description "none")) :type 'user-error)
+            (lispm-settings-mcp-change "peekaboo"
                                      '(:url " https://mcp.example/sse " :description "HTTP MCP" :defer nil)
                                      t)
-            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :url)
+            (should (equal (plist-get (lispm-settings-mcp-get "peekaboo") :url)
                            "https://mcp.example/sse"))
-            (lispm-mcp-server-remove "peekaboo" t)
-            (should-not (lispm-mcp-server-get "peekaboo"))
+            (lispm-settings-mcp-remove "peekaboo" t)
+            (should-not (lispm-settings-mcp-get "peekaboo"))
             (should (memq 'lispm-mcp-servers saved))
             ;; Creating a skill in the user's directory and inspecting it.
             (let ((file (lispm-create-skill "my-helper" "Help with notes." "* Steps\n\nDo it." "My Helper" t)))
@@ -10151,12 +10167,12 @@ the skill form creates a new skill file."
               (should (equal (lispm-ui-form-value 'command) "npx"))
               (should (eq (lispm-ui-form-value 'sandbox) 'none))
               (lispm-ui-form-submit))
-            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :command) "npx"))
+            (should (equal (plist-get (lispm-settings-mcp-get "peekaboo") :command) "npx"))
             (with-current-buffer (lispm-mcp-form "peekaboo")
               (should (equal (lispm-ui-form-title) (lispm-tr "MCP Server %s" "peekaboo")))
               (lispm-ui-form-set 'transport 'http 'url "https://mcp.example/v1")
               (lispm-ui-form-submit))
-            (should (equal (plist-get (lispm-mcp-server-get "peekaboo") :url)
+            (should (equal (plist-get (lispm-settings-mcp-get "peekaboo") :url)
                            "https://mcp.example/v1"))
             (with-current-buffer (lispm-skill-form)
               (should (equal (lispm-ui-form-title) (lispm-tr "New Skill")))
@@ -11476,7 +11492,7 @@ LispM's agents see them; and is told so when it connects."
       (should (equal (seq-difference
                       (mapcar (lambda (tool) (alist-get 'name tool))
                               (alist-get 'tools (alist-get 'result (lispm-test--mcp codex "tools/list"))))
-                      (mapcar #'car lispm-agents-mcp-tools))
+                      (mapcar #'lispm-tool-spec-name lispm-agents-mcp-tools))
                      '("list_agents" "send_message" "ask_agent" "reply" "search_tools" "skill" "call_tool")))
       ;; An ended terminal is a peer no more; a new one takes no name in use.
       (kill-buffer codex)
