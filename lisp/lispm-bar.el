@@ -62,7 +62,6 @@
 (require 'lispm-skills)
 (require 'lispm-chat)
 
-(declare-function lispm-show "lispm" (agent))
 (declare-function lispm-setup-model "lispm-backend-form" ())
 
 (defgroup lispm-bar nil
@@ -97,7 +96,9 @@
   "Show the conversation with LispM itself in a chat, all of it.
 The bar shows the same conversation, its latest reply."
   (interactive)
-  (lispm-show (lispm-system-agent)))
+  (unless lispm-show-agent-function
+    (user-error "Chat display is not available"))
+  (funcall lispm-show-agent-function (lispm-system-agent)))
 
 ;;;; What the bar finds
 

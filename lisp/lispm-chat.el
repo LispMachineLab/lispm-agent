@@ -64,9 +64,6 @@
 (require 'yank-media)
 (require 'dnd)
 
-(declare-function lispm--read-session "lispm" (prompt))
-(declare-function lispm-dashboard "lispm" ())
-
 (defgroup lispm-chat nil
   "The chat view of LispM sessions."
   :group 'lispm
@@ -1479,9 +1476,11 @@ checked or not as `lispm-ground-code' now says."
     (goto-char (point-max))
     (insert text)))
 
-(defun lispm-chat--in-input-p ()
+(defun lispm-chat-in-input-p ()
   "Non-nil if point is in the text being written."
   (>= (point) lispm-chat--input-start))
+
+(defalias 'lispm-chat--in-input-p #'lispm-chat-in-input-p)
 
 (defvar lispm-chat-commands)
 
@@ -1837,7 +1836,9 @@ Return the chat of the new conversation."
 
 (defun lispm-chat-resume (agent _argument)
   "Resume a recorded conversation where AGENT's chat is."
-  (let* ((session (lispm--read-session (lispm-tr "Resume: ")))
+  (unless lispm-read-session-function
+    (user-error "Session selection is not available"))
+  (let* ((session (funcall lispm-read-session-function (lispm-tr "Resume: ")))
          (resumed (lispm-resume-file (plist-get session :file))))
     (unless (eq resumed agent)
       (lispm-chat--replace agent resumed))))
@@ -1903,7 +1904,9 @@ ARGUMENT edit edits the rules of the level Custom instead."
 
 (defun lispm-chat-agents (_agent _argument)
   "Show every agent."
-  (lispm-dashboard))
+  (unless lispm-open-dashboard-function
+    (user-error "Dashboard is not available"))
+  (funcall lispm-open-dashboard-function))
 
 (defun lispm-chat-transcript (agent &optional _argument)
   "Show the org transcript of AGENT's conversation."
@@ -2144,6 +2147,15 @@ numbers come or go."
         (lispm-chat-mode)
         (goto-char (point-max))))
     chat))
+
+(defun lispm-chat--on-model-change (agent)
+  "Redraw AGENT's chat view if open after AGENT switches model."
+  (when (buffer-live-p (lispm-agent-view agent))
+    (with-current-buffer (lispm-agent-view agent)
+      (lispm-chat--redraw))))
+
+(add-hook 'lispm-model-change-functions #'lispm-chat--on-model-change)
+(setq lispm-open-transcript-function #'lispm-chat-transcript)
 
 (provide 'lispm-chat)
 ;;; lispm-chat.el ends here

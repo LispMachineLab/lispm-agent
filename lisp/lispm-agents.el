@@ -67,6 +67,7 @@
 (require 'subr-x)
 (require 'lispm-agents-context)
 (require 'lispm-i18n)
+(require 'lispm-core)
 (require 'lispm-ui-ask)
 (require 'lispm-ui-form)
 (require 'lispm-finder nil t)
@@ -76,13 +77,11 @@
 
 (declare-function project-root "project" (project))
 (declare-function project-known-project-roots "project" ())
-(declare-function lispm-system-agent-p "lispm-core" (agent))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function eat-make "eat" (name program &optional startfile &rest switches))
 (declare-function eat-term-send-string-as-yank "eat" (terminal args))
 (declare-function eat-term-send-string "eat" (terminal string))
-(declare-function lispm-agents-roster--collect "lispm-agents-roster" (subject fields event))
 (defvar eat-terminal)
 (defvar embark-keymap-alist)
 (defvar project-current-directory-override)
@@ -372,10 +371,9 @@ SUBJECT is an agent, buffer, stable (KIND SESSION-ID) key, or nil when
 the affected agents must be found by comparing snapshots.  FIELDS is
 a list of symbols naming record fields; nil asks only for comparison.
 EVENT is a plist, as `lispm-agents-roster-change-functions' describes.
-This does nothing until the roster library and an observer are loaded."
-  (when (and lispm-agents-roster-change-functions
-             (fboundp 'lispm-agents-roster--collect))
-    (lispm-agents-roster--collect subject fields event)))
+Delegates to `lispm-emit-change' for registered observers."
+  (when lispm-agents-roster-change-functions
+    (lispm-emit-change subject fields event)))
 
 (defun lispm-agents--changed ()
   "Forget what was worked out from the agents, and tell who shows them."

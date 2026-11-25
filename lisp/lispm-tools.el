@@ -305,7 +305,20 @@ search_tools itself is there when there is anything to find."
              lispm-tools--registry)
     (sort tools (lambda (a b) (string< (lispm-tool-name a) (lispm-tool-name b))))))
 
-(define-error 'lispm-tool-argument-error "Invalid tool argument")
+(define-error 'lispm-tool-argument-error "Invalid tool argument" 'lispm-tool-error)
+
+(defun lispm-asked (call)
+  "What CALL awaits approval for, as a plist (:tool :name :input :reasons).
+The call itself; or for a call that makes calls in turn, as a Lisp
+program does, the call of its that waits (see `lispm-call-ask'), with
+:always, what approving it for good means, if it says.  :reasons are
+why functions of `lispm-tool-action-functions' had it ask, if they
+did: a list of strings."
+  (or (plist-get call :asking)
+      (list :tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))
+            :name (plist-get call :name)
+            :input (plist-get call :input)
+            :reasons (plist-get call :reasons))))
 
 (defun lispm-tools--argument (key type value opts)
   "Check VALUE of parameter KEY against TYPE and OPTS; return it for Lisp."
@@ -1931,9 +1944,11 @@ non-binary, or the list of match lines (at most LIMIT)."
             (erase-buffer)
             ;; Binary files are skipped; of a large one only the
             ;; head is read, to tell whether it is.
-            (when (and (ignore-errors
-                         (insert-file-contents file nil 0 (if small size 8000))
-                         t)
+            (when (and (condition-case nil
+                           (progn
+                             (insert-file-contents file nil 0 (if small size 8000))
+                             t)
+                         (file-error nil))
                        (not (save-excursion
                               (goto-char (point-min))
                               (search-forward "\0" (min (point-max) 8000) t))))
@@ -1960,9 +1975,10 @@ is abandoned if the turn of AGENT in which it started ends meanwhile."
         (puthash (expand-file-name file) b visiting)))
     (cl-labels
         ((expand-directory (dir)
-           (dolist (entry (nreverse (ignore-errors
-                                      (directory-files-and-attributes
-                                       dir t directory-files-no-dot-files-regexp))))
+           (dolist (entry (nreverse (condition-case nil
+                                        (directory-files-and-attributes
+                                         dir t directory-files-no-dot-files-regexp)
+                                      (file-error nil))))
              (let ((path (car entry))
                    (type (file-attribute-type (cdr entry))))
                (cond ((eq type t)

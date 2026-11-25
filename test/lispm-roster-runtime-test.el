@@ -90,7 +90,7 @@
     (let ((agent (lispm-defagent worker :root project))
           (events nil))
       (setq lispm-test--scripts '((worker hang)))
-      (cl-letf (((symbol-function 'lispm-agents-roster-notify)
+      (cl-letf (((symbol-function 'lispm-emit-change)
                  (lambda (_subject _fields &optional event)
                    (when event (push event events)))))
         (lispm-tell agent "Read this" :from "sender" :reply-to "session call")
@@ -114,7 +114,7 @@
                 :name "codex" :kind "Codex" :root "/tmp/"
                 :deliver (lambda (_text)
                            (setq metadata (copy-tree lispm-collab-delivery-metadata))))))
-    (cl-letf (((symbol-function 'lispm-agents-roster-notify)
+    (cl-letf (((symbol-function 'lispm-emit-change)
                (lambda (_subject _fields &optional event)
                  (when event (push event events)))))
       (lispm-tell-peer peer "Hello" "Ada")
@@ -146,7 +146,7 @@
       (with-current-buffer terminal
         (setq lispm-agents-buffer-session-id "codex-session"))
       (setq lispm-test--scripts '((worker hang)))
-      (cl-letf (((symbol-function 'lispm-agents-roster-notify)
+      (cl-letf (((symbol-function 'lispm-emit-change)
                  (lambda (_subject _fields &optional event)
                    (when event (push event events)))))
         (let* ((id (lispm-collab-ask-for-peer caller peer 'worker "Review"))

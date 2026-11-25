@@ -362,10 +362,11 @@ POST /call/NAME answer bin/lispm-tool."
 
 (defun lispm-mcp-server--read-file ()
   "The lines of `lispm-mcp-server-file': address, token and process id."
-  (ignore-errors
-    (with-temp-buffer
-      (insert-file-contents (expand-file-name lispm-mcp-server-file))
-      (split-string (buffer-string) "\n" t))))
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents (expand-file-name lispm-mcp-server-file))
+        (split-string (buffer-string) "\n" t))
+    (file-error nil)))
 
 (defun lispm-mcp-server--emacs-p (pid)
   "Non-nil if PID is the process id of a running Emacs, LispM.app's too."
@@ -445,7 +446,9 @@ if it still names this server."
     (when lispm-mcp-server--process
       (let ((lispm-mcp-server-file (or lispm-mcp-server--owned-file lispm-mcp-server-file)))
         (when (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token)
-          (ignore-errors (delete-file (expand-file-name lispm-mcp-server-file)))))
+          (condition-case nil
+              (delete-file (expand-file-name lispm-mcp-server-file))
+            (file-error nil))))
       (delete-process lispm-mcp-server--process))
     (setq lispm-mcp-server--process nil
           lispm-mcp-server--token nil)

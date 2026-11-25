@@ -89,12 +89,13 @@ its terminal, it has the terminal's end noticed all the same, see
   "Return a random version 4 UUID string.
 Its bytes are the system's, from /dev/urandom, as a server's token is a
 secret; `random''s where there is none."
-  (let ((bytes (or (ignore-errors
-                     (with-temp-buffer
-                       (set-buffer-multibyte nil)
-                       ;; A device takes no start, only an end.
-                       (insert-file-contents-literally "/dev/urandom" nil nil 16)
-                       (and (= (buffer-size) 16) (string-to-list (buffer-string)))))
+  (let ((bytes (or (condition-case nil
+                       (with-temp-buffer
+                         (set-buffer-multibyte nil)
+                         ;; A device takes no start, only an end.
+                         (insert-file-contents-literally "/dev/urandom" nil nil 16)
+                         (and (= (buffer-size) 16) (string-to-list (buffer-string))))
+                     (file-error nil))
                    (mapcar (lambda (_) (random 256)) (number-sequence 1 16)))))
     (setf (nth 6 bytes) (logior #x40 (logand (nth 6 bytes) #x0f))
           (nth 8 bytes) (logior #x80 (logand (nth 8 bytes) #x3f)))
@@ -565,8 +566,9 @@ ERRORP, non-nil, marks the call failed."
 
 (defun lispm-agents-context-parse (text)
   "Return the JSON-RPC message TEXT as an alist, or nil when malformed."
-  (ignore-errors
-    (json-parse-string text :object-type 'alist :null-object nil :false-object :false)))
+  (condition-case nil
+      (json-parse-string text :object-type 'alist :null-object nil :false-object :false)
+    ((json-error wrong-type-argument) nil)))
 
 (defun lispm-agents-context-handle (server tools message)
   "Answer the MCP MESSAGE, an alist, for SERVER offering TOOLS.

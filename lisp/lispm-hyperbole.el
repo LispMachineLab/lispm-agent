@@ -45,13 +45,12 @@
 ;;; Code:
 
 (require 'lispm-inspect)
+(require 'lispm-chat)
 
 (defvar hkey-alist)
 (defvar hyperbole-mode)
 (declare-function ibut:at-p "hbut" (&optional name-key-only))
 (declare-function hbut:act "hbut" (&optional hbut))
-(declare-function lispm-chat--in-input-p "lispm-chat" ())
-(declare-function lispm-chat-newline "lispm-chat" ())
 
 (defun lispm-hyperbole--presented ()
   "The object presented at point and where its text is, or nil.
@@ -76,7 +75,7 @@ See lispm-inspect.el."
   ;; In the chat's input, M-RET starts a new line, Hyperbole mode or not.
   ;; The Action Mouse Key keeps its own list.
   (add-to-list 'hkey-alist
-               '((and (derived-mode-p 'lispm-chat-mode) (lispm-chat--in-input-p))
+               '((and (derived-mode-p 'lispm-chat-mode) (lispm-chat-in-input-p))
                  . ((lispm-chat-newline) . (lispm-chat-newline)))))
 
 (defun lispm-hyperbole-act ()

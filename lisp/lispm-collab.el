@@ -92,8 +92,6 @@
 (require 'lispm-runtime)
 (require 'org-id)
 
-(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
-
 ;;;; Peers: agents of other programs
 
 (cl-defstruct (lispm-peer (:constructor lispm-peer-create)
@@ -167,8 +165,7 @@ A peer with no tools to reply with answers with its final reply."
                 (list :from from :to (lispm-peer-name peer)
                       :queued (plist-get lispm-collab-delivery-metadata :queued)))
           lispm-collab--requests)
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify nil '(waits)))
+    (lispm-emit-change nil '(waits))
     (condition-case err
         (if answer
             (funcall answer
@@ -181,8 +178,7 @@ A peer with no tools to reply with answers with its final reply."
                    (format "[Request %s from %s]\n%s\n\n(%s waits for your answer: give it with your reply tool, request %s.)"
                            id from request from id)))
       (error (setq lispm-collab--requests (cl-remove id lispm-collab--requests :key #'car :test #'equal))
-             (when (fboundp 'lispm-agents-roster-notify)
-               (lispm-agents-roster-notify nil '(waits)))
+             (lispm-emit-change nil '(waits))
              (signal (car err) (cdr err))))
     id))
 
@@ -193,20 +189,18 @@ An error if no request ID awaits PEER's reply."
     (unless (and entry (equal (nth 1 entry) (lispm-peer-name peer)))
       (error "No request %s awaits your reply" id))
     (setq lispm-collab--requests (delq entry lispm-collab--requests))
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify
-       nil '(waits) (list :type 'request-settled :request-id id
-                         :from (lispm-peer-name peer) :to (plist-get (nth 3 entry) :from))))
+    (lispm-emit-change
+     nil '(waits) (list :type 'request-settled :request-id id
+                        :from (lispm-peer-name peer) :to (plist-get (nth 3 entry) :from)))
     (funcall (nth 2 entry) text)))
 
 (defun lispm-collab-peer-ended (name)
   "Settle the requests asked of the peer NAME, which ended without replying."
   (dolist (entry (seq-filter (lambda (entry) (equal (nth 1 entry) name)) lispm-collab--requests))
     (setq lispm-collab--requests (delq entry lispm-collab--requests))
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify
-       nil '(waits) (list :type 'request-settled :request-id (car entry)
-                         :from name :to (plist-get (nth 3 entry) :from) :ended t)))
+    (lispm-emit-change
+     nil '(waits) (list :type 'request-settled :request-id (car entry)
+                        :from name :to (plist-get (nth 3 entry) :from) :ended t))
     (with-demoted-errors "lispm request callback: %S"
       (funcall (nth 2 entry) (format "%s ended without replying." name) t))))
 
@@ -329,9 +323,8 @@ conversation where CALLER works it then designates."
   "Report the wait between CALLER and TARGET changing, with optional EVENT.
 Both endpoints have data to refresh: CALLER's outgoing wait and
 TARGET's reverse wait, as well as their request ids."
-  (when (fboundp 'lispm-agents-roster-notify)
-    (lispm-agents-roster-notify caller '(waits-on request-ids) event)
-    (lispm-agents-roster-notify target '(waited-on-by request-ids))))
+  (lispm-emit-change caller '(waits-on request-ids) event)
+  (lispm-emit-change target '(waited-on-by request-ids)))
 
 (defun lispm-collab--starts-role-p (agent)
   "Non-nil when AGENT designates a role that starts a new helper."

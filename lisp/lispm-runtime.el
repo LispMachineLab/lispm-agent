@@ -63,10 +63,6 @@
 (require 'lispm-journal)
 
 (declare-function lispm-git-commit "lispm-memory" (agent message))
-(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
-(declare-function lispm-agents-roster--named-key "lispm-agents-roster" (name))
-
-(defvar lispm-agents-roster-change-functions)
 
 (defcustom lispm-save-sessions t
   "Whether to save session files at the end of every turn."
@@ -402,7 +398,9 @@ the session's agent is started again from its role."
 TEXT is an alist of permission classes and actions, as printed.  One
 that cannot be read stands for asking for everything, rather than for
 no ceiling at all."
-  (let ((ceiling (ignore-errors (car (read-from-string text)))))
+  (let ((ceiling (condition-case nil
+                     (car (read-from-string text))
+                   ((invalid-read-syntax end-of-file) nil))))
     (if (and (consp ceiling)
              (seq-every-p (lambda (entry)
                             (and (consp entry) (symbolp (car entry))
@@ -440,8 +438,7 @@ opened again, after Emacs stopped or by hand, is bounded alike."
 AGENT's session records it (#+lispm_parent:), so that lists of the
 sessions show AGENT's under PARENT's, see `lispm-sessions'."
   (setf (lispm-agent-parent agent) parent)
-  (when (fboundp 'lispm-agents-roster-notify)
-    (lispm-agents-roster-notify agent '(parent)))
+  (lispm-emit-change agent '(parent))
   (when (buffer-live-p (lispm-agent-buffer agent))
     (with-current-buffer (lispm-agent-buffer agent)
       (lispm--set-keyword "parent" parent))
@@ -927,13 +924,9 @@ The sender's request ids change with the recipient's mailbox.  When
 its key is unknown, compare relations globally rather than inventing
 an endpoint.  Ordinary messages without a request id need no scan."
   (when (and (or (plist-get entry :request-id) (plist-get entry :reply-to))
-             (bound-and-true-p lispm-agents-roster-change-functions)
-             (fboundp 'lispm-agents-roster-notify))
-    (lispm-agents-roster-notify agent '(request-ids))
-    (if-let* ((key (and (fboundp 'lispm-agents-roster--named-key)
-                        (lispm-agents-roster--named-key (plist-get entry :from)))))
-        (lispm-agents-roster-notify key '(request-ids))
-      (lispm-agents-roster-notify nil '(relations)))))
+             lispm-change-functions)
+    (lispm-emit-change agent '(request-ids)
+                       (list :type 'mailbox-relation :from (plist-get entry :from)))))
 
 (defun lispm-reply-value (reply)
   "The value a turn returned with REPLY, as a turn callback gets it; or nil.
@@ -1006,12 +999,11 @@ ANSWER-TO identifies the background request this input answers."
                         :queued (format-time-string "[%Y-%m-%d %a %H:%M]")))
       (setf (lispm-agent-inbox agent)
             (append (lispm-agent-inbox agent) (list entry))))
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify
-       agent '(mailbox)
-       (unless same
-         (list :type 'message-queued :id (plist-get entry :id) :from from
-               :to (list 'lispm (lispm-agent-id agent)) :request-id (or request-id reply-to)))))
+    (lispm-emit-change
+     agent '(mailbox)
+     (unless same
+       (list :type 'message-queued :id (plist-get entry :id) :from from
+             :to (list 'lispm (lispm-agent-id agent)) :request-id (or request-id reply-to))))
     (lispm--roster-entry-relations agent entry)
     (lispm-inbox-save agent)
     (run-at-time 0 nil #'lispm--drain-inbox agent)
@@ -1081,8 +1073,7 @@ handed over to a continuation, and the turn starts there."
       (progn
         (push (or entry (list :id (lispm-inbox-new-id) :text (lispm--take-input agent)))
               (lispm-agent-inbox agent))
-        (when (fboundp 'lispm-agents-roster-notify)
-          (lispm-agents-roster-notify agent '(mailbox)))
+        (lispm-emit-change agent '(mailbox))
         (lispm-inbox-save agent)
         (lispm-compact agent))
     (lispm--start-turn agent entry)))
@@ -1130,12 +1121,11 @@ is given up: the session goes on."
       (when (re-search-backward (lispm-transcript-heading-regexp 'user) nil t)
         (setcdr lispm--turn-start (copy-marker (match-beginning 0))))))
   (lispm-inbox-save agent)
-  (when (fboundp 'lispm-agents-roster-notify)
-    (lispm-agents-roster-notify
-     agent '(mailbox turn)
-     (list :type 'message-taken :id (plist-get (lispm-agent-entry agent) :id)
-           :from (plist-get entry :from) :to (list 'lispm (lispm-agent-id agent))
-           :request-id (or (plist-get entry :request-id) (plist-get entry :reply-to)))))
+  (lispm-emit-change
+   agent '(mailbox turn)
+   (list :type 'message-taken :id (plist-get (lispm-agent-entry agent) :id)
+         :from (plist-get entry :from) :to (list 'lispm (lispm-agent-id agent))
+         :request-id (or (plist-get entry :request-id) (plist-get entry :reply-to))))
   (with-demoted-errors "LispM: taking a snapshot: %S"
     (lispm-journal-begin agent))
   (lispm--request agent))
@@ -1456,12 +1446,6 @@ with the session's size in bytes when the request was made."
     (when (and (> tokens 0) (lispm-agent-request-bytes agent))
       (setf (lispm-agent-context agent) (cons tokens (lispm-agent-request-bytes agent))))))
 
-(defun lispm--reply-text (content)
-  "Text blocks of CONTENT joined."
-  (string-trim
-   (mapconcat (lambda (b) (if (equal (alist-get 'type b) "text") (alist-get 'text b) ""))
-              content "")))
-
 (defun lispm--stop-note (stop message)
   "A note explaining stop reason STOP of MESSAGE, or nil if it is normal."
   (pcase stop
@@ -1680,8 +1664,7 @@ STATE overrides the call's final TODO keyword.  IMAGES are files the
 result holds besides TEXT."
   (when-let* ((call (gethash id (lispm-agent-pending agent))))
     (remhash id (lispm-agent-pending agent))
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify agent '(calls)))
+    (lispm-emit-change agent '(calls))
     (let* ((marker (plist-get call :marker))
            (note (and (functionp lispm-tool-result-note-function)
                       (ignore-errors
@@ -1788,10 +1771,10 @@ observers, as the runtime's agent status does for other interfaces."
           (lispm-agent-process agent) nil
           (lispm-agent-waiting-on agent) nil
           (lispm-agent-condition agent) nil)
-    (when (and waiting-on (fboundp 'lispm-agents-roster-notify))
-      (lispm-agents-roster-notify agent '(waits-on request-ids))
+    (when waiting-on
+      (lispm-emit-change agent '(waits-on request-ids))
       (dolist (target waiting-on)
-        (lispm-agents-roster-notify target '(waited-on-by request-ids))))
+        (lispm-emit-change target '(waited-on-by request-ids))))
     (clrhash (lispm-agent-pending agent))
     (lispm--in-session agent
       (lispm--newline)
@@ -1949,8 +1932,8 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
                    (append (lispm-agent-inbox agent) (lispm-agent-suspended agent)))))
       (unless keep-inbox
         (setf (lispm-agent-inbox agent) nil (lispm-agent-suspended agent) nil))
-      (when (and inbox (fboundp 'lispm-agents-roster-notify))
-        (lispm-agents-roster-notify agent '(mailbox)))
+      (when inbox
+        (lispm-emit-change agent '(mailbox)))
       (dolist (entry inbox)
         (lispm--roster-entry-relations agent entry)
         (when-let* ((callback (plist-get entry :callback)))
@@ -2025,19 +2008,6 @@ call's remembered approval settles this one; otherwise it is `user'."
         (pcase decision
           ((or 'approve 'allow) (lispm--run-tool agent id))
           ('deny (lispm--tool-done agent id (lispm--denial reason) t "DENIED")))))))
-
-(defun lispm-asked (call)
-  "What CALL awaits approval for, as a plist (:tool :name :input :reasons).
-The call itself; or for a call that makes calls in turn, as a Lisp
-program does, the call of its that waits (see `lispm-call-ask'), with
-:always, what approving it for good means, if it says.  :reasons are
-why functions of `lispm-tool-action-functions' had it ask, if they
-did: a list of strings."
-  (or (plist-get call :asking)
-      (list :tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))
-            :name (plist-get call :name)
-            :input (plist-get call :input)
-            :reasons (plist-get call :reasons))))
 
 (defun lispm-call-ask (agent id tool input continue &optional always reasons)
   "Have AGENT's running call ID await approval of a call of TOOL on INPUT.
@@ -2134,8 +2104,8 @@ looked up when a call runs."
         (unless (seq-find (lambda (e) (equal (plist-get e :id) (plist-get entry :id)))
                           (lispm-agent-inbox agent))
           (setf (lispm-agent-inbox agent) (append (lispm-agent-inbox agent) (list entry)))))
-      (when (and queued (fboundp 'lispm-agents-roster-notify))
-        (lispm-agents-roster-notify agent '(mailbox))
+      (when queued
+        (lispm-emit-change agent '(mailbox))
         (dolist (entry queued) (lispm--roster-entry-relations agent entry)))
       (cond ((or calls condition (and running (not (lispm--input-heading-p))))
              (lispm--resume-turn agent running calls condition))
@@ -2891,10 +2861,7 @@ If the restart needs a value, ask the user for it."
 (defun lispm--restart-use-model (agent _condition value)
   "Retry AGENT's request with the backend and model in VALUE, (BACKEND . MODEL)."
   (lispm-use-model agent (car value) (cdr value))
-  (when (buffer-live-p (lispm-agent-view agent))
-    (with-current-buffer (lispm-agent-view agent)
-      (when (fboundp 'lispm-chat--redraw)
-        (lispm-chat--redraw))))
+  (run-hook-with-args 'lispm-model-change-functions agent)
   (lispm--request agent))
 
 (defun lispm-use-model (agent backend model)
@@ -2913,7 +2880,9 @@ The condition's heading records it, so it outlives a restart of Emacs."
       (widen)
       (goto-char (point-max))
       (when (re-search-backward "^:RESTART: use-model\n:VALUE: \\(.*\\)$" nil t)
-        (when-let* ((value (ignore-errors (car (read-from-string (match-string 1)))))
+        (when-let* ((value (condition-case nil
+                               (car (read-from-string (match-string 1)))
+                             ((invalid-read-syntax end-of-file) nil)))
                     ((consp value))
                     ((or (null (car value)) (lispm-backend (car value)))))
           (setf (lispm-agent-backend agent) (car value)

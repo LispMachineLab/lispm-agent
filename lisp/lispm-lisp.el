@@ -72,10 +72,10 @@
   :type 'integer
   :group 'lispm)
 
-(define-error 'lispm-call-failed "Tool call failed")
+(define-error 'lispm-call-failed "Tool call failed" 'lispm-tool-error)
 (define-error 'lispm-call-denied "Tool call denied" 'lispm-call-failed)
-(define-error 'lispm-lisp-serialization-error "Cannot serialize value for tool")
-(define-error 'lispm-lisp-type-error "Invalid value returned to macro tool")
+(define-error 'lispm-lisp-serialization-error "Cannot serialize value for tool" 'lispm-tool-error)
+(define-error 'lispm-lisp-type-error "Invalid value returned to macro tool" 'lispm-tool-error)
 
 ;; Not an `error': a program cannot handle it, and goes no further.
 (put 'lispm-lisp-refused 'error-conditions '(lispm-lisp-refused))
@@ -596,7 +596,6 @@ call a tool for that, or use eval_elisp" head)))))))
 
 (defun lispm-lisp--prepare (code)
   "The forms of the program CODE, checked and rewritten to run."
-  (require 'lispm-lisp-macros)
   (mapcar (lambda (form)
             (when (and (consp form) (memq (car form) lispm-lisp--never))
               (lispm-lisp--refuse "%s" (car form)))

@@ -42,8 +42,6 @@
 (require 'lispm-i18n)
 (require 'lispm-exec)
 
-(declare-function lispm-agents-roster-notify "lispm-agents" (subject fields &optional event))
-
 (defgroup lispm nil
   "An Emacs-native agent runtime."
   :group 'tools
@@ -650,8 +648,7 @@ conversation (see `lispm-character-agent')."
     (lispm--apply-role agent role)
     (setq lispm--agents (append lispm--agents
                                 (list (cons (lispm-agent-name agent) agent))))
-    (when (fboundp 'lispm-agents-roster-notify)
-      (lispm-agents-roster-notify agent '(agents)))
+    (lispm-emit-change agent '(agents))
     agent))
 
 (defun lispm-forget-agent (agent)
@@ -661,8 +658,7 @@ conversation (see `lispm-character-agent')."
                      lispm--retired-agents nil nil #'equal)
           (lispm-agent-id agent)))
   (setq lispm--agents (seq-remove (lambda (cell) (eq (cdr cell) agent)) lispm--agents))
-  (when (fboundp 'lispm-agents-roster-notify)
-    (lispm-agents-roster-notify agent '(agents))))
+  (lispm-emit-change agent '(agents)))
 
 (defun lispm-register-agent (name &rest props)
   "Declare the standing agent NAME and return it.
@@ -688,8 +684,7 @@ define a role NAME.  Redeclaring a live agent keeps its runtime state."
             (lispm-agent-standing agent) t
             (lispm-agent-system agent) sys)
       (lispm--apply-role agent role)
-      (when (fboundp 'lispm-agents-roster-notify)
-        (lispm-agents-roster-notify agent '(root)))
+      (lispm-emit-change agent '(root))
       (run-hook-with-args 'lispm-agent-declared-functions agent)
       agent)))
 
@@ -1381,6 +1376,48 @@ Drops legacy \"reasoning\" blocks and canonical ephemeral thought blocks."
   (and (consp block)
        (not (equal (alist-get 'type block) "reasoning"))
        (not (alist-get 'ephemeral block))))
+
+;;;; Error hierarchy, observable hooks, and UI dispatch
+
+(define-error 'lispm-error "LispM error")
+(define-error 'lispm-api-error "LispM API error" 'lispm-error)
+(define-error 'lispm-tool-error "LispM tool error" 'lispm-error)
+(define-error 'lispm-mcp-error "LispM MCP error" 'lispm-error)
+(define-error 'lispm-session-error "LispM session error" 'lispm-error)
+(define-error 'lispm-collab-error "LispM collaboration error" 'lispm-error)
+
+(defvar lispm-change-functions nil
+  "Abnormal hook run with (SUBJECT FIELDS EVENT) on agent state changes.
+SUBJECT is an agent, buffer, (KIND SESSION-ID) key, or nil.
+FIELDS is a list of changed field symbols; EVENT is an optional plist.")
+
+(defun lispm-emit-change (subject fields &optional event)
+  "Notify `lispm-change-functions' observers of SUBJECT's FIELDS change."
+  (when lispm-change-functions
+    (run-hook-with-args 'lispm-change-functions subject fields event)))
+
+(defvar lispm-model-change-functions nil
+  "Abnormal hook run with (AGENT) when AGENT switches backend or model.")
+
+(defvar lispm-show-agent-function nil
+  "Function called with (AGENT) to open or focus AGENT's primary UI view.")
+
+(defvar lispm-open-transcript-function nil
+  "Function called with (AGENT) to display AGENT's transcript buffer.")
+
+(defvar lispm-open-dashboard-function nil
+  "Function called with no arguments to open the LispM dashboard.")
+
+(defvar lispm-read-session-function nil
+  "Function called with (PROMPT) to prompt for a saved session file.")
+
+(defun lispm-content-text (content)
+  "Return the joined, trimmed text blocks of API message CONTENT."
+  (string-trim
+   (mapconcat (lambda (b) (if (equal (alist-get 'type b) "text") (alist-get 'text b) ""))
+              content "")))
+
+(defalias 'lispm--reply-text #'lispm-content-text)
 
 (provide 'lispm-core)
 ;;; lispm-core.el ends here

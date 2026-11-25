@@ -499,5 +499,9 @@ AGENT is the running agent of the current project, or a new one."
     (lispm-mcp-server-maybe-start)
   (add-hook 'after-init-hook #'lispm-mcp-server-maybe-start))
 
+(setq lispm-show-agent-function #'lispm-show
+      lispm-open-dashboard-function #'lispm-dashboard
+      lispm-read-session-function #'lispm--read-session)
+
 (provide 'lispm)
 ;;; lispm.el ends here

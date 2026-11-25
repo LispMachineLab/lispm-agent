@@ -810,7 +810,7 @@ See `lispm-transcript-parts'."
         (cond
          ((assoc "TOOL_ID" props)
           (let* ((json (lispm-transcript--block bbeg own-end))
-                 (input (and json (ignore-errors (lispm--json-decode json))))
+                 (input (and json (condition-case nil (lispm--json-decode json) (json-error nil))))
                  result preview reasons stopped)
             (pcase-dolist (`(,kbeg ,kbody ,kend) kids)
               (let* ((kid (lispm-transcript--heading kbeg))
@@ -841,7 +841,7 @@ See `lispm-transcript-parts'."
           (push (list :kind 'block
                       :type (cdr (assoc "BLOCK" props))
                       :block (when-let* ((json (lispm-transcript--block bbeg own-end)))
-                               (ignore-errors (lispm--json-decode json)))
+                               (condition-case nil (lispm--json-decode json) (json-error nil)))
                       :pos hbeg)
                 parts))
          ((equal (plist-get heading :title) "Reply")
@@ -920,7 +920,9 @@ one chosen, once it is) and :value (the value it was given, if any),
               :state (plist-get heading :todo)
               :restarts (mapcar #'intern (split-string (or (cdr (assoc "RESTARTS" props)) "")))
               :restart (and restart (intern restart))
-              :value (and value (ignore-errors (car (read-from-string value))))
+              :value (and value (condition-case nil
+                                    (car (read-from-string value))
+                                  ((invalid-read-syntax end-of-file) nil)))
               :resume (and (assoc "RESUME" props) t)
               :message (lispm-transcript--text text end)
               :pos hbeg)))))
