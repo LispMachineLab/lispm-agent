@@ -29,7 +29,8 @@ ELS = $(addprefix lisp/, \
       lispm-stage.el lispm-edits.el lispm-spotlight.el lispm-stage-runner.el \
       lispm-shell-stage.el lispm-eval-stage.el \
       lispm-chat-items.el lispm-chat-view.el lispm-chat.el \
-      lispm-agents-work.el lispm-hyperbole.el lispm-bar-core.el lispm-bar.el \
+      lispm-agents-work.el lispm-office-scope.el lispm-office-actions.el lispm-office-inspect.el lispm-office.el \
+      lispm-hyperbole.el lispm-bar-core.el lispm-bar.el \
       lispm-batch.el lispm.el lispm-terminal.el)
 # The dependencies of lispm.el (Package-Requires), installed by `make deps'.
 DEPS = --eval "(progn (require 'package) (setq package-user-dir (expand-file-name \".deps\")) (package-initialize))" \
@@ -63,7 +64,7 @@ test: deps
 	  -l test/lispm-process-tools-test.el -l test/lispm-tool-search-test.el \
 	  -l test/lispm-mcp-lifecycle-test.el -l test/lispm-security-test.el \
 	  -l test/lispm-correctness-test.el -l test/lispm-basis-test.el -l test/lispm-unify-test.el \
-	  -l test/lispm-layers-test.el \
+	  -l test/lispm-layers-test.el -l test/lispm-office-test.el \
 	  -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
 	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'

@@ -4,8 +4,8 @@
 
 ;; Author: Ryan.K
 ;; URL: https://github.com/LispMachineLab/lispm-agent
-;; Version: 0.22.0
-;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-ui "0.10.0") (lispm-auth "0.2.8"))
+;; Version: 0.23.0
+;; Package-Requires: ((emacs "30.1") (mcp "0.1") (eat "0.9") (lispm-ui "0.13.0") (lispm-auth "0.2.8"))
 ;; Keywords: tools, ai
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -38,7 +38,9 @@
 ;;   context        an org buffer (lispm-transcript.el), read on every
 ;;                  request, so editing the buffer edits the context;
 ;;   interface      a chat laid out like Claude Code's, drawn from that
-;;                  org buffer (lispm-chat.el);
+;;                  org buffer (lispm-chat.el), plus a spatial Office
+;;                  view across active project and helper agents
+;;                  (lispm-office.el);
 ;;   tools          Emacs Lisp functions over buffers, files, processes
 ;;                  and Emacs itself (lispm-tools.el), which agents
 ;;                  compose in Lisp programs, each call under the
@@ -126,6 +128,7 @@
 (require 'lispm-settings)
 (require 'lispm-backend-form)
 (require 'lispm-chat)
+(require 'lispm-office)
 (require 'lispm-bar)
 (require 'lispm-mcp-server)
 (require 'lispm-batch)

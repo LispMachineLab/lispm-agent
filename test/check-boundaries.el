@@ -48,7 +48,9 @@
           "lispm-process-tools"))
     (4 . ("lispm-stage" "lispm-edits" "lispm-spotlight" "lispm-stage-runner"
           "lispm-shell-stage" "lispm-eval-stage" "lispm-chat-items"
-          "lispm-chat-view" "lispm-chat" "lispm-agents-work" "lispm-hyperbole"
+          "lispm-chat-view" "lispm-chat" "lispm-agents-work"
+          "lispm-office-scope" "lispm-office-actions"
+          "lispm-office-inspect" "lispm-office" "lispm-hyperbole"
           "lispm-bar-core" "lispm-bar" "lispm-batch" "lispm" "lispm-terminal")))
   "Mapping from integer layer (0..4) to list of module base names.")
 
