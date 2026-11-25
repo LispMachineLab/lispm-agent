@@ -11,14 +11,14 @@
 (defmacro lispm-process-tools-test--with-runs (&rest body)
   "Run BODY with isolated program ownership and restore all lifecycle hooks."
   (declare (indent 0))
-  `(let ((lispm-process-tools--runs nil)
+  `(let ((lispm-job--active nil)
          (lispm-sandbox-level 'none)
          (lispm-state-change-functions (copy-sequence lispm-state-change-functions))
          (lispm-session-end-functions (copy-sequence lispm-session-end-functions))
          (lispm-agents-context-release-functions
           (copy-sequence lispm-agents-context-release-functions)))
      (unwind-protect (progn ,@body)
-       (mapc #'lispm-process-tools--cleanup (copy-sequence lispm-process-tools--runs)))))
+       (lispm-job-cancel-all))))
 
 (defun lispm-process-tools-test--call (agent input)
   "Invoke run_program for AGENT on INPUT, returning (JSON . ERRORP)."
@@ -32,7 +32,7 @@
 (defun lispm-process-tools-test--released-p (run)
   "Non-nil when RUN owns no live processes, deadline or lifecycle entry."
   (and (lispm-process-tools--run-finished run)
-       (not (memq run lispm-process-tools--runs))
+       (not (memq run (lispm-process-tools--active-runs)))
        (not (process-live-p (lispm-process-tools--run-process run)))
        (not (process-live-p (lispm-process-tools--run-errors run)))
        (not (memq (lispm-process-tools--run-timer run) timer-list))))
@@ -60,7 +60,7 @@
           (should (eq (alist-get 'truncated result) :false))
           (should-not (file-exists-p (expand-file-name "marker" cwd)))
           (should (equal (aref argv 3) literal))
-          (should-not lispm-process-tools--runs))))))
+          (should-not (lispm-job-active nil 'process)))))))
 
 (ert-deftest lispm-process-tools-test-nonzero-and-no-stdin ()
   "A nonzero exit fails with diagnostics; a stdin reader receives EOF."
@@ -90,7 +90,7 @@
          '((program . "/bin/sh")
            (args . ["-c" "i=0; while [ $i -lt 1000 ]; do printf '\"\\\\\\n'; i=$((i+1)); done; sleep 1"]))
          (lambda (text errorp) (push (cons text errorp) results)))
-        (setq run (car lispm-process-tools--runs))
+        (setq run (car (lispm-process-tools--active-runs)))
         (should (lispm-test--wait (lambda () (lispm-process-tools--run-truncated run))))
         (should (<= (lispm-process-tools--run-size run) 256))
         (should (<= (apply #'+ (mapcar #'length (lispm-process-tools--run-output run))) 256))
@@ -111,7 +111,7 @@
                              (args . ["-c" "sleep 30 & echo $! > child.pid; printf began; wait"])
                              (timeout . 1))
                            (lambda (text errorp) (push (cons text errorp) results)))
-        (let ((run (car lispm-process-tools--runs)))
+        (let ((run (car (lispm-process-tools--active-runs))))
           (should (lispm-test--wait (lambda () results) 4))
           (should (cdar results))
           (should (equal (alist-get 'status (lispm--json-decode (caar results))) "timed_out"))
@@ -133,10 +133,10 @@
             results)
         (lispm-process-tools--start first "/bin/sh" ["-c" "exec sleep 10"] nil 15
                                    (lambda (&rest args) (push args results)))
-        (let ((one (car lispm-process-tools--runs)))
+        (let ((one (car (lispm-process-tools--active-runs))))
           (lispm-process-tools--start second "/bin/sh" ["-c" "exec sleep 10"] nil 15
                                      (lambda (&rest args) (push args results)))
-          (let ((two (car lispm-process-tools--runs)))
+          (let ((two (car (lispm-process-tools--active-runs))))
             (should (eq (process-get (lispm-process-tools--run-process one) 'lispm-agent) first))
             (lispm-set-state first 'aborting)
             (should (lispm-process-tools-test--released-p one))
@@ -144,7 +144,7 @@
             (run-hook-with-args 'lispm-session-end-functions second)
             (should (lispm-process-tools-test--released-p two))
             (should-not results)
-            (should-not (memq #'lispm-process-tools--state-changed lispm-state-change-functions))))))))
+            (should-not (memq #'lispm-job--state-changed lispm-state-change-functions))))))))
 
 (ert-deftest lispm-process-tools-test-terminal-close-and-spawn-failure ()
   "Bridge closure and failed startup leave no stderr pipes or lifecycle hooks."
@@ -155,20 +155,20 @@
         (with-temp-buffer
           (setq-local lispm-agents-bridge--agent agent)
           (lispm-process-tools--start agent "/bin/sh" ["-c" "exec sleep 10"] nil 15 #'ignore)
-          (let ((run (car lispm-process-tools--runs)))
+          (let ((run (car (lispm-process-tools--active-runs))))
             (run-hook-with-args 'lispm-agents-context-release-functions (current-buffer))
             (should (lispm-process-tools-test--released-p run))))
         (let ((original (symbol-function 'make-process)))
           (cl-letf (((symbol-function 'make-process)
                      (lambda (&rest args)
                        (when (equal (plist-get args :name) "lispm-program")
-                         (setq captured (car lispm-process-tools--runs))
+                         (setq captured (car (lispm-process-tools--active-runs)))
                          (error "Process startup failed"))
                        (apply original args))))
             (should-error (lispm-process-tools--start agent "/bin/sh" [] nil 1 #'ignore))))
         (should captured)
         (should (lispm-process-tools-test--released-p captured))
-        (should-not lispm-process-tools--runs)))))
+        (should-not (lispm-job-active nil 'process))))))
 
 (ert-deftest lispm-process-tools-test-validation-and-policy ()
   "Invalid argv cannot spawn, and arbitrary executables always use shell policy."
@@ -238,7 +238,7 @@
           (let ((lispm-sandbox-srt-program "/no/srt"))
             (should-error (lispm-process-tools--start agent "/bin/sh" [] nil 1 #'ignore)
                           :type 'lispm-sandbox-error))
-          (should-not lispm-process-tools--runs))))))
+          (should-not (lispm-job-active nil 'process)))))))
 
 (ert-deftest lispm-process-tools-test-sandbox-cwd-keeps-root-rules ()
   "The sandbox sees project-relative rules while the program uses its cwd."

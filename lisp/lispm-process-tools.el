@@ -12,16 +12,18 @@
 
 ;;; Code:
 
+(require 'lispm-job)
 (require 'lispm-tools)
 
 (cl-defstruct (lispm-process-tools--run
                (:constructor lispm-process-tools--run-create) (:copier nil))
   "An agent's process and the bounded output collected from its pipes."
-  agent process errors timer sandbox done output error-output
+  agent process errors timer sandbox done handle output error-output
   (size 0) limit truncated output-truncated error-truncated finished)
 
-(defvar lispm-process-tools--runs nil
-  "Program calls that have not completed or been cancelled.")
+(defun lispm-process-tools--active-runs ()
+  "Return active `lispm-process-tools--run' records managed by `lispm-job'."
+  (mapcar #'lispm-job-data (lispm-job-active nil 'process)))
 
 (defvar lispm-process-output-functions nil
   "Abnormal hook run as `run_program' receives output chunks.
@@ -94,10 +96,9 @@ Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
         (run-hook-with-args 'lispm-process-output-functions
                             (lispm-process-tools--run-agent run) errorp text)))))
 
-(defun lispm-process-tools--cleanup (run)
-  "Release RUN's resources, suppressing any late process callbacks."
+(defun lispm-process-tools--release (run)
+  "Release RUN's processes, timer and sandbox, suppressing late callbacks."
   (setf (lispm-process-tools--run-finished run) t)
-  (setq lispm-process-tools--runs (delq run lispm-process-tools--runs))
   (when-let* ((timer (lispm-process-tools--run-timer run))) (cancel-timer timer))
   (when-let* ((process (lispm-process-tools--run-process run)))
     (lispm-exec-delete process))
@@ -105,11 +106,13 @@ Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
     (when (processp errors) (ignore-errors (delete-process errors))))
   ;; A spawn failure may precede sandbox-attach and its sentinel.
   (when-let* ((sandbox (lispm-process-tools--run-sandbox run)))
-    (ignore-errors (lispm-sandbox--forget sandbox)))
-  (unless lispm-process-tools--runs
-    (remove-hook 'lispm-state-change-functions #'lispm-process-tools--state-changed)
-    (remove-hook 'lispm-session-end-functions #'lispm-process-tools--session-ended)
-    (remove-hook 'lispm-agents-context-release-functions #'lispm-process-tools--terminal-ended)))
+    (ignore-errors (lispm-sandbox--forget sandbox))))
+
+(defun lispm-process-tools--cleanup (run)
+  "Cancel RUN through `lispm-job' and release its resources."
+  (if-let* ((handle (lispm-process-tools--run-handle run)))
+      (lispm-job-cancel handle)
+    (lispm-process-tools--release run)))
 
 (defun lispm-process-tools--format-stream (raw budget truncatedp marker)
   "Format RAW stream within BUDGET, adding MARKER when TRUNCATEDP or shrunk."
@@ -167,10 +170,13 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
 (defun lispm-process-tools--finish (run status &optional exit signal)
   "Finish RUN once, returning STATUS, EXIT and SIGNAL to its caller."
   (unless (lispm-process-tools--run-finished run)
-    (let ((result (lispm-process-tools--result run status exit signal)))
-      (lispm-process-tools--cleanup run)
-      (funcall (lispm-process-tools--run-done run) result
-               (not (and (equal status "exited") (eql exit 0)))))))
+    (when (if-let* ((handle (lispm-process-tools--run-handle run)))
+              (lispm-job-finish handle)
+            t)
+      (let ((result (lispm-process-tools--result run status exit signal)))
+        (lispm-process-tools--release run)
+        (funcall (lispm-process-tools--run-done run) result
+                 (not (and (equal status "exited") (eql exit 0))))))))
 
 (defun lispm-process-tools--sentinel (run process)
   "Complete RUN when PROCESS has exited, draining its bounded stderr first."
@@ -182,24 +188,6 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
     (if (eq (process-status process) 'exit)
         (lispm-process-tools--finish run "exited" (process-exit-status process))
       (lispm-process-tools--finish run "signalled" nil (process-exit-status process)))))
-
-(defun lispm-process-tools--session-ended (agent)
-  "Cancel the programs of AGENT without reviving its closing caller."
-  (dolist (run (copy-sequence lispm-process-tools--runs))
-    (when (eq agent (lispm-process-tools--run-agent run))
-      (lispm-process-tools--cleanup run))))
-
-(defun lispm-process-tools--state-changed (agent)
-  "Stop AGENT's programs when its turn is being aborted."
-  (when (eq (lispm-agent-state agent) 'aborting)
-    (lispm-process-tools--session-ended agent)))
-
-(defun lispm-process-tools--terminal-ended (terminal)
-  "Stop the programs belonging to the external agent in TERMINAL."
-  (when (and (buffer-live-p terminal)
-             (local-variable-p 'lispm-agents-bridge--agent terminal))
-    (lispm-process-tools--session-ended
-     (buffer-local-value 'lispm-agents-bridge--agent terminal))))
 
 (defun lispm-process-tools--string-p (value)
   "Non-nil when VALUE is a string that an OS argument can represent."
@@ -217,7 +205,7 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
     (error "cwd must be a directory name without NUL characters"))
   (unless (and (integerp lispm-tool-output-limit) (>= lispm-tool-output-limit 2))
     (error "run_program needs a tool output limit of at least 2 characters"))
-  (let* ((root (lispm-agent-root agent))
+  (let* ((root (lispm-principal-root agent))
          (timeout (or timeout 120))
          (directory (file-name-as-directory (expand-file-name (or cwd root) root))))
     (unless (and (integerp timeout) (<= 1 timeout 86400))
@@ -246,10 +234,10 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
                             "lispm-program-cwd" directory)
                       command)))
       (lispm-tools-with-async-start (lispm-process-tools--cleanup run)
-        (push run lispm-process-tools--runs)
-        (add-hook 'lispm-state-change-functions #'lispm-process-tools--state-changed)
-        (add-hook 'lispm-session-end-functions #'lispm-process-tools--session-ended)
-        (add-hook 'lispm-agents-context-release-functions #'lispm-process-tools--terminal-ended)
+        (setf (lispm-process-tools--run-handle run)
+              (lispm-job-register agent 'process
+                                  (lambda () (lispm-process-tools--release run))
+                                  run))
         (setf (lispm-process-tools--run-sandbox run)
               (lispm-sandbox-prepare command nil (format "the program %s" program)))
         (setf (lispm-process-tools--run-errors run)
@@ -297,7 +285,7 @@ and run_elisp for standalone Lisp/JSON processing in a kernel worker."
 
 (defun lispm-process-tools-unload-function ()
   "Stop running programs before unloading their callbacks."
-  (mapc #'lispm-process-tools--cleanup (copy-sequence lispm-process-tools--runs))
+  (lispm-job-cancel-kind 'process)
   (remhash "run_program" lispm-tools--registry)
   nil)
 

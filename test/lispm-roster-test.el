@@ -151,9 +151,9 @@ Archives are absent; snapshots neither scan transcripts nor expose strings."
       (with-current-buffer terminal (setq lispm-agents-buffer-session-id "terminal"))
       (lispm-agents-refresh-buffer-titles
        (list (list :agent 'codex :id "terminal" :title "Worker" :parent "parent" :cwd project)))
-      (lispm-set-parent helper (lispm-agent-id proxy))
-      (setf (lispm-agent-waiting-on proxy) (list helper)
-            (lispm-agent-entry helper) (list :from (lispm-agent-name proxy) :request-id "R7" :text "Review"))
+      (lispm-set-parent helper (lispm-principal-id proxy))
+      (setf (lispm-principal-waiting-on proxy) (list helper)
+            (lispm-agent-entry helper) (list :from (lispm-principal-name proxy) :request-id "R7" :text "Review"))
       (let* ((roster (lispm-agents-roster))
              (cli (seq-find (lambda (record) (eq (plist-get record :buffer) terminal)) roster))
              (child (seq-find (lambda (record) (eq (plist-get record :buffer) (lispm-agent-buffer helper))) roster)))

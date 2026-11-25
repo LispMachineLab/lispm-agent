@@ -38,16 +38,18 @@
   (declare (indent 1))
   `(let* ((,runtime (lispm-kernel-start lispm-elisp-kernel-test--program))
           (lispm-kernel-exec-runtime-function (lambda () ,runtime))
-          (lispm-elisp--jobs nil)
+          (lispm-job--active nil)
           (lispm-state-change-functions (copy-sequence lispm-state-change-functions))
-          (lispm-session-end-functions (copy-sequence lispm-session-end-functions)))
+          (lispm-session-end-functions (copy-sequence lispm-session-end-functions))
+          (lispm-agents-context-release-functions
+           (copy-sequence lispm-agents-context-release-functions)))
      (unwind-protect
          (progn
            (should (lispm-elisp-kernel-test--wait
                     ,runtime (lambda () (lispm-kernel-runtime-hello ,runtime))))
            (should (memq :exec (plist-get (lispm-kernel-runtime-hello ,runtime) :jobs)))
            ,@body)
-       (mapc #'lispm-elisp--cancel (copy-sequence lispm-elisp--jobs))
+       (lispm-job-cancel-all)
        (lispm-elisp-kernel-test--wait
         ,runtime (lambda () (zerop (hash-table-count (lispm-kernel-runtime-requests ,runtime)))) 5)
        (lispm-kernel-stop ,runtime))))
@@ -129,7 +131,7 @@
           (should-not (= (car value) (plist-get (lispm-kernel-runtime-hello runtime) :pid)))
           (should (equal (cdr value) (list (file-truename project) '("release λ") 42 'child)))
           (should (eq lispm-elisp-kernel-test--sentinel 'parent))
-          (should-not lispm-elisp--jobs))))))
+          (should-not (lispm-job-active nil 'elisp)))))))
 
 (ert-deftest lispm-elisp-kernel-test-errors ()
   "Malformed code never runs its valid prefix; runtime errors are failures."
@@ -146,7 +148,7 @@
         (should-not (file-exists-p marker))
         (should (cdr failed))
         (should (string-match-p "Elisp worker: synthetic failure" (car failed)))
-        (should-not lispm-elisp--jobs)))))
+        (should-not (lispm-job-active nil 'elisp))))))
 
 (ert-deftest lispm-elisp-kernel-test-parent-remains-responsive ()
   "A parent timer runs while the worker is in a CPU loop."
@@ -190,7 +192,7 @@
         (should (cdr result))
         (should (string-match-p "did not finish" (car result)))
         (should (lispm-elisp-kernel-test--wait runtime (lambda () (not (process-attributes pid))) 5))
-        (should-not lispm-elisp--jobs)
+        (should-not (lispm-job-active nil 'elisp))
         (should (lispm-kernel-live-p runtime))))))
 
 (ert-deftest lispm-elisp-kernel-test-abort-kills-worker ()
@@ -222,7 +224,7 @@
           (should (equal (lispm-test--transcript agent) transcript))
           (should (= (length lispm-test--requests) 1))
           (should (funcall (lispm-test--idle-p agent)))
-          (should-not lispm-elisp--jobs)
+          (should-not (lispm-job-active nil 'elisp))
           ;; The shared kernel is still usable after cancelling this child.
           (should (= (lispm-elisp-kernel-test--value
                       (lispm-elisp-kernel-test--call runtime agent "(+ 8 9)")) 17)))))))

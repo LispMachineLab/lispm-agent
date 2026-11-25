@@ -92,43 +92,6 @@
 
 ;;;; LispM itself
 
-(defcustom lispm-system-agent-name 'lispm
-  "Name of LispM itself, the system's own agent that the bar talks to."
-  :type 'symbol
-  :group 'lispm-bar)
-
-(defcustom lispm-system-agent-root "~/"
-  "Directory LispM itself works in: relative paths are relative to it."
-  :type 'directory
-  :group 'lispm-bar)
-
-(defconst lispm-bar--instructions
-  "You are LispM itself: the agent of this whole computer and of the Emacs it runs, not of one project. The user reaches you from the LispM bar (a one-line field with a small window for your reply), from a Listener command prompt, from a chat window, or from the LispM terminal; all share this one conversation. Check `[Current LispM scenario]' when present on a turn to know which surface the user is currently using, what windows or buffers are active, and what recent commands ran. You act for the user across Emacs and the computer: find what the system and what is installed can do (search_tools finds their skills, the manuals with their tools), open and change things, introspect live Emacs state when asked about UI behavior, and answer questions. When answering in the LispM bar or inline in a Listener, lead with the answer or with what you did, and keep it short unless asked for more."
-  "What LispM itself is told it is, beyond what every agent is told.")
-
-(lispm-defrole system
-  "LispM itself: the agent of the whole system, which the LispM bar talks to."
-  :instructions lispm-bar--instructions)
-
-(defun lispm-system-agent ()
-  "LispM itself: the standing agent of the whole system.
-It is declared when first needed.  It works in `lispm-system-agent-root',
-the home directory, with the role `system', and keeps one conversation
-going across Emacs sessions, which the bar and the chat both show.  It
-is not one of a project's agents: its memory, tasks and episodes are
-the system's (see `lispm-system-directory')."
-  (let ((agent (lispm-get-agent lispm-system-agent-name t)))
-    (if (and agent (lispm-agent-standing agent))
-        agent
-      (lispm-register-agent lispm-system-agent-name :role 'system :root lispm-system-agent-root
-                            :system t))))
-
-(defun lispm-system-agent-p (agent)
-  "Non-nil if AGENT is LispM itself, see `lispm-system-agent'."
-  (and (lispm-agent-p agent)
-       (lispm-agent-standing agent)
-       (eq (lispm-agent-name agent) lispm-system-agent-name)))
-
 ;;;###autoload
 (defun lispm-ai-chat ()
   "Show the conversation with LispM itself in a chat, all of it.

@@ -379,7 +379,7 @@ EPHEMERAL-P marks whether BUFFER was opened solely for spotlighting."
 
 (defun lispm-spotlight--agent-key (agent)
   "Return the stable actor key string for AGENT."
-  (if agent (symbol-name (lispm-agent-name agent)) "LispM"))
+  (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
 
 (defun lispm-spotlight--actor (agent)
   "Build a `lispm-ui-spotlight-actor' for AGENT."
@@ -566,7 +566,7 @@ without touching visible windows; sibling subagents share scroll-lock."
   "Light what AGENT's call of TOOL on INPUT read in RESULT at PHASE `finish'.
 Nothing is shown when ERRORP is non-nil."
   (when (and (eq phase 'finish) (not errorp) (lispm-spotlight--live-p))
-    (let* ((root (if agent (lispm-agent-root agent) default-directory))
+    (let* ((root (if agent (lispm-principal-root agent) default-directory))
            (default-directory root)
            (spec (condition-case nil
                      (or (and (fboundp 'lispm-tool-would-spotlight)

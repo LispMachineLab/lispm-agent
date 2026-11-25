@@ -18,8 +18,7 @@
            (lispm-mcp-server--process nil)
            (lispm-mcp-server--token nil)
            (lispm-mcp-server--sessions (make-hash-table :test #'equal))
-           (lispm-process-tools--runs nil)
-           (lispm-elisp--jobs nil)
+           (lispm-job--active nil)
            (lispm-sandbox-level 'none)
            (lispm-state-change-functions (copy-sequence lispm-state-change-functions))
            (lispm-session-end-functions (copy-sequence lispm-session-end-functions))
@@ -28,13 +27,12 @@
            (kill-emacs-hook (copy-sequence kill-emacs-hook)))
        (unwind-protect (progn ,@body)
          (lispm-mcp-server--stop)
-         (mapc #'lispm-process-tools--cleanup (copy-sequence lispm-process-tools--runs))
-         (mapc #'lispm-elisp--cancel (copy-sequence lispm-elisp--jobs))))))
+         (lispm-job-cancel-all)))))
 
 (defun lispm-mcp-lifecycle-test--session (directory &optional id)
-  "Keep a session with an independent proxy agent rooted in DIRECTORY."
+  "Keep a session with an independent proxy principal rooted in DIRECTORY."
   (let* ((id (or id "outside"))
-         (agent (lispm-agent--create :name 'outside :id id :root directory :tools t))
+         (agent (lispm-principal--create :name 'outside :id id :root directory :tools t))
          (session (lispm-mcp-server--session-make
                    :id id :name "outside" :kind "Outside" :directory directory
                    :agent agent :used 0)))
@@ -65,8 +63,8 @@
                    (lambda (runtime id) (push (list runtime id) cancelled))))
           (lispm-process-tools--start agent (executable-find "sleep") ["30"] nil 60 #'ignore)
           (lispm-elisp--start agent "(sleep-for 30)" 60 #'ignore)
-          (let* ((run (car lispm-process-tools--runs))
-                 (job (car lispm-elisp--jobs))
+          (let* ((run (car (lispm-process-tools--active-runs)))
+                 (job (car (lispm-elisp--active-jobs)))
                  (answer (lispm-agents-bridge-server-answer
                           session (lambda (&rest result) (push result results)))))
             (should (process-live-p (lispm-process-tools--run-process run)))
@@ -76,8 +74,8 @@
             (should-not (process-live-p (lispm-process-tools--run-process run)))
             (should-not (process-live-p (lispm-process-tools--run-errors run)))
             (should-not (memq (lispm-process-tools--run-timer run) timer-list))
-            (should-not lispm-process-tools--runs)
-            (should-not lispm-elisp--jobs)
+            (should-not (lispm-job-active nil 'process))
+            (should-not (lispm-job-active nil 'elisp))
             (should (lispm-elisp--job-finished job))
             (should (equal cancelled '((kernel 42))))
             ;; Late results and another close cannot revive the caller.

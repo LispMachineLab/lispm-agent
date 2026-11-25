@@ -157,7 +157,7 @@
                           (car (plist-get (plist-get (lispm-agents-roster-details key) :mailbox) :queued))
                           :request-id)
                          id))
-          (should (memq worker (lispm-agent-waiting-on caller)))
+          (should (memq worker (lispm-principal-waiting-on caller)))
           (should (lispm-test--wait (lambda () (lispm-agent-entry worker))))
           (should (equal (plist-get (lispm-agent-entry worker) :request-id) id))
           (should (equal (plist-get
@@ -166,7 +166,7 @@
                          id))
           (setf (lispm-agent-last-reply worker) "Reviewed")
           (lispm--finish-turn worker)
-          (should-not (lispm-agent-waiting-on caller))
+          (should-not (lispm-principal-waiting-on caller))
           (let ((settled (seq-find (lambda (event) (eq (plist-get event :type) 'request-settled)) events)))
             (should (equal (plist-get settled :request-id) id))))))))
 

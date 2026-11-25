@@ -111,6 +111,8 @@
 (require 'lispm-title)
 (require 'lispm-episodes)
 (require 'lispm-characters)
+(require 'lispm-character-rag)
+(require 'lispm-character-comfyui)
 (require 'lispm-emacs)
 (require 'lispm-develop)
 (require 'lispm-skills)

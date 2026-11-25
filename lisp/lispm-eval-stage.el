@@ -156,7 +156,7 @@
   "Return or create AGENT's stage buffer for KIND (`lisp' or `web')."
   (let* ((tag (if (eq kind 'web) "web" "lisp"))
          (name (format "*lispm-stage-%s: %s*"
-                       tag (if agent (lispm-agent-name agent) "LispM")))
+                       tag (if agent (lispm-principal-name agent) "LispM")))
          (buf (get-buffer-create name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'lispm-eval-stage-mode)
@@ -166,7 +166,7 @@
 (defun lispm-eval-stage--header-text (agent summary status-str face)
   "Format a stage header line for AGENT, SUMMARY, STATUS-STR and FACE."
   (let ((color (lispm-edits--color agent))
-        (label (if agent (symbol-name (lispm-agent-name agent)) "LispM"))
+        (label (if agent (symbol-name (lispm-principal-name agent)) "LispM"))
         (short (truncate-string-to-width (or summary "") 52 nil nil "…")))
     (concat (propertize " " 'face `(:background ,color))
             " "

@@ -76,7 +76,7 @@
 
 (declare-function project-root "project" (project))
 (declare-function project-known-project-roots "project" ())
-(declare-function lispm-system-agent-p "lispm-bar" (agent))
+(declare-function lispm-system-agent-p "lispm-core" (agent))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-codicon "nerd-icons" (icon-name &rest args))
 (declare-function eat-make "eat" (name program &optional startfile &rest switches))

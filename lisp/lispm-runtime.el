@@ -1166,17 +1166,18 @@ Run from `lispm-tools-changed-functions' when an agent's tools grow in
 the middle of a session, as when it finds deferred tools, loads a
 skill or defines a tool itself.  The earlier tools keep their place;
 the request prefix changes once."
-  (let ((buffer (lispm-agent-buffer agent)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when lispm--tools
-          (let ((names (mapcar (lambda (schema) (alist-get 'name schema)) lispm--tools)))
-            (dolist (tool (lispm-agent-tools* agent))
-              (unless (member (lispm-tool-name tool) names)
-                (setq lispm--tools
-                      (append lispm--tools
-                              (list (let ((lispm-current-agent agent))
-                                      (lispm-tool-schema tool)))))))))))))
+  (when (lispm-agent-p agent)
+    (let ((buffer (lispm-agent-buffer agent)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when lispm--tools
+            (let ((names (mapcar (lambda (schema) (alist-get 'name schema)) lispm--tools)))
+              (dolist (tool (lispm-agent-tools* agent))
+                (unless (member (lispm-tool-name tool) names)
+                  (setq lispm--tools
+                        (append lispm--tools
+                                (list (let ((lispm-current-agent agent))
+                                        (lispm-tool-schema tool))))))))))))))
 
 (add-hook 'lispm-tools-changed-functions #'lispm--extend-session-tools)
 
@@ -3581,8 +3582,9 @@ That is left to the start of a turn, past `lispm-compact-threshold'."
 
 (defun lispm--forget-idle-work (agent)
   "Drop the background work waiting for AGENT, whose session ends."
-  (lispm-cancel-idle (cons 'compact (lispm-agent-id agent)))
-  (lispm--cancel-idle-handover agent))
+  (when (lispm-agent-p agent)
+    (lispm-cancel-idle (cons 'compact (lispm-principal-id agent)))
+    (lispm--cancel-idle-handover agent)))
 
 (add-hook 'lispm-session-end-functions #'lispm--forget-idle-work)
 

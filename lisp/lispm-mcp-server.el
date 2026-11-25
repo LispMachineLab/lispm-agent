@@ -235,15 +235,14 @@ a request with HEADERS names, opened at first need."
                                (lispm-mcp-server--make "lispm-tool" "lispm-tool" directory)))))
 
 (cl-defmethod lispm-agents-bridge-server-agent ((session lispm-mcp-server-session))
-  "The LispM agent SESSION's agent acts as, made at first need: of the
-role `lispm-mcp-server-role' names, in SESSION's directory."
+  "The LispM policy principal of SESSION's external client."
   (or (lispm-mcp-server-session-agent session)
       (setf (lispm-mcp-server-session-agent session)
-            (lispm--apply-role
-             (lispm-agent--create :name (intern (lispm-mcp-server-session-name session))
-                                  :id (lispm-mcp-server-session-id session)
-                                  :root (lispm-mcp-server-session-directory session))
-             (lispm-get-role (or lispm-mcp-server-role lispm-agents-bridge-role lispm-default-role))))))
+            (lispm-make-principal
+             (intern (lispm-mcp-server-session-name session))
+             (lispm-mcp-server-session-directory session)
+             :id (lispm-mcp-server-session-id session)
+             :role (or lispm-mcp-server-role lispm-agents-bridge-role lispm-default-role)))))
 
 (cl-defmethod lispm-agents-bridge-server-kind ((session lispm-mcp-server-session))
   "What SESSION's agent is, as its client says, outside LispM."
