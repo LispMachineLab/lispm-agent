@@ -232,7 +232,7 @@
     (should (equal (match-string 1 "hello") "hello")))
   ;; `lispm-bar-redraw' avoids touching buffer when text is unchanged.
   (lispm-test-env
-    (let ((lispm-bar--open t)
+    (let ((lispm-bar-open t)
           (lispm-bar--text "status line"))
       (lispm-defagent sys :root project)
       (cl-letf (((symbol-function 'lispm-system-agent) (lambda () (car (lispm-agents))))

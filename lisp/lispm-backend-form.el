@@ -387,6 +387,56 @@ says, once it is valid."
       (lispm-backend-add name backend t))
     (lispm-set-model name model t)))
 
+(defun lispm-model-setup-form--validate-name (value)
+  "Check that VALUE can name a new custom backend."
+  (when (stringp value)
+    (let* ((trimmed (string-trim value))
+           (name (intern trimmed)))
+      (cond ((not (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" trimmed))
+             (lispm-tr "Use letters, digits, `-', `_' or `.'"))
+            ((lispm-backend-get name)
+             (lispm-tr "There is already a backend %s" name))))))
+
+(defun lispm-model-setup-form--fields
+    (choices provider props active-model custom-p address-p key-p)
+  "Return the field definitions for `lispm-model-setup-form'."
+  `((model-group :type heading :label ,(lispm-tr "Model Provider"))
+    (provider :type choice :label ,(lispm-tr "Provider")
+              :choices ,choices
+              :value ,provider
+              :on-change ,#'lispm-model-setup-form--select-provider
+              :help ,(lispm-tr "Choose the provider or server LispM's agents ask."))
+    (name :type text :label ,(lispm-tr "Name") :required t
+          :value ""
+          :when ,custom-p
+          :validate ,#'lispm-model-setup-form--validate-name
+          :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))
+    (api :type radio :label ,(lispm-tr "API")
+         :choices ,(mapcar (lambda (api)
+                             (cons (car api) (lispm-backend-api-name (car api))))
+                           lispm-backend-apis)
+         :value ,(or (plist-get props :api) 'openai)
+         :when ,custom-p
+         :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
+    (url :type text :label ,(lispm-tr "Address") :required t
+         :value ,(or (plist-get props :url) "")
+         :when ,address-p
+         :validate ,#'lispm-backend-form--validate-url
+         :help ,(lispm-tr "The server's base address, without the path LispM adds."))
+    (model :type text :label ,(lispm-tr "Model") :required t
+           :value ,active-model
+           :help ,(lispm-tr "The model agents use when they name none."))
+    (key :type password :label ,(lispm-tr "The key")
+         :value ""
+         :when ,key-p
+         :help ,(lambda (values)
+                  (let* ((prov (alist-get 'provider values))
+                         (back (and prov (not (eq prov 'custom))
+                                    (lispm-backend-get prov))))
+                    (if (and back (lispm-backend-key-at-hand-p back))
+                        (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
+                      (lispm-tr "LispM Auth keeps it encrypted.")))))))
+
 (defun lispm-model-setup-form ()
   "Make the form that sets up LispM's model and provider; return its buffer."
   (let* ((choices (lispm-model-setup-form--provider-choices))
@@ -406,52 +456,8 @@ says, once it is valid."
                              (eq (plist-get p :key-source) 'none)
                              (and (assq prov lispm-backends)
                                   (eq (lispm-backend-form--key-source p) 'none)))))))
-         (fields
-          `((model-group :type heading :label ,(lispm-tr "Model Provider"))
-            (provider :type choice :label ,(lispm-tr "Provider")
-                      :choices ,choices
-                      :value ,provider
-                      :on-change ,#'lispm-model-setup-form--select-provider
-                      :help ,(lispm-tr "Choose the provider or server LispM's agents ask."))
-            (name :type text :label ,(lispm-tr "Name") :required t
-                  :value ""
-                  :when ,custom-p
-                  :validate ,(lambda (value)
-                               (when (stringp value)
-                                 (let* ((trimmed (string-trim value))
-                                        (name (intern trimmed)))
-                                   (cond ((not (string-match-p
-                                                "\\`[[:alnum:]][[:alnum:]_.-]*\\'"
-                                                trimmed))
-                                          (lispm-tr "Use letters, digits, `-', `_' or `.'"))
-                                         ((lispm-backend-get name)
-                                          (lispm-tr "There is already a backend %s" name))))))
-                  :help ,(lispm-tr "A name to know the backend by, as `my-gateway'."))
-            (api :type radio :label ,(lispm-tr "API")
-                 :choices ,(mapcar (lambda (api)
-                                     (cons (car api) (lispm-backend-api-name (car api))))
-                                   lispm-backend-apis)
-                 :value ,(or (plist-get props :api) 'openai)
-                 :when ,custom-p
-                 :help ,(lispm-tr "The API the server speaks; LispM adds `/v1/messages' or `/chat/completions'."))
-            (url :type text :label ,(lispm-tr "Address") :required t
-                 :value ,(or (plist-get props :url) "")
-                 :when ,address-p
-                 :validate ,#'lispm-backend-form--validate-url
-                 :help ,(lispm-tr "The server's base address, without the path LispM adds."))
-            (model :type text :label ,(lispm-tr "Model") :required t
-                   :value ,active-model
-                   :help ,(lispm-tr "The model agents use when they name none."))
-            (key :type password :label ,(lispm-tr "The key")
-                 :value ""
-                 :when ,key-p
-                 :help ,(lambda (values)
-                          (let* ((prov (alist-get 'provider values))
-                                 (back (and prov (not (eq prov 'custom))
-                                            (lispm-backend-get prov))))
-                            (if (and back (lispm-backend-key-at-hand-p back))
-                                (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
-                              (lispm-tr "LispM Auth keeps it encrypted.")))))))
+         (fields (lispm-model-setup-form--fields
+                  choices provider props active-model custom-p address-p key-p))
          (buffer
           (lispm-ui-form
            (lispm-tr "Set Up a Model")

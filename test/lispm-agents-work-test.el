@@ -21,7 +21,7 @@
          (window-state-change-hook nil)
          (lispm-agents-open-project-functions nil)
          (lispm-agents-work-display-function #'ignore)
-         (lispm-agents--root-cache (make-hash-table :test #'equal)))
+         (lispm-agents-root-cache (make-hash-table :test #'equal)))
      (unwind-protect (progn ,@body)
        (dolist (buffer (copy-sequence lispm-agents-work--buffers))
          (when (buffer-live-p buffer) (kill-buffer buffer))))))
@@ -40,7 +40,7 @@
          (sub (expand-file-name "src" main))
          (worktree (expand-file-name "worktree" base))
          (other (expand-file-name "project-other" base))
-         (lispm-agents--root-cache (make-hash-table :test #'equal))
+         (lispm-agents-root-cache (make-hash-table :test #'equal))
          (lispm-agents-defined nil))
     (unwind-protect
         (progn
@@ -97,7 +97,7 @@
   (let* ((home (expand-file-name "~"))
          (chat (expand-file-name "agent-chats/example" temporary-file-directory))
          (lispm-agents-defined `((example :chats (,(file-name-directory chat)))))
-         (lispm-agents--root-cache (make-hash-table :test #'equal))
+         (lispm-agents-root-cache (make-hash-table :test #'equal))
          (a (lispm-test--work-record "a" home '(lispm "b")))
          (b (lispm-test--work-record "b" "/tmp/elsewhere" '(lispm "a")))
          (c (lispm-test--work-record "c" chat)))

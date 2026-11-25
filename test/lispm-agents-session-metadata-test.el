@@ -8,7 +8,7 @@
 (ert-deftest lispm-test-claude-session-start-keeps-first-timestamp ()
   "Responses change the transcript time without changing its start."
   (let ((file (make-temp-file "lispm-claude-start-" nil ".jsonl"))
-        (lispm-agents--session-cache (make-hash-table :test #'equal)))
+        (lispm-agents-session-cache (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-temp-file file
@@ -121,7 +121,7 @@ and clearing or changing custom-title.json takes effect without transcript cache
          (title-file (expand-file-name "0199/custom-title.json" dir))
          (sub-dir (expand-file-name "0199/subagents" dir))
          (sub-file (expand-file-name "agent-a1.jsonl" sub-dir))
-         (lispm-agents--session-cache (make-hash-table :test #'equal)))
+         (lispm-agents-session-cache (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (make-directory sub-dir t)

@@ -75,10 +75,11 @@ transcript is under, besides what that file holds."
                                 (directory-file-name (file-name-directory
                                                       (directory-file-name directory)))))
                 (when (file-readable-p meta)
-                  (ignore-errors
-                    (with-temp-buffer
-                      (insert-file-contents meta)
-                      (json-parse-buffer :object-type 'plist)))))))))
+                  (condition-case nil
+                      (with-temp-buffer
+                        (insert-file-contents meta)
+                        (json-parse-buffer :object-type 'plist))
+                    ((file-error json-error) nil))))))))
 
 (defun lispm-agents-claude-session (file objects)
   "Return the Claude session recorded in FILE given its head/tail OBJECTS.
@@ -134,10 +135,12 @@ time is the first timestamp in the transcript head, in float seconds."
   "Return the string KEY holds in the JSON object of FILE, or nil when FILE
 cannot be read or KEY holds no string, or a blank one."
   (when (file-readable-p file)
-    (when-let* ((value (ignore-errors
-                         (with-temp-buffer
-                           (insert-file-contents file)
-                           (plist-get (json-parse-buffer :object-type 'plist) key))))
+    (when-let* ((value (condition-case nil
+                           (with-temp-buffer
+                             (insert-file-contents file)
+                             (let ((object (json-parse-buffer :object-type 'plist)))
+                               (when (listp object) (plist-get object key))))
+                         ((file-error json-error) nil)))
                 ((stringp value))
                 ((not (string-blank-p value))))
       value)))

@@ -16,7 +16,7 @@
            (lispm-agents-codex-index-file (expand-file-name "codex/index.jsonl" tmp))
            (lispm-agents-state-file (expand-file-name "sessions.eld" tmp))
            (lispm-agents--archived nil)
-           (lispm-agents--session-cache (make-hash-table :test #'equal))
+           (lispm-agents-session-cache (make-hash-table :test #'equal))
            (lispm--session-cache (make-hash-table :test #'equal))
            (lispm-agents-session-lookup-functions nil))
        ,@body)))

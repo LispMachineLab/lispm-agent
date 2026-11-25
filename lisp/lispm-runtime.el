@@ -67,7 +67,7 @@
 (require 'lispm-approval)
 
 ;; Compaction saves memory through lispm-memory; loaded before a turn triggers it.
-(declare-function lispm-git-commit "lispm-memory" (agent message))
+(declare-function lispm-git-commit "lispm-memory-store" (agent message))
 
 ;;;; Handing over: compaction
 

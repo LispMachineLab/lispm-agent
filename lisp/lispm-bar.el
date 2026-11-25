@@ -61,261 +61,10 @@
 (require 'lispm-tools)
 (require 'lispm-skills)
 (require 'lispm-chat)
-
-(declare-function lispm-setup-model "lispm-backend-form" ())
-
-(defgroup lispm-bar nil
-  "The LispM bar: one field to find what is installed and to ask LispM."
-  :group 'lispm
-  :prefix "lispm-bar-")
-
-(defface lispm-bar-selected '((t :inherit highlight :extend t))
-  "Face of the line Return acts on."
-  :group 'lispm-bar)
-
-(defface lispm-bar-dim '((t :inherit lispm-chat-dim))
-  "Face of what the bar says on the side: kinds, details, hints."
-  :group 'lispm-bar)
-
-(defface lispm-bar-heading '((t :inherit bold))
-  "Face of the headings of the bar opened out."
-  :group 'lispm-bar)
-
-(defface lispm-bar-activity '((t :inherit lispm-chat-accent))
-  "Face of the line saying what LispM is doing."
-  :group 'lispm-bar)
-
-(defface lispm-bar-question '((t :inherit lispm-chat-pending))
-  "Face of what LispM asks: a call awaiting approval, a way to go on."
-  :group 'lispm-bar)
-
-;;;; LispM itself
-
-;;;###autoload
-(defun lispm-ai-chat ()
-  "Show the conversation with LispM itself in a chat, all of it.
-The bar shows the same conversation, its latest reply."
-  (interactive)
-  (unless lispm-show-agent-function
-    (user-error "Chat display is not available"))
-  (funcall lispm-show-agent-function (lispm-system-agent)))
-
-;;;; What the bar finds
-
-(defcustom lispm-bar-results 5
-  "How many of the things it finds the bar shows.
-Opened out, it shows three times as many."
-  :type 'natnum
-  :group 'lispm-bar)
-
-(defvar lispm-bar-source-functions (list #'lispm-bar-skills #'lispm-bar-tools)
-  "Functions giving the bar what it can find as the user types.
-Each is called with no argument, as the bar opens, and returns a list
-of plists, one for each thing:
-  :kind    what it is: a symbol of `lispm-bar-kinds', as `application'
-  :label   what it is, shown beside it, for a kind not there
-  :name    its name, as shown
-  :icon    a string shown before the name, as an icon, optional
-  :detail  a line saying more of it, optional
-  :fields  what it is found by, as `lispm-tools-search-score' takes
-           them; by default, its name
-  :open    a function of no argument opening it, for a thing Return
-           opens, as an application: the bar closes, then it runs
-  :ask     for another, a sentence for LispM about it, which Return
-           adds to what the user asks, as \"Use the skill notes.\"
-Things of the sources earlier in the list come first among those the
-words match as well.  LispM's own are its skills and tools; another
-package may add more, as a desktop its applications.")
-
-(defconst lispm-bar-kinds
-  `((application ,(lispm-tr-noop "Application") ,(lispm-tr-noop "Applications"))
-    (skill ,(lispm-tr-noop "Skill") ,(lispm-tr-noop "Skills"))
-    (tool ,(lispm-tr-noop "Tool") ,(lispm-tr-noop "Tools")))
-  "The kinds of things the bar finds: (KIND SINGULAR PLURAL).
-The names are English, translated where shown.")
-
-(defun lispm-bar--kind-label (thing &optional plural)
-  "What THING is, as the bar shows it beside it; with PLURAL, as a heading."
-  (if-let* ((names (alist-get (plist-get thing :kind) lispm-bar-kinds)))
-      (lispm-tr (if plural (nth 1 names) (car names)))
-    (or (plist-get thing :label) "")))
-
-(defun lispm-bar-skills ()
-  "The skills LispM itself can load, for the bar to find.
-Return asks LispM, naming the skill chosen."
-  (let ((agent (lispm-system-agent)))
-    (when (lispm-tools-allowed-p agent "skill")
-      (mapcar (lambda (skill)
-                (list :kind 'skill
-                      :name (or (plist-get skill :title) (plist-get skill :name))
-                      :detail (plist-get skill :description)
-                      :fields (lispm-skills-search-fields skill)
-                      :ask (format "Use the skill %s." (plist-get skill :name))))
-              (lispm-skills agent)))))
-
-(defun lispm-bar-tools ()
-  "The tools LispM itself may call, offered or deferred, for the bar to find.
-Return asks LispM, naming the tool chosen."
-  (let ((agent (lispm-system-agent))
-        tools)
-    (dolist (tool (lispm-tools-registered))
-      (let ((name (lispm-tool-name tool)))
-        (when (lispm-tools-allowed-p agent name)
-          (push (list :kind 'tool
-                      :name name
-                      :detail (lispm-tools-description tool)
-                      :fields (lispm-tools-fields tool)
-                      :ask (format "Use the tool %s." name))
-                tools))))
-    (sort tools (lambda (a b) (string< (plist-get a :name) (plist-get b :name))))))
-
-(defvar lispm-bar--things nil
-  "What the bar can find, as its sources gave it when it opened.")
-
-(defun lispm-bar--gather ()
-  "Ask the sources what the bar can find, and keep it."
-  (setq lispm-bar--things
-        (mapcan (lambda (source)
-                  (condition-case err
-                      (copy-sequence (funcall source))
-                    (error (message "LispM bar: %s: %s" source (error-message-string err))
-                           nil)))
-                lispm-bar-source-functions)))
-
-(defun lispm-bar-find (text &optional limit)
-  "What the bar finds for TEXT, best first, at most LIMIT things.
-The things are plists, as `lispm-bar-source-functions' give them, ranked
-as search_tools ranks what it finds; none for TEXT without a word.
-While the bar is open, they are what the sources gave as it opened."
-  (when-let* ((words (lispm-tools-search-words text)))
-    (lispm-tools-rank words (if (and (lispm-bar-open-p) lispm-bar--things)
-                                 lispm-bar--things
-                               (lispm-bar--gather))
-                       (or limit lispm-bar-results)
-                       (lambda (thing)
-                         (or (plist-get thing :fields) `((3 . ,(plist-get thing :name))))))))
-
-;;;; A model to ask
-
-(defvar lispm-bar--open)
-
-(defvar lispm-bar-ready-function #'lispm-bar-model-ready-p
-  "Function telling whether LispM has a model to ask.
-It is called with the system agent and returns non-nil when it has.
-A setup of models of its own sets it, with `lispm-bar-setup-function'.")
-
-(defvar lispm-bar-setup-function #'lispm-bar-setup-model
-  "Function helping the user set up a model, called with no argument.
-The bar calls it, once closed, when asked something while no model
-works (see `lispm-bar-ready-function'); what was asked waits, and is
-asked once `lispm-bar-model-ready' is called.")
-
-(defun lispm-bar-model-ready-p (agent)
-  "Non-nil if AGENT has a backend to ask, as far as can be told.
-Without asking it, that is: a backend of `lispm-backends' (see
-`lispm-backend'), whose key, when it reads one from an environment
-variable or the secret store, is set there."
-  (when-let* ((name (lispm-backend-name agent))
-              (backend (lispm-backend name)))
-    (let ((variable (plist-get backend :key-env))
-          (key (plist-get backend :key)))
-      (cond (variable (not (string-empty-p (or (getenv variable) ""))))
-            ((and (consp key) (eq (car key) 'secret))
-             (let ((secret (ignore-errors (lispm-secret-get (cdr key) t))))
-               (and (stringp secret) (not (string-empty-p secret)))))
-            (t t)))))
-
-(defun lispm-bar-setup-model ()
-  "Open the form setting up a model backend for LispM."
-  (require 'lispm-backend-form)
-  (lispm-setup-model))
-
-(defvar lispm-bar--waiting nil
-  "What the user asked while no model worked, to ask once one does.
-\(TEXT . REQUEST): what they typed, and what LispM is to be asked.")
-
-(defun lispm-bar-model-ready ()
-  "Tell the bar that a model works now: what waited for one is asked.
-A setup of models calls it once it is done.  The bar shows the reply
-when it opens next."
-  (when-let* ((waiting lispm-bar--waiting))
-    (setq lispm-bar--waiting nil)
-    (lispm-bar-ask (cdr waiting) (car waiting))
-    (unless lispm-bar--open
-      (message "%s" (lispm-tr "LispM is answering “%s”: %s shows the reply"
-                              (lispm-oneline (car waiting) 40)
-                              (substitute-command-keys "\\[lispm-ai]"))))))
-
-(defun lispm-bar--settings-changed ()
-  "Ask what waited for a model once a setting change makes one ready."
-  (when (and lispm-bar--waiting (lispm-bar-ready-p))
-    (lispm-bar-model-ready)))
-
-(add-hook 'lispm-settings-change-hook #'lispm-bar--settings-changed)
-
-;;;; Asking
-
-(defvar lispm-bar--asked nil
-  "What was last asked from the bar: (TEXT . ENTRY-ID), or nil.
-TEXT is what the user typed; ENTRY-ID the id of the input it is in
-the system agent's inbox, then of its turn.")
-
-(defvar lispm-bar-entrypoint nil
-  "Symbol naming the UI surface that called `lispm-bar-ask' most recently.
-For example, `bar' when asked from the LispM bar field, or
-`genera-listener' when asked from `Dynamic Lisp Listener 1'.")
-
-(defvar lispm-bar--reply nil
-  "The reply of the turn that answered what was last asked, once it ended.")
-
-(defvar lispm-bar--evaluated nil
-  "What was last evaluated as Emacs Lisp from the bar: (TEXT . OUTPUT), or nil.")
-
-(defun lispm-bar-eval (text)
-  "Evaluate Emacs Lisp form TEXT and record its formatted output for the bar."
-  (let ((output
-         (condition-case err
-             (let ((val (eval (car (read-from-string text)) t)))
-               (format "=> %S" val))
-           (error
-            (format "error: %s" (error-message-string err))))))
-    (setq lispm-bar--evaluated (cons text output)
-          lispm-bar--asked nil
-          lispm-bar--reply nil)
-    (lispm-bar--changed)
-    output))
-
-(defun lispm-bar-ask (request &optional text)
-  "Ask LispM itself REQUEST; the bar shows its reply.
-TEXT is what the user typed, if REQUEST says more; the bar shows it."
-  (let* ((agent (lispm-system-agent))
-         (asked (cons (or text request) nil)))
-    (setq lispm-bar--asked asked
-          lispm-bar--reply nil
-          lispm-bar--evaluated nil)
-    (lispm-tell agent request
-                :callback (lambda (reply &rest _)
-                            (when (eq lispm-bar--asked asked)
-                              (setq lispm-bar--reply reply)
-                              (lispm-bar--changed))))
-    (setcdr asked (plist-get (car (last (lispm-agent-inbox agent))) :id))
-    (lispm-bar--changed)
-    agent))
-
-(defun lispm-bar--asked-state (agent)
-  "How far AGENT is with what was last asked.
-Nil if nothing was, else `queued', `working' or `done'."
-  (when-let* ((asked lispm-bar--asked))
-    (cond ((seq-find (lambda (entry) (equal (plist-get entry :id) (cdr asked)))
-                     (lispm-agent-inbox agent))
-           'queued)
-          ((equal (plist-get (lispm-agent-entry agent) :id) (cdr asked)) 'working)
-          (lispm-bar--reply 'done))))
+(require 'lispm-bar-core)
 
 ;;;; The bar's state
 
-(defvar lispm-bar--open nil
-  "Non-nil while the bar is open: the window it was opened from.")
 
 (defvar lispm-bar--text ""
   "What the field holds.")
@@ -329,8 +78,6 @@ Nil if nothing was, else `queued', `working' or `done'."
 (defvar lispm-bar--expanded nil
   "Non-nil while the bar is opened out.")
 
-(defvar lispm-bar--ready t
-  "Whether LispM had a model to ask when the bar last looked.")
 
 (defvar lispm-bar--then nil
   "A function to run once the bar has closed: opening what was chosen.")
@@ -347,17 +94,11 @@ Nil if nothing was, else `queued', `working' or `done'."
 (defvar lispm-bar-map)
 (defvar lispm-bar-show-function)
 
-(defun lispm-bar-open-p ()
-  "Non-nil while the bar is open."
-  (and lispm-bar--open t))
 
 (defun lispm-bar-expanded-p ()
   "Non-nil while the bar is opened out, see `lispm-bar-toggle'."
   lispm-bar--expanded)
 
-(defun lispm-bar-ready-p ()
-  "Non-nil if LispM has a model to ask, see `lispm-bar-ready-function'."
-  (setq lispm-bar--ready (and (funcall lispm-bar-ready-function (lispm-system-agent)) t)))
 
 (defvar lispm-bar-ask-icon nil
   "An icon before the line asking LispM: a string, or a function returning one.
@@ -381,7 +122,7 @@ model is ready, or `Evaluate Lisp' when falling back without a model)."
   "Return items found for TEXT, prioritizing openable items and appending model
 setup when no model is ready."
   (let ((found (lispm-bar-find text (lispm-bar--limit))))
-    (if (and (not lispm-bar--ready) (not (string-blank-p text)))
+    (if (and (not lispm-bar-ready) (not (string-blank-p text)))
         (append (seq-filter (lambda (thing) (plist-get thing :open)) found)
                 (seq-remove (lambda (thing) (plist-get thing :open)) found)
                 (list (lispm-bar--setup-thing text)))
@@ -458,7 +199,7 @@ ICON, a string, goes before NAME."
   "The line asking LispM what the field holds, or evaluating Emacs Lisp when no
 model is configured."
   (lispm-bar--line 0
-                   (if lispm-bar--ready
+                   (if lispm-bar-ready
                        (lispm-tr "Ask LispM “%s”" (lispm-oneline lispm-bar--text 60))
                      (lispm-tr "Evaluate Lisp “%s”" (lispm-oneline lispm-bar--text 60)))
                    nil
@@ -473,14 +214,14 @@ Opened out, they come under headings, a kind each."
    (let ((index 0) (kind nil) (lines nil))
      (dolist (thing lispm-bar--found)
        (cl-incf index)
-       (let ((next-kind (lispm-bar--kind-label thing t)))
+       (let ((next-kind (lispm-bar-kind-label thing t)))
          (when (and lispm-bar--expanded
                     (not (string-empty-p next-kind))
                     (not (equal next-kind kind)))
            (setq kind next-kind)
            (push (propertize (concat "\n" kind "\n") 'face 'lispm-bar-heading) lines)))
        (push (lispm-bar--line index (plist-get thing :name) (plist-get thing :detail)
-                              (if lispm-bar--expanded "" (lispm-bar--kind-label thing))
+                              (if lispm-bar--expanded "" (lispm-bar-kind-label thing))
                               (plist-get thing :icon))
              lines))
      (apply #'concat (nreverse lines)))))
@@ -491,20 +232,20 @@ Opened out, they come under headings, a kind each."
 
 (defun lispm-bar--reply-text (agent)
   "What AGENT has replied to what was last asked, so far, or nil."
-  (pcase (lispm-bar--asked-state agent)
+  (pcase (lispm-bar-asked-state agent)
     ('working (or (let ((live (seq-filter (lambda (s) (eq (plist-get s :kind) 'text))
                                           (and (buffer-live-p (lispm-agent-buffer agent))
                                                (lispm-live-segments (lispm-agent-buffer agent))))))
                     (and live (mapconcat (lambda (s) (plist-get s :text)) live "\n\n")))
                   (lispm-agent-last-reply agent)))
-    ('done lispm-bar--reply)))
+    ('done lispm-bar-reply)))
 
 (defun lispm-bar--reply-lines (agent)
   "What was last asked and how AGENT replied, or nil when nothing was."
-  (when-let* ((asked lispm-bar--asked))
+  (when-let* ((asked lispm-bar-asked))
     (let ((reply (lispm-bar--reply-text agent)))
       (concat (propertize (lispm-bar--indent (car asked) "λ ") 'face 'lispm-bar-dim) "\n"
-              (when (eq (lispm-bar--asked-state agent) 'queued)
+              (when (eq (lispm-bar-asked-state agent) 'queued)
                 (propertize (concat "  ⎿  " (lispm-tr "queued; sent when the agent is free") "\n")
                             'face 'lispm-bar-dim))
               (when (and reply (not (string-blank-p reply)))
@@ -629,7 +370,7 @@ way to go on from where its turn stopped; nil if it asks nothing."
 
 (defun lispm-bar--eval-lines ()
   "What was last evaluated as Emacs Lisp and its output, or nil."
-  (when-let* ((evaluated lispm-bar--evaluated))
+  (when-let* ((evaluated lispm-bar-evaluated))
     (concat (propertize (lispm-bar--indent (car evaluated) "λ ") 'face 'lispm-bar-dim) "\n"
             (string-trim-right (cdr evaluated)) "\n")))
 
@@ -638,7 +379,7 @@ way to go on from where its turn stopped; nil if it asks nothing."
   (let* ((agent (lispm-system-agent))
          (finding (not (string-blank-p lispm-bar--text)))
          (has-apps (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application))
-                             lispm-bar--things)))
+                             lispm-bar-things)))
     (concat
      (when finding (lispm-bar--found-lines))
      (when (and finding lispm-bar--expanded) "\n")
@@ -646,13 +387,13 @@ way to go on from where its turn stopped; nil if it asks nothing."
            ((not finding)
             (or (lispm-bar--reply-lines agent)
                 (lispm-bar--eval-lines)
-                (when (and lispm-bar--waiting (not lispm-bar--ready))
-                  (propertize (concat (lispm-bar--indent (car lispm-bar--waiting) "λ ") "\n"
+                (when (and lispm-bar-waiting (not lispm-bar-ready))
+                  (propertize (concat (lispm-bar--indent (car lispm-bar-waiting) "λ ") "\n"
                                       "  ⎿  " (lispm-tr "asked once LispM has a model") "\n")
                               'face 'lispm-bar-dim))
-                (propertize (concat (cond ((and (not lispm-bar--ready) has-apps)
+                (propertize (concat (cond ((and (not lispm-bar-ready) has-apps)
                                            (lispm-tr "Find applications, or evaluate Lisp."))
-                                          ((not lispm-bar--ready)
+                                          ((not lispm-bar-ready)
                                            (lispm-tr "Evaluate Lisp, or find skills and tools."))
                                           (has-apps
                                            (lispm-tr "Find applications, skills and tools, or ask LispM."))
@@ -695,10 +436,10 @@ They are written while the field over or under them is read from."
 (defun lispm-bar-redraw ()
   "Draw the bar's lines again, and show them."
   (setq lispm-bar--redraw-timer nil)
-  (when (and lispm-bar--open (not (timerp lispm-bar--spinner-timer))
+  (when (and lispm-bar-open (not (timerp lispm-bar--spinner-timer))
              (lispm-agent-working-p (lispm-system-agent)))
     (setq lispm-bar--spinner-timer (run-at-time 0.25 0.25 #'lispm-bar--spin)))
-  (when lispm-bar--open
+  (when lispm-bar-open
     (let ((buffer (lispm-bar-buffer)))
       (with-current-buffer buffer
         (let ((inhibit-read-only t)
@@ -715,7 +456,7 @@ They are written while the field over or under them is read from."
 
 (defun lispm-bar--changed (&rest _)
   "Redraw the bar soon, if it is open."
-  (when (and lispm-bar--open (not (timerp lispm-bar--redraw-timer)))
+  (when (and lispm-bar-open (not (timerp lispm-bar--redraw-timer)))
     (setq lispm-bar--redraw-timer (run-at-time 0.03 nil #'lispm-bar-redraw))))
 
 (defun lispm-bar--agent-changed (agent &rest _)
@@ -725,7 +466,7 @@ They are written while the field over or under them is read from."
 
 (defun lispm-bar--spin ()
   "Keep the spinner turning while the bar is open and LispM works."
-  (if (and lispm-bar--open (lispm-agent-working-p (lispm-system-agent)))
+  (if (and lispm-bar-open (lispm-agent-working-p (lispm-system-agent)))
       (lispm-bar--changed)
     (when (timerp lispm-bar--spinner-timer)
       (cancel-timer lispm-bar--spinner-timer)
@@ -742,7 +483,7 @@ None while the bar is open, where the call is asked about; else a
 message naming the key opening it.  Other agents are left to others.
 This is a `lispm-approval-message-functions' function."
   (when (lispm-system-agent-p agent)
-    (if lispm-bar--open
+    (if lispm-bar-open
         t
       (lispm-tr "LispM asks to use %s: %s to answer"
                 (lispm-chat-tool-name tool) (substitute-command-keys "\\[lispm-ai]")))))
@@ -810,7 +551,7 @@ See `lispm-bar-height'."
 (defun lispm-bar--field-changed ()
   "Find what the field's text names, and redraw.
 This is a `post-command-hook' function of the field."
-  (when (and lispm-bar--open (minibufferp))
+  (when (and lispm-bar-open (minibufferp))
     (let ((text (minibuffer-contents-no-properties)))
       (unless (equal text lispm-bar--text)
         (lispm-bar--set-text text)
@@ -846,10 +587,10 @@ setup and queues what was asked until `lispm-bar-model-ready'."
                 (or (plist-get thing :setup) (plist-get thing :ask)))
            (add-to-history 'lispm-bar-history text)
            (setq lispm-bar-entrypoint 'bar
-                 lispm-bar--waiting (cons text request)
+                 lispm-bar-waiting (cons text request)
                  lispm-bar--then lispm-bar-setup-function)
            (exit-minibuffer))
-          ((not lispm-bar--ready)
+          ((not lispm-bar-ready)
            (add-to-history 'lispm-bar-history text)
            (lispm-bar-eval text)
            (delete-minibuffer-contents)
@@ -890,7 +631,7 @@ field's words find, under a heading a kind."
   "Complete an Emacs Lisp symbol at point in the bar's field."
   (interactive)
   (when (and (minibufferp)
-             (or (not lispm-bar--ready)
+             (or (not lispm-bar-ready)
                  (string-prefix-p "(" (string-trim-left (minibuffer-contents-no-properties)))))
     (let ((end (point))
           (beg (save-excursion
@@ -948,7 +689,7 @@ Typed in a field holding text, n is typed."
 (defun lispm-bar-close-then (function)
   "Close the bar, then call FUNCTION, as for what takes the bar's place: a
 chat, a frame laid out anew.  With the bar closed, call it now."
-  (if-let* ((lispm-bar--open)
+  (if-let* ((lispm-bar-open)
             (field (active-minibuffer-window)))
       (progn (setq lispm-bar--then function)
              (with-selected-window field
@@ -1000,21 +741,21 @@ of what is found.  \\[lispm-bar-chat] shows the conversation in a chat;
 To open it with a key, bind it, as
   (keymap-global-set \"C-c SPC\" #\\='lispm-ai)"
   (interactive)
-  (if lispm-bar--open
+  (if lispm-bar-open
       (when-let* ((field (active-minibuffer-window)))
         (with-selected-window field (abort-recursive-edit)))
-    (let ((initial (car lispm-bar--waiting)))
-      (setq lispm-bar--open (selected-window)
+    (let ((initial (car lispm-bar-waiting)))
+      (setq lispm-bar-open (selected-window)
             lispm-bar--then nil
             lispm-bar--text ""
             lispm-bar--found nil
             lispm-bar--choice 0)
       (lispm-bar-ready-p)
-      (lispm-bar--gather)
+      (lispm-bar-gather)
       (when initial (lispm-bar--set-text initial))
       (unwind-protect
           (funcall lispm-bar-read-function (lambda () (lispm-bar--read initial)))
-        (setq lispm-bar--open nil)
+        (setq lispm-bar-open nil)
         (when (timerp lispm-bar--redraw-timer)
           (cancel-timer lispm-bar--redraw-timer)
           (setq lispm-bar--redraw-timer nil))
@@ -1028,5 +769,9 @@ To open it with a key, bind it, as
 ;;;###autoload
 (unless (fboundp 'ai) (defalias 'ai #'lispm-ai))
 
+
+(setq lispm-bar-changed-function #'lispm-bar--changed)
+
 (provide 'lispm-bar)
+
 ;;; lispm-bar.el ends here
