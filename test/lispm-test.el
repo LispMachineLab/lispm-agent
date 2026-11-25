@@ -7187,6 +7187,121 @@ when LispM starts without a model."
       (should (= (length shown) 1))
       (mapc #'kill-buffer shown))))
 
+(ert-deftest lispm-test-model-setup-form-rotom-optional-key ()
+  "Rotom and keyless backends treat The key as optional and place point at
+the end of Model so pasting or deleting replaces the old model cleanly."
+  (lispm-test--with-settings
+    (let* ((store nil)
+           (key-fn (lambda () "rotom-dynamic-key"))
+           (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-get-functions
+            (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
+           (lispm-secret-set-functions
+            (list (lambda (id secret) (setf (alist-get id store) secret) t)))
+           (lispm-backend-form-show-function #'identity)
+           (transient-mark-mode t)
+           (delete-selection-mode nil))
+      ;; 1. Rotom with :key nil shows optional Key field, places cursor at
+      ;; end of Model, supports M-a + paste replacement + DEL, and submits
+      ;; with an empty Key.
+      (let ((lispm-backends (copy-tree lispm-backends))
+            (lispm-backend 'rotom)
+            (lispm-model "gpt-6-sol"))
+        (setf (alist-get 'rotom lispm-backends)
+              (list :api 'openai :url "http://127.0.0.1:4141/v1"
+                    :model "gpt-6-sol" :key nil))
+        (let ((buf (lispm-model-setup-form)))
+          (unwind-protect
+              (save-window-excursion
+                (switch-to-buffer buf)
+                (should (assq 'key (lispm-ui-form-values)))
+                (should (string-search
+                         "Optional; leave it empty if the server asks for no key."
+                         (buffer-substring-no-properties (point-min) (point-max))))
+                (let ((model-widget (alist-get 'model (lispm-ui-form-widgets buf))))
+                  (should (eq (lispm-ui-form--key-at (point)) 'model))
+                  (should (= (point) (widget-field-text-end model-widget)))
+                  (execute-kbd-macro (kbd "M-a"))
+                  (let ((kill-ring '("grok-5.5"))
+                        (kill-ring-yank-pointer nil))
+                    (execute-kbd-macro (kbd "C-y")))
+                  (should (equal (lispm-ui-form-value 'model) "grok-5.5"))
+                  (execute-kbd-macro (kbd "DEL"))
+                  (should (equal (lispm-ui-form-value 'model) "grok-5."))
+                  (execute-kbd-macro "5")
+                  (should (equal (lispm-ui-form-value 'model) "grok-5.5")))
+                (lispm-ui-form-submit))
+            (when (buffer-live-p buf) (kill-buffer buf))))
+        (should (eq lispm-backend 'rotom))
+        (should (equal (plist-get (lispm-backend-get 'rotom) :model) "grok-5.5"))
+        (should (equal (lispm-default-model) "grok-5.5"))
+        (should-not (plist-get (lispm-backend-get 'rotom) :key)))
+      ;; 2. Rotom with a function :key preserves the function when Key is empty.
+      (let ((lispm-backends (copy-tree lispm-backends))
+            (lispm-backend 'rotom)
+            (lispm-model "gpt-6-sol"))
+        (setf (alist-get 'rotom lispm-backends)
+              (list :api 'openai :url "http://127.0.0.1:4141/v1"
+                    :model "gpt-6-sol" :key key-fn))
+        (let ((buf (lispm-model-setup-form)))
+          (unwind-protect
+              (with-current-buffer buf
+                (lispm-ui-form-set 'model "grok-5.5")
+                (lispm-ui-form-submit))
+            (when (buffer-live-p buf) (kill-buffer buf))))
+        (should (eq (plist-get (lispm-backend-get 'rotom) :key) key-fn))
+        (should (equal (plist-get (lispm-backend-get 'rotom) :model) "grok-5.5"))
+        (should (equal (lispm-default-model) "grok-5.5")))
+      ;; 3. Rotom with an unstored secret entry still focuses Model and submits cleanly.
+      (let ((lispm-backends (copy-tree lispm-backends))
+            (lispm-backend 'rotom)
+            (lispm-model "gpt-6-sol"))
+        (setf (alist-get 'rotom lispm-backends)
+              (list :api 'openai :url "http://127.0.0.1:4141/v1"
+                    :model "gpt-6-sol" :key '(secret . lispm-backend-rotom)))
+        (let ((buf (lispm-model-setup-form)))
+          (unwind-protect
+              (with-current-buffer buf
+                (should (eq (lispm-ui-form--key-at (point)) 'model))
+                (lispm-ui-form-set 'model "grok-5.5")
+                (lispm-ui-form-submit))
+            (when (buffer-live-p buf) (kill-buffer buf))))
+        (should (equal (plist-get (lispm-backend-get 'rotom) :model) "grok-5.5"))
+        (should (equal (lispm-default-model) "grok-5.5"))
+        (should-not (plist-get (lispm-backend-get 'rotom) :key)))
+      ;; 4. Typing a key explicitly into Rotom's Key field stores it encrypted.
+      (let ((lispm-backends (copy-tree lispm-backends))
+            (lispm-backend 'rotom)
+            (lispm-model "gpt-6-sol"))
+        (setf (alist-get 'rotom lispm-backends)
+              (list :api 'openai :url "http://127.0.0.1:4141/v1"
+                    :model "gpt-6-sol" :key nil))
+        (let ((buf (lispm-model-setup-form)))
+          (unwind-protect
+              (with-current-buffer buf
+                (lispm-test--form-type 'key "rotom-tok-1")
+                (lispm-ui-form-submit))
+            (when (buffer-live-p buf) (kill-buffer buf))))
+        (should (equal (cdr (assq 'lispm-backend-rotom store)) "rotom-tok-1"))
+        (should (equal (plist-get (lispm-backend-get 'rotom) :key)
+                       '(secret . lispm-backend-rotom))))
+      ;; 5. Existing ollama backend (:key nil, no :key-source) also re-submits cleanly.
+      (let ((lispm-backends (copy-tree lispm-backends))
+            (lispm-backend 'ollama)
+            (lispm-model "qwen3-coder"))
+        (setf (alist-get 'ollama lispm-backends)
+              (list :api 'openai :url "http://localhost:11434/v1"
+                    :model "qwen3-coder"))
+        (let ((buf (lispm-model-setup-form)))
+          (unwind-protect
+              (with-current-buffer buf
+                (lispm-ui-form-set 'model "qwen3-coder:latest")
+                (lispm-ui-form-submit))
+            (when (buffer-live-p buf) (kill-buffer buf))))
+        (should (equal (plist-get (lispm-backend-get 'ollama) :model) "qwen3-coder:latest"))
+        (should (equal (lispm-default-model) "qwen3-coder:latest"))
+        (should-not (plist-get (lispm-backend-get 'ollama) :key))))))
+
 (ert-deftest lispm-test-character-names ()
   (should (eq (lispm-character-name-for "Ada Lovelace") 'ada-lovelace))
   (should (eq (lispm-character-name-for "  R2-D2! ") 'r2-d2))

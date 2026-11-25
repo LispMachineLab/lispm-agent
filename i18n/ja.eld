@@ -506,6 +506,7 @@
   ("The model agents use when they name none." . "エージェントがモデルを指定しないときに使うモデル。")
   ("A key is stored encrypted; leave it empty to keep it." . "キーは暗号化して保存されています。そのまま残すには空欄にしてください。")
   ("LispM Auth keeps it encrypted." . "LispM Auth が暗号化して保持します。")
+  ("Optional; leave it empty if the server asks for no key." . "省略可能。サーバーがキーを求めない場合は空欄にしてください。")
   ("A key is set; leave it empty to keep it, or type a new one." . "キーは設定済みです。そのまま残すには空欄にし、新しいキーを入力することもできます。")
   ("Saved in Customize in plain text." . "Customize に平文で保存されます。")
   ("The variable holding the key." . "キーを保持する変数。")

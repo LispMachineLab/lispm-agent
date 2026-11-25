@@ -338,6 +338,13 @@ says, once it is valid."
        'url (or (plist-get props :url) "")
        'model (or (plist-get props :model) "")))))
 
+(defun lispm-model-setup-form--optional-key-p (provider props)
+  "Return non-nil when PROVIDER with PROPS does not require an API key."
+  (or (memq provider '(custom ollama lm-studio rotom rotom-messages))
+      (eq (plist-get props :key-source) 'none)
+      (and (assq provider lispm-backends)
+           (eq (lispm-backend-form--key-source props) 'none))))
+
 (defun lispm-model-setup-form--submit (values)
   "Save the backend and model VALUES describe, and make it LispM's model."
   (let* ((provider (alist-get 'provider values))
@@ -363,7 +370,8 @@ says, once it is valid."
                              old
                              (lispm-backend-key-at-hand-p old))
                         (lispm-backend-form--key-source old))
-                       ((and (eq provider 'custom) (string-empty-p key))
+                       ((and (string-empty-p key)
+                             (lispm-model-setup-form--optional-key-p provider props))
                         'none)
                        ((lispm-secret-available-p) 'secret)
                        (t 'typed)))
@@ -381,7 +389,9 @@ says, once it is valid."
     (if models
         (setq backend (plist-put backend :models models))
       (cl-remf backend :models))
-    (setq backend (lispm-backend-form--with-key backend name source key variable))
+    (if (and (string-empty-p key) old (functionp (plist-get old :key)))
+        (setq backend (plist-put backend :key (plist-get old :key)))
+      (setq backend (lispm-backend-form--with-key backend name source key variable)))
     (if old
         (lispm-backend-change name backend t)
       (lispm-backend-add name backend t))
@@ -431,11 +441,16 @@ says, once it is valid."
          :when ,key-p
          :help ,(lambda (values)
                   (let* ((prov (alist-get 'provider values))
+                         (p (lispm-model-setup-form--props prov))
                          (back (and prov (not (eq prov 'custom))
                                     (lispm-backend-get prov))))
-                    (if (and back (lispm-backend-key-at-hand-p back))
-                        (lispm-tr "A key is stored encrypted; leave it empty to keep it.")
-                      (lispm-tr "LispM Auth keeps it encrypted.")))))))
+                    (cond
+                     ((and back (lispm-backend-key-at-hand-p back))
+                      (lispm-tr "A key is stored encrypted; leave it empty to keep it."))
+                     ((lispm-model-setup-form--optional-key-p prov p)
+                      (lispm-tr "Optional; leave it empty if the server asks for no key."))
+                     (t
+                      (lispm-tr "LispM Auth keeps it encrypted."))))))))
 
 (defun lispm-model-setup-form ()
   "Make the form that sets up LispM's model and provider; return its buffer."
@@ -452,10 +467,11 @@ says, once it is valid."
          (key-p (lambda (values)
                   (let* ((prov (alist-get 'provider values))
                          (p (lispm-model-setup-form--props prov)))
-                    (not (or (memq prov '(ollama lm-studio))
-                             (eq (plist-get p :key-source) 'none)
-                             (and (assq prov lispm-backends)
-                                  (eq (lispm-backend-form--key-source p) 'none)))))))
+                    (or (memq prov '(custom rotom rotom-messages))
+                        (not (or (memq prov '(ollama lm-studio))
+                                 (eq (plist-get p :key-source) 'none)
+                                 (and (assq prov lispm-backends)
+                                      (eq (lispm-backend-form--key-source p) 'none))))))))
          (fields (lispm-model-setup-form--fields
                   choices provider props active-model custom-p address-p key-p))
          (buffer
@@ -471,10 +487,13 @@ says, once it is valid."
            :on-submit #'lispm-model-setup-form--submit)))
     (with-current-buffer buffer
       (let* ((need-key (and (funcall key-p (list (cons 'provider provider)))
+                            (not (lispm-model-setup-form--optional-key-p provider props))
                             (not (and props (lispm-backend-key-at-hand-p props)))))
              (target (if need-key 'key 'model)))
         (when-let* ((widget (alist-get target (lispm-ui-form-widgets buffer))))
-          (goto-char (or (widget-field-start widget) (widget-get widget :from))))))
+          (goto-char (or (widget-field-text-end widget)
+                         (widget-field-start widget)
+                         (widget-get widget :from))))))
     buffer))
 
 ;;;###autoload

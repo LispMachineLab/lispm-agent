@@ -506,6 +506,7 @@
   ("The model agents use when they name none." . "Le modèle que les agents utilisent quand ils n'en nomment aucun.")
   ("A key is stored encrypted; leave it empty to keep it." . "Une clé est stockée chiffrée ; laissez vide pour la conserver.")
   ("LispM Auth keeps it encrypted." . "LispM Auth la garde chiffrée.")
+  ("Optional; leave it empty if the server asks for no key." . "Facultatif ; laissez vide si le serveur ne demande aucune clé.")
   ("A key is set; leave it empty to keep it, or type a new one." . "Une clé est définie ; laissez vide pour la conserver, ou saisissez-en une nouvelle.")
   ("Saved in Customize in plain text." . "Enregistrée en clair dans Customize.")
   ("The variable holding the key." . "La variable qui contient la clé.")

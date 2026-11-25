@@ -506,6 +506,7 @@
   ("The model agents use when they name none." . "代理未指定模型時使用的模型。")
   ("A key is stored encrypted; leave it empty to keep it." . "金鑰已加密儲存；留空即可保留。")
   ("LispM Auth keeps it encrypted." . "LispM Auth 會將其加密儲存。")
+  ("Optional; leave it empty if the server asks for no key." . "選填；如果伺服器不需要金鑰，留空即可。")
   ("A key is set; leave it empty to keep it, or type a new one." . "已設定金鑰；留空即可保留，或輸入新金鑰。")
   ("Saved in Customize in plain text." . "以明文儲存在 Customize 中。")
   ("The variable holding the key." . "儲存金鑰的變數。")
