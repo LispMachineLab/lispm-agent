@@ -280,21 +280,25 @@ stays on record."
          ;; The past of the entry replaced: when it was saved, recalled, merged.
          (past (and existing
                     (with-current-buffer buffer
-                      (mapcar (lambda (name) (cons name (org-entry-get (plist-get existing :beg) name)))
-                              '("CREATED" "RECALLED" "RECALLS" "MERGED"))))))
+                      (save-restriction
+                        (widen)
+                        (mapcar (lambda (name) (cons name (org-entry-get (plist-get existing :beg) name)))
+                                '("CREATED" "RECALLED" "RECALLS" "MERGED")))))))
     (with-current-buffer buffer
       (save-excursion
-        (if existing
-            (progn (delete-region (plist-get existing :beg) (plist-get existing :end))
-                   (goto-char (plist-get existing :beg)))
-          (goto-char (point-max))
-          (unless (bolp) (insert "\n")))
-        (insert (lispm-memory--entry-text
-                 title tags
-                 `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory--stamp)))
-                   ("UPDATED" . ,(and existing (lispm-memory--stamp)))
-                   ,@(assoc-delete-all "CREATED" past))
-                 content))))
+        (save-restriction
+          (widen)
+          (if existing
+              (progn (delete-region (plist-get existing :beg) (plist-get existing :end))
+                     (goto-char (plist-get existing :beg)))
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n")))
+          (insert (lispm-memory--entry-text
+                   title tags
+                   `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory--stamp)))
+                     ("UPDATED" . ,(and existing (lispm-memory--stamp)))
+                     ,@(assoc-delete-all "CREATED" past))
+                   content)))))
     (lispm-memory--save buffer)
     (lispm-git-commit agent (format "%s: %s \"%s\"" (lispm-agent-name agent)
                                     (if existing "update memory" "remember") title))
@@ -372,7 +376,9 @@ A character's own memory comes first."
          (buffer (and entry (lispm-memory--buffer agent (plist-get entry :scope) nil t))))
     (unless entry (error "No memory titled \"%s\"" title))
     (with-current-buffer buffer
-      (delete-region (plist-get entry :beg) (plist-get entry :end)))
+      (save-restriction
+        (widen)
+        (delete-region (plist-get entry :beg) (plist-get entry :end))))
     (lispm-memory--save buffer)
     (lispm-git-commit agent (format "%s: forget \"%s\"" (lispm-agent-name agent) title))
     (format "Forgot \"%s\" (it remains in git history)." title)))
@@ -395,14 +401,16 @@ A character's own memory comes first."
                       unless (member id ids) return id)))
     (with-current-buffer buffer
       (save-excursion
-        (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (insert "* TODO " (lispm--oneline title 120) "\n"
-                ":PROPERTIES:\n:ID:       " id "\n"
-                ":CREATED:  " (lispm-memory--stamp) "\n:END:\n"
-                (if (and notes (not (string-blank-p notes)))
-                    (concat (org-escape-code-in-string (string-trim notes)) "\n")
-                  ""))))
+        (save-restriction
+          (widen)
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert "* TODO " (lispm--oneline title 120) "\n"
+                  ":PROPERTIES:\n:ID:       " id "\n"
+                  ":CREATED:  " (lispm-memory--stamp) "\n:END:\n"
+                  (if (and notes (not (string-blank-p notes)))
+                      (concat (org-escape-code-in-string (string-trim notes)) "\n")
+                    "")))))
     (lispm-memory--save buffer)
     (lispm-git-commit agent (format "%s: add task %s" (lispm-agent-name agent) id))
     id))
@@ -415,16 +423,18 @@ A character's own memory comes first."
          (task (lispm-tasks--find agent id)))
     (with-current-buffer buffer
       (save-excursion
-        (when note
-          (goto-char (plist-get task :end))
-          (unless (bolp) (insert "\n"))
-          (insert "- " (lispm-memory--stamp) " " (lispm--oneline note 500) "\n"))
-        (when state
-          (goto-char (plist-get task :beg))
-          (let ((case-fold-search nil))
-            (if (looking-at "\\* \\(?:\\(TODO\\|NEXT\\|BLOCKED\\|DONE\\|CANCELLED\\) \\)?")
-                (replace-match (concat "* " state " ") t t)
-              (error "Malformed task heading"))))))
+        (save-restriction
+          (widen)
+          (when note
+            (goto-char (plist-get task :end))
+            (unless (bolp) (insert "\n"))
+            (insert "- " (lispm-memory--stamp) " " (lispm--oneline note 500) "\n"))
+          (when state
+            (goto-char (plist-get task :beg))
+            (let ((case-fold-search nil))
+              (if (looking-at "\\* \\(?:\\(TODO\\|NEXT\\|BLOCKED\\|DONE\\|CANCELLED\\) \\)?")
+                  (replace-match (concat "* " state " ") t t)
+                (error "Malformed task heading")))))))
     (lispm-memory--save buffer)
     (lispm-git-commit agent (format "%s: task %s%s" (lispm-agent-name agent) id
                                     (if state (concat " -> " state) " note")))
@@ -496,16 +506,40 @@ calls of one response, become one commit listing each of them."
                      (concat "{ [ -d .git ] || git init -q; } && "
                              ;; Images of sessions stay out of the history, and
                              ;; so do the state of inboxes, the snapshots of
-                             ;; projects, a repository of their own, and the
-                             ;; sandbox's srt and settings.
-                             "for p in '*.images/' 'journal.git/' 'inbox.org' 'sandbox/'; do"
+                             ;; projects, a repository of their own, the
+                             ;; sandbox's srt and settings, and RAG caches.
+                             "for p in '*.images/' 'journal.git/' 'inbox.org' 'sandbox/' '.rag-index.eld'; do"
                              " grep -qxF \"$p\" .git/info/exclude 2>/dev/null"
                              " || { mkdir -p .git/info && echo \"$p\" >> .git/info/exclude; }; done && "
                              "git add -A && "
                              "{ git diff --cached --quiet || git"
                              " -c user.name=" (shell-quote-argument author)
                              " -c user.email=" (shell-quote-argument (concat author "@lispm.invalid"))
-                             " commit -q -m " (shell-quote-argument message) "; }")))))))))
+                             " commit -q -m " (shell-quote-argument message) "; }"))
+               :sentinel (lambda (p _event)
+                           (unless (process-live-p p)
+                             (when (eq lispm-git--process p)
+                               (setq lispm-git--process nil))
+                             (when (and lispm-git--queue (not lispm-git--timer))
+                               (setq lispm-git--timer
+                                     (run-at-time 0.2 nil #'lispm-git--flush))))))))))))
+
+(defun lispm-git--on-kill-emacs ()
+  "Flush pending `lispm-git' commits cleanly within a bounded wait on exit."
+  (when lispm-git--timer
+    (cancel-timer lispm-git--timer)
+    (setq lispm-git--timer nil))
+  (when (and lispm-git--queue (lispm-git-p))
+    (let ((deadline (+ (float-time) 1.5)))
+      (while (and (process-live-p lispm-git--process) (< (float-time) deadline))
+        (accept-process-output lispm-git--process 0.05))
+      (unless (process-live-p lispm-git--process)
+        (lispm-git--flush))))
+  (let ((deadline (+ (float-time) 1.5)))
+    (while (and (process-live-p lispm-git--process) (< (float-time) deadline))
+      (accept-process-output lispm-git--process 0.05))))
+
+(add-hook 'kill-emacs-hook #'lispm-git--on-kill-emacs)
 
 (defun lispm-git--commit-turn (agent _reply)
   "Commit AGENT's session after a turn."

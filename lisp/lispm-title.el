@@ -85,6 +85,13 @@ topic, in %s. No quotes, no final punctuation."
     (setq line (string-trim line "[\"'“”‘’「」『』*#` \t]+" "[\"'“”‘’「」『』*` \t.。!！]+"))
     (and (not (string-empty-p line)) (truncate-string-to-width line 80))))
 
+(defun lispm-title--file-title (file)
+  "The #+lispm_title on disk in FILE, or nil."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file nil 0 4096)
+      (cdr (assoc "title" (lispm-transcript-keywords))))))
+
 (defun lispm-title--ask (agent reply)
   "Ask the model for a title of AGENT's session, which ended a turn with REPLY."
   (let* ((prompt (lispm-title--first-prompt agent))
@@ -104,7 +111,9 @@ topic, in %s. No quotes, no final punctuation."
                (let ((title (lispm-title--clean
                              (lispm--reply-text (append (alist-get 'content message) nil)))))
                  ;; Unless the user titled it meanwhile.
-                 (when (and title file (file-exists-p file) (not (lispm-session-title agent)))
+                 (when (and title file (file-exists-p file)
+                            (not (or (lispm-session-title agent)
+                                     (lispm-title--file-title file))))
                    (lispm-rename-session file title)
                    (run-hook-with-args 'lispm-title-change-functions agent))))
              :on-error #'ignore)))

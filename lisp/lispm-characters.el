@@ -1023,7 +1023,9 @@ Returns a list of float vectors, one per string in TEXTS, or nil on failure.")
           (let ((body (string-trim (buffer-substring-no-properties start (match-beginning 0))))
                 (next-line (match-string 2)))
             (when (not (string-empty-p body))
-              (push (list title keywords body) sections))
+              (push (list title keywords
+                          (if org-p (org-unescape-code-in-string body) body))
+                    sections))
             (if (and org-p (string-match "\\(.*?\\)[ \t]+:\\([[:alnum:]_@#%:]+\\):[ \t]*\\'" next-line))
                 (setq title (string-trim (match-string 1 next-line))
                       keywords (split-string (match-string 2 next-line) ":" t))
@@ -1039,7 +1041,9 @@ Returns a list of float vectors, one per string in TEXTS, or nil on failure.")
             (setq start (point))))
         (let ((body (string-trim (buffer-substring-no-properties start (point-max)))))
           (when (not (string-empty-p body))
-            (push (list title keywords body) sections)))))
+            (push (list title keywords
+                        (if org-p (org-unescape-code-in-string body) body))
+                  sections)))))
     (pcase-dolist (`(,title ,keywords ,body) (nreverse sections))
       (dolist (piece (lispm-characters--split-paragraphs body lispm-character-rag-chunk-size))
         (let* ((full (concat title "\n" piece))
@@ -1114,12 +1118,13 @@ using BM25 and Lorebook keyword triggers."
         (/ dot (* (sqrt n1) (sqrt n2)))))))
 
 (defun lispm-characters--character-backend (character)
-  "Backend plist for CHARACTER, falling back to `lispm-backend'."
+  "Backend plist for CHARACTER, falling back to the active LispM backend."
   (let ((character (lispm-get-character character)))
     (or (lispm-character-endpoint character)
         (and (lispm-character-backend character)
-             (cdr (assq (lispm-character-backend character) lispm-backends)))
-        (cdr (assq lispm-backend lispm-backends)))))
+             (lispm-backend (lispm-character-backend character)))
+        (when-let* ((name (lispm-backend-name)))
+          (lispm-backend name)))))
 
 (defcustom lispm-character-rag-timeout 5
   "Timeout in seconds for character embedding HTTP requests."
@@ -1268,7 +1273,8 @@ in CHARACTER's knowledge base."
                     (goto-char beg))
                 (goto-char (point-max))
                 (unless (bolp) (insert "\n"))))
-            (insert "* " clean-title tag-str "\n" (string-trim content) "\n")))
+            (insert "* " clean-title tag-str "\n"
+                    (org-escape-code-in-string (string-trim content)) "\n")))
         (lispm-memory--save buffer)))
     (lispm-git-commit (symbol-name (lispm-character-name character))
                       (format "%s: knowledge: %s" (lispm-character-name character) clean-title))
@@ -1284,23 +1290,27 @@ in CHARACTER's knowledge base."
              chunks "\n\n"))
 
 (defun lispm-characters--rag-prompt (agent)
-  "System prompt section injecting relevant knowledge from a character's RAG store."
+  "System prompt section summarizing a character's RAG knowledge base for AGENT."
   (when-let* ((character (lispm-agent-character* agent))
               ((lispm-character-rag-enabled-p character))
               (files (lispm-character-knowledge-files character)))
-    (let* ((input (cdr (lispm-characters--last-input agent)))
-           (hits (and input (not (string-empty-p input))
-                      (lispm-character-rag-search character input lispm-character-rag-top-k))))
-      (concat "# Your knowledge base (RAG)\n"
-              (format "Sources (%d): %s. Use `rag_search' to query your knowledge base and `knowledge_add' to record new lorebook entries.\n"
-                      (length files)
-                      (mapconcat #'file-name-nondirectory (seq-take files 10) ", "))
-              (if hits
-                  (concat "\nRelevant passages for this turn:\n"
-                          (lispm--truncate (lispm-characters--rag-format hits) 6000))
-                "")))))
+    (format "# Your knowledge base (RAG)\nSources (%d): %s. Use `rag_search' to query your knowledge base and `knowledge_add' to record new lorebook entries.\n"
+            (length files)
+            (mapconcat #'file-name-nondirectory (seq-take files 10) ", "))))
+
+(defun lispm-characters--rag-context (agent)
+  "Request context section retrieving RAG passages for AGENT's current turn."
+  (when-let* ((character (lispm-agent-character* agent))
+              ((lispm-character-rag-enabled-p character))
+              ((lispm-character-knowledge-files character))
+              (input (cdr (lispm-characters--last-input agent)))
+              ((not (string-empty-p input)))
+              (hits (lispm-character-rag-search character input lispm-character-rag-top-k)))
+    (concat "Relevant passages from your knowledge base for this turn:\n"
+            (lispm--truncate (lispm-characters--rag-format hits) 6000))))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-characters--rag-prompt t)
+(add-hook 'lispm-request-context-functions #'lispm-characters--rag-context t)
 
 (lispm-deftool rag_search
     ((query string "Words, concepts or names to look up in your knowledge base.")
@@ -1454,10 +1464,21 @@ CALLBACK with `(FILES ERROR)'."
     (funcall callback nil "LispM-ComfyUI (`lispm-comfyui') is not installed")
     (cl-return-from lispm-characters--comfyui-generate nil))
   (condition-case err
-      (let ((buffer (car (lispm-comfyui--canvas-buffers))))
-        (when (and workflow (not (string-empty-p workflow)) (not buffer))
-          (save-window-excursion (lispm-comfyui-open workflow))
-          (setq buffer (car (lispm-comfyui--canvas-buffers))))
+      (let ((buffer (if (and workflow (not (string-empty-p workflow)))
+                        (let ((match-fn
+                               (lambda (buf)
+                                 (when-let* ((file (buffer-file-name buf)))
+                                   (or (equal (expand-file-name file)
+                                              (expand-file-name workflow))
+                                       (and (not (file-name-directory workflow))
+                                            (equal (file-name-nondirectory file) workflow)))))))
+                          (or (seq-find match-fn (lispm-comfyui--canvas-buffers))
+                              (let ((opened (save-window-excursion
+                                              (lispm-comfyui-open workflow))))
+                                (or (and (buffer-live-p opened) opened)
+                                    (seq-find match-fn (lispm-comfyui--canvas-buffers))
+                                    (car (lispm-comfyui--canvas-buffers))))))
+                      (car (lispm-comfyui--canvas-buffers)))))
         (if buffer
             (progn
               (lispm-characters--comfyui-set-prompts buffer prompt negative-prompt)

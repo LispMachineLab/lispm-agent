@@ -687,7 +687,7 @@ STATE is `running', `starting', `failed' or `stopped'."
   "Signal an error unless NAME, a string, can name an MCP server."
   (let ((name (and (stringp name) (string-trim name))))
     (unless (and name (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" name))
-      (user-error "%s" (lispm-tr "A backend needs a name of letters, digits, `-', `_' or `.'")))
+      (user-error "An MCP server needs a name of letters, digits, `-', `_' or `.'"))
     name))
 
 (defun lispm-mcp-server--normalize (config)
@@ -708,7 +708,7 @@ STATE is `running', `starting', `failed' or `stopped'."
     (cond (url
            (unless (and (stringp url)
                         (string-match-p "\\`https?://[^/[:space:]]+" url))
-             (user-error "%s" (lispm-tr "A backend's address starts with http:// or https://"))))
+             (user-error "An MCP server's address starts with http:// or https://")))
           ((or (not (stringp command)) (string-empty-p command))
            (user-error "An MCP server needs a command or an HTTP address")))
     config))

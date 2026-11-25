@@ -120,9 +120,14 @@ BODY can use `project', a scratch directory for agents to work in."
          (progn ,@body)
        (dolist (a (lispm-agents)) (lispm-unwatch a))
        (maphash (lambda (_ timer) (cancel-timer timer)) lispm--idle-work)
-       ;; Snapshots still being taken would outlive their project.
+       (when lispm-git--timer
+         (cancel-timer lispm-git--timer)
+         (setq lispm-git--timer nil))
+       (setq lispm-git--queue nil lispm-git--process nil)
+       ;; Snapshots and git commits still running would outlive their directory.
        (dolist (p (process-list))
-         (when (string-prefix-p "lispm-journal" (process-name p))
+         (when (or (string-prefix-p "lispm-journal" (process-name p))
+                   (equal (process-name p) "lispm-git"))
            (delete-process p)))
        (dolist (b (buffer-list))
          (when (and (buffer-file-name b) (file-in-directory-p (buffer-file-name b) tmp))

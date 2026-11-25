@@ -738,10 +738,10 @@ They are written while the field over or under them is read from."
     (let ((buffer (lispm-bar-buffer)))
       (with-current-buffer buffer
         (let ((inhibit-read-only t)
-              (text (lispm-bar--text)))
+              (text (string-remove-suffix "\n" (lispm-bar--text))))
           (unless (equal-including-properties text (buffer-string))
             (erase-buffer)
-            (insert (string-remove-suffix "\n" text))
+            (insert text)
             ;; While it finds, the bar shows the top, where Return acts;
             ;; else the end, where the reply grows.
             (goto-char (if (string-blank-p lispm-bar--text) (point-max) (point-min)))

@@ -487,6 +487,10 @@ AGENT is the running agent of the current project, or a new one."
 (with-eval-after-load 'lispm-agents-mcp
   (require 'lispm-agents-bridge))
 
+;; Hyperbole's Action Key on LispM presentations once Hyperbole loads.
+(with-eval-after-load 'hyperbole
+  (require 'lispm-hyperbole))
+
 ;; Agents LispM did not start reach this Emacs over MCP, once the user's
 ;; init has had its say (lispm-mcp-server.el).
 (if after-init-time

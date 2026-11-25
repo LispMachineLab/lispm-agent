@@ -738,7 +738,10 @@ conversations take on the new definition at once."
           (lispm-character-comfyui character) (plist-get props :comfyui))
     (dolist (agent (lispm-agents))
       (when (eq (lispm-agent-character agent) name)
-        (lispm--apply-role agent (lispm-get-role (lispm-agent-role agent)))))
+        (when-let* ((role (lispm-get-role (or (lispm-character-role character)
+                                              (lispm-agent-role agent))
+                                          t)))
+          (lispm--apply-role agent role))))
     (run-hook-with-args 'lispm-character-change-functions name 'defined)
     character))
 
