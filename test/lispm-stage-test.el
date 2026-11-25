@@ -205,7 +205,7 @@
         ;; Simulate clicking/Vim-escaping slightly above `lispm-chat--input-start'
         ;; while the bottom prompt is still visible in the chat window.
         (with-current-buffer chat
-          (goto-char (- lispm-chat--prompt-start 5))
+          (goto-char (- lispm-chat-prompt-start 5))
           (set-window-point (selected-window) (point)))
         (lispm--live-insert agent 'text
                             (mapconcat (lambda (i) (format "more-%d" i))

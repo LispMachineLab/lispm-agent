@@ -1144,7 +1144,23 @@ work on its branch; when it replies, the result lists its commits, what it left 
 and the changes against the base, or, if it changed nothing, its worktree and branch are
 removed at once.
 
-* 12. Known limitations and next steps
+* 12. Module architecture: strict 5-layer DAG
+
+The codebase under ~lisp/~ is organized as an 85-module strict directed acyclic graph partitioned into five numbered layers (0 through 4), checked statically and at load time by ~make check-layers~ (~test/check-boundaries.el~):
+
+- *Layer 0 (Platform & transports)*: ~lispm-i18n~, ~lispm-exec~, ~lispm-local-http~, ~lispm-websocket~, ~lispm-agents-context~ --- dependency-free primitives and local transport utilities.
+- *Layer 1 (Identity, storage primitives, API clients & backend discovery)*: ~lispm-util~, ~lispm-secrets~, ~lispm-core~, ~lispm-job~, ~lispm-sandbox~, ~lispm-services~, ~lispm-roles~, ~lispm-media~, ~lispm-transcript~, HTTP/LLM backends (~lispm-anthropic~, ~lispm-openai~, ~lispm-api~), ~lispm-deftool-macros~, and external agent discovery/adapters (~lispm-agents-core~, ~lispm-agents-sessions~, ~lispm-agents-terminals~, ~lispm-agents~, ~lispm-agents-mcp~, ~lispm-agents-ide~, ~lispm-agents-claude~, ~lispm-agents-codex~).
+- *Layer 2 (Runtime, tools, session kernel & memory)*: tool registry, permissions and builtins (~lispm-tool-core~, ~lispm-tool-permissions~, ~lispm-tool-search~, ~lispm-tool-builtins~, ~lispm-shell-classify~, ~lispm-tools~), ~lispm-elisp-worker~, ~lispm-elisp~, ~lispm-memory-store~, ~lispm-memory~, ~lispm-inbox~, ~lispm-journal~, the session kernel (~lispm-session~, ~lispm-turns~, ~lispm-conditions~, ~lispm-approval~, ~lispm-runtime~), safe Lisp evaluation (~lispm-lisp-check~, ~lispm-lisp~, ~lispm-lisp-macros~), ~lispm-collab~, and ~lispm-mcp~.
+- *Layer 3 (Features, bridges & domain tools)*: ~lispm-title~, ~lispm-episodes~, ~lispm-emacs~, ~lispm-develop-core~, ~lispm-develop~, ~lispm-skills-core~, ~lispm-skills~, ~lispm-characters~, ~lispm-character-rag~, ~lispm-character-comfyui~, ~lispm-agents-bridge~, ~lispm-mcp-server~, ~lispm-ground~, ~lispm-presentations~, ~lispm-inspect~, ~lispm-agents-roster~, ~lispm-settings~, ~lispm-backend-form~, ~lispm-runtime-tools~, ~lispm-session-tools~, and ~lispm-process-tools~.
+- *Layer 4 (UI stages, chat, status bar & entrypoints)*: interactive stages (~lispm-stage~, ~lispm-edits~, ~lispm-spotlight~, ~lispm-stage-runner~, ~lispm-shell-stage~, ~lispm-eval-stage~), chat UI (~lispm-chat-items~, ~lispm-chat-view~, ~lispm-chat~), ~lispm-agents-work~, ~lispm-hyperbole~, ~lispm-bar-core~, ~lispm-bar~, ~lispm-batch~, ~lispm~, and ~lispm-terminal~.
+
+Three invariants hold across the entire graph:
+
+1. *No upward or cyclic ~require~*: every module may only ~require~ modules in strictly lower layers or strictly earlier positions within the same layer.
+2. *Public module boundaries*: double-dash symbols (~prefix--name~) are module-private; cross-module callers only touch documented public interfaces.
+3. *Upward inversion via hooks and dispatch variables*: lower layers notify or delegate to higher UI layers (~lispm-chat~, ~lispm-bar~, ~lispm-inspect~, ~lispm-agents-roster~) through registered hooks and dispatch variables rather than upward ~require~ edges.
+
+* 13. Known limitations and next steps
 
 - *Drafts are context in the org interface*: with ~lispm-interface~ set to ~org~, if another
   agent's message arrives while the user is typing under ~* User~, the draft is sent along as

@@ -94,7 +94,7 @@ BODY can use `project', a scratch directory for agents to work in."
   `(let* ((tmp (file-name-as-directory (make-temp-file "lispm-test-" t)))
           (lispm-directory (expand-file-name "home/" tmp))
           (lispm-agents-state-file (expand-file-name "agent-sessions.eld" tmp))
-          (lispm-agents--opened-times nil)
+          (lispm-agents-opened-times nil)
           (lispm-agents--archived 'unloaded)
           (project (expand-file-name "project/" tmp))
           (lispm-git nil)
@@ -2226,7 +2226,7 @@ changes; the trust is saved with Customize."
               (lispm-allow agent "t2")
               (should (lispm-test--wait (lispm-test--idle-p agent)))
               (should (equal lispm-trusted-skills
-                             (list (cons (abbreviate-file-name skill) (lispm-skills--hash skill)))))
+                             (list (cons (abbreviate-file-name skill) (lispm-skills-hash skill)))))
               (should (string-match-p "lispm-trusted-skills" (lispm-test--file project "../custom.el")))
               (should-not (lispm-agent-allowed agent))
               ;; Then it runs unasked ...
@@ -8252,7 +8252,7 @@ the start again for another reply."
         (let ((part (substring text 0 k)))
           (should (equal-including-properties (lispm-chat--streaming-markdown part)
                                               (lispm-chat-markdown part t)))))
-      (should (equal (car lispm-chat--streamed) (string-remove-suffix "Next" text)))
+      (should (equal (car lispm-chat-streamed) (string-remove-suffix "Next" text)))
       (should (equal-including-properties (lispm-chat--streaming-markdown "Other\n*reply*")
                                           (lispm-chat-markdown "Other\n*reply*" t))))))
 
@@ -8364,7 +8364,7 @@ name; long results are cut to a few lines and say how many more there are."
       ;; Only the items drawn now are remembered, not each step of the response.
       (with-current-buffer chat
         (should-not (seq-find (lambda (item) (equal (plist-get item :text) "Partial"))
-                              (hash-table-keys lispm-chat--rendered))))
+                              (hash-table-keys lispm-chat-rendered))))
       (with-current-buffer session
         (goto-char (point-min))
         (search-forward "hello")
@@ -8841,7 +8841,7 @@ not what the reply defines itself."
   "Narrow boxes wrap whole lines, keeping indentation, diff markers and faces."
   (let* ((width 24)
          (text "  alpha beta gamma delta epsilon zeta eta theta")
-         (box (lispm-chat--box (list nil text) width))
+         (box (lispm-chat-box (list nil text) width))
          (lines (split-string box "\n" t))
          (body (butlast (cdr lines))))
     (should (> (length body) 2))
@@ -8855,7 +8855,7 @@ not what the reply defines itself."
   (dolist (marker '("+" "-" " " "@@"))
     (let* ((text (concat "  " (propertize (concat marker (make-string 35 ?界))
                                         'face 'lispm-chat-added)))
-           (box (lispm-chat--box (list text) 23))
+           (box (lispm-chat-box (list text) 23))
            (lines (split-string box "\n" t))
            (body (butlast (cdr lines))))
       (should (> (length body) 3))
@@ -8869,13 +8869,13 @@ not what the reply defines itself."
                                 body "")
                      (make-string 35 ?界)))))
   ;; Lines that fit, including empty lines, keep their original layout.
-  (should (equal (lispm-chat--box '("  ok" nil "") 10)
+  (should (equal (lispm-chat-box '("  ok" nil "") 10)
                  "╭────────╮\n│   ok   │\n│        │\n╰────────╯\n")))
 
 (ert-deftest lispm-test-chat-approval-wrap ()
   "Commands and diffs awaiting approval remain whole in a narrow chat."
   (lispm-test-env
-    (cl-letf (((symbol-function 'lispm-chat--width) (lambda () 58)))
+    (cl-letf (((symbol-function 'lispm-chat-width) (lambda () 58)))
       (let* ((agent (lispm-defagent tester "Test agent." :root project))
              (chat (lispm-chat agent))
              (long (make-string 120 ?x))
@@ -9063,7 +9063,7 @@ approval box and in the transcript's preview; one that computes does not."
                   (with-current-buffer chat
                     (apply #'max (mapcar #'string-width
                                          (split-string (buffer-substring-no-properties
-                                                        (point-min) lispm-chat--prompt-start)
+                                                        (point-min) lispm-chat-prompt-start)
                                                        "\n"))))))
         (save-window-excursion
           (set-window-buffer window chat)
@@ -10382,7 +10382,7 @@ scratch directory, never the user's."
   (declare (indent 1))
   `(let* ((lispm-agents-defined nil)
           (lispm-agents--keys nil)
-          (lispm-agents--root-cache (make-hash-table :test #'equal))
+          (lispm-agents-root-cache (make-hash-table :test #'equal))
           (lispm-agents-map (make-sparse-keymap))
           (lispm-test--agent-list-map (make-sparse-keymap))
           (lispm-agents-key-maps '(lispm-agents-map lispm-test--agent-list-map))
@@ -10465,7 +10465,7 @@ back when it goes."
 error, before anything runs."
   (lispm-test--with-agents
       '((claude :name "Claude Code" :program "lispm-test-no-such-program"))
-    (should-error (lispm-agents--launch 'claude temporary-file-directory "x" nil)
+    (should-error (lispm-agents-launch 'claude temporary-file-directory "x" nil)
                   :type 'user-error)
     (should-error (lispm-agents-new 'hermes temporary-file-directory) :type 'user-error)))
 
@@ -10498,7 +10498,7 @@ sessions cannot be read lists none, and the others still list theirs."
 one, without waiting: an agent whose reader has nothing yet is pending,
 one whose reader fails lists none, and agents without a reader are read
 as they are.  The session list and the picker never ask a reader."
-  (let ((lispm-agents--session-readers nil)
+  (let ((lispm-agents-session-readers nil)
         (lispm-agents--candidates nil)
         (lispm-agents-sessions-arrived-hook nil)
         (arrived 0))
@@ -10527,7 +10527,7 @@ as they are.  The session list and the picker never ask a reader."
         ;; One reader per agent: a new one replaces the old.
         (dolist (agent '(codex claude hermes))
           (lispm-agents-add-session-reader agent (lambda () (error "A reader was asked"))))
-        (should (= (length lispm-agents--session-readers) 3))
+        (should (= (length lispm-agents-session-readers) 3))
         (should (equal (mapcar (lambda (s) (plist-get s :id)) (lispm-agents-sessions-list))
                        '("h" "c" "l" "a")))
         (cl-letf (((symbol-function 'completing-read)
@@ -10537,7 +10537,7 @@ as they are.  The session list and the picker never ask a reader."
         (lispm-agents-remove-session-reader 'claude)
         (lispm-agents-remove-session-reader 'hermes)
         (lispm-agents-remove-session-reader 'hermes)
-        (should-not lispm-agents--session-readers)
+        (should-not lispm-agents-session-readers)
         (should (= arrived 9))
         (should (equal (lispm-agents-sessions-snapshot)
                        (cons (lispm-agents-sessions-list) nil)))))))
@@ -10563,7 +10563,7 @@ project of its name; the Codex app's scratch tree holds chats."
                            "⎇ feature"))
             (should (equal (lispm-agents-location-label codex (directory-file-name repo))
                            "⎇ codex worktree")))
-        (clrhash lispm-agents--root-cache)
+        (clrhash lispm-agents-root-cache)
         (delete-directory repo t)))))
 
 (ert-deftest lispm-test-agent-archive-survives-an-unreadable-state ()
@@ -10577,7 +10577,7 @@ read is moved aside, not replaced by the next archiving."
          (two '(:agent codex :id "2")))
     (unwind-protect
         (progn
-          (lispm-agents--set-archived one t)
+          (lispm-agents-set-archived one t)
           (should-not (file-exists-p (concat lispm-agents-state-file ".part")))
           (setq lispm-agents--archived 'unloaded)
           (should (lispm-agents-archived-p one))
@@ -10587,13 +10587,13 @@ read is moved aside, not replaced by the next archiving."
           (setq lispm-agents--archived 'unloaded)
           (let ((inhibit-message t))
             (should-not (lispm-agents-archived-p one)))
-          (lispm-agents--set-archived two t)
+          (lispm-agents-set-archived two t)
           (should (equal (with-temp-buffer
                            (insert-file-contents (concat lispm-agents-state-file ".unreadable"))
                            (buffer-string))
                          cut-short))
           (setq lispm-agents--archived 'unloaded)
-          (should (equal (lispm-agents--archived-keys) '("codex:2"))))
+          (should (equal (lispm-agents-archived-keys) '("codex:2"))))
       (delete-directory directory t))))
 
 (ert-deftest lispm-test-codex-sessions-named-by-the-index ()
@@ -10637,7 +10637,7 @@ first prompt; context Codex injects is no prompt."
             (should (equal (plist-get session :parent) "0201"))
             (should (equal (plist-get session :title) "integration_review (Linnaeus)"))
             (should (lispm-agents-session-resumable-p session))))
-      (remhash file lispm-agents--session-cache)
+      (remhash file lispm-agents-session-cache)
       (delete-directory home t))))
 
 (ert-deftest lispm-test-claude-subagents-under-their-session ()
@@ -10695,13 +10695,13 @@ resumed but opened, since Claude resumes sessions of its own only."
               (should (equal (lispm-agents-session-tree (list two))
                              (list (list two))))
               (should (string-search "↳ Find the failing test"
-                                     (lispm-agents--session-label
+                                     (lispm-agents-session-label
                                       (plist-put (copy-sequence one) :time 0.0) 60.0)))
               (lispm-agents-resume-session one)
               (should (equal (buffer-file-name shown) first))
               (kill-buffer shown)))
         (dolist (transcript (list file first second))
-          (remhash transcript lispm-agents--session-cache))
+          (remhash transcript lispm-agents-session-cache))
         (delete-directory lispm-agents-claude-projects-directory t)))))
 
 (ert-deftest lispm-test-agents-session-tree ()
@@ -10802,8 +10802,8 @@ names nothing.  A transcript without a prompt is no session."
           (should (equal (funcall title) "Build fix"))
           (lispm-agents-claude--rename (car (lispm-agents-claude-sessions)) " ")
           (should (equal (funcall title) "Fix the build")))
-      (remhash file lispm-agents--session-cache)
-      (remhash empty lispm-agents--session-cache)
+      (remhash file lispm-agents-session-cache)
+      (remhash empty lispm-agents-session-cache)
       (delete-directory lispm-agents-claude-projects-directory t))))
 
 (ert-deftest lispm-test-age-short-date ()
@@ -10893,7 +10893,7 @@ variables under test.  Launching must leave Emacs's environment unchanged."
             terminal)))
     (unwind-protect
         (lispm-test--with-agents `((tool :name "Tool" :program ,program))
-          (lispm-agents--launch
+          (lispm-agents-launch
            'tool temporary-file-directory "lispm-test-launch-environment"
            (list "-Q" "--batch" "--eval"
                  (prin1-to-string `(prin1 (mapcar #'getenv ',variables)))))
@@ -11004,7 +11004,7 @@ input start nothing, while a custom name reaches the resume arguments."
                        (lambda (&rest args)
                          (setq prompt args)
                          (if (eq answer 'cancel) (signal 'quit nil) answer)))
-                      ((symbol-function 'lispm-agents--launch)
+                      ((symbol-function 'lispm-agents-launch)
                        (lambda (&rest args) (push args made) buffer))
                       ((symbol-function 'executable-find) #'identity))
               (should-error (lispm-agents-session-act 'resume-with session) :type 'user-error)
@@ -11134,7 +11134,7 @@ nothing."
       (dlet ((lispm-agents-sessions-changed-hook (list (lambda () (cl-incf told)))))
         (should-not (lispm-agents-user-wrote 'lispm "0300"))
         (should (= told 0))
-        (lispm-agents--set-archived session t)
+        (lispm-agents-set-archived session t)
         (should (lispm-agents-archived-p session))
         (should (lispm-agents-user-wrote 'lispm "0300"))
         (should-not (lispm-agents-archived-p session))
@@ -12213,9 +12213,9 @@ Stickies, whose opening `opened' records."
             (lispm-bar-show-function #'ignore)
             (lispm-bar-hide-function #'ignore)
             (lispm-bar-ready-function (lambda (_agent) t))
-            (lispm-bar--open nil) (lispm-bar--asked nil) (lispm-bar--reply nil)
-            (lispm-bar--evaluated nil)
-            (lispm-bar--waiting nil) (lispm-bar--expanded nil) (lispm-bar--things nil)
+            (lispm-bar-open nil) (lispm-bar-asked nil) (lispm-bar-reply nil)
+            (lispm-bar-evaluated nil)
+            (lispm-bar-waiting nil) (lispm-bar--expanded nil) (lispm-bar-things nil)
             (lispm-bar--text "") (lispm-bar--found nil) (lispm-bar--choice 0)
             (lispm-bar-history nil))
        (unwind-protect
@@ -12253,9 +12253,9 @@ Stickies, whose opening `opened' records."
 speaks of nothing else: no applications, no screen of a desktop."
   (lispm-test-with-bar
     (let ((lispm-bar-source-functions (list #'lispm-bar-skills #'lispm-bar-tools))
-          (lispm-bar--open t))
-      (lispm-bar--gather)
-      (should-not (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application)) lispm-bar--things))
+          (lispm-bar-open t))
+      (lispm-bar-gather)
+      (should-not (seq-find (lambda (thing) (eq (plist-get thing :kind) 'application)) lispm-bar-things))
       (should (lispm-bar-open-p))
       (should (string-match-p "^Find skills and tools, or ask LispM\\.$"
                               (substring-no-properties (lispm-bar--text))))
@@ -12277,13 +12277,13 @@ speaks of nothing else: no applications, no screen of a desktop."
     ;; A source that fails leaves the others to find.
     (let ((lispm-bar-source-functions (cons (lambda () (error "Broken")) lispm-bar-source-functions))
           (inhibit-message t))
-      (lispm-bar--gather)
+      (lispm-bar-gather)
       (should (lispm-bar-find "stick")))))
 
 (ert-deftest lispm-test-bar-draws ()
   "The bar asks LispM first, then shows what it found; opened out, under headings."
   (lispm-test-with-bar
-    (let ((lispm-bar--open t))
+    (let ((lispm-bar-open t))
       (lispm-bar--set-text "stick")
       (let ((text (substring-no-properties (lispm-bar--text))))
         (should (string-match-p "\\`❯ Ask LispM “stick”" text))
@@ -12303,7 +12303,7 @@ speaks of nothing else: no applications, no screen of a desktop."
   (lispm-test-with-bar
     (lispm-test--bar-keys "stick C-n RET")
     (should (equal opened '(stickies)))
-    (should-not lispm-bar--open)
+    (should-not lispm-bar-open)
     (should-not (lispm-agent-inbox (lispm-system-agent)))))
 
 (ert-deftest lispm-test-bar-asks ()
@@ -12318,12 +12318,12 @@ reply, streamed in, and a skill chosen is named in the request."
             `((lispm ,(lispm-test--msg "end_turn" (lispm-test--text "Hello there.")))))
       (lispm-test--bar-keys "hi SPC LispM RET <escape>")
       (should (equal lispm-bar-history '("hi LispM")))
-      (should (equal (car lispm-bar--asked) "hi LispM"))
+      (should (equal (car lispm-bar-asked) "hi LispM"))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
-      (should (equal lispm-bar--reply "Hello there."))
+      (should (equal lispm-bar-reply "Hello there."))
       (should (equal deltas '((lispm text "streaming..."))))
       (should (string-match-p "^\\* User\nhi LispM$" (lispm-test--transcript agent)))
-      (let ((lispm-bar--open t))
+      (let ((lispm-bar-open t))
         (should (string-match-p "λ hi LispM\n⏺ Hello there\\."
                                 (substring-no-properties (lispm-bar--text))))))))
 
@@ -12337,7 +12337,7 @@ reply, streamed in, and a skill chosen is named in the request."
                      ,(lispm-test--msg "end_turn" (lispm-test--text "Said hi.")))))
       (lispm-bar-ask "Greet")
       (should (lispm-test--wait (lambda () (lispm-waiting-calls agent))))
-      (let ((lispm-bar--open t))
+      (let ((lispm-bar-open t))
         (should (string-match-p "▌ Bash command: touch hi && echo hi\n  To greet\\.\n  Do you want to proceed\\? y yes · n no"
                                 (substring-no-properties (lispm-bar--text)))))
       ;; Typed after other text, y is only a letter.
@@ -12349,7 +12349,7 @@ reply, streamed in, and a skill chosen is named in the request."
       (with-temp-buffer
         (lispm-bar-yes))
       (should (lispm-test--wait (lispm-test--idle-p agent)))
-      (should (equal lispm-bar--reply "Said hi."))
+      (should (equal lispm-bar-reply "Said hi."))
       (should (string-match-p "^hi$" (lispm-test--transcript agent))))))
 
 (ert-deftest lispm-test-bar-approval-message ()
@@ -12358,7 +12358,7 @@ so, while it is closed a message names the key opening it."
   (lispm-test-with-bar
     (let ((agent (lispm-system-agent))
           (other (let ((default-directory project)) (lispm-start))))
-      (let ((lispm-bar--open (selected-window)))
+      (let ((lispm-bar-open (selected-window)))
         (should (eq (lispm-bar--approval-message agent "run_shell") t)))
       (should (string-match-p "\\`LispM asks to use Bash: .* to answer\\'"
                               (lispm-bar--approval-message agent "run_shell")))
@@ -12373,8 +12373,8 @@ applications found and offering `Set up a model…' below."
            (lispm-bar-ready-function (lambda (_agent) nil))
            (lispm-bar-setup-function (lambda () (cl-incf setup))))
       (lispm-bar-ready-p)
-      (let ((lispm-bar--open t))
-        (lispm-bar--gather)
+      (let ((lispm-bar-open t))
+        (lispm-bar-gather)
         (should (string-match-p "^Find applications, or evaluate Lisp\\.$"
                                 (substring-no-properties (lispm-bar--text))))
         (lispm-bar--set-text "stick")
@@ -12386,17 +12386,17 @@ applications found and offering `Set up a model…' below."
           (should (string-match-p "^  Set up a model…  then LispM is asked “stick”" text))))
       ;; Return on line 0 evaluates Emacs Lisp in place and renders `=> result'.
       (lispm-test--bar-keys "(+ SPC 20 SPC 22) RET <escape>")
-      (should (equal lispm-bar--evaluated '("(+ 20 22)" . "=> 42")))
+      (should (equal lispm-bar-evaluated '("(+ 20 22)" . "=> 42")))
       (should (= setup 0))
-      (let ((lispm-bar--open t))
+      (let ((lispm-bar-open t))
         (should (string-match-p "λ (\\+ 20 22)\n=> 42"
                                 (substring-no-properties (lispm-bar--text)))))
       ;; Reader/evaluation errors are formatted cleanly without crashing the bar.
       (lispm-test--bar-keys "(1+ SPC \"bad\") RET <escape>")
-      (should (string-prefix-p "error: " (cdr lispm-bar--evaluated)))
+      (should (string-prefix-p "error: " (cdr lispm-bar-evaluated)))
       ;; TAB completes Lisp symbols in the bar's field.
       (lispm-test--bar-keys "emacs-ver TAB RET <escape>")
-      (should (equal (cdr lispm-bar--evaluated) (format "=> %S" emacs-version)))
+      (should (equal (cdr lispm-bar-evaluated) (format "=> %S" emacs-version)))
       ;; Selecting a matched application still opens it and closes the bar.
       (lispm-test--bar-keys "take SPC a SPC note C-n RET")
       (should (equal opened '(stickies)))
@@ -12404,15 +12404,15 @@ applications found and offering `Set up a model…' below."
       ;; Choosing `Set up a model…' queues what was typed and opens model setup.
       (lispm-test--bar-keys "how SPC late SPC is SPC it C-p RET")
       (should (= setup 1))
-      (should (equal lispm-bar--waiting '("how late is it" . "how late is it")))
+      (should (equal lispm-bar-waiting '("how late is it" . "how late is it")))
       (should-not (lispm-agent-inbox agent))
       (setq lispm-test--scripts
             `((lispm ,(lispm-test--msg "end_turn" (lispm-test--text "Late.")))))
       (let ((inhibit-message t))
         (lispm-bar-model-ready))
-      (should-not lispm-bar--waiting)
+      (should-not lispm-bar-waiting)
       (should (lispm-test--wait (lispm-test--idle-p agent)))
-      (should (equal lispm-bar--reply "Late."))
+      (should (equal lispm-bar-reply "Late."))
       (should (string-match-p "^how late is it$" (lispm-test--transcript agent))))))
 
 (ert-deftest lispm-test-bar-model-ready ()
@@ -12707,7 +12707,7 @@ was asked takes its place."
       (should (lispm-test--wait (lambda () called)))
       (should closed)))
   ;; With the bar closed, what follows it happens at once.
-  (let ((lispm-bar--open nil) (called nil))
+  (let ((lispm-bar-open nil) (called nil))
     (lispm-bar-close-then (lambda () (setq called t)))
     (should called)))
 
@@ -12771,7 +12771,7 @@ inferred directory in both `M-x' (`read-directory-name') and the GUI modal form.
                        (lambda (_prompt &optional dir _default _mustmatch _initial)
                          (setq prompted-init dir)
                          other))
-                      ((symbol-function 'lispm-agents--launch)
+                      ((symbol-function 'lispm-agents-launch)
                        (lambda (_agent dir &rest _)
                          (setq launched-dir dir)
                          (current-buffer)))
@@ -12985,7 +12985,7 @@ sibling edits or requiring eval; lispm-system-definition ignores strings and
 preserves dynamic binding in patches."
   (lispm-test-with-dev
     (let ((agent (lispm-defagent tester :root project :policy '((write . auto) (exec . deny))))
-          (lispm-develop--history nil))
+          (lispm-develop-history nil))
       (lispm-test--write
        file
        (concat ";;; dev.el --- A fixture  -*- lexical-binding: t; -*-\n"

@@ -29,25 +29,27 @@
     (1 . ("lispm-util" "lispm-secrets" "lispm-core" "lispm-job" "lispm-sandbox"
           "lispm-services" "lispm-roles" "lispm-media" "lispm-transcript"
           "lispm-anthropic" "lispm-openai" "lispm-api"
-          "lispm-deftool-macros" "lispm-agents" "lispm-agents-mcp"
+          "lispm-deftool-macros" "lispm-agents-core" "lispm-agents-sessions"
+          "lispm-agents-terminals" "lispm-agents" "lispm-agents-mcp"
           "lispm-agents-ide" "lispm-agents-claude" "lispm-agents-codex"))
     (2 . ("lispm-tool-core" "lispm-tool-permissions" "lispm-tool-search"
           "lispm-tool-builtins" "lispm-shell-classify" "lispm-tools"
-          "lispm-elisp-worker" "lispm-elisp" "lispm-memory"
+          "lispm-elisp-worker" "lispm-elisp" "lispm-memory-store" "lispm-memory"
           "lispm-inbox" "lispm-journal" "lispm-session" "lispm-turns"
           "lispm-conditions" "lispm-approval" "lispm-runtime"
           "lispm-lisp-check" "lispm-lisp" "lispm-lisp-macros"
           "lispm-collab" "lispm-mcp"))
-    (3 . ("lispm-title" "lispm-episodes" "lispm-emacs" "lispm-develop"
-          "lispm-skills" "lispm-characters" "lispm-character-rag"
-          "lispm-character-comfyui" "lispm-agents-bridge" "lispm-mcp-server"
-          "lispm-ground" "lispm-inspect" "lispm-agents-roster" "lispm-settings"
+    (3 . ("lispm-title" "lispm-episodes" "lispm-emacs" "lispm-develop-core"
+          "lispm-develop" "lispm-skills-core" "lispm-skills" "lispm-characters"
+          "lispm-character-rag" "lispm-character-comfyui" "lispm-agents-bridge"
+          "lispm-mcp-server" "lispm-ground" "lispm-presentations"
+          "lispm-inspect" "lispm-agents-roster" "lispm-settings"
           "lispm-backend-form" "lispm-runtime-tools" "lispm-session-tools"
           "lispm-process-tools"))
     (4 . ("lispm-stage" "lispm-edits" "lispm-spotlight" "lispm-stage-runner"
-          "lispm-shell-stage" "lispm-eval-stage" "lispm-chat"
-          "lispm-agents-work" "lispm-hyperbole" "lispm-bar" "lispm-batch"
-          "lispm" "lispm-terminal")))
+          "lispm-shell-stage" "lispm-eval-stage" "lispm-chat-items"
+          "lispm-chat-view" "lispm-chat" "lispm-agents-work" "lispm-hyperbole"
+          "lispm-bar-core" "lispm-bar" "lispm-batch" "lispm" "lispm-terminal")))
   "Mapping from integer layer (0..4) to list of module base names.")
 
 (defconst lispm-boundaries--root
@@ -229,7 +231,8 @@ Return `(DEFS . DUPLICATE-ERRORS)'."
                     "\\_<\\(lispm-chat--[a-z0-9-]+\\|lispm-agents-roster-[a-z0-9-]+\\)\\_>"
                     line pos)
               (let ((sym (match-string 1 line)))
-                (unless (and (string-suffix-p "/lispm-agents.el" file)
+                (unless (and (or (string-suffix-p "/lispm-agents-core.el" file)
+                                 (string-suffix-p "/lispm-agents-terminals.el" file))
                              (member sym '("lispm-agents-roster-notify"
                                            "lispm-agents-roster-change-functions")))
                   (push sym upward-refs)))

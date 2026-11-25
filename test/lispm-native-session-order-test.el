@@ -33,7 +33,7 @@
             ;; A metadata edit must not count as resuming the transcript.
             (setq now 300.0)
             (lispm-rename-session file "Renamed conversation")
-            (setq lispm-agents--opened-times nil)
+            (setq lispm-agents-opened-times nil)
             (should (= (lispm-test--native-opened older) 100))
             (setq now 400.0)
             (let ((resumed (lispm-resume-file file)))

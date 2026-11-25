@@ -228,12 +228,13 @@ STATE is `keep', `drop' or `named-only'.")
                           "codex_exec\\|\"exec\"\\|parent_thread_id\\|subagent"
                           line))
                     'keep
-                  (let* ((meta (ignore-errors
-                                 (json-parse-string line
-                                                    :object-type 'plist
-                                                    :array-type 'list
-                                                    :null-object nil
-                                                    :false-object nil)))
+                  (let* ((meta (condition-case nil
+                                   (json-parse-string line
+                                                      :object-type 'plist
+                                                      :array-type 'list
+                                                      :null-object nil
+                                                      :false-object nil)
+                                 (json-error nil)))
                          (payload (and (equal (plist-get meta :type) "session_meta")
                                        (plist-get meta :payload))))
                     (cond ((null payload) 'keep)
@@ -473,10 +474,11 @@ A call of a LispM tool may wait for the user's approval.")
                      (expand-file-name "config.toml"
                                        (or (getenv "CODEX_HOME") "~/.codex"))))
          (existing (when (and config (file-readable-p config))
-                     (ignore-errors
-                       (with-temp-buffer
-                         (insert-file-contents config)
-                         (lispm-agents-codex--parse-excluded-vars (buffer-string)))))))
+                     (condition-case nil
+                         (with-temp-buffer
+                           (insert-file-contents config)
+                           (lispm-agents-codex--parse-excluded-vars (buffer-string)))
+                       (file-error nil)))))
     (delete-dups (append existing (list lispm-agents-codex-token-variable)))))
 
 (cl-defmethod lispm-agents-context-arguments ((server lispm-agents-codex-mcp))

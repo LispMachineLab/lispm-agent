@@ -466,7 +466,9 @@ the language spoken.  That of `custom' is said from its rules."
     (when (file-readable-p file)
       (with-temp-buffer
         (insert-file-contents file)
-        (alist-get 'version (ignore-errors (json-parse-buffer :object-type 'alist)))))))
+        (alist-get 'version (condition-case nil
+                                (json-parse-buffer :object-type 'alist)
+                              (json-error nil)))))))
 
 (defun lispm-sandbox--srt ()
   "The command that runs srt, a list, or nil while there is none."

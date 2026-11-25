@@ -65,7 +65,7 @@
            (chat (lispm-chat agent))
            (redrawn nil))
       (ignore chat)
-      (cl-letf (((symbol-function 'lispm-chat--redraw)
+      (cl-letf (((symbol-function 'lispm-chat-redraw-now)
                  (lambda () (setq redrawn t))))
         (lispm--restart-use-model agent nil (cons nil (lispm-agent-model* agent)))
         (should redrawn))))
