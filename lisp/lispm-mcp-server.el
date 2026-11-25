@@ -165,17 +165,21 @@ letters, digits, dots, dashes and underscores."
 
 (defun lispm-mcp-server--directory (headers)
   "The directory the agent whose request has HEADERS works in: the one
-X-LispM-Directory names, if a local one, else the home directory."
-  (let ((directory (when-let* ((value (cdr (assoc "x-lispm-directory" headers))))
-                     (decode-coding-string value 'utf-8))))
+X-LispM-Directory names, if a non-root local one, else the home directory."
+  (let* ((directory (when-let* ((value (cdr (assoc "x-lispm-directory" headers))))
+                      (decode-coding-string value 'utf-8)))
+         (expanded (and directory
+                        (file-name-absolute-p directory)
+                        ;; A remote name would have TRAMP connect.
+                        (not (file-remote-p directory))
+                        (file-directory-p directory)
+                        (file-name-as-directory (expand-file-name directory)))))
     (file-name-as-directory
      (expand-file-name
-      (if (and directory
-               (file-name-absolute-p directory)
-               ;; A remote name would have TRAMP connect.
-               (not (file-remote-p directory))
-               (file-directory-p directory))
-          directory
+      (if (and expanded
+               (not (equal expanded "/"))
+               (not (equal (file-name-as-directory (file-truename expanded)) "/")))
+          expanded
         "~")))))
 
 (defun lispm-mcp-server--add (key session)

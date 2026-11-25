@@ -1024,15 +1024,17 @@ execution time; the command, not that limit, is what was approved."
 (defun lispm-tools-allowance (tool input &optional agent)
   "What approving AGENT's call of TOOL on INPUT for good adds to its allowed.
 The tool's name: every later call of it runs at once.  For a tool of
-class `exec', which reaches all of Emacs, this exact call: (NAME .
-KEY), KEY from `lispm-tools--call-key'.  Allowing every later call would
-put the agent past its policy, which such a call can change.  So for a tool of
-class `shell', since a shell command reaches Emacs too, unless AGENT's
+class `exec', which reaches all of Emacs, or a write outside the
+agent's root, this exact call: (NAME . KEY), KEY from
+`lispm-tools--call-key'.  Allowing every later call would put the agent
+past its policy, which such a call can change.  So for a tool of class
+`shell', since a shell command reaches Emacs too, unless AGENT's
 commands are kept apart from Emacs (see `lispm-tools-apart-p'): on
 another machine, or in the sandbox, they cannot change the policy, and
 the tool is allowed.  Approving one call of a tool that always asks is
 never approving the next."
   (if (or (lispm-tool-always-ask tool)
+          (and agent (lispm-tools--outside-write-p agent tool input))
           (pcase (lispm-tool-permission tool)
             ('exec t)
             ('shell (not (lispm-tools-apart-p agent)))))
@@ -1044,11 +1046,14 @@ never approving the next."
 A tool of class `shell' allowed as a whole was allowed while AGENT's
 commands could not reach Emacs (see `lispm-tools-allowance'), and
 holds only while that is so: with the sandbox off again, each command
-asks, as it did before."
+asks, as it did before.  Writes outside AGENT's root and `always-ask'
+tools require a per-call allowance rather than a bare tool name."
   (let ((allowed (lispm-agent-allowed agent))
         (name (lispm-tool-name tool))
         (key (lispm-tools--call-key input tool)))
     (or (and (member name allowed)
+             (not (lispm-tool-always-ask tool))
+             (not (lispm-tools--outside-write-p agent tool input))
              (or (not (eq (lispm-tool-permission tool) 'shell))
                  (lispm-tools-apart-p agent)))
         ;; Earlier approvals kept parameter order and shell timeouts.
@@ -1057,6 +1062,14 @@ asks, as it did before."
                     (and (consp entry) (equal (car entry) name)
                          (equal (lispm-tools--call-key (cdr entry) tool) key)))
                   allowed))))
+
+(defun lispm-tools--outside-write-p (agent tool input)
+  "Non-nil if AGENT's call of TOOL with INPUT writes outside AGENT's root."
+  (and (eq (lispm-tool-permission tool) 'write)
+       (let ((targets (lispm-tools--targets agent tool input)))
+         (or (eq targets t)
+             (seq-some (lambda (file) (not (lispm-tools--in-root-p agent file)))
+                       targets)))))
 
 (defun lispm-tools--targets (agent tool input)
   "Files AGENT's call of TOOL with INPUT changes, as far as can be told before.
@@ -1184,16 +1197,13 @@ outside the agent's root when the policy for their class is `auto'.")
   "What LispM's own rules decide of AGENT's call of TOOL on INPUT.
 See `lispm-tool-action'."
   (let ((action (lispm-policy-action agent (lispm-tool-call-permission tool input))))
-    (cond ((lispm-tools--allowed-p agent tool input) 'auto)
+    (cond ((eq action 'deny) 'deny)
+          ((lispm-tools--allowed-p agent tool input) 'auto)
           ((and (eq action 'auto) (not lispm-auto-approve-all)
                 (lispm-tool-always-ask tool))
            'ask)
           ((and (eq action 'auto) (not lispm-auto-approve-all)
-                (eq (lispm-tool-permission tool) 'write)
-                (let ((targets (lispm-tools--targets agent tool input)))
-                  (or (eq targets t)
-                      (seq-some (lambda (file) (not (lispm-tools--in-root-p agent file)))
-                                targets))))
+                (lispm-tools--outside-write-p agent tool input))
            'ask)
           (t action))))
 
@@ -2302,12 +2312,12 @@ For files use edit_file."
   '(("ls" . t) ("dir" . t) ("tree" . t) ("pwd" . t) ("file" . t) ("stat" . t)
     ("du" . t) ("df" . t) ("cat" . t) ("head" . t) ("tail" . t) ("wc" . t)
     ("zcat" . t) ("gzcat" . t) ("zgrep" . t) ("sed" . lispm-shell--sed-reads-p)
-    ("grep" . t) ("egrep" . t) ("fgrep" . t) ("rg" . t) ("ag" . t)
+    ("grep" . t) ("egrep" . t) ("fgrep" . t) ("rg" . lispm-shell--rg-reads-p) ("ag" . t)
     ("find" . lispm-shell--find-reads-p) ("fd" . lispm-shell--fd-reads-p)
     ("echo" . t) ("printf" . t) ("true" . t) ("false" . t) ("test" . t) ("[" . t)
-    ("which" . t) ("whereis" . t) ("whatis" . t) ("type" . t) ("man" . t)
+    ("which" . t) ("whereis" . t) ("whatis" . t) ("type" . t) ("man" . lispm-shell--man-reads-p)
     ("basename" . t) ("dirname" . t) ("realpath" . t) ("readlink" . t)
-    ("sort" . t) ("uniq" . t) ("cut" . t) ("tr" . t) ("diff" . t) ("cmp" . t) ("comm" . t)
+    ("sort" . lispm-shell--sort-reads-p) ("uniq" . t) ("cut" . t) ("tr" . t) ("diff" . t) ("cmp" . t) ("comm" . t)
     ("column" . t) ("fold" . t) ("nl" . t) ("paste" . t) ("rev" . t) ("seq" . t) ("expr" . t)
     ("jq" . t) ("xxd" . t) ("od" . t) ("hexdump" . t) ("strings" . t) ("nm" . t)
     ("md5" . t) ("md5sum" . t) ("shasum" . t) ("sha1sum" . t) ("sha256sum" . t) ("cksum" . t)
@@ -2489,6 +2499,36 @@ this cannot read is one that may write."
                              options))
                  args)))
 
+(defun lispm-shell--short-option-has-p (args chars)
+  "Non-nil if any single-dash option in ARGS before `--' has a char in CHARS."
+  (catch 'found
+    (dolist (arg args)
+      (when (equal arg "--")
+        (throw 'found nil))
+      (when (and (> (length arg) 1)
+                 (eq (aref arg 0) ?-)
+                 (not (eq (aref arg 1) ?-)))
+        (dolist (ch chars)
+          (when (seq-position arg ch 1)
+            (throw 'found t)))))
+    nil))
+
+(defun lispm-shell--sort-reads-p (args)
+  "Non-nil if sort with ARGS only reads: no output file or compress command."
+  (and (lispm-shell--none-of args '("-o" "--output" "--compress-program"))
+       (not (lispm-shell--short-option-has-p args '(?o)))))
+
+(defun lispm-shell--man-reads-p (args)
+  "Non-nil if man with ARGS only reads: no custom pager or command hook."
+  (and (lispm-shell--none-of args '("-P" "--pager" "-H" "--html"
+                                   "-p" "--preprocessor" "-l" "--local-file"
+                                   "-T" "--troff-device"))
+       (not (lispm-shell--short-option-has-p args '(?P ?H ?p ?l ?T)))))
+
+(defun lispm-shell--rg-reads-p (args)
+  "Non-nil if rg with ARGS only reads: no preprocessor command (`--pre')."
+  (lispm-shell--none-of args '("--pre" "--pre-glob")))
+
 (defun lispm-shell--cd-reads-p (args)
   "Non-nil for cd's ordinary directory change, with at most one operand.
 Only -L, -P and -- are recognized; other shell-specific forms ask."
@@ -2631,11 +2671,11 @@ is not."
     (nreverse positionals)))
 
 (defconst lispm-shell--git-readers
-  '("status" "log" "diff" "show" "blame" "annotate" "grep" "ls-files" "ls-tree" "ls-remote"
+  '("status" "log" "show" "blame" "annotate" "ls-files" "ls-tree" "ls-remote"
     "cat-file" "rev-parse" "rev-list" "describe" "shortlog" "merge-base" "name-rev"
     "count-objects" "check-ignore" "check-attr" "diff-tree" "diff-index" "diff-files"
     "for-each-ref" "show-ref" "show-branch" "var" "version" "whatchanged" "cherry"
-    "range-diff" "help" "verify-commit" "verify-tag" "status")
+    "range-diff" "help" "verify-commit" "verify-tag")
   "Git subcommands that only read, whatever their arguments.")
 
 (defun lispm-shell--git-reads-p (args)
@@ -2643,8 +2683,8 @@ is not."
 Of its options before the subcommand, -C, -P, --no-pager, --no-optional-locks,
 --git-dir= and --work-tree= are read with; any other, -c among them, which
 can have a subcommand run a program, is not.  Subcommands of
-`lispm-shell--git-readers' read; branch, tag, remote, config, stash,
-reflog, worktree, submodule and notes read while their arguments only ask."
+`lispm-shell--git-readers' read; diff, grep, branch, tag, remote, config,
+stash, reflog, worktree, submodule and notes read while their arguments ask."
   (let (subcommand)
     (while (and args (not subcommand))
       (let ((arg (pop args)))
@@ -2657,6 +2697,11 @@ reflog, worktree, submodule and notes read while their arguments only ask."
       ('nil t)
       ('unsure nil)
       ((pred (lambda (s) (member s lispm-shell--git-readers))) t)
+      ("diff"
+       (lispm-shell--none-of args '("--output" "--ext-diff" "--textconv")))
+      ("grep"
+       (and (lispm-shell--none-of args '("-O" "--open-files-in-pager"))
+            (not (lispm-shell--short-option-has-p args '(?O)))))
       ("branch"
        (and (lispm-shell--none-of args '("-d" "-D" "-m" "-M" "-c" "-C" "-u" "-f" "--delete" "--move"
                                          "--copy" "--force" "--set-upstream-to" "--unset-upstream"
@@ -2708,22 +2753,40 @@ reflog, worktree, submodule and notes read while their arguments only ask."
   "GitHub CLI commands that only read: (COMMAND . SUBCOMMANDS), every
 subcommand of a COMMAND with none.")
 
+(defun lispm-shell--gh-api-reads-p (args)
+  "Non-nil if `gh api' ARGS only use GET/HEAD and send no body fields."
+  (catch 'write
+    (let ((method nil)
+          (tail args))
+      (while tail
+        (let ((arg (pop tail)))
+          (cond
+           ((equal arg "--") (setq tail nil))
+           ((or (member arg '("-f" "-F" "--field" "--raw-field" "--input"))
+                (string-prefix-p "-f" arg)
+                (string-prefix-p "-F" arg)
+                (string-prefix-p "--field=" arg)
+                (string-prefix-p "--raw-field=" arg)
+                (string-prefix-p "--input=" arg))
+            (throw 'write nil))
+           ((member arg '("-X" "--method"))
+            (setq method (pop tail)))
+           ((string-prefix-p "--method=" arg)
+            (setq method (substring arg (length "--method="))))
+           ((string-prefix-p "-X" arg)
+            (setq method (substring arg 2))))))
+      (member (and method (upcase method)) '(nil "GET" "HEAD")))))
+
 (defun lispm-shell--gh-reads-p (args)
   "Non-nil if gh with ARGS only reads: a command of `lispm-shell--gh-readers',
 not opening the browser (-w, --web), and api only with GET or HEAD and
 nothing to send."
-  (let ((positionals (lispm-shell--positionals args '("-R" "--repo"))))
+  (let ((positionals (lispm-shell--positionals args '("-R" "--repo" "-X" "--method"))))
     (and (lispm-shell--none-of args '("-w" "--web"))
          (when-let* ((readers (assoc (car positionals) lispm-shell--gh-readers)))
            (and (or (null (cdr readers)) (member (cadr positionals) (cdr readers)))
                 (or (not (equal (car positionals) "api"))
-                    (and (lispm-shell--none-of args '("-f" "-F" "--field" "--raw-field" "--input"))
-                         (let ((method (or (cadr (member "-X" args)) (cadr (member "--method" args))
-                                           (seq-some (lambda (arg)
-                                                       (and (string-prefix-p "--method=" arg)
-                                                            (substring arg 9)))
-                                                     args))))
-                           (member method '(nil "GET" "HEAD"))))))))))
+                    (lispm-shell--gh-api-reads-p args)))))))
 
 ;;;; Built-in tools: execution
 
