@@ -38,6 +38,32 @@
          (lispm-spotlight-reset)
          (lispm-stage-reset)))))
 
+(defmacro lispm-stage-test--with-frame (&rest body)
+  "Run BODY on a 160x44 frame when resizable, else with compact minimums.
+Emacs 32 disallows `set-frame-size' on the batch TTY root frame, so when
+resizing fails we bind compact stage minimums that fit an 80x24 frame."
+  (declare (indent 0))
+  `(let ((orig-w (frame-width))
+         (orig-h (frame-height))
+         (resized nil))
+     (unwind-protect
+         (progn
+           (setq resized (condition-case nil
+                             (progn (set-frame-size (selected-frame) 160 44) t)
+                           (error nil)))
+           (let ((lispm-stage-chat-min-width
+                  (if resized lispm-stage-chat-min-width 20))
+                 (lispm-stage-min-sizes
+                  (if resized
+                      lispm-stage-min-sizes
+                    '((code . (20 . 6))
+                      (shell . (20 . 6))
+                      (lisp . (20 . 6))
+                      (web . (20 . 6))))))
+             (save-window-excursion ,@body)))
+       (when resized
+         (set-frame-size (selected-frame) orig-w orig-h)))))
+
 (ert-deftest lispm-stage-test-pure-geometry-planner ()
   "Split planner enforces minimum width and height for every stage kind."
   ;; Wide enough for two 70-col code columns: splits horizontally.
@@ -63,39 +89,35 @@
           (agent (lispm-defagent tiler "Tiler." :root project)))
       (dolist (f (list fa fb fc))
         (lispm-test--write f "(defun f () 1)\n"))
-      (let ((chat (lispm-chat agent))
-            (orig-w (frame-width))
-            (orig-h (frame-height)))
-        (unwind-protect
-            (save-window-excursion
-              (set-frame-size (selected-frame) 160 44)
-              (delete-other-windows)
-              (switch-to-buffer chat)
-              (let ((lispm-stage-max-tiles 3))
-                ;; 1. First file splits off a >=70-col stage column.
-                (lispm-test--call agent "read_file" '((path . "a.el")))
-                (should (= (length (window-list)) 2))
-                (let ((wa (get-buffer-window (find-buffer-visiting fa))))
-                  (should (>= (window-total-width wa) 70)))
-                ;; 2. Second file auto-splits vertically inside the stage column.
-                (lispm-spotlight--on-response agent nil)
-                (lispm-test--call agent "read_file" '((path . "b.el")))
-                (should (= (length (window-list)) 3))
-                (should (get-buffer-window (find-buffer-visiting fa)))
-                (should (get-buffer-window (find-buffer-visiting fb)))
-                ;; 3. Shell call auto-splits a 3rd pane (code + code + shell).
-                (lispm-test--call-async agent "run_shell"
-                                        '((command . "git --version")))
-                (should (= (length (window-list)) 4))
-                (should (get-buffer-window (lispm-shell-stage--buffer agent)))
-                ;; 4. At max-tiles=3, a 4th code buffer evicts oldest code tile `a.el'.
-                (lispm-spotlight--on-response agent nil)
-                (lispm-test--call agent "read_file" '((path . "c.el")))
-                (should (= (length (window-list)) 4))
-                (should-not (get-buffer-window (find-buffer-visiting fa)))
-                (should (get-buffer-window (find-buffer-visiting fb)))
-                (should (get-buffer-window (find-buffer-visiting fc)))))
-          (set-frame-size (selected-frame) orig-w orig-h))))))
+      (let ((chat (lispm-chat agent)))
+        (lispm-stage-test--with-frame
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (let ((lispm-stage-max-tiles 3))
+            ;; 1. First file splits off a stage column.
+            (lispm-test--call agent "read_file" '((path . "a.el")))
+            (should (= (length (window-list)) 2))
+            (let ((wa (get-buffer-window (find-buffer-visiting fa))))
+              (should (>= (window-total-width wa)
+                          (car (alist-get 'code lispm-stage-min-sizes)))))
+            ;; 2. Second file auto-splits vertically inside the stage column.
+            (lispm-spotlight--on-response agent nil)
+            (lispm-test--call agent "read_file" '((path . "b.el")))
+            (should (= (length (window-list)) 3))
+            (should (get-buffer-window (find-buffer-visiting fa)))
+            (should (get-buffer-window (find-buffer-visiting fb)))
+            ;; 3. Shell call auto-splits a 3rd pane (code + code + shell).
+            (lispm-test--call-async agent "run_shell"
+                                    '((command . "git --version")))
+            (should (= (length (window-list)) 4))
+            (should (get-buffer-window (lispm-shell-stage--buffer agent)))
+            ;; 4. At max-tiles=3, a 4th code buffer evicts oldest code tile `a.el'.
+            (lispm-spotlight--on-response agent nil)
+            (lispm-test--call agent "read_file" '((path . "c.el")))
+            (should (= (length (window-list)) 4))
+            (should-not (get-buffer-window (find-buffer-visiting fa)))
+            (should (get-buffer-window (find-buffer-visiting fb)))
+            (should (get-buffer-window (find-buffer-visiting fc)))))))))
 
 (ert-deftest lispm-stage-test-zoom-freeze-and-prompt-or-timeout-resume ()
   "Selecting a stage pane zooms and freezes it; prompt click or timeout unzooms."
@@ -106,69 +128,64 @@
           (agent (lispm-defagent zoomer "Zoomer." :root project)))
       (dolist (f (list fa fb fc))
         (lispm-test--write f "(defun z () 1)\n"))
-      (let ((chat (lispm-chat agent))
-            (orig-w (frame-width))
-            (orig-h (frame-height)))
-        (unwind-protect
-            (save-window-excursion
-              (set-frame-size (selected-frame) 160 44)
-              (delete-other-windows)
-              (switch-to-buffer chat)
-              (setf (lispm-agent-state agent) 'requesting)
-              (lispm-test--call agent "read_file" '((path . "zoom-a.el")))
-              (lispm-spotlight--on-response agent nil)
-              (lispm-test--call agent "read_file" '((path . "zoom-b.el")))
-              (let ((ba (find-buffer-visiting fa))
-                    (bb (find-buffer-visiting fb)))
-                (should (= (length (lispm-stage--windows (selected-frame))) 2))
-                ;; 1. User clicks into `zoom-a.el': collapses to 1 zoomed pane.
-                (let ((wa (get-buffer-window ba)))
-                  (select-window wa)
-                  (let ((noninteractive nil))
-                    (lispm-stage--on-window-selection-change (selected-frame)))
-                  (should (lispm-stage-zoomed-p (selected-frame)))
-                  (should (= (length (lispm-stage--windows (selected-frame))) 1))
-                  (should (get-buffer-window ba))
-                  (should-not (get-buffer-window bb)))
-                ;; 2. Agent reads `zoom-c.el' while zoomed: stage stays frozen on `ba'.
-                (lispm-spotlight--on-response agent nil)
-                (lispm-test--call agent "read_file" '((path . "zoom-c.el")))
-                (let ((bc (find-buffer-visiting fc)))
-                  (should (= (length (lispm-stage--windows (selected-frame))) 1))
-                  (should (get-buffer-window ba))
-                  (should-not (get-buffer-window bc))
-                  ;; 3. While agent is busy, clicking back into `chat' re-tiles!
-                  (select-window (get-buffer-window chat))
-                  (let ((noninteractive nil))
-                    (lispm-stage--on-window-selection-change (selected-frame)))
-                  (should-not (lispm-stage-zoomed-p (selected-frame)))
-                  (should (>= (length (lispm-stage--windows (selected-frame))) 2))
-                  (should (get-buffer-window bc))
-                  ;; 4. While agent is busy, 10s inactivity timeout unzooms & re-tiles.
-                  (select-window (get-buffer-window ba))
-                  (let ((noninteractive nil))
-                    (lispm-stage--on-window-selection-change (selected-frame)))
-                  (should (lispm-stage-zoomed-p (selected-frame)))
-                  (let ((lispm-stage-zoom-timeout 10))
-                    (lispm-stage-set-zoom-last-active (- (float-time) 11.0))
-                    (lispm-stage--check-zoom-timeout))
-                  (should-not (lispm-stage-zoomed-p (selected-frame)))
-                  (should (eq (window-buffer (selected-window)) chat))
-                  (should (>= (length (lispm-stage--windows (selected-frame))) 2))
-                  ;; 5. Once agent stops (`idle'), clicking a buffer and returning
-                  ;; to `chat' keeps the single buffer without re-splitting!
-                  (setf (lispm-agent-state agent) 'idle)
-                  (select-window (get-buffer-window ba))
-                  (let ((noninteractive nil))
-                    (lispm-stage--on-window-selection-change (selected-frame)))
-                  (should (= (length (lispm-stage--windows (selected-frame))) 1))
-                  (select-window (get-buffer-window chat))
-                  (let ((noninteractive nil))
-                    (lispm-stage--on-window-selection-change (selected-frame)))
-                  (should-not (lispm-stage-zoomed-p (selected-frame)))
-                  (should (= (length (lispm-stage--windows (selected-frame))) 1))
-                  (should (get-buffer-window ba)))))
-          (set-frame-size (selected-frame) orig-w orig-h))))))
+      (let ((chat (lispm-chat agent)))
+        (lispm-stage-test--with-frame
+          (delete-other-windows)
+          (switch-to-buffer chat)
+          (setf (lispm-agent-state agent) 'requesting)
+          (lispm-test--call agent "read_file" '((path . "zoom-a.el")))
+          (lispm-spotlight--on-response agent nil)
+          (lispm-test--call agent "read_file" '((path . "zoom-b.el")))
+          (let ((ba (find-buffer-visiting fa))
+                (bb (find-buffer-visiting fb)))
+            (should (= (length (lispm-stage--windows (selected-frame))) 2))
+            ;; 1. User clicks into `zoom-a.el': collapses to 1 zoomed pane.
+            (let ((wa (get-buffer-window ba)))
+              (select-window wa)
+              (let ((noninteractive nil))
+                (lispm-stage--on-window-selection-change (selected-frame)))
+              (should (lispm-stage-zoomed-p (selected-frame)))
+              (should (= (length (lispm-stage--windows (selected-frame))) 1))
+              (should (get-buffer-window ba))
+              (should-not (get-buffer-window bb)))
+            ;; 2. Agent reads `zoom-c.el' while zoomed: stage stays frozen on `ba'.
+            (lispm-spotlight--on-response agent nil)
+            (lispm-test--call agent "read_file" '((path . "zoom-c.el")))
+            (let ((bc (find-buffer-visiting fc)))
+              (should (= (length (lispm-stage--windows (selected-frame))) 1))
+              (should (get-buffer-window ba))
+              (should-not (get-buffer-window bc))
+              ;; 3. While agent is busy, clicking back into `chat' re-tiles!
+              (select-window (get-buffer-window chat))
+              (let ((noninteractive nil))
+                (lispm-stage--on-window-selection-change (selected-frame)))
+              (should-not (lispm-stage-zoomed-p (selected-frame)))
+              (should (>= (length (lispm-stage--windows (selected-frame))) 2))
+              (should (get-buffer-window bc))
+              ;; 4. While agent is busy, 10s inactivity timeout unzooms & re-tiles.
+              (select-window (get-buffer-window ba))
+              (let ((noninteractive nil))
+                (lispm-stage--on-window-selection-change (selected-frame)))
+              (should (lispm-stage-zoomed-p (selected-frame)))
+              (let ((lispm-stage-zoom-timeout 10))
+                (lispm-stage-set-zoom-last-active (- (float-time) 11.0))
+                (lispm-stage--check-zoom-timeout))
+              (should-not (lispm-stage-zoomed-p (selected-frame)))
+              (should (eq (window-buffer (selected-window)) chat))
+              (should (>= (length (lispm-stage--windows (selected-frame))) 2))
+              ;; 5. Once agent stops (`idle'), clicking a buffer and returning
+              ;; to `chat' keeps the single buffer without re-splitting!
+              (setf (lispm-agent-state agent) 'idle)
+              (select-window (get-buffer-window ba))
+              (let ((noninteractive nil))
+                (lispm-stage--on-window-selection-change (selected-frame)))
+              (should (= (length (lispm-stage--windows (selected-frame))) 1))
+              (select-window (get-buffer-window chat))
+              (let ((noninteractive nil))
+                (lispm-stage--on-window-selection-change (selected-frame)))
+              (should-not (lispm-stage-zoomed-p (selected-frame)))
+              (should (= (length (lispm-stage--windows (selected-frame))) 1))
+              (should (get-buffer-window ba)))))))))
 
 (ert-deftest lispm-stage-test-subagent-session-id-lineage ()
   "Subagents with session-id `:parent' project onto their parent's stage."
@@ -261,55 +278,50 @@
            (agent-c (lispm-defagent gamma-c "Busy agent C." :root project))
            (chat-a (lispm-chat agent-a))
            (chat-b (lispm-chat agent-b))
-           (chat-c (lispm-chat agent-c))
-           (orig-w (frame-width))
-           (orig-h (frame-height)))
+           (chat-c (lispm-chat agent-c)))
       (lispm-test--write fa "(defun a () 1)\n")
       (lispm-test--write fc "(defun c () 3)\n")
-      (unwind-protect
-          (save-window-excursion
-            (set-frame-size (selected-frame) 160 44)
-            (delete-other-windows)
-            (switch-to-buffer chat-a)
-            (setf (lispm-agent-state agent-a) 'running
-                  (lispm-agent-state agent-b) 'idle
-                  (lispm-agent-state agent-c) 'running)
-            (lispm-stage--on-agent-state agent-a)
-            (lispm-stage--on-agent-state agent-b)
-            (lispm-stage--on-agent-state agent-c)
-            ;; Agent A reads `fa'; background Agent C reads `fc'.
-            (lispm-test--call agent-a "read_file" '((path . "agent-a.el")))
-            (lispm-test--call agent-c "read_file" '((path . "agent-c.el")))
-            (let ((ba (find-buffer-visiting fa))
-                  (bc (find-buffer-visiting fc)))
-              (should (get-buffer-window ba))
-              (should-not (get-buffer-window bc))
-              ;; 1. Switch chat window to busy Agent C: spotlight switches to `bc'!
-              (set-window-buffer (get-buffer-window chat-a) chat-c)
-              (let ((noninteractive nil))
-                (lispm-stage--on-window-buffer-change (selected-frame)))
-              (should-not (get-buffer-window ba))
-              (should (get-buffer-window bc))
-              ;; 2. Switch chat window to idle Agent B: spotlight closes completely!
-              (set-window-buffer (get-buffer-window chat-c) chat-b)
-              (let ((noninteractive nil))
-                (lispm-stage--on-window-buffer-change (selected-frame)))
-              (should (= (length (lispm-stage--windows (selected-frame))) 0))
-              (should (= (length (window-list)) 1))
-              ;; 3. Switch back to busy Agent C, then suspend stage reactively
-              ;; (host Files/Shells mode), re-enable, then C finishes -> closes!
-              (set-window-buffer (get-buffer-window chat-b) chat-c)
-              (let ((noninteractive nil))
-                (lispm-stage--on-window-buffer-change (selected-frame)))
-              (should (= (length (lispm-stage--windows (selected-frame))) 1))
-              (lispm-stage-set-enabled nil)
-              (should (= (length (lispm-stage--windows (selected-frame))) 0))
-              (lispm-stage-set-enabled t)
-              (should (= (length (lispm-stage--windows (selected-frame))) 1))
-              (setf (lispm-agent-state agent-c) 'idle)
-              (lispm-stage--on-agent-state agent-c)
-              (should (= (length (lispm-stage--windows (selected-frame))) 0))))
-        (set-frame-size (selected-frame) orig-w orig-h)))))
+      (lispm-stage-test--with-frame
+        (delete-other-windows)
+        (switch-to-buffer chat-a)
+        (setf (lispm-agent-state agent-a) 'running
+              (lispm-agent-state agent-b) 'idle
+              (lispm-agent-state agent-c) 'running)
+        (lispm-stage--on-agent-state agent-a)
+        (lispm-stage--on-agent-state agent-b)
+        (lispm-stage--on-agent-state agent-c)
+        ;; Agent A reads `fa'; background Agent C reads `fc'.
+        (lispm-test--call agent-a "read_file" '((path . "agent-a.el")))
+        (lispm-test--call agent-c "read_file" '((path . "agent-c.el")))
+        (let ((ba (find-buffer-visiting fa))
+              (bc (find-buffer-visiting fc)))
+          (should (get-buffer-window ba))
+          (should-not (get-buffer-window bc))
+          ;; 1. Switch chat window to busy Agent C: spotlight switches to `bc'!
+          (set-window-buffer (get-buffer-window chat-a) chat-c)
+          (let ((noninteractive nil))
+            (lispm-stage--on-window-buffer-change (selected-frame)))
+          (should-not (get-buffer-window ba))
+          (should (get-buffer-window bc))
+          ;; 2. Switch chat window to idle Agent B: spotlight closes completely!
+          (set-window-buffer (get-buffer-window chat-c) chat-b)
+          (let ((noninteractive nil))
+            (lispm-stage--on-window-buffer-change (selected-frame)))
+          (should (= (length (lispm-stage--windows (selected-frame))) 0))
+          (should (= (length (window-list)) 1))
+          ;; 3. Switch back to busy Agent C, then suspend stage reactively
+          ;; (host Files/Shells mode), re-enable, then C finishes -> closes!
+          (set-window-buffer (get-buffer-window chat-b) chat-c)
+          (let ((noninteractive nil))
+            (lispm-stage--on-window-buffer-change (selected-frame)))
+          (should (= (length (lispm-stage--windows (selected-frame))) 1))
+          (lispm-stage-set-enabled nil)
+          (should (= (length (lispm-stage--windows (selected-frame))) 0))
+          (lispm-stage-set-enabled t)
+          (should (= (length (lispm-stage--windows (selected-frame))) 1))
+          (setf (lispm-agent-state agent-c) 'idle)
+          (lispm-stage--on-agent-state agent-c)
+          (should (= (length (lispm-stage--windows (selected-frame))) 0)))))))
 
 (provide 'lispm-stage-test)
 ;;; lispm-stage-test.el ends here
