@@ -666,12 +666,12 @@ of LispM's own, `project' for a project's, `user' for one in
 
 ;;;; MCP servers
 
-(defun lispm-mcp-server-get (name)
+(defun lispm-settings-mcp-get (name)
   "The plist of MCP server NAME, or nil; a copy, safe to change."
   (when-let* ((entry (assoc name lispm-mcp-servers)))
     (copy-tree (cdr entry))))
 
-(defun lispm-mcp-server-status (name)
+(defun lispm-settings-mcp-status (name)
   "How MCP server NAME stands: a plist (:state STATE :tools COUNT :tool-names).
 STATE is `running', `starting', `failed' or `stopped'."
   (let* ((tools (and (hash-table-p lispm-mcp--tools) (gethash name lispm-mcp--tools)))
@@ -683,14 +683,14 @@ STATE is `running', `starting', `failed' or `stopped'."
                       (t 'stopped))))
     (list :state state :tools (length tools) :tool-names tools)))
 
-(defun lispm-mcp-server--check-name (name)
+(defun lispm-settings-mcp--check-name (name)
   "Signal an error unless NAME, a string, can name an MCP server."
   (let ((name (and (stringp name) (string-trim name))))
     (unless (and name (string-match-p "\\`[[:alnum:]][[:alnum:]_.-]*\\'" name))
       (user-error "An MCP server needs a name of letters, digits, `-', `_' or `.'"))
     name))
 
-(defun lispm-mcp-server--normalize (config)
+(defun lispm-settings-mcp--normalize (config)
   "CONFIG, a plist for an MCP server, trimmed for keeping."
   (let ((config (copy-tree config)))
     (dolist (key '(:command :url :description :token))
@@ -701,7 +701,7 @@ STATE is `running', `starting', `failed' or `stopped'."
             (plist-put config key trimmed)))))
     config))
 
-(defun lispm-mcp-server--check (config)
+(defun lispm-settings-mcp--check (config)
   "Signal an error unless CONFIG, a plist, describes an MCP server."
   (let ((command (plist-get config :command))
         (url (plist-get config :url)))
@@ -713,23 +713,23 @@ STATE is `running', `starting', `failed' or `stopped'."
            (user-error "An MCP server needs a command or an HTTP address")))
     config))
 
-(defun lispm-mcp-server-add (name config &optional save)
+(defun lispm-settings-mcp-add (name config &optional save)
   "Add MCP server NAME with CONFIG, a plist, to `lispm-mcp-servers'; SAVE it."
-  (setq name (lispm-mcp-server--check-name name))
+  (setq name (lispm-settings-mcp--check-name name))
   (when (assoc name lispm-mcp-servers)
     (user-error "There is already an MCP server %s" name))
-  (setq config (lispm-mcp-server--check (lispm-mcp-server--normalize config)))
+  (setq config (lispm-settings-mcp--check (lispm-settings-mcp--normalize config)))
   (lispm-settings-set 'lispm-mcp-servers
                       (append (copy-tree lispm-mcp-servers) (list (cons name config)))
                       save))
 
-(defun lispm-mcp-server-change (name config &optional save)
+(defun lispm-settings-mcp-change (name config &optional save)
   "Make CONFIG, a plist, the one MCP server NAME has; SAVE it.
 If NAME is running, restart it with its new configuration."
-  (setq name (lispm-mcp-server--check-name name))
+  (setq name (lispm-settings-mcp--check-name name))
   (unless (assoc name lispm-mcp-servers)
     (user-error "There is no MCP server %s" name))
-  (setq config (lispm-mcp-server--check (lispm-mcp-server--normalize config)))
+  (setq config (lispm-settings-mcp--check (lispm-settings-mcp--normalize config)))
   (let ((was-live (and (fboundp 'lispm-mcp--live-p) (lispm-mcp--live-p name))))
     (when (and was-live (fboundp 'lispm-mcp-stop))
       (lispm-mcp-stop name))
@@ -743,7 +743,7 @@ If NAME is running, restart it with its new configuration."
     (when (and was-live (fboundp 'lispm-mcp-start))
       (lispm-mcp-start name))))
 
-(defun lispm-mcp-server-remove (name &optional save)
+(defun lispm-settings-mcp-remove (name &optional save)
   "Stop MCP server NAME and remove it from `lispm-mcp-servers'; SAVE the rest."
   (unless (assoc name lispm-mcp-servers)
     (user-error "There is no MCP server %s" name))

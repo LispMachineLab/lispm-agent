@@ -65,9 +65,9 @@
    messages))
 
 (defun lispm-anthropic-request (backend model effort system tools messages)
-  "A Messages request for BACKEND; return (BODY . BETAS).
+  "Build a Messages request envelope for BACKEND.
 MODEL, EFFORT and SYSTEM are strings; TOOLS and MESSAGES are lists
-of alists in Messages shape."
+of alists in Messages shape.  Returns a `lispm-api-envelope'."
   (let* ((features (plist-get backend :features))
          (tools (if (memq 'eager-input features)
                     (mapcar (lambda (tool) (append tool '((eager_input_streaming . t)))) tools)
@@ -99,13 +99,17 @@ of alists in Messages shape."
                (string-match-p lispm-anthropic--fallback-models model))
       (push "server-side-fallback-2026-07-01" betas)
       (setq body (append body '((fallbacks . "default")))))
-    (cons body (nreverse betas))))
+    (let ((betas (nreverse betas)))
+      (lispm-api-make-envelope
+       body
+       :headers (when betas (list (concat "anthropic-beta: " (string-join betas ","))))
+       :meta (when betas (list :betas betas))))))
 
-(defun lispm-anthropic-headers (key betas)
-  "HTTP headers of a Messages request with KEY and BETAS."
+(defun lispm-anthropic-headers (key &optional extra-headers)
+  "HTTP headers of a Messages request with KEY and optional EXTRA-HEADERS."
   (append '("content-type: application/json" "anthropic-version: 2023-06-01")
           (and key (list (concat "x-api-key: " key)))
-          (and betas (list (concat "anthropic-beta: " (string-join betas ","))))))
+          extra-headers))
 
 ;;;; Responses
 

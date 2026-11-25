@@ -1255,7 +1255,7 @@ otherwise attach to the last user text message.  Does not mutate MESSAGES."
                            m))))))
 
 (defun lispm-request-body (agent)
-  "Request for AGENT's next model call, as (BODY . BETAS).
+  "Request envelope for AGENT's next model call, a `lispm-api-envelope'.
 Signal a `user-error' if the session cannot be sent as it is."
   (let ((parsed (with-current-buffer (lispm-agent-buffer agent) (lispm-transcript-parse))))
     (when (plist-get parsed :pending)
@@ -1325,21 +1325,21 @@ starting hold requests back so that their tools are there.")
                (lispm-request-body agent)
              (error (error-message-string err)))
       ((and (pred stringp) problem) (lispm-signal agent 'request-failed problem))
-      (`(,body . ,betas)
+      (request
        (setf (lispm-agent-continuing agent) nil)
        (cl-incf (lispm-agent-steps agent))
        (setf (lispm-agent-request-bytes agent) (lispm--session-bytes agent))
        ;; What the request carries is on disk, should Emacs stop now.
        (lispm--save-session agent)
-       (lispm--send agent body betas 0))))))
+       (lispm--send agent request 0))))))
 
-(defun lispm--send (agent body betas attempt)
-  "Send the request BODY with BETAS for AGENT; ATTEMPT counts retries."
+(defun lispm--send (agent request attempt)
+  "Send the REQUEST envelope for AGENT; ATTEMPT counts retries."
   (lispm-set-state agent 'requesting
                    (if (> attempt 0) (format "retry %d" attempt) "thinking")
                    (if (> attempt 0) 'retry 'thinking))
   (lispm--live-begin agent)
-  (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent) body betas
+  (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent) request
                        :on-delta (lambda (kind text)
                                    (if (eq kind 'tool-input)
                                        (with-demoted-errors "LispM: %S"
@@ -1347,7 +1347,7 @@ starting hold requests back so that their tools are there.")
                                                              agent text))
                                      (lispm--live-insert agent kind text)))
                        :on-done (lambda (message) (lispm--on-message agent message))
-                       :on-error (lambda (err) (lispm--on-error agent err body betas attempt)))))
+                       :on-error (lambda (err) (lispm--on-error agent err request attempt)))))
     (when (processp proc)
       (process-put proc 'lispm-agent agent))
     (setf (lispm-agent-process agent) proc)))
@@ -1819,8 +1819,8 @@ observers, as the runtime's agent status does for other interfaces."
     (when (lispm-agent-inbox agent)
       (run-at-time 0 nil #'lispm--drain-inbox agent))))
 
-(defun lispm--on-error (agent err body betas attempt)
-  "Handle the failure ERR of AGENT's request BODY (BETAS), try ATTEMPT."
+(defun lispm--on-error (agent err request attempt)
+  "Handle the failure ERR of AGENT's REQUEST envelope, try ATTEMPT."
   (when (eq (lispm-agent-state agent) 'requesting)
     (setf (lispm-agent-process agent) nil)
     (lispm--live-delete agent)
@@ -1840,7 +1840,7 @@ observers, as the runtime's agent status does for other interfaces."
         (run-at-time delay nil
                      (lambda ()
                        (when (eq (lispm-agent-state agent) 'requesting)
-                         (lispm--send agent body betas (1+ attempt)))))))
+                         (lispm--send agent request (1+ attempt)))))))
      (t
       (let ((raised (lispm-agent-max-tokens agent)))
         ;; The server may refuse a limit raised past what the model
@@ -3338,8 +3338,7 @@ non-nil goes on with the turn in the continuation."
         (let* ((summary-request (lispm--summary-request agent))
                (request (car summary-request))
                (kept (cdr summary-request))
-               (proc (funcall lispm-api-function (lispm-agent-backend* agent)
-                              (car request) (cdr request)
+               (proc (funcall lispm-api-function (lispm-agent-backend* agent) request
                               :on-done (lambda (message)
                                          (setf (lispm-agent-process agent) nil)
                                          (lispm--continue agent (lispm--reply-text
@@ -3510,7 +3509,7 @@ is given up.  A handover the next turn waits for takes it (see
                      (current (lambda () (eq (gethash agent lispm--idle-handovers) token))))
           (puthash agent token lispm--idle-handovers)
           (let ((proc (funcall
-                       lispm-api-function (lispm-agent-backend* agent) (car request) (cdr request)
+                       lispm-api-function (lispm-agent-backend* agent) request
                        :on-done
                        (lambda (message)
                          (when (funcall current)

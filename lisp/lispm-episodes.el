@@ -260,7 +260,7 @@ See lispm-episodes.el."
                                 (content . [((type . "text") (text . ,text))]))))))
               (when-let* ((edited (lispm-episodes--unsaved sources)))
                 (error "%s has unsaved changes" (abbreviate-file-name edited)))
-              (funcall lispm-api-function backend (car request) (cdr request)
+              (funcall lispm-api-function backend request
                        :on-done
                        (lambda (message)
                          (let ((summary (lispm--reply-text (append (alist-get 'content message) nil))))

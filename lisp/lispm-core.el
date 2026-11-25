@@ -1333,5 +1333,54 @@ and a sentence saying why it did not: later, never before this returns."
               (setq-local display-line-numbers nil))
             90 t))
 
+;;;; API envelopes and canonical content blocks
+
+(cl-defstruct (lispm-api-envelope (:constructor lispm-api-envelope--create)
+                                  (:copier nil))
+  "Provider-agnostic HTTP request envelope for a model API call.
+BODY is the JSON-serializable payload alist.
+HEADERS is an optional list of provider-specific extra HTTP header
+strings (excluding authorization/API key headers).
+META is an optional plist of provider-specific metadata for inspection."
+  body
+  headers
+  meta)
+
+(cl-defun lispm-api-make-envelope (body &key headers meta)
+  "Build a `lispm-api-envelope' for BODY with optional HEADERS and META."
+  (lispm-api-envelope--create :body body :headers headers :meta meta))
+
+(defun lispm-thought-block (text &optional signature ephemeral)
+  "Construct a canonical provider-neutral thought content block for TEXT.
+SIGNATURE is an optional provider verification signature.  EPHEMERAL,
+when non-nil, marks a display-only thought block never replayed back to
+model APIs (for example Chat Completions reasoning text)."
+  `((type . "thinking")
+    (thinking . ,text)
+    ,@(when signature `((signature . ,signature)))
+    ,@(when ephemeral '((ephemeral . t)))))
+
+(defun lispm-thought-block-p (block)
+  "Return non-nil if BLOCK is a thought/reasoning content block.
+Recognizes canonical \"thinking\" blocks and legacy \"reasoning\" blocks
+read from older transcripts."
+  (and (consp block)
+       (member (alist-get 'type block) '("thinking" "reasoning"))
+       t))
+
+(defun lispm-thought-block-text (block)
+  "Return non-blank thought text of BLOCK, or nil."
+  (when (lispm-thought-block-p block)
+    (let ((text (or (alist-get 'thinking block)
+                    (alist-get 'text block))))
+      (and (stringp text) (not (string-blank-p text)) text))))
+
+(defun lispm-block-replayable-p (block)
+  "Return non-nil if raw transcript BLOCK should be replayed to model APIs.
+Drops legacy \"reasoning\" blocks and canonical ephemeral thought blocks."
+  (and (consp block)
+       (not (equal (alist-get 'type block) "reasoning"))
+       (not (alist-get 'ephemeral block))))
+
 (provide 'lispm-core)
 ;;; lispm-core.el ends here

@@ -792,7 +792,7 @@ not under git (see `lispm-git-p'), nor once AGENT has ended.  See
                                     (lispm-exec-delete handle))))))
                 (condition-case err
                     (setq handle
-                          (funcall lispm-api-function backend (car request) (cdr request)
+                          (funcall lispm-api-function backend request
                                    :on-done
                                    (lambda (message)
                                      (when (lispm-job-finish job)

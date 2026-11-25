@@ -61,9 +61,9 @@
 ;;   :END:
 ;;
 ;; Any other top-level heading (say "* Notes") is the user's own and is
-;; not sent; neither is any message tagged :ignore:, nor reasoning text
-;; from Chat Completions servers (a "reasoning" block), which is shown
-;; but never sent back.  A tool result tagged :cleared: is sent as a
+;; not sent; neither is any message tagged :ignore:, nor ephemeral
+;; reasoning text (for example from Chat Completions servers), which is
+;; shown but never sent back.  A tool result tagged :cleared: is sent as a
 ;; line saying it was cleared: the runtime tags old results so when a
 ;; session grows long (see `lispm-compact-keep-results').
 ;;
@@ -218,20 +218,20 @@ non-nil records that it stopped a turn in the middle, not between two."
 
 (defun lispm-transcript--raw-title (block)
   "Heading for a content BLOCK that is kept as raw JSON."
-  (let ((type (alist-get 'type block)))
-    (pcase type
-      ("thinking"
-       (let ((text (alist-get 'thinking block)))
-         (if (and (stringp text) (not (string-blank-p text)))
-             (concat "Thinking: " (lispm--oneline text 70))
-           "Thinking")))
-      ("redacted_thinking" "Redacted thinking")
-      ("reasoning" (concat "Reasoning: " (lispm--oneline (alist-get 'text block) 70)))
-      ("fallback"
-       (format "Fallback: %s -> %s"
-               (alist-get 'model (alist-get 'from block))
-               (alist-get 'model (alist-get 'to block))))
-      (_ (capitalize (replace-regexp-in-string "_" " " (format "%s" type)))))))
+  (cond
+   ((lispm-thought-block-p block)
+    (if-let* ((text (lispm-thought-block-text block)))
+        (concat "Thinking: " (lispm--oneline text 70))
+      "Thinking"))
+   (t
+    (let ((type (alist-get 'type block)))
+      (pcase type
+        ("redacted_thinking" "Redacted thinking")
+        ("fallback"
+         (format "Fallback: %s -> %s"
+                 (alist-get 'model (alist-get 'from block))
+                 (alist-get 'model (alist-get 'to block))))
+        (_ (capitalize (replace-regexp-in-string "_" " " (format "%s" type)))))))))
 
 (defun lispm-transcript--raw (block)
   "Section text for a content BLOCK kept verbatim as JSON."
@@ -888,8 +888,9 @@ a call waiting at one (see `lispm-transcript-stopped')."
                   (push (lispm-transcript--tool-result id "(no result recorded)" t)
                         results)))))
         ('block
-         (when (and (plist-get part :block) (not (equal (plist-get part :type) "reasoning")))
-           (push (plist-get part :block) blocks)))))
+         (when-let* ((block (plist-get part :block))
+                     ((lispm-block-replayable-p block)))
+           (push block blocks)))))
     (list (nreverse blocks) (nreverse results) (nreverse pending))))
 
 (defun lispm-transcript--after-drawer (beg end)

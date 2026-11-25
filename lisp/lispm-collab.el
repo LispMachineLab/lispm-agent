@@ -354,6 +354,98 @@ An existing agent or character keeps its own conversation."
       (lispm-set-parent helper (lispm-principal-id caller)))
     (cons target (and helper t))))
 
+(cl-defstruct (lispm-reply-route (:constructor lispm-reply-route--create)
+                                 (:copier nil))
+  "Structured reply route identifying a delegated request and delivery mode.
+CALLER-ID is the requesting session or principal identifier.
+REQUEST-ID is the tool call id or background request identifier.
+MODE is `call' (settle pending tool call) or `inbox' (deliver reply message).
+RETIRE, when non-nil, retires the helper session once it has replied."
+  caller-id
+  request-id
+  (mode 'call)
+  retire)
+
+(defun lispm-reply-route-encode (route)
+  "Encode ROUTE (`lispm-reply-route' or wire string) as an org property string.
+Returns nil when ROUTE is nil or incomplete."
+  (cond
+   ((null route) nil)
+   ((stringp route) route)
+   ((lispm-reply-route-p route)
+    (when-let* ((caller-id (lispm-reply-route-caller-id route))
+                (request-id (lispm-reply-route-request-id route)))
+      (string-join
+       (delq nil (list caller-id request-id
+                       (when (eq (lispm-reply-route-mode route) 'inbox) "inbox")
+                       (when (lispm-reply-route-retire route) "retire")))
+       " ")))
+   (t (error "Invalid reply route: %S" route))))
+
+(defun lispm-reply-route-decode (value)
+  "Decode VALUE (`lispm-reply-route' or wire string) into a `lispm-reply-route'.
+Returns nil when VALUE is nil or cannot be parsed."
+  (cond
+   ((null value) nil)
+   ((lispm-reply-route-p value) value)
+   ((stringp value)
+    (pcase (split-string value)
+      (`(,caller-id ,request-id . ,flags)
+       (lispm-reply-route--create
+        :caller-id caller-id
+        :request-id request-id
+        :mode (if (member "inbox" flags) 'inbox 'call)
+        :retire (and (member "retire" flags) t)))
+      (_ nil)))
+   (t nil)))
+
+(cl-defun lispm-collab--dispatch (caller agent request &key mode callback root call request-id)
+  "Dispatch REQUEST from CALLER to native AGENT under MODE (`call' or `inbox').
+Resolves AGENT via `lispm-collab--recipient' in ROOT, encodes a structured
+`lispm-reply-route', records `ASKED' on CALL when applicable, and delivers
+the request to the recipient.  Returns (TARGET . HELPER-P)."
+  (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root))
+               (inbox-p (eq mode 'inbox))
+               (route-id (if inbox-p request-id call))
+               (route (when (and route-id (or inbox-p (lispm-agent-p caller)))
+                        (lispm-reply-route-encode
+                         (lispm-reply-route--create
+                          :caller-id (lispm-principal-id caller)
+                          :request-id route-id
+                          :mode mode
+                          :retire helper-p)))))
+    (unless inbox-p
+      (when (lispm-collab--cycle-p caller target)
+        (error "%s is (indirectly) waiting on you; asking it would deadlock"
+               (lispm-principal-name target)))
+      (push target (lispm-principal-waiting-on caller))
+      (lispm-collab--wait-changed caller target))
+    (when (and call (lispm-agent-p caller))
+      (lispm-collab--record-asked caller call target))
+    (lispm-tell
+     target request
+     :from (lispm-principal-name caller)
+     :request-id request-id
+     :reply-to route
+     :callback
+     (if inbox-p
+         (lispm-collab--callback target route)
+       (lambda (reply)
+         (setf (lispm-principal-waiting-on caller)
+               (cl-remove target (lispm-principal-waiting-on caller) :count 1))
+         (lispm-collab--wait-changed
+          caller target
+          (when request-id
+            (list :type 'request-settled :request-id request-id
+                  :from (lispm-principal-name target)
+                  :to (lispm-principal-name caller))))
+         (when helper-p
+           (run-at-time 0 nil #'lispm-collab--retire target))
+         (funcall callback target reply))))
+    (when inbox-p
+      (lispm--await-reply caller request-id))
+    (cons target helper-p)))
+
 (cl-defun lispm-delegate (caller agent request callback &key root call request-id)
   "Hand REQUEST from CALLER to AGENT, and call CALLBACK when it has replied.
 AGENT is a running agent or its name, or a role or the name of one no
@@ -366,31 +458,12 @@ Emacs: should Emacs stop before the reply, it still settles the call.
 REQUEST-ID identifies a peer's request for mailbox and wait observers;
 it does not replace CALL or change the durable reply-to route.
 Return the agent asked."
-  (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root)))
-    (when (lispm-collab--cycle-p caller target)
-      (error "%s is (indirectly) waiting on you; asking it would deadlock" (lispm-principal-name target)))
-    (push target (lispm-principal-waiting-on caller))
-    (lispm-collab--wait-changed caller target)
-    (when (and call (lispm-agent-p caller))
-      (lispm-collab--record-asked caller call target))
-    (lispm-tell target request
-                :from (lispm-principal-name caller)
-                :request-id request-id
-                :reply-to (and call (lispm-agent-p caller)
-                               (concat (lispm-principal-id caller) " " call (if helper-p " retire" "")))
-                :callback (lambda (reply)
-                            (setf (lispm-principal-waiting-on caller)
-                                  (cl-remove target (lispm-principal-waiting-on caller) :count 1))
-                            (lispm-collab--wait-changed
-                             caller target
-                             (when request-id
-                               (list :type 'request-settled :request-id request-id
-                                     :from (lispm-principal-name target)
-                                     :to (lispm-principal-name caller))))
-                            (when helper-p
-                              (run-at-time 0 nil #'lispm-collab--retire target))
-                            (funcall callback target reply)))
-    target))
+  (car (lispm-collab--dispatch caller agent request
+                               :mode 'call
+                               :callback callback
+                               :root root
+                               :call call
+                               :request-id request-id)))
 
 (defun lispm-collab--accepted (id name &optional session helper-p)
   "Receipt for the request ID accepted by NAME, optionally SESSION.
@@ -436,15 +509,14 @@ requests, as with `lispm-ask-peer', last only while Emacs runs."
            :id id)
           (lispm--await-reply caller id (lispm-peer-name peer))
           (lispm-collab--accepted id (lispm-peer-name peer)))
-      (pcase-let* ((`(,target . ,helper-p) (lispm-collab--recipient caller agent root))
-                   (route (concat caller-id " " id " inbox" (if helper-p " retire" ""))))
-        (lispm-tell target request :from (lispm-principal-name caller)
-                    :request-id id :reply-to route
-                    :callback (lispm-collab--callback target route))
-        (lispm--await-reply caller id)
-        (when call
-          (lispm-collab--record-asked caller call target))
-        (lispm-collab--accepted id (lispm-principal-name target) (lispm-principal-id target) helper-p)))))
+      (pcase-let ((`(,target . ,helper-p)
+                   (lispm-collab--dispatch caller agent request
+                                           :mode 'inbox
+                                           :root root
+                                           :call call
+                                           :request-id id)))
+        (lispm-collab--accepted id (lispm-principal-name target)
+                                (lispm-principal-id target) helper-p)))))
 
 (defun lispm-collab--replied (agent reply)
   "The text delivered when AGENT replied REPLY.
@@ -530,27 +602,32 @@ since it asked, and AGENT took the request up again."
 
 (defun lispm-collab--callback (agent reply-to)
   "The callback of AGENT's input asked for by REPLY-TO, after Emacs restarted.
-REPLY-TO names the caller's session, request or call, and whether AGENT
-is a helper, to retire once it has replied.  An `inbox' flag routes a
-background request to a new message; old routes settle a pending call."
-  (pcase (split-string reply-to)
-    (`(,caller-id ,call . ,flags)
-     (lambda (reply)
-       (if (member "inbox" flags)
-           (lispm-collab--reply-message caller-id call (lispm-agent-name agent)
-                                       (lispm-collab--replied agent reply))
-         (lispm-collab--deliver caller-id call agent reply))
-       (when (member "retire" flags)
-         (run-at-time 0 nil #'lispm-collab--retire agent))))))
+REPLY-TO is a `lispm-reply-route' or its encoded wire string, naming
+the caller's session, request or call, and whether AGENT is a helper,
+to retire once it has replied.  An `inbox' route sends a background reply
+as a new message; a `call' route settles a pending tool call."
+  (when-let* ((route (lispm-reply-route-decode reply-to)))
+    (let ((caller-id (lispm-reply-route-caller-id route))
+          (call (lispm-reply-route-request-id route))
+          (inbox-p (eq (lispm-reply-route-mode route) 'inbox))
+          (retire-p (lispm-reply-route-retire route)))
+      (lambda (reply)
+        (if inbox-p
+            (lispm-collab--reply-message caller-id call (lispm-agent-name agent)
+                                        (lispm-collab--replied agent reply))
+          (lispm-collab--deliver caller-id call agent reply))
+        (when retire-p
+          (run-at-time 0 nil #'lispm-collab--retire agent))))))
 
 (setq lispm-inbox-callback-function #'lispm-collab--callback)
 
 (defun lispm-collab--answering-p (agent caller call)
   "Non-nil if AGENT has the request of CALLER's CALL, queued or under way."
-  (let ((prefix (concat (lispm-agent-id caller) " " call)))
+  (let ((caller-id (lispm-principal-id caller)))
     (seq-some (lambda (entry)
-                (when-let* ((reply-to (plist-get entry :reply-to)))
-                  (or (equal reply-to prefix) (string-prefix-p (concat prefix " ") reply-to))))
+                (when-let* ((route (lispm-reply-route-decode (plist-get entry :reply-to))))
+                  (and (equal (lispm-reply-route-caller-id route) caller-id)
+                       (equal (lispm-reply-route-request-id route) call))))
               (cons (lispm-agent-entry agent)
                     (append (lispm-agent-inbox agent) (lispm-agent-suspended agent))))))
 

@@ -301,17 +301,18 @@ Once Claude reports itself connected, it is sent the current selection."
 (defconst lispm-agents-ide-tools
   (append
    (lispm-agents-context-tools #'lispm-agents-ide-directory)
-   '(("openDiff" lispm-agents-ide--tool-open-diff
-      ((old_file_path . ((type . "string")))
-       (new_file_path . ((type . "string")))
-       (new_file_contents . ((type . "string")))
-       (tab_name . ((type . "string"))))
-      ["old_file_path" "new_file_path" "new_file_contents" "tab_name"]
-      "Show a proposed change as a diff for the user to accept or reject.")
-     ("close_tab" lispm-agents-ide--tool-close-tab ((tab_name . ((type . "string")))) ["tab_name"]
-      "Close a diff.")
-     ("closeAllDiffTabs" lispm-agents-ide--tool-close-all-diffs nil nil
-      "Close every diff.")))
+   (lispm-tool-spec-from-rows
+    '(("openDiff" lispm-agents-ide--tool-open-diff
+       ((old_file_path . ((type . "string")))
+        (new_file_path . ((type . "string")))
+        (new_file_contents . ((type . "string")))
+        (tab_name . ((type . "string"))))
+       ["old_file_path" "new_file_path" "new_file_contents" "tab_name"]
+       "Show a proposed change as a diff for the user to accept or reject.")
+      ("close_tab" lispm-agents-ide--tool-close-tab ((tab_name . ((type . "string")))) ["tab_name"]
+       "Close a diff.")
+      ("closeAllDiffTabs" lispm-agents-ide--tool-close-all-diffs nil nil
+       "Close every diff."))))
   "Tools served to Claude: the read tools and the diff tools.")
 
 (provide 'lispm-agents-ide)

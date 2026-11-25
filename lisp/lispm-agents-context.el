@@ -397,48 +397,150 @@ the selection."
       (lispm-agents-context-display buffer)
       (list (format "Opened file: %s" file)))))
 
+(cl-defstruct (lispm-tool-spec (:constructor lispm-tool-spec--create)
+                               (:copier nil))
+  "Canonical wire-level tool metadata and handler."
+  name
+  description
+  properties
+  required
+  input-schema
+  function)
+
+(defun lispm-tool-spec-make-schema (&optional properties required)
+  "Build an object JSON schema alist from PROPERTIES and REQUIRED."
+  `((type . "object")
+    (properties . ,(or properties (make-hash-table)))
+    ,@(when required `((required . ,required)))))
+
+(cl-defun lispm-tool-spec-create (name description &key function properties required input-schema)
+  "Create a `lispm-tool-spec' named NAME with DESCRIPTION and optional schema."
+  (lispm-tool-spec--create
+   :name name
+   :description description
+   :properties properties
+   :required required
+   :input-schema input-schema
+   :function function))
+
+(defun lispm-tool-spec-bind (spec function)
+  "Return a copy of SPEC bound to handler FUNCTION."
+  (lispm-tool-spec--create
+   :name (lispm-tool-spec-name spec)
+   :description (lispm-tool-spec-description spec)
+   :properties (lispm-tool-spec-properties spec)
+   :required (lispm-tool-spec-required spec)
+   :input-schema (lispm-tool-spec-input-schema spec)
+   :function function))
+
+(defun lispm-tool-spec-normalize (entry)
+  "Normalize ENTRY (a `lispm-tool-spec' or 5-tuple) into a spec."
+  (cond
+   ((lispm-tool-spec-p entry) entry)
+   ((consp entry)
+    (pcase-let ((`(,name ,fn ,properties ,required ,description) entry))
+      (lispm-tool-spec-create name description
+                             :function fn
+                             :properties properties
+                             :required required)))
+   (t (error "Invalid tool specification: %S" entry))))
+
+(defun lispm-tool-spec-from-rows (rows)
+  "Convert compact specification ROWS into `lispm-tool-spec' structs.
+Each row has the form (NAME FUNCTION PROPERTIES REQUIRED DESCRIPTION)."
+  (mapcar #'lispm-tool-spec-normalize rows))
+
+(defun lispm-tool-spec-resolved-description (spec)
+  "Return the resolved string description for `lispm-tool-spec' SPEC."
+  (let ((description (lispm-tool-spec-description spec)))
+    (if (functionp description) (funcall description) description)))
+
+(defun lispm-tool-spec--raw-schema (spec)
+  "Resolve SPEC's input schema alist preserving `properties' as recorded."
+  (if-let* ((schema (lispm-tool-spec-input-schema spec)))
+      (if (functionp schema) (funcall schema) schema)
+    `((type . "object")
+      (properties . ,(lispm-tool-spec-properties spec))
+      ,@(when-let* ((req (lispm-tool-spec-required spec)))
+          `((required . ,req))))))
+
+(defun lispm-tool-spec-resolved-schema (spec)
+  "Return SPEC's input schema safe for plain `json-serialize'."
+  (let* ((raw (lispm-tool-spec--raw-schema spec))
+         (copy (if (consp raw) (copy-alist raw) '((type . "object")))))
+    (unless (alist-get 'properties copy)
+      (setf (alist-get 'properties copy) (make-hash-table)))
+    copy))
+
+(defun lispm-tool-spec-to-mcp (spec)
+  "Format SPEC as an MCP tools/list entry alist."
+  `((name . ,(lispm-tool-spec-name spec))
+    (description . ,(lispm-tool-spec-resolved-description spec))
+    (inputSchema . ,(lispm-tool-spec-resolved-schema spec))))
+
+(defun lispm-tool-spec-to-api (spec)
+  "Format SPEC as an API tool definition alist."
+  `((name . ,(lispm-tool-spec-name spec))
+    (description . ,(lispm-tool-spec-resolved-description spec))
+    (input_schema . ,(lispm-tool-spec--raw-schema spec))))
+
+(defun lispm-tool-spec-find (name tools)
+  "Find the `lispm-tool-spec' named NAME in TOOLS, or nil."
+  (cl-loop for entry in tools
+           for spec = (lispm-tool-spec-normalize entry)
+           when (equal (lispm-tool-spec-name spec) name)
+           return spec))
+
+(defun lispm-tool-spec-remove (names tools)
+  "Return TOOLS omitting entries whose names are in NAMES."
+  (seq-remove (lambda (entry)
+                (member (lispm-tool-spec-name (lispm-tool-spec-normalize entry)) names))
+              tools))
+
 (defconst lispm-agents-context--uri-schema
   '((uri . ((type . "string") (description . "The file URI or path"))))
   "Input properties of a tool that takes one file.")
 
 (defconst lispm-agents-context-tools
-  `(("getCurrentSelection" lispm-agents-context--tool-selection nil nil
-     "Get the text the user has selected in Emacs, or their cursor position, \
+  (lispm-tool-spec-from-rows
+   `(("getCurrentSelection" lispm-agents-context--tool-selection nil nil
+      "Get the text the user has selected in Emacs, or their cursor position, \
 in the file they were last in.  Call it when the user refers to what they \
 are looking at or have selected.")
-    ("getLatestSelection" lispm-agents-context--tool-selection nil nil
-     "Get the latest text selection in any file.")
-    ("getOpenEditors" lispm-agents-context--tool-open-editors nil nil
-     "List the files open in Emacs, marking the active one and those with \
+     ("getLatestSelection" lispm-agents-context--tool-selection nil nil
+      "Get the latest text selection in any file.")
+     ("getOpenEditors" lispm-agents-context--tool-open-editors nil nil
+      "List the files open in Emacs, marking the active one and those with \
 unsaved changes.")
-    ("getWorkspaceFolders" lispm-agents-context--tool-workspace-folders nil nil
-     "Get the workspace folders.")
-    ("getDiagnostics" lispm-agents-context--tool-diagnostics ,lispm-agents-context--uri-schema nil
-     "Get the language server's diagnostics (errors, warnings) Emacs holds \
+     ("getWorkspaceFolders" lispm-agents-context--tool-workspace-folders nil nil
+      "Get the workspace folders.")
+     ("getDiagnostics" lispm-agents-context--tool-diagnostics ,lispm-agents-context--uri-schema nil
+      "Get the language server's diagnostics (errors, warnings) Emacs holds \
 for one open file, or for every open file when no URI is given.")
-    ("checkDocumentDirty" lispm-agents-context--tool-dirty ,lispm-agents-context--uri-schema ["uri"]
-     "Check whether a file has unsaved changes in Emacs.  Check before \
+     ("checkDocumentDirty" lispm-agents-context--tool-dirty ,lispm-agents-context--uri-schema ["uri"]
+      "Check whether a file has unsaved changes in Emacs.  Check before \
 editing a file the user has open.")
-    ("openFile" lispm-agents-context--tool-open-file
-     ((filePath . ((type . "string") (description . "Path of the file to open")))
-      (startText . ((type . "string") (description . "Text to place the cursor at"))))
-     ["filePath"]
-     "Show a file to the user in Emacs."))
-  "Read tools: (NAME FUNCTION PROPERTIES REQUIRED DESCRIPTION).
-FUNCTION takes the agent's directory and the arguments and returns the
-text items of its result.")
+     ("openFile" lispm-agents-context--tool-open-file
+      ((filePath . ((type . "string") (description . "Path of the file to open")))
+       (startText . ((type . "string") (description . "Text to place the cursor at"))))
+      ["filePath"]
+      "Show a file to the user in Emacs.")))
+  "Read tools as a list of `lispm-tool-spec' structs.
+Each tool's function takes the agent's directory and the arguments and
+returns the text items of its result.")
 
 (defun lispm-agents-context-tools (directory-of &optional names)
   "Return the read tools named NAMES, or all, for servers of DIRECTORY-OF.
-DIRECTORY-OF maps a server to its directory.  The tools take the form
-servers dispatch: their function takes the server, the arguments and the
-request id."
-  (mapcar (pcase-lambda (`(,name ,function . ,description))
-            `(,name ,(lambda (server arguments _id)
-                       (funcall function (funcall directory-of server) arguments))
-                    ,@description))
+DIRECTORY-OF maps a server to its directory.  The returned
+`lispm-tool-spec' structs bind handlers taking SERVER, ARGUMENTS, and ID."
+  (mapcar (lambda (spec)
+            (let ((fn (lispm-tool-spec-function spec)))
+              (lispm-tool-spec-bind
+               spec (lambda (server arguments _id)
+                      (funcall fn (funcall directory-of server) arguments)))))
           (if names
-              (seq-filter (lambda (tool) (member (car tool) names)) lispm-agents-context-tools)
+              (seq-filter (lambda (spec) (member (lispm-tool-spec-name spec) names))
+                          lispm-agents-context-tools)
             lispm-agents-context-tools)))
 
 ;;;; MCP
@@ -485,20 +587,17 @@ caller handles; or `deferred' when a tool answers later itself."
           ("tools/list"
            (lispm-agents-context-result
             id `((tools . ,(vconcat
-                            (mapcar (pcase-lambda (`(,name ,_ ,properties ,required ,description))
-                                      `((name . ,name)
-                                        (description . ,description)
-                                        (inputSchema
-                                         . ((type . "object")
-                                            (properties . ,(or properties (make-hash-table)))
-                                            ,@(when required `((required . ,required)))))))
+                            (mapcar (lambda (tool)
+                                      (lispm-tool-spec-to-mcp
+                                       (lispm-tool-spec-normalize tool)))
                                     tools))))))
           ("tools/call"
-           (let ((tool (assoc (alist-get 'name params) tools)))
+           (let ((tool (lispm-tool-spec-find (alist-get 'name params) tools)))
              (if (not tool)
                  (lispm-agents-context-error id -32602
                                              (format "Unknown tool: %s" (alist-get 'name params)))
-               (let ((result (funcall (nth 1 tool) server (alist-get 'arguments params) id)))
+               (let ((result (funcall (lispm-tool-spec-function tool)
+                                      server (alist-get 'arguments params) id)))
                  (if (eq result 'deferred)
                      'deferred
                    (lispm-agents-context-tool-result id result))))))

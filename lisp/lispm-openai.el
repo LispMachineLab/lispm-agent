@@ -37,7 +37,8 @@
 ;;   Messages-only blocks
 ;;
 ;; Reasoning text some servers return (reasoning_content, reasoning)
-;; becomes a "reasoning" block: shown in the transcript, never sent back.
+;; becomes an ephemeral canonical "thinking" block (`lispm-thought-block'):
+;; shown in the transcript, never replayed back.
 
 ;;; Code:
 
@@ -140,26 +141,27 @@
     (nreverse out)))
 
 (defun lispm-openai-request (backend model effort system tools messages)
-  "A Chat Completions request for BACKEND; return (BODY . nil).
+  "Build a Chat Completions request envelope for BACKEND.
 MODEL, EFFORT and SYSTEM are strings; TOOLS and MESSAGES are lists
-of alists in Messages shape."
+of alists in Messages shape.  Returns a `lispm-api-envelope'."
   (let* ((features (plist-get backend :features))
          (stream (memq 'streaming features)))
-    (cons `((model . ,model)
-            (,(if (memq 'max-completion-tokens features) 'max_completion_tokens 'max_tokens)
-             . ,(or (plist-get backend :max-tokens) lispm-max-tokens))
-            (stream . ,(if stream t :false))
-            ,@(and stream (memq 'stream-usage features)
-                   '((stream_options (include_usage . t))))
-            ,@(and (memq 'reasoning-effort features) `((reasoning_effort . ,effort)))
-            ,@(and tools `((tools . ,(vconcat (mapcar #'lispm-openai--tool tools)))))
-            (messages . ,(vconcat (lispm-openai--messages system messages))))
-          nil)))
+    (lispm-api-make-envelope
+     `((model . ,model)
+       (,(if (memq 'max-completion-tokens features) 'max_completion_tokens 'max_tokens)
+        . ,(or (plist-get backend :max-tokens) lispm-max-tokens))
+       (stream . ,(if stream t :false))
+       ,@(and stream (memq 'stream-usage features)
+              '((stream_options (include_usage . t))))
+       ,@(and (memq 'reasoning-effort features) `((reasoning_effort . ,effort)))
+       ,@(and tools `((tools . ,(vconcat (mapcar #'lispm-openai--tool tools)))))
+       (messages . ,(vconcat (lispm-openai--messages system messages)))))))
 
-(defun lispm-openai-headers (key _betas)
-  "HTTP headers of a Chat Completions request with KEY."
+(defun lispm-openai-headers (key &optional extra-headers)
+  "HTTP headers of a Chat Completions request with KEY and optional EXTRA-HEADERS."
   (append '("content-type: application/json")
-          (and key (list (concat "authorization: Bearer " key)))))
+          (and key (list (concat "authorization: Bearer " key)))
+          extra-headers))
 
 ;;;; Responses
 
@@ -194,7 +196,7 @@ REASONING and TEXT are strings or nil; CALLS a list of (ID NAME
 ARGUMENTS); FINISH the finish reason; USAGE the usage object."
   (let ((n 0) content invalid)
     (when (lispm-openai--string reasoning)
-      (push `((type . "reasoning") (text . ,reasoning)) content))
+      (push (lispm-thought-block reasoning nil t) content))
     (when (lispm-openai--string text)
       (push `((type . "text") (text . ,text)) content))
     (pcase-dolist (`(,id ,name ,arguments) calls)
