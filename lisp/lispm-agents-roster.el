@@ -275,6 +275,9 @@ builds a fresh index so settled requests never remain cached."
 (defvar-local lispm-agents-roster--child-scan-pos nil
   "Buffer position up to which transcript child records were scanned.")
 
+(defvar-local lispm-agents-roster--child-scan-tick nil
+  "Modified-chars tick at the last transcript child scan.")
+
 (defvar-local lispm-agents-roster--child-scan-records nil
   "Cached list of `(CHILD-ID . CHILD-NAME)' discovered in the current transcript.")
 
@@ -285,9 +288,11 @@ Maintains incremental buffer-local scan state so unchanged buffers run in O(1)."
     (save-excursion
       (save-restriction
         (widen)
-        (let ((max-pos (point-max)))
+        (let ((max-pos (point-max))
+              (tick (buffer-chars-modified-tick)))
           (if (and (integerp lispm-agents-roster--child-scan-pos)
-                   (= lispm-agents-roster--child-scan-pos max-pos))
+                   (= lispm-agents-roster--child-scan-pos max-pos)
+                   (eql lispm-agents-roster--child-scan-tick tick))
               lispm-agents-roster--child-scan-records
             (let* ((incremental (and (integerp lispm-agents-roster--child-scan-pos)
                                      (< lispm-agents-roster--child-scan-pos max-pos)))
@@ -310,6 +315,7 @@ Maintains incremental buffer-local scan state so unchanged buffers run in O(1)."
                     (puthash id t seen)
                     (push (cons id name) out))))
               (setq lispm-agents-roster--child-scan-pos max-pos
+                    lispm-agents-roster--child-scan-tick tick
                     lispm-agents-roster--child-scan-records (nreverse out)))))))))
 
 (defun lispm-agents-roster--retired-children (index)

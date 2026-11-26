@@ -295,13 +295,37 @@
   input
   summary
   buffer
-  started-at)
+  started-at
+  isolated)
 
 (defvar lispm-eval-stage--sessions (make-hash-table :test #'equal)
   "Call key -> active `lispm-eval-stage--session'.")
 
+(defvar lispm-eval-stage--isolated-buffers (make-hash-table :test #'eq)
+  "Agent -> ephemeral isolated eval stage buffers created during concurrency.")
+
 (defvar lispm-eval-stage--ticker nil
   "Timer updating elapsed times in active Lisp and web stage headers.")
+
+(defun lispm-eval-stage--prune-isolated (agent &optional force)
+  "Kill retired isolated eval stage buffers owned by AGENT.
+Unless FORCE is non-nil, keep buffers still shown in a visible window."
+  (let (keep)
+    (dolist (buf (gethash agent lispm-eval-stage--isolated-buffers))
+      (when (buffer-live-p buf)
+        (let (active)
+          (maphash (lambda (_k session)
+                     (when (eq (lispm-eval-stage--session-buffer session) buf)
+                       (setq active t)))
+                   lispm-eval-stage--sessions)
+          (cond
+           (active (push buf keep))
+           ((and (not force) (get-buffer-window buf 'visible))
+            (push buf keep))
+           (t (kill-buffer buf))))))
+    (if keep
+        (puthash agent (nreverse keep) lispm-eval-stage--isolated-buffers)
+      (remhash agent lispm-eval-stage--isolated-buffers))))
 
 (defun lispm-eval-stage--resolve-key (agent &optional call-id)
   "Return the session table key for AGENT and optional CALL-ID."
@@ -338,6 +362,7 @@
 
 (defun lispm-eval-stage--start (agent kind tool-name input)
   "Stage AGENT's starting call of TOOL-NAME (classified as KIND) on INPUT."
+  (lispm-eval-stage--prune-isolated agent)
   (let* ((now (float-time))
          (call-id (bound-and-true-p lispm-current-call))
          (key (lispm-eval-stage--resolve-key agent call-id))
@@ -352,7 +377,10 @@
                    :key key :agent agent :call-id call-id
                    :kind kind :tool-name tool-name
                    :input input :summary summary
-                   :buffer buf :started-at now)))
+                   :buffer buf :started-at now
+                   :isolated (and isolated (not webkit-buf) t))))
+    (when (lispm-eval-stage--session-isolated session)
+      (push buf (gethash agent lispm-eval-stage--isolated-buffers)))
     (unless webkit-buf
       (with-current-buffer buf
         (let ((inhibit-read-only t))
@@ -417,7 +445,7 @@
           ('finish (lispm-eval-stage--finish agent kind name input result errorp)))))))
 
 (defun lispm-eval-stage--on-session-end (agent)
-  "Clean up any running Lisp or web stage state for AGENT."
+  "Clean up any running Lisp or web stage state and isolated buffers for AGENT."
   (let (keys)
     (maphash (lambda (key session)
                (when (eq (lispm-eval-stage--session-agent session) agent)
@@ -425,6 +453,7 @@
              lispm-eval-stage--sessions)
     (dolist (key keys)
       (remhash key lispm-eval-stage--sessions)))
+  (lispm-eval-stage--prune-isolated agent t)
   (lispm-eval-stage--tick))
 
 (add-hook 'lispm-tool-call-functions #'lispm-eval-stage--on-tool-call)

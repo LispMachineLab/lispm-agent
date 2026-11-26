@@ -35,6 +35,14 @@
 (require 'lispm-session)
 
 (defvar lispm-kernel-exec-owner)
+(declare-function lispm-kernel-exec-release-owner "lispm-kernel-exec" (owner))
+
+(defun lispm-turns--release-kernel-owner (agent)
+  "Release kernel owner quota state when AGENT's session ends."
+  (when (and (lispm-agent-p agent) (fboundp 'lispm-kernel-exec-release-owner))
+    (lispm-kernel-exec-release-owner (lispm-agent-id agent))))
+
+(add-hook 'lispm-session-end-functions #'lispm-turns--release-kernel-owner)
 
 (defvar-local lispm--live nil
   "Live section bounds while streaming.")
@@ -747,29 +755,40 @@ once every call has a result."
 (defun lispm--launch-unblocked-tools (agent)
   "Start all queued `run' calls for AGENT not blocked by earlier or active calls.
 Return non-nil if any tool call started."
-  (let (queued started)
+  (let (pending-entries has-queued started)
     (maphash (lambda (id call)
-               (when (and (eq (plist-get call :status) 'run)
-                          (plist-get call :queued))
-                 (push (cons id call) queued)))
+               (let ((status (plist-get call :status)))
+                 (cond
+                  ((and (eq status 'run) (plist-get call :queued))
+                   (setq has-queued t)
+                   (push (cons id call) pending-entries))
+                  ((memq status '(ask stopped))
+                   (push (cons id call) pending-entries)))))
              (lispm-agent-pending agent))
-    (when queued
-      (setq queued (sort queued (lambda (a b)
-                                  (< (or (plist-get (cdr a) :seq) 0)
-                                     (or (plist-get (cdr b) :seq) 0)))))
+    (when has-queued
+      (setq pending-entries
+            (sort pending-entries
+                  (lambda (a b)
+                    (< (or (plist-get (cdr a) :seq) 0)
+                       (or (plist-get (cdr b) :seq) 0)))))
       (let ((blockers (lispm--active-calls agent)))
         (lispm-turns-dispatching agent
-          (dolist (entry queued)
+          (dolist (entry pending-entries)
             (let ((id (car entry))
                   (call (cdr entry)))
               (lispm--ensure-call-concurrency agent call)
-              (if (lispm--call-conflicts-p call blockers)
-                  ;; Keep FIFO ordering among conflicting resource/editor calls.
-                  (push call blockers)
+              (cond
+               ((memq (plist-get call :status) '(ask stopped))
+                ;; Earlier unapproved/stopped calls act as conflict barriers.
+                (push call blockers))
+               ((lispm--call-conflicts-p call blockers)
+                ;; Keep FIFO ordering among conflicting resource/editor calls.
+                (push call blockers))
+               (t
                 (plist-put call :queued nil)
                 (push call blockers)
                 (lispm-turns-run-tool agent id)
-                (setq started t)))))))
+                (setq started t))))))))
     started))
 
 (defun lispm--run-next-queued-tool (agent)

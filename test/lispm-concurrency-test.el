@@ -395,7 +395,168 @@
                     "accepted by worker-2 (20261126-120001-12345678)\n"))
           (let ((third (lispm-agents-roster--retired-children idx)))
             (should (= (length third) 2))
-            (should (member "worker-2" (mapcar (lambda (r) (plist-get r :name)) third)))))))))
+            (should (member "worker-2" (mapcar (lambda (r) (plist-get r :name)) third))))
+          ;; Equal-length in-place edit invalidates cache via modification tick.
+          (with-current-buffer tbuf
+            (goto-char (point-min))
+            (should (search-forward "worker-1 (20261126-120000-abcdef12)"))
+            (replace-match "worker-9 (20261126-120000-fedcba98)" t t))
+          (let ((fourth (lispm-agents-roster--retired-children idx)))
+            (should (= (length fourth) 2))
+            (should (member "worker-9" (mapcar (lambda (r) (plist-get r :name)) fourth)))
+            (should-not (member "worker-1" (mapcar (lambda (r) (plist-get r :name)) fourth)))))))))
+
+(ert-deftest lispm-concurrency-test-run-shell-concurrency-and-edit-conflict ()
+  "Read-only `run_shell' is parallel, mutating serializes per root; edit_file conflicts edit_buffer."
+  (lispm-test-env
+    (let* ((dir-a (expand-file-name "root-a/" project))
+           (dir-b (expand-file-name "root-b/" project))
+           (_ (progn (make-directory dir-a t) (make-directory dir-b t)))
+           (agent-a (lispm-defagent shell-a :root dir-a))
+           (agent-b (lispm-defagent shell-b :root dir-b))
+           (sh-tool (lispm-get-tool "run_shell"))
+           (ro-spec (let ((lispm-current-agent agent-a))
+                      (lispm-tool-concurrency-spec sh-tool '((command . "git status")))))
+           (mut-a1 (let ((lispm-current-agent agent-a))
+                     (lispm-tool-concurrency-spec sh-tool '((command . "touch a.txt")))))
+           (mut-a2 (let ((lispm-current-agent agent-a))
+                     (lispm-tool-concurrency-spec sh-tool '((command . "git add -A")))))
+           (mut-b (let ((lispm-current-agent agent-b))
+                    (lispm-tool-concurrency-spec sh-tool '((command . "touch b.txt"))))))
+      (should (equal ro-spec '(parallel)))
+      (should-not (lispm-tool-concurrency-conflict-p ro-spec mut-a1))
+      (should (eq (car mut-a1) 'resource))
+      (should (lispm-tool-concurrency-conflict-p mut-a1 mut-a2))
+      (should-not (lispm-tool-concurrency-conflict-p mut-a1 mut-b))
+      ;; `edit_file' (relative or org link) and `edit_buffer' on visiting buffer must conflict.
+      (let* ((file (expand-file-name "shared.el" dir-a))
+             (_ (lispm-test--write file "(+ 1 2)\n"))
+             (buf (find-file-noselect file))
+             (ef-tool (lispm-get-tool "edit_file"))
+             (eb-tool (lispm-get-tool "edit_buffer")))
+        (unwind-protect
+            (let* ((lispm-current-agent agent-a)
+                   (s-rel (lispm-tool-concurrency-spec ef-tool '((path . "shared.el"))))
+                   (s-link (lispm-tool-concurrency-spec ef-tool '((path . "[[file:shared.el]]"))))
+                   (s-buf (lispm-tool-concurrency-spec
+                           eb-tool `((buffer . ,(buffer-name buf)))))
+                   (s-link-buf (lispm-tool-concurrency-spec
+                                eb-tool `((buffer . ,(format "[[buffer:%s]]" (buffer-name buf)))))))
+              (should (lispm-tool-concurrency-conflict-p s-rel s-buf))
+              (should (lispm-tool-concurrency-conflict-p s-link s-link-buf)))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest lispm-concurrency-test-ask-call-blocks-later-conflicting-run ()
+  "An earlier `ask' call blocks later conflicting `run' calls without stalling disjoint ones."
+  (lispm-test-env
+    (let ((lispm-tools--registry (copy-hash-table lispm-tools--registry))
+          started callbacks)
+      (lispm-deftool test_ask_res ((path string "Target path."))
+        "Tool requiring approval on a path."
+        :permission exec
+        :async t
+        :concurrency (lambda (path) (list 'resource path))
+        (push (cons 'ask path) started)
+        (funcall done "asked-ok" nil)
+        nil)
+      (lispm-deftool test_auto_res ((path string "Target path."))
+        "Auto-approved resource tool."
+        :permission write
+        :async t
+        :concurrency (lambda (path) (list 'resource path))
+        (push (cons 'auto path) started)
+        (push (cons path done) callbacks)
+        nil)
+      (let ((agent (lispm-defagent gated :root project :policy '((exec . ask) (write . auto)))))
+        (setq lispm-test--scripts
+              `((gated ,(lispm-test--msg "tool_use"
+                                         (lispm-test--tool "t1" "test_ask_res"
+                                                           '((path . "alpha.el")))
+                                         (lispm-test--tool "t2" "test_auto_res"
+                                                           '((path . "alpha.el")))
+                                         (lispm-test--tool "t3" "test_auto_res"
+                                                           '((path . "beta.el"))))
+                       ,(lispm-test--msg "end_turn" (lispm-test--text "Done gated.")))))
+        (lispm-tell agent "go")
+        ;; t3 on beta.el starts immediately; t2 on alpha.el stays queued behind t1 (ask).
+        (should (lispm-test--wait (lambda () (assoc "beta.el" callbacks))))
+        (should-not (assoc "alpha.el" callbacks))
+        (should (plist-get (gethash "t2" (lispm-agent-pending agent)) :queued))
+        (funcall (cdr (assoc "beta.el" callbacks)) "beta-done" nil)
+        (should (lispm-test--wait (lambda () (not (gethash "t3" (lispm-agent-pending agent))))))
+        (should-not (assoc "alpha.el" callbacks))
+        ;; Denying t1 unblocks t2 immediately.
+        (lispm-resolve agent "t1" 'deny "skip")
+        (should (lispm-test--wait (lambda () (assoc "alpha.el" callbacks))))
+        (funcall (cdr (assoc "alpha.el" callbacks)) "alpha-done" nil)
+        (should (lispm-test--wait (lispm-test--idle-p agent)))
+        (let ((tr (lispm-test--transcript agent)))
+          (should (string-match-p "DONE test_auto_res" tr))
+          (should (string-match-p "Done gated\\." tr)))))))
+
+(ert-deftest lispm-concurrency-test-shell-log-reuse-and-session-owner-cleanup ()
+  "Shell log reuses primary buffer sequentially, cleans ephemeral logs and releases kernel owner."
+  (lispm-test-env
+    (let* ((agent (lispm-defagent sh-clean :root project))
+           (primary-name (lispm-tools-shell-log-buffer-name agent nil))
+           (released-owners nil))
+      (unwind-protect
+          (let ((b1 (lispm-tools-shell-log-buffer agent "c1")))
+            (should (equal (buffer-name b1) primary-name))
+            ;; Sequential call after release reuses the same primary buffer.
+            (lispm-tools-release-shell-log agent "c1")
+            (let ((b2 (lispm-tools-shell-log-buffer agent "c2")))
+              (should (eq b2 b1))
+              ;; Concurrent call gets isolated buffer that is killed when released.
+              (let ((b3 (lispm-tools-shell-log-buffer agent "c3")))
+                (should-not (eq b3 b2))
+                (should (buffer-live-p b3))
+                (lispm-tools-release-shell-log agent "c3")
+                (should-not (buffer-live-p b3)))
+              (lispm-tools-release-shell-log agent "c2")
+              (should (buffer-live-p b1))))
+        (when-let* ((b (get-buffer primary-name)))
+          (kill-buffer b)))
+      ;; Session-end hook notifies kernel owner release if kernel module is bound.
+      (cl-letf (((symbol-function 'lispm-kernel-exec-release-owner)
+                 (lambda (owner) (push owner released-owners))))
+        (run-hook-with-args 'lispm-session-end-functions agent)
+        (should (equal released-owners (list (lispm-agent-id agent))))))))
+
+(ert-deftest lispm-concurrency-test-rag-warm-error-and-disk-merge ()
+  "RAG async warm clears inflight key on sync error and merges concurrent disk updates."
+  (lispm-test-env
+    (let* ((char (lispm-create-character "Nova" :description "Helper."
+                                         :rag t :embedding-model "embed-1"))
+           (_ (lispm-character-rag-add char "Alpha" "First chunk content."))
+           (_ (lispm-character-rag-add char "Beta" "Second chunk content."))
+           (lispm-characters--rag-query-cache (make-hash-table :test #'equal))
+           (lispm-characters--rag-warming (make-hash-table :test #'equal))
+           (chunks (lispm-character-rag-chunks char))
+           (index-file (lispm-characters--rag-index-file char)))
+      ;; 1. Synchronous throw while initiating fetch must clear warming key.
+      (cl-letf (((symbol-function 'lispm-characters--fetch-embeddings-async)
+                 (lambda (&rest _) (error "Sync boom"))))
+        (should-error
+         (lispm-characters--warm-embeddings-async char "alpha" chunks))
+        (should (= (hash-table-count lispm-characters--rag-warming) 0)))
+      ;; 2. Concurrent disk cache write before completion is merged, not overwritten.
+      (let ((pending-cb nil)
+            (other-key (concat "embed-1:" "custom-other")))
+        (cl-letf (((symbol-function 'lispm-characters--fetch-embeddings-async)
+                   (lambda (_backend _model texts cb)
+                     (setq pending-cb (cons (length texts) cb)))))
+          (lispm-characters--warm-embeddings-async char "alpha" chunks)
+          (should pending-cb)
+          ;; Simulate another async worker writing `other-key' to disk while inflight.
+          (let ((disk (lispm-characters--rag-read-cache index-file)))
+            (puthash other-key [9.0 9.0] disk)
+            (lispm-characters--rag-write-cache index-file disk))
+          (funcall (cdr pending-cb)
+                   (make-list (car pending-cb) [1.0 0.0]))
+          (let ((final (lispm-characters--rag-read-cache index-file)))
+            (should (equal (gethash other-key final) [9.0 9.0]))
+            (should (= (hash-table-count final) 3))))))))
 
 (provide 'lispm-concurrency-test)
 ;;; lispm-concurrency-test.el ends here

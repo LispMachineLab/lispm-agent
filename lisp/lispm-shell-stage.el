@@ -317,13 +317,37 @@ ERRORP marks an execution or timeout failure."
   stripped-header-p
   started-at
   staged-p
-  probe-timer)
+  probe-timer
+  isolated)
 
 (defvar lispm-shell-stage--sessions (make-hash-table :test #'equal)
   "Call key -> active `lispm-shell-stage--session'.")
 
+(defvar lispm-shell-stage--isolated-buffers (make-hash-table :test #'eq)
+  "Agent -> ephemeral isolated shell stage buffers created during concurrency.")
+
 (defvar lispm-shell-stage--ticker nil
   "Timer refreshing elapsed durations in running shell stage headers.")
+
+(defun lispm-shell-stage--prune-isolated (agent &optional force)
+  "Kill retired isolated shell stage buffers owned by AGENT.
+Unless FORCE is non-nil, keep buffers still shown in a visible window."
+  (let (keep)
+    (dolist (buf (gethash agent lispm-shell-stage--isolated-buffers))
+      (when (buffer-live-p buf)
+        (let (active)
+          (maphash (lambda (_k session)
+                     (when (eq (lispm-shell-stage--session-stage-buffer session) buf)
+                       (setq active t)))
+                   lispm-shell-stage--sessions)
+          (cond
+           (active (push buf keep))
+           ((and (not force) (get-buffer-window buf 'visible))
+            (push buf keep))
+           (t (kill-buffer buf))))))
+    (if keep
+        (puthash agent (nreverse keep) lispm-shell-stage--isolated-buffers)
+      (remhash agent lispm-shell-stage--isolated-buffers))))
 
 (defun lispm-shell-stage--resolve-key (agent &optional call-id)
   "Return the session table key for AGENT and optional CALL-ID."
@@ -563,7 +587,7 @@ ERRORP marks an execution or timeout failure."
    #'lispm-shell-stage--tick))
 
 (defun lispm-shell-stage--retire-session (key)
-  "Detach timers and hooks for KEY's active shell stage session."
+  "Detach timers, hooks and log ownership for KEY's active shell stage session."
   (when-let* ((session (gethash key lispm-shell-stage--sessions)))
     (remhash key lispm-shell-stage--sessions)
     (when-let* ((timer (lispm-shell-stage--session-probe-timer session)))
@@ -572,6 +596,12 @@ ERRORP marks an execution or timeout failure."
       (when (buffer-live-p log)
         (with-current-buffer log
           (remove-hook 'after-change-functions #'lispm-shell-stage--on-log-change t))))
+    (when (equal (lispm-shell-stage-spec-tool-name
+                  (lispm-shell-stage--session-spec session))
+                 "run_shell")
+      (lispm-tools-release-shell-log
+       (lispm-shell-stage--session-agent session)
+       (lispm-shell-stage--session-call-id session)))
     (lispm-shell-stage--tick)
     session))
 
@@ -590,13 +620,13 @@ ERRORP marks an execution or timeout failure."
   (let* ((call-id (bound-and-true-p lispm-current-call))
          (key (lispm-shell-stage--resolve-key agent call-id))
          (_ (lispm-shell-stage--retire-session key))
+         (_ (lispm-shell-stage--prune-isolated agent))
          (isolated (and call-id (lispm-shell-stage--agent-has-session-p agent key)))
          (now (float-time))
          (root (if agent (lispm-principal-root agent) default-directory))
          (buf (lispm-shell-stage--buffer agent (and isolated call-id)))
          (log (and (equal (lispm-shell-stage-spec-tool-name spec) "run_shell")
-                   (get-buffer-create
-                    (lispm-tools-shell-log-buffer-name agent call-id))))
+                   (lispm-tools-shell-log-buffer agent call-id)))
          (session (lispm-shell-stage--session-create
                    :key key
                    :agent agent
@@ -606,7 +636,10 @@ ERRORP marks an execution or timeout failure."
                    :stage-buffer buf
                    :log-buffer log
                    :log-offset (if log (with-current-buffer log (point-max)) 0)
-                   :started-at now)))
+                   :started-at now
+                   :isolated (and isolated t))))
+    (when isolated
+      (push buf (gethash agent lispm-shell-stage--isolated-buffers)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -716,8 +749,9 @@ ERRORP marks an execution or timeout failure."
         ('finish (lispm-shell-stage--finish agent spec result errorp))))))
 
 (defun lispm-shell-stage--on-session-end (agent)
-  "Clean up any running shell stage state for AGENT."
-  (lispm-shell-stage--retire-agent agent))
+  "Clean up any running shell stage state and isolated buffers for AGENT."
+  (lispm-shell-stage--retire-agent agent)
+  (lispm-shell-stage--prune-isolated agent t))
 
 (add-hook 'lispm-tool-call-functions #'lispm-shell-stage--on-tool-call)
 (add-hook 'lispm-process-output-functions #'lispm-shell-stage--on-program-output)

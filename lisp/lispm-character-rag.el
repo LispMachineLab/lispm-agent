@@ -462,7 +462,8 @@ When CALLBACK is non-nil, call it with the resulting cosine scores alist."
         (if (and (null missing) q-vec)
             (when callback
               (funcall callback (lispm-characters--rag-scores-from-cache model chunks cache q-vec)))
-          (let ((warm-key (cons (lispm-character-name character) query)))
+          (let ((warm-key (list (lispm-character-name character)
+                                model (plist-get backend :url) query)))
             (if-let* ((existing (gethash warm-key lispm-characters--rag-warming)))
                 (when callback
                   (puthash warm-key (cons callback existing) lispm-characters--rag-warming))
@@ -470,32 +471,41 @@ When CALLBACK is non-nil, call it with the resulting cosine scores alist."
               (let ((texts (append (mapcar (lambda (c)
                                              (concat (plist-get c :title) "\n" (plist-get c :text)))
                                            missing)
-                                   (unless q-vec (list query)))))
-                (lispm-characters--fetch-embeddings-async
-                 backend model texts
-                 (lambda (vecs)
-                   (let ((callbacks (nreverse (gethash warm-key lispm-characters--rag-warming)))
-                         (resolved-q-vec q-vec))
-                     (remhash warm-key lispm-characters--rag-warming)
-                     (when vecs
-                       (let ((dirty nil))
-                         (cl-loop for c in missing
-                                  for v in vecs
-                                  when v
-                                  do (puthash (concat model ":" (plist-get c :id)) v cache)
-                                     (setq dirty t))
-                         (when dirty
-                           (lispm-characters--rag-write-cache index-file cache))
-                         (unless resolved-q-vec
-                           (setq resolved-q-vec (nth (length missing) vecs))
-                           (lispm-characters--rag-cache-query-vec
-                            backend model query resolved-q-vec))))
-                     (let ((scores (and resolved-q-vec
-                                        (lispm-characters--rag-scores-from-cache
-                                         model chunks cache resolved-q-vec))))
-                       (dolist (cb callbacks)
-                         (unless (eq cb #'ignore)
-                           (funcall cb scores)))))))))))))))
+                                   (unless q-vec (list query))))
+                    (handed-off nil))
+                (unwind-protect
+                    (progn
+                      (lispm-characters--fetch-embeddings-async
+                       backend model texts
+                       (lambda (vecs)
+                         (let ((callbacks (nreverse (gethash warm-key lispm-characters--rag-warming)))
+                               (resolved-q-vec q-vec)
+                               (active-cache cache))
+                           (remhash warm-key lispm-characters--rag-warming)
+                           (when vecs
+                             (let ((dirty nil)
+                                   (merged (lispm-characters--rag-read-cache index-file)))
+                               (cl-loop for c in missing
+                                        for v in vecs
+                                        when v
+                                        do (puthash (concat model ":" (plist-get c :id)) v merged)
+                                           (setq dirty t))
+                               (when dirty
+                                 (lispm-characters--rag-write-cache index-file merged)
+                                 (setq active-cache merged))
+                               (unless resolved-q-vec
+                                 (setq resolved-q-vec (nth (length missing) vecs))
+                                 (lispm-characters--rag-cache-query-vec
+                                  backend model query resolved-q-vec))))
+                           (let ((scores (and resolved-q-vec
+                                              (lispm-characters--rag-scores-from-cache
+                                               model chunks active-cache resolved-q-vec))))
+                             (dolist (cb callbacks)
+                               (unless (eq cb #'ignore)
+                                 (funcall cb scores)))))))
+                      (setq handed-off t))
+                  (unless handed-off
+                    (remhash warm-key lispm-characters--rag-warming)))))))))))
 
 (defun lispm-characters--rag-embedding-scores-cached (character query chunks)
   "Return cached embedding scores for CHARACTER, QUERY and CHUNKS, warming async."

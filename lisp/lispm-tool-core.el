@@ -254,13 +254,27 @@ the model sees too.  Signal an error to report a failure to the model."
 
 (defun lispm-tool--normalize-resource (resource)
   "Normalize RESOURCE key into canonical comparable form."
-  (if (stringp resource)
-      (expand-file-name resource)
-    resource))
+  (cond
+   ((stringp resource)
+    (let ((ref (condition-case nil
+                   (if (bound-and-true-p lispm-current-agent)
+                       (lispm-tools-file resource)
+                     (expand-file-name (car (lispm-tools-reference resource))))
+                 (error (expand-file-name resource)))))
+      (if (and (not (file-remote-p ref)) (file-exists-p ref))
+          (file-truename ref)
+        ref)))
+   ((and (consp resource) (eq (car resource) 'buffer) (stringp (cdr resource)))
+    (cons 'buffer
+          (condition-case nil
+              (lispm-tools-buffer-name (cdr resource))
+            (error (cdr resource)))))
+   (t resource)))
 
 (defun lispm-tool-call-resources (tool input)
   "Return deduplicated canonical resource keys targeted by TOOL on INPUT."
   (let ((targets (lispm-tool-targets tool))
+        (buf-arg (alist-get 'buffer input))
         raw)
     (cond
      (targets
@@ -272,9 +286,16 @@ the model sees too.  Signal an error to report a failure to the model."
       (when-let* ((path (or (alist-get 'path input) (alist-get 'file input)))
                   ((stringp path)))
         (push path raw))
-      (when-let* ((buf (alist-get 'buffer input))
-                  ((stringp buf)))
-        (push (cons 'buffer buf) raw))))
+      (when (stringp buf-arg)
+        (push (cons 'buffer buf-arg) raw))))
+    (when (stringp buf-arg)
+      (let* ((resolved (condition-case nil
+                           (lispm-tools-buffer-name buf-arg)
+                         (error buf-arg)))
+             (buf (get-buffer resolved)))
+        (when-let* (((buffer-live-p buf))
+                    (file (buffer-file-name buf)))
+          (push file raw))))
     (delete-dups (mapcar #'lispm-tool--normalize-resource (delq nil raw)))))
 
 (defun lispm-tool--canonical-concurrency (raw)
