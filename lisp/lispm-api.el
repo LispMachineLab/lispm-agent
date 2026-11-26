@@ -38,6 +38,12 @@
 (require 'lispm-core)
 (require 'lispm-anthropic)
 (require 'lispm-openai)
+(require 'lispm-control-protocol)
+
+(defcustom lispm-api-kernel-sse-decode t
+  "When non-nil, offload SSE decoding and delta coalescing to `lispm-kernel'."
+  :type 'boolean
+  :group 'lispm)
 
 (defcustom lispm-curl-program "curl"
   "The curl executable."
@@ -130,6 +136,7 @@ alists in Messages shape.  Returns a `lispm-api-envelope'."
 ;;;; Transport
 
 (declare-function lispm-kernel-http-stream "lispm-kernel-exec")
+(declare-function lispm-kernel-llm-stream "lispm-kernel-exec")
 
 (defun lispm-api-curl-config (headers)
   "curl configuration sending HEADERS.
@@ -213,6 +220,7 @@ function."
   (let* ((env (if (lispm-api-envelope-p request)
                   request
                 (lispm-api-make-envelope request)))
+         (dialect (or (plist-get backend :api) 'anthropic))
          (shape (lispm-api--shape backend))
          (state (funcall (plist-get shape :stream)))
          (headers (funcall (plist-get shape :headers)
@@ -222,7 +230,21 @@ function."
          (url (concat (string-remove-suffix "/" (plist-get backend :url))
                       (plist-get shape :path)))
          (client-error nil))
-    (or (and (fboundp 'lispm-kernel-http-stream)
+    (or (and lispm-api-kernel-sse-decode
+             (fboundp 'lispm-kernel-llm-stream)
+             (lispm-kernel-llm-stream
+              dialect url headers payload
+              on-delta
+              (lambda (res)
+                (let ((decoded (lispm-control-protocol-decode-llm-result res)))
+                  (if (plist-get decoded :ok)
+                      (funcall on-done (plist-get decoded :message))
+                    (funcall on-error (plist-get decoded :error)))))
+              :curl lispm-curl-program
+              :fallback (lambda ()
+                          (lispm-api--stream-locally
+                           shape state headers payload url on-delta on-done on-error))))
+        (and (fboundp 'lispm-kernel-http-stream)
              (lispm-kernel-http-stream
               url headers payload
               (lambda (chunk)

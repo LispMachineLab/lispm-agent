@@ -28,6 +28,7 @@
 (require 'lispm-core)
 (require 'lispm-transcript)
 (require 'lispm-runtime)
+(require 'lispm-control-plane)
 (require 'lispm-inspect)
 (require 'lispm-sandbox)
 (require 'lispm-chat-items)
@@ -643,6 +644,7 @@ the hints, or the menu of / commands."
   "Note when AGENT starts or stops working, and redraw its chat."
   (let ((chat (lispm-agent-view agent)))
     (when (buffer-live-p chat)
+      (lispm-control-plane-set-viewport agent (lispm-chat--visible-p chat))
       (with-current-buffer chat
         (if (not (lispm-agent-working-p agent))
             (setq lispm-chat-busy-since nil)
@@ -668,12 +670,17 @@ the hints, or the menu of / commands."
            (puthash buf t seen)
            (with-current-buffer buf
              (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
+               (lispm-control-plane-set-viewport lispm-chat-agent t)
                (when lispm-chat--needs-redraw
                  (lispm-chat-redraw buf))
                (when (lispm-agent-working-p lispm-chat-agent)
                  (setq any-busy t)))))))
      'no-minibuf
      (and (framep frame-or-window) frame-or-window))
+    (dolist (agent (lispm-agents))
+      (let ((chat (lispm-agent-view agent)))
+        (when (and (buffer-live-p chat) (not (gethash chat seen)))
+          (lispm-control-plane-set-viewport agent (lispm-chat--visible-p chat)))))
     (when any-busy
       (lispm-chat--animate))))
 

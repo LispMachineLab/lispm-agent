@@ -107,6 +107,7 @@
 (require 'lispm-inbox)
 (require 'lispm-journal)
 (require 'lispm-runtime)
+(require 'lispm-control-plane)
 (require 'lispm-lisp)
 (require 'lispm-lisp-macros)
 (require 'lispm-collab)

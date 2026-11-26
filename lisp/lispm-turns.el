@@ -562,6 +562,14 @@ Each is a plist: (:kind text :text TEXT), (:kind thinking :text TEXT) or
                 (setq pos next)))
             (nreverse segments)))))))
 
+(defun lispm-turns-live-begin (agent)
+  "Open the streamed live region in AGENT's session buffer."
+  (lispm--live-begin agent))
+
+(defun lispm-turns-live-insert (agent kind text)
+  "Insert streamed TEXT of KIND (`text', `thinking', or `tool') for AGENT."
+  (lispm--live-insert agent kind text))
+
 (defun lispm-turns-live-delete (agent)
   "Remove AGENT's streamed region; the final message replaces it."
   (lispm-in-session agent

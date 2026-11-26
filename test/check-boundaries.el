@@ -28,7 +28,7 @@
           "lispm-agents-context"))
     (1 . ("lispm-util" "lispm-secrets" "lispm-core" "lispm-workspace" "lispm-job" "lispm-sandbox"
           "lispm-services" "lispm-roles" "lispm-media" "lispm-transcript"
-          "lispm-anthropic" "lispm-openai" "lispm-api"
+          "lispm-anthropic" "lispm-openai" "lispm-control-protocol" "lispm-api"
           "lispm-deftool-macros" "lispm-agents-core" "lispm-agents-sessions"
           "lispm-agents-terminals" "lispm-agents" "lispm-agents-mcp"
           "lispm-agents-ide" "lispm-agents-claude" "lispm-agents-codex"))
@@ -36,7 +36,7 @@
           "lispm-tool-builtins" "lispm-shell-classify" "lispm-tools"
           "lispm-elisp-worker" "lispm-elisp" "lispm-memory-store" "lispm-memory"
           "lispm-inbox" "lispm-journal" "lispm-session" "lispm-turns"
-          "lispm-conditions" "lispm-approval" "lispm-runtime"
+          "lispm-conditions" "lispm-approval" "lispm-runtime" "lispm-control-plane"
           "lispm-lisp-check" "lispm-lisp" "lispm-lisp-macros"
           "lispm-collab" "lispm-mcp"))
     (3 . ("lispm-title" "lispm-episodes" "lispm-emacs" "lispm-develop-core"
