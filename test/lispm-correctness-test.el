@@ -224,7 +224,7 @@
       (should (equal (lispm-chat--shift-undo '((10 . 11) nil ("x" . -10) 1 nil) 5 10)
                      '((15 . 16) nil ("x" . -15) nil)))))
   ;; `lispm-shell-stage--on-log-change' and `lispm-chat--update-footer' preserve `match-data'.
-  (let ((lispm-shell-stage--sessions (make-hash-table :test #'eq)))
+  (let ((lispm-shell-stage--sessions (make-hash-table :test #'equal)))
     (string-match "\\(hello\\)" "hello")
     (with-temp-buffer
       (lispm-shell-stage--on-log-change 1 1 0)

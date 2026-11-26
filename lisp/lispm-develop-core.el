@@ -598,6 +598,7 @@ the value it now gives.  After edit_definition, or an edit_file of a
 definition, this makes Emacs run the new code; then run its tests with
 ert_run.  Returns the value: the name defined, or a variable's value."
   :permission exec
+  :concurrency 'editor
   :deferred t
   :spotlight (lambda (result name &optional _kind path)
                (list :kind 'eval-definition

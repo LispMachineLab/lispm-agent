@@ -487,14 +487,26 @@ it names one."
                               (cl-count-if (lambda (l) (not (string-prefix-p "[" l))) lines)))))
          (_ (lispm-chat--preview lines lispm-chat-preview-lines expanded)))))))
 
+(defvar lispm-chat-media-ready-functions nil
+  "Abnormal hook called with FILE when async media preview generation finishes.")
+
 (defun lispm-chat--image (file)
   "FILE, an image or a video, shown: the image, or a frame from the
 middle of the video with its name under it; named where images cannot
 be shown.  RET on an image visits it, on a video plays it."
   (let* ((video (eq (lispm-media-kind file) 'video))
          (name (file-name-nondirectory file))
-         (shown (and (display-images-p) (file-readable-p file)
-                     (if video (lispm-video-poster file) file))))
+         (shown (when (and (display-images-p) (file-readable-p file))
+                  (if (not video)
+                      file
+                    (or (lispm-video-poster-cached file)
+                        (progn
+                          (lispm-video-poster-async
+                           file
+                           (lambda (poster)
+                             (when poster
+                               (run-hook-with-args 'lispm-chat-media-ready-functions file))))
+                          nil))))))
     (lispm-present
      (cond ((and shown video)
             (concat (lispm-chat--picture-of shown) "\n" (lispm-tr "▶ %s" name)))

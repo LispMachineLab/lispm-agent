@@ -33,6 +33,7 @@
 
 (defvar lispm-session-mode)
 (defvar lispm-session-agent)
+(defvar lispm-current-call)
 
 (defcustom lispm-rationale-permissions '(write shell exec)
   "Permission classes whose tools take a required `why' argument.
@@ -86,12 +87,15 @@ a tool defined with `lispm-deftool' was loaded from, if any.  A tool
 with FOR, a function of an agent, is only that of agents it holds for.
 CLASS, a function of a call's arguments, says which class the call
 belongs to when it does less than the tool can (see
-`lispm-tool-call-permission').  KEYWORDS are explicit search terms,
-a list of strings; they do not change the tool's name or schema."
+`lispm-tool-call-permission').  CONCURRENCY is `parallel',
+`resource', `editor', or a function of the call's arguments returning one
+of those (or `(resource . KEYS)') to guide intra-turn scheduling.
+KEYWORDS are explicit search terms, a list of strings; they do not
+change the tool's name or schema."
   name description params input-schema permission function async preview deferred
   changes targets always-ask file
   ;; Last: packages compiled before it read the others where they were.
-  diff for class keywords spotlight param-schema)
+  diff for class keywords spotlight param-schema concurrency)
 
 (defalias 'lispm-tool--create #'lispm-make-tool)
 
@@ -174,6 +178,8 @@ BODY may start with keyword options:
                      command that only reads does, or nil for the tool's
                      own; it changes nothing (see
                      `lispm-tool-call-permission')
+  :concurrency SPEC  `parallel', `resource', `editor', or a function of the
+                     call's arguments returning one (or `(resource . KEYS)')
   :keywords LIST     explicit search terms, a list of strings; these
                      aid discovery without adding callable aliases
   :spotlight FN      for a tool that reads or looks up places: called
@@ -186,7 +192,7 @@ the model sees too.  Signal an error to report a failure to the model."
   (declare (indent 3) (doc-string 3)
            (debug (&define name sexp stringp [&rest keywordp form] def-body)))
   (let ((permission 'read) async preview diff changes edit targets deferred always-ask for class
-        keywords spotlight
+        concurrency keywords spotlight
         (compiled (lispm-tools-compile-params name params))
         (args (mapcar #'car params)))
     (while (keywordp (car body))
@@ -205,6 +211,7 @@ the model sees too.  Signal an error to report a failure to the model."
           (:always-ask (setq always-ask (pop body)))
           (:for (setq for (pop body)))
           (:class (setq class (pop body)))
+          (:concurrency (setq concurrency (pop body)))
           (:keywords (setq keywords (pop body)))
           (:spotlight (setq spotlight (pop body)))
           (_ (error "Unknown `lispm-deftool' option %S in %s" opt name)))))
@@ -236,6 +243,7 @@ the model sees too.  Signal an error to report a failure to the model."
        :always-ask ,always-ask
        :for ,for
        :class ,class
+       :concurrency ,concurrency
        :keywords ,keywords
        :spotlight ,spotlight
        :file (or load-file-name
@@ -243,6 +251,80 @@ the model sees too.  Signal an error to report a failure to the model."
        :function ,(if async
                       `(lambda (done ,@args) (ignore done ,@args) ,@body)
                     `(lambda ,args (ignore ,@args) ,@body))))))
+
+(defun lispm-tool--normalize-resource (resource)
+  "Normalize RESOURCE key into canonical comparable form."
+  (if (stringp resource)
+      (expand-file-name resource)
+    resource))
+
+(defun lispm-tool-call-resources (tool input)
+  "Return deduplicated canonical resource keys targeted by TOOL on INPUT."
+  (let ((targets (lispm-tool-targets tool))
+        raw)
+    (cond
+     (targets
+      (let ((got (condition-case nil
+                     (apply targets (lispm-tools-arguments tool input))
+                   (error nil))))
+        (setq raw (if (listp got) got (list got)))))
+     (t
+      (when-let* ((path (or (alist-get 'path input) (alist-get 'file input)))
+                  ((stringp path)))
+        (push path raw))
+      (when-let* ((buf (alist-get 'buffer input))
+                  ((stringp buf)))
+        (push (cons 'buffer buf) raw))))
+    (delete-dups (mapcar #'lispm-tool--normalize-resource (delq nil raw)))))
+
+(defun lispm-tool--canonical-concurrency (raw)
+  "Normalize RAW concurrency specification to `(CLASS . KEYS)'."
+  (pcase raw
+    ('parallel '(parallel))
+    ('editor '(editor))
+    ('resource '(resource))
+    (`(resource . ,keys)
+     (cons 'resource (delete-dups (mapcar #'lispm-tool--normalize-resource keys))))
+    (_ '(editor))))
+
+(defun lispm-tool-concurrency-spec (tool input)
+  "Return conflict spec `(CLASS . KEYS)' for calling TOOL with INPUT.
+CLASS is `parallel', `resource', or `editor'."
+  (if (not tool)
+      '(parallel)
+    (let ((explicit (lispm-tool-concurrency tool)))
+      (cond
+       (explicit
+        (lispm-tool--canonical-concurrency
+         (if (functionp explicit)
+             (condition-case nil
+                 (apply explicit (lispm-tools-arguments tool input))
+               (error 'editor))
+           explicit)))
+       ((memq (lispm-tool-permission tool) '(read web comm shell exec))
+        '(parallel))
+       ((eq (lispm-tool-permission tool) 'memory)
+        '(resource (memory)))
+       ((eq (lispm-tool-permission tool) 'lisp)
+        '(editor))
+       ((eq (lispm-tool-permission tool) 'write)
+        (if-let* ((resources (lispm-tool-call-resources tool input)))
+            (cons 'resource resources)
+          '(editor)))
+       (t '(editor))))))
+
+(defun lispm-tool-concurrency-conflict-p (spec-a spec-b)
+  "Return non-nil when calls with SPEC-A and SPEC-B must not overlap."
+  (let ((ca (car spec-a))
+        (cb (car spec-b)))
+    (cond
+     ((or (eq ca 'editor) (eq cb 'editor)) t)
+     ((and (eq ca 'resource) (eq cb 'resource))
+      (let ((ra (cdr spec-a))
+            (rb (cdr spec-b)))
+        (or (null ra) (null rb)
+            (and (cl-intersection ra rb :test #'equal) t))))
+     (t nil))))
 
 (defun lispm-tool-to-spec (tool &optional function description)
   "Return a canonical `lispm-tool-spec' representing TOOL.
@@ -416,9 +498,10 @@ around it either: that would leave the call without a result."
       (when pending
         (setq quit-flag pending)))))
 
-(defun lispm-tools--deliver (done agent tool text errorp images &optional input)
+(defun lispm-tools--deliver (done agent tool text errorp images &optional input call-id)
   "Give DONE the result of AGENT's call of TOOL: TEXT, ERRORP and IMAGES.
-INPUT, when provided, is the call's decoded JSON input.
+INPUT, when provided, is the call's decoded JSON input.  CALL-ID binds
+`lispm-current-call' while running finish hooks.
 First, if TOOL may have changed files, TRAMP forgets what it knew of
 those of a remote root (see `lispm-tools--flush-remote'), and the
 buffers of those under AGENT's root that changed on disk are reverted,
@@ -441,6 +524,7 @@ must not leave half done, so quitting is inhibited meanwhile."
              (message "LispM: reverting changed buffers: %S" err))))))
     (with-demoted-errors "LispM: tool call hook: %S"
       (let ((lispm-current-agent agent)
+            (lispm-current-call (or call-id (bound-and-true-p lispm-current-call)))
             (default-directory (if agent (lispm-principal-root agent) default-directory)))
         (run-hook-with-args 'lispm-tool-call-functions
                             agent 'finish tool input text errorp)))
@@ -475,6 +559,7 @@ ran to its end as interrupted.  DONE is never called while the tool
 runs."
   (let* ((inhibit-quit t)
          (agent lispm-current-agent)
+         (call-id (bound-and-true-p lispm-current-call))
          (running t)
          (called nil)
          (result nil)
@@ -483,7 +568,7 @@ runs."
                      (when (lispm-tool-result-p value)
                        (setq images (append images (lispm-tool-result-images value))
                              value (lispm-tool-result-text value)))
-                     (let ((args (list (lispm-tools--result-text value) errorp images input)))
+                     (let ((args (list (lispm-tools--result-text value) errorp images input call-id)))
                        (setq called t)
                        (if running
                            (setq result args)

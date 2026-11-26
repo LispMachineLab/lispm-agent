@@ -64,7 +64,7 @@ test: deps
 	  -l test/lispm-process-tools-test.el -l test/lispm-tool-search-test.el \
 	  -l test/lispm-mcp-lifecycle-test.el -l test/lispm-security-test.el \
 	  -l test/lispm-correctness-test.el -l test/lispm-basis-test.el -l test/lispm-unify-test.el \
-	  -l test/lispm-layers-test.el -l test/lispm-office-test.el \
+	  -l test/lispm-layers-test.el -l test/lispm-concurrency-test.el -l test/lispm-office-test.el \
 	  -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
 	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'

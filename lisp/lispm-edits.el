@@ -755,13 +755,16 @@ that still make sense are made again from the text it has now."
     (dolist (agent (delete-dups (mapcar #'lispm-edits--proposal-agent proposals)))
       (lispm-edits--update agent))))
 
-(defun lispm-edits-active-p (&optional buffer)
-  "Return non-nil if BUFFER, or any buffer when nil, shows a proposal or edit."
+(defun lispm-edits-active-p (&optional buffer agent)
+  "Return non-nil if BUFFER, or any buffer when nil, shows a proposal or edit.
+When AGENT is non-nil, limit the check to shows or proposals owned by AGENT."
   (or (seq-some (lambda (show)
-                  (or (null buffer) (eq (lispm-edits--show-buffer show) buffer)))
+                  (and (or (null buffer) (eq (lispm-edits--show-buffer show) buffer))
+                       (or (null agent) (eq (lispm-edits--show-agent show) agent))))
                 lispm-edits--shows)
       (seq-some (lambda (proposal)
-                  (or (null buffer) (eq (lispm-edits--proposal-buffer proposal) buffer)))
+                  (and (or (null buffer) (eq (lispm-edits--proposal-buffer proposal) buffer))
+                       (or (null agent) (eq (lispm-edits--proposal-agent proposal) agent))))
                 lispm-edits--proposals)))
 
 (add-hook 'after-revert-hook #'lispm-edits--reverted)

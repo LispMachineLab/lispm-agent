@@ -76,6 +76,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'lispm-exec)
 (require 'lispm-core)
 
 (defvar server-socket-dir)
@@ -592,6 +593,27 @@ LEVEL defaults to `lispm-sandbox-level'."
       (lispm-sandbox--fail (format "could not make the named pipe %s" fifo)))
     fifo))
 
+(defun lispm-sandbox--fifo-async (callback)
+  "Create a named pipe FIFO without blocking and pass `(FIFO ERR)' to CALLBACK."
+  (lispm-sandbox--sweep)
+  (let ((fifo (make-temp-name (expand-file-name "control-" (lispm-sandbox--directory "run")))))
+    (lispm-exec "mkfifo" (list "-m" "600" fifo)
+                (lambda (exit _out _err)
+                  (if (eql exit 0)
+                      (funcall callback fifo nil)
+                    (funcall callback nil (format "could not make the named pipe %s" fifo)))))))
+
+(defun lispm-sandbox--wrap-command (command srt settings-file fifo)
+  "Wrap COMMAND argv to run via SRT using SETTINGS-FILE and FIFO control fd."
+  (append (list "/bin/sh" "-c"
+                (format "CLAUDE_CODE_TMPDIR=%s; export CLAUDE_CODE_TMPDIR; exec \"$@\" 3<%s"
+                        (shell-quote-argument (lispm-sandbox--tmpdir))
+                        (shell-quote-argument fifo))
+                "lispm-sandbox")
+          srt
+          (list "--settings" settings-file "--control-fd" "3" "--")
+          command))
+
 (defun lispm-sandbox-prepare (command &optional level name extra)
   "Get COMMAND, a program and its arguments, ready to run in the sandbox.
 LEVEL is the level to run at; nil follows `lispm-sandbox-level', now
@@ -616,15 +638,31 @@ with its `lispm-sandbox-run-command', then give it to
               ;; srt reads level changes from descriptor 3, the pipe's
               ;; reading end.  Its temporary directory is ours.
               (lispm-sandbox-run-command run)
-              (append (list "/bin/sh" "-c"
-                            (format "CLAUDE_CODE_TMPDIR=%s; export CLAUDE_CODE_TMPDIR; exec \"$@\" 3<%s"
-                                    (shell-quote-argument (lispm-sandbox--tmpdir))
-                                    (shell-quote-argument fifo))
-                            "lispm-sandbox")
-                      srt
-                      (list "--settings" file "--control-fd" "3" "--")
-                      command))))
+              (lispm-sandbox--wrap-command command srt file fifo))))
     run))
+
+(defun lispm-sandbox-prepare-async (command callback &optional level name extra)
+  "Prepare COMMAND for the sandbox without blocking on `mkfifo'.
+Calls CALLBACK with `(RUN ERR-MSG)', where RUN is a `lispm-sandbox-run'
+struct on success or nil when sandbox setup failed with ERR-MSG."
+  (let* ((started (or level lispm-sandbox-level))
+         (settings (lispm-sandbox-settings started extra))
+         (run (lispm-sandbox--make-run :name name :level level :started started
+                                       :extra extra :settings settings :command command)))
+    (if (not settings)
+        (funcall callback run nil)
+      (when (file-remote-p default-directory)
+        (lispm-sandbox--fail "it confines processes of this machine, and the directory is remote"))
+      (let ((srt (lispm-sandbox--ready))
+            (file (lispm-sandbox--settings-file (json-serialize settings))))
+        (lispm-sandbox--fifo-async
+         (lambda (fifo mkfifo-err)
+           (if (not fifo)
+               (funcall callback nil (format "Sandbox unavailable: %s" mkfifo-err))
+             (setf (lispm-sandbox-run-fifo run) fifo
+                   (lispm-sandbox-run-command run)
+                   (lispm-sandbox--wrap-command command srt file fifo))
+             (funcall callback run nil))))))))
 
 (defun lispm-sandbox-attach (run process)
   "Note that PROCESS was started for RUN, made by `lispm-sandbox-prepare'.

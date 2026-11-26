@@ -15,10 +15,12 @@
 (require 'lispm-job)
 (require 'lispm-tools)
 
+(defvar lispm-current-call)
+
 (cl-defstruct (lispm-process-tools--run
                (:constructor lispm-process-tools--run-create) (:copier nil))
   "An agent's process and the bounded output collected from its pipes."
-  agent process errors timer sandbox done handle output error-output
+  agent call-id process errors timer sandbox done handle output error-output
   (size 0) limit truncated output-truncated error-truncated finished)
 
 (defun lispm-process-tools--active-runs ()
@@ -93,8 +95,9 @@ Once output exceeds the limit, retain a 30% head + 70% tail window per stream."
                   (+ (length next-out) (length next-err)))))))
     (when lispm-process-output-functions
       (with-demoted-errors "LispM: process output hook: %S"
-        (run-hook-with-args 'lispm-process-output-functions
-                            (lispm-process-tools--run-agent run) errorp text)))))
+        (let ((lispm-current-call (lispm-process-tools--run-call-id run)))
+          (run-hook-with-args 'lispm-process-output-functions
+                              (lispm-process-tools--run-agent run) errorp text))))))
 
 (defun lispm-process-tools--release (run)
   "Release RUN's processes, timer and sandbox, suppressing late callbacks."
@@ -225,7 +228,9 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
            (default-directory (if confined root directory))
            (command (cons executable (append args nil)))
            (run (lispm-process-tools--run-create
-                 :agent agent :done done :limit lispm-tool-output-limit)))
+                 :agent agent
+                 :call-id (bound-and-true-p lispm-current-call)
+                 :done done :limit lispm-tool-output-limit)))
       ;; Keep relative sandbox rules rooted at the project.  This fixed
       ;; wrapper changes only the target's cwd; no argument becomes code.
       (when (and confined (not (equal directory (file-name-as-directory root))))
@@ -234,31 +239,58 @@ normal tool limit cannot cut JSON or discard trailing failure summaries."
                             "lispm-program-cwd" directory)
                       command)))
       (lispm-tools-with-async-start (lispm-process-tools--cleanup run)
-        (setf (lispm-process-tools--run-handle run)
-              (lispm-job-register agent 'process
-                                  (lambda () (lispm-process-tools--release run))
-                                  run))
-        (setf (lispm-process-tools--run-sandbox run)
-              (lispm-sandbox-prepare command nil (format "the program %s" program)))
-        (setf (lispm-process-tools--run-errors run)
-              (make-pipe-process
-               :name "lispm-program-stderr" :buffer nil :noquery t :coding 'utf-8
-               :filter (lambda (_process text) (lispm-process-tools--collect run t text))
-               :sentinel #'ignore))
-        (setf (lispm-process-tools--run-process run)
-              (make-process
-               :name "lispm-program" :buffer nil :noquery t :coding 'utf-8
-               :connection-type 'pipe :stderr (lispm-process-tools--run-errors run)
-               :command (lispm-sandbox-run-command (lispm-process-tools--run-sandbox run))
-               :filter (lambda (_process text) (lispm-process-tools--collect run nil text))
-               :sentinel (lambda (process _event) (lispm-process-tools--sentinel run process))))
-        (process-put (lispm-process-tools--run-process run) 'lispm-agent agent)
-        (lispm-sandbox-attach (lispm-process-tools--run-sandbox run)
-                              (lispm-process-tools--run-process run))
-        (unless (lispm-process-tools--run-finished run)
-          (setf (lispm-process-tools--run-timer run)
-                (run-at-time timeout nil #'lispm-process-tools--finish run "timed_out")))
-        (ignore-errors (process-send-eof (lispm-process-tools--run-process run))))))
+        (let ((start-dir default-directory)
+              (in-start t))
+          (setf (lispm-process-tools--run-handle run)
+                (lispm-job-register agent 'process
+                                    (lambda () (lispm-process-tools--release run))
+                                    run))
+          (lispm-sandbox-prepare-async
+           command
+           (lambda (sandbox err-msg)
+             (cond
+              ((lispm-process-tools--run-finished run)
+               (when sandbox (ignore-errors (lispm-sandbox-forget sandbox))))
+              ((not sandbox)
+               (let ((handle (lispm-process-tools--run-handle run)))
+                 (when (if handle (lispm-job-finish handle) t)
+                   (lispm-process-tools--release run)
+                   (funcall done (or err-msg "Sandbox unavailable") t))))
+              (t
+               (condition-case err
+                   (let ((inhibit-quit t)
+                         (default-directory start-dir))
+                     (setf (lispm-process-tools--run-sandbox run) sandbox
+                           (lispm-process-tools--run-errors run)
+                           (make-pipe-process
+                            :name "lispm-program-stderr" :buffer nil :noquery t :coding 'utf-8
+                            :filter (lambda (_process text) (lispm-process-tools--collect run t text))
+                            :sentinel #'ignore)
+                           (lispm-process-tools--run-process run)
+                           (make-process
+                            :name "lispm-program" :buffer nil :noquery t :coding 'utf-8
+                            :connection-type 'pipe
+                            :stderr (lispm-process-tools--run-errors run)
+                            :command (lispm-sandbox-run-command sandbox)
+                            :filter (lambda (_process text) (lispm-process-tools--collect run nil text))
+                            :sentinel (lambda (process _event)
+                                        (lispm-process-tools--sentinel run process))))
+                     (process-put (lispm-process-tools--run-process run) 'lispm-agent agent)
+                     (lispm-sandbox-attach sandbox (lispm-process-tools--run-process run))
+                     (unless (lispm-process-tools--run-finished run)
+                       (setf (lispm-process-tools--run-timer run)
+                             (run-at-time timeout nil #'lispm-process-tools--finish run "timed_out")))
+                     (ignore-errors (process-send-eof (lispm-process-tools--run-process run))))
+                 (error
+                  (ignore-errors (lispm-sandbox-forget sandbox))
+                  (if in-start
+                      (signal (car err) (cdr err))
+                    (let ((handle (lispm-process-tools--run-handle run)))
+                      (when (if handle (lispm-job-finish handle) t)
+                        (lispm-process-tools--release run)
+                        (funcall done (error-message-string err) t)))))))))
+           nil (format "the program %s" program))
+          (setq in-start nil)))))
   nil)
 
 (lispm-deftool run_program

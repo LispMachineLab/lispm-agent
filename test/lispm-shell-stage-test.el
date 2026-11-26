@@ -30,10 +30,10 @@
            (lispm-spotlight--ephemeral-buffers nil)
            (lispm-spotlight--scroll-lock nil)
            (lispm-shell-stage--in-batch t)
-           (lispm-shell-stage--sessions (make-hash-table :test #'eq)))
+           (lispm-shell-stage--sessions (make-hash-table :test #'equal)))
        (unwind-protect
            (progn ,@body)
-         (maphash (lambda (agent _s) (lispm-shell-stage--retire-session agent))
+         (maphash (lambda (key _s) (lispm-shell-stage--retire-session key))
                   (copy-hash-table lispm-shell-stage--sessions))
          (when (timerp lispm-shell-stage--ticker)
            (cancel-timer lispm-shell-stage--ticker)

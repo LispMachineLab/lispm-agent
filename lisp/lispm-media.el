@@ -27,6 +27,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'lispm-exec)
 (require 'lispm-core)
 
 (defcustom lispm-context-images 5
@@ -172,20 +173,62 @@ The others become a line of text; see `lispm-context-images'."
 ;; changed gets new frames and one unchanged keeps them.  The chat shows
 ;; a video by one such frame, its poster.
 
+(defvar lispm-video--info-cache (make-hash-table :test #'equal)
+  "Cached ffprobe metadata plists keyed by `(TRUENAME SIZE MTIME)'.")
+
+(defvar lispm-video--pending (make-hash-table :test #'equal)
+  "In-flight asynchronous video poster requests keyed by `(poster FILE WIDTH)'.")
+
+(defun lispm-video--info-key (file)
+  "Return cache key for FILE based on truename, size and modification time."
+  (when-let* ((attrs (file-attributes file)))
+    (list (file-truename file)
+          (file-attribute-size attrs)
+          (float-time (file-attribute-modification-time attrs)))))
+
+(defun lispm-video--parse-info (output)
+  "Parse ffprobe key-value OUTPUT into a metadata plist."
+  (when (and (stringp output) (not (string-empty-p output)))
+    (let (info)
+      (with-temp-buffer
+        (insert output)
+        (goto-char (point-min))
+        (while (re-search-forward "^\\(width\\|height\\|duration\\)=\\([0-9.]+\\)" nil t)
+          (setq info (plist-put info (intern (concat ":" (match-string 1)))
+                                (string-to-number (match-string 2))))))
+      info)))
+
 (defun lispm-video-info (file)
-  "What ffprobe says of the video FILE: a plist of its :duration in
-seconds, :width and :height, those it tells; nil without ffprobe."
-  (when-let* ((ffprobe (and lispm-ffprobe (executable-find lispm-ffprobe))))
-    (with-temp-buffer
-      (when (zerop (call-process ffprobe nil t nil "-v" "error" "-select_streams" "v:0"
-                                 "-show_entries" "stream=width,height:format=duration"
-                                 "-of" "default=noprint_wrappers=1" (expand-file-name file)))
-        (let (info)
-          (goto-char (point-min))
-          (while (re-search-forward "^\\(width\\|height\\|duration\\)=\\([0-9.]+\\)" nil t)
-            (setq info (plist-put info (intern (concat ":" (match-string 1)))
-                                  (string-to-number (match-string 2)))))
-          info)))))
+  "What ffprobe says of the video FILE: a plist of its `:duration' in
+seconds, `:width' and `:height', those it tells; nil without ffprobe."
+  (let ((key (lispm-video--info-key file)))
+    (or (and key (gethash key lispm-video--info-cache))
+        (when-let* ((ffprobe (and lispm-ffprobe (executable-find lispm-ffprobe))))
+          (with-temp-buffer
+            (when (zerop (call-process ffprobe nil t nil "-v" "error" "-select_streams" "v:0"
+                                       "-show_entries" "stream=width,height:format=duration"
+                                       "-of" "default=noprint_wrappers=1" (expand-file-name file)))
+              (when-let* ((info (lispm-video--parse-info (buffer-string))))
+                (when key (puthash key info lispm-video--info-cache))
+                info)))))))
+
+(defun lispm-video-info-async (file callback)
+  "Probe video FILE metadata asynchronously and call CALLBACK with the plist."
+  (let ((key (lispm-video--info-key file)))
+    (if-let* ((cached (and key (gethash key lispm-video--info-cache))))
+        (funcall callback cached)
+      (if-let* ((ffprobe (and lispm-ffprobe (executable-find lispm-ffprobe))))
+          (lispm-exec
+           ffprobe
+           (list "-v" "error" "-select_streams" "v:0"
+                 "-show_entries" "stream=width,height:format=duration"
+                 "-of" "default=noprint_wrappers=1" (expand-file-name file))
+           (lambda (exit output _errors)
+             (let ((info (and (eql exit 0) (lispm-video--parse-info output))))
+               (when (and info key)
+                 (puthash key info lispm-video--info-cache))
+               (funcall callback info))))
+        (funcall callback nil)))))
 
 (defun lispm-video--length (seconds)
   "SECONDS as a length: 12.3 s, or 1:05 past a minute."
@@ -204,19 +247,23 @@ seconds, :width and :height, those it tells; nil without ffprobe."
                 (format ", %d×%d" (plist-get info :width) (plist-get info :height))
               ""))))
 
+(defun lispm-video--cache-dir (file)
+  "Return the cache directory path for video FILE without creating it."
+  (let ((attributes (file-attributes file)))
+    (expand-file-name
+     (format "cache/video/%s/"
+             (substring (secure-hash 'sha1 (format "%s %s %s" (file-truename file)
+                                                   (file-attribute-size attributes)
+                                                   (float-time (file-attribute-modification-time
+                                                                attributes))))
+                        0 16))
+     lispm-directory)))
+
 (defun lispm-video--cache (file)
   "Directory of what is kept of the video FILE: its frames.
 Named after the file, its size and its time, so that a video changed
 gets a new one."
-  (let* ((attributes (file-attributes file))
-         (dir (expand-file-name
-               (format "cache/video/%s/"
-                       (substring (secure-hash 'sha1 (format "%s %s %s" (file-truename file)
-                                                             (file-attribute-size attributes)
-                                                             (float-time (file-attribute-modification-time
-                                                                          attributes))))
-                                  0 16))
-               lispm-directory)))
+  (let ((dir (lispm-video--cache-dir file)))
     (make-directory dir t)
     dir))
 
@@ -243,10 +290,78 @@ ffprobe cannot tell how long FILE is.  Frames once taken are kept (see
                         "-q:v" "4" (cdr frame))))
       (seq-filter (lambda (frame) (file-exists-p (cdr frame))) frames))))
 
+(defun lispm-video--extract-frames-async (ffmpeg file width frames pending callback)
+  "Extract PENDING frame pairs from video FILE using FFMPEG asynchronously.
+FRAMES holds all target `(SECONDS . JPEG)' pairs; CALLBACK receives
+those present when finished."
+  (while (and pending (file-exists-p (cdar pending)))
+    (setq pending (cdr pending)))
+  (if (null pending)
+      (funcall callback (seq-filter (lambda (frame) (file-exists-p (cdr frame))) frames))
+    (let ((frame (car pending))
+          (rest (cdr pending)))
+      (lispm-exec
+       ffmpeg
+       (list "-v" "error" "-y"
+             "-ss" (format "%.3f" (car frame)) "-i" (expand-file-name file)
+             "-frames:v" "1" "-vf" (format "scale='min(%d,iw)':-2" width)
+             "-q:v" "4" (cdr frame))
+       (lambda (_exit _out _err)
+         (lispm-video--extract-frames-async ffmpeg file width frames rest callback))))))
+
+(defun lispm-video-frames-async (file callback &optional n width)
+  "Extract N evenly spaced frames of video FILE at WIDTH without blocking.
+Calls CALLBACK with `(SECONDS . JPEG)' pairs, or nil on failure."
+  (let ((ffmpeg (and lispm-ffmpeg (executable-find lispm-ffmpeg))))
+    (if (not ffmpeg)
+        (funcall callback nil)
+      (lispm-video-info-async
+       file
+       (lambda (info)
+         (let ((duration (plist-get info :duration)))
+           (if (not (and duration (> duration 0)))
+               (funcall callback nil)
+             (let* ((count (max 1 (or n lispm-video-frames)))
+                    (w (or width lispm-video-frame-width))
+                    (dir (lispm-video--cache file))
+                    (frames (cl-loop for i from 0 below count
+                                     collect (cons (/ (* (+ i 0.5) duration) count)
+                                                   (expand-file-name
+                                                    (format "%d-of-%d-%dw.jpg" i count w) dir)))))
+               (lispm-video--extract-frames-async ffmpeg file w frames frames callback)))))))))
+
 (defun lispm-video-poster (file &optional width)
   "A frame from the middle of the video FILE, a JPEG at most WIDTH pixels
 wide (`lispm-video-frame-width' by default); nil without ffmpeg."
   (cdar (lispm-video-frames file 1 width)))
+
+(defun lispm-video-poster-cached (file &optional width)
+  "Return already cached poster JPEG for video FILE at WIDTH, or nil.
+Performs only a filesystem check and never spawns subprocesses."
+  (let* ((w (or width lispm-video-frame-width))
+         (poster (expand-file-name (format "0-of-1-%dw.jpg" w)
+                                   (lispm-video--cache-dir file))))
+    (and (file-exists-p poster) poster)))
+
+(defun lispm-video-poster-async (file callback &optional width)
+  "Find or generate a poster frame for video FILE at WIDTH without blocking.
+Calls CALLBACK with the JPEG file path or nil."
+  (if-let* ((cached (lispm-video-poster-cached file width)))
+      (funcall callback cached)
+    (let* ((w (or width lispm-video-frame-width))
+           (key (list 'poster (expand-file-name file) w)))
+      (if-let* ((existing (gethash key lispm-video--pending)))
+          (puthash key (cons callback existing) lispm-video--pending)
+        (puthash key (list callback) lispm-video--pending)
+        (lispm-video-frames-async
+         file
+         (lambda (frames)
+           (let ((callbacks (nreverse (gethash key lispm-video--pending)))
+                 (poster (cdar frames)))
+             (remhash key lispm-video--pending)
+             (dolist (cb callbacks)
+               (funcall cb poster))))
+         1 w)))))
 
 (defun lispm-image-as-png (file)
   "FILE, an image of a kind models do not take, as a PNG: the file made,
@@ -261,6 +376,20 @@ does, else ffmpeg."
                                      "-i" (expand-file-name file) png))))
          (file-exists-p png)
          png)))
+
+(defun lispm-image-as-png-async (file callback)
+  "Convert image FILE to PNG asynchronously and invoke CALLBACK with its path."
+  (let* ((src (expand-file-name file))
+         (png (concat (file-name-sans-extension src) ".png"))
+         (cmd (cond ((and (eq system-type 'darwin) (executable-find "sips"))
+                     (list "sips" "-s" "format" "png" src "--out" png))
+                    ((and lispm-ffmpeg (executable-find lispm-ffmpeg))
+                     (list lispm-ffmpeg "-v" "error" "-y" "-i" src png)))))
+    (if (not cmd)
+        (funcall callback nil)
+      (lispm-exec (car cmd) (cdr cmd)
+                  (lambda (exit _out _err)
+                    (funcall callback (and (eql exit 0) (file-exists-p png) png)))))))
 
 (defun lispm-media-video-blocks (file)
   "The blocks the model sees for the video FILE: a line about it, then

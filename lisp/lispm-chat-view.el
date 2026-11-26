@@ -78,6 +78,14 @@ it, and all the :items.")
 (defvar-local lispm-chat-closing nil
   "Non-nil while this chat is being closed.")
 
+(defcustom lispm-chat-defer-hidden-redraws t
+  "When non-nil, defer redraws and spinner animation for hidden chat buffers."
+  :type 'boolean
+  :group 'lispm-chat)
+
+(defvar-local lispm-chat--needs-redraw nil
+  "Non-nil when a hidden chat buffer changed and should redraw once visible.")
+
 (defvar lispm-chat--spinner-timer nil
   "Timer turning the spinners of busy agents.")
 
@@ -524,6 +532,7 @@ Returns an undo list preserving user input edits after `lispm-chat-redraw-now'."
 
 (defun lispm-chat-redraw-now ()
   "Bring the current chat up to date, from the first string that changed."
+  (setq lispm-chat--needs-redraw nil)
   (let* ((strings (lispm-chat--strings lispm-chat-agent))
          (old lispm-chat-drawn)
          (new strings)
@@ -605,11 +614,18 @@ the hints, or the menu of / commands."
       (setq lispm-chat--asked id
             lispm-chat--choice 0))))
 
+(defun lispm-chat--visible-p (chat)
+  "Return non-nil when CHAT is visible in a window or deferral is disabled."
+  (and (buffer-live-p chat)
+       (or (not lispm-chat-defer-hidden-redraws)
+           (and (get-buffer-window chat 'visible) t))))
+
 (defun lispm-chat-redraw (chat)
   "Redraw CHAT now."
   (when (buffer-live-p chat)
     (with-current-buffer chat
-      (setq lispm-chat--render-timer nil)
+      (setq lispm-chat--render-timer nil
+            lispm-chat--needs-redraw nil)
       (when (and lispm-chat-agent (buffer-live-p (lispm-agent-buffer lispm-chat-agent)))
         (lispm-chat-redraw-now)))))
 
@@ -618,8 +634,10 @@ the hints, or the menu of / commands."
   (let ((chat (and agent (lispm-agent-view agent))))
     (when (buffer-live-p chat)
       (with-current-buffer chat
-        (unless (timerp lispm-chat--render-timer)
-          (setq lispm-chat--render-timer (run-at-time 0.05 nil #'lispm-chat-redraw chat)))))))
+        (if (lispm-chat--visible-p chat)
+            (unless (timerp lispm-chat--render-timer)
+              (setq lispm-chat--render-timer (run-at-time 0.05 nil #'lispm-chat-redraw chat)))
+          (setq lispm-chat--needs-redraw t))))))
 
 (defun lispm-chat--state-changed (agent)
   "Note when AGENT starts or stops working, and redraw its chat."
@@ -634,10 +652,30 @@ the hints, or the menu of / commands."
       (lispm-chat-schedule agent))))
 
 (defun lispm-chat--busy-agents ()
-  "The agents working while their chat is open."
-  (seq-filter (lambda (a) (and (buffer-live-p (lispm-agent-view a))
+  "The agents working while their chat is visible."
+  (seq-filter (lambda (a) (and (lispm-chat--visible-p (lispm-agent-view a))
                                (lispm-agent-working-p a)))
               (lispm-agents)))
+
+(defun lispm-chat--on-window-change (frame-or-window)
+  "Flush pending redraws and restart spinner for visible chats in FRAME-OR-WINDOW."
+  (let ((any-busy nil)
+        (seen (make-hash-table :test #'eq)))
+    (walk-windows
+     (lambda (win)
+       (let ((buf (window-buffer win)))
+         (when (and (buffer-live-p buf) (not (gethash buf seen)))
+           (puthash buf t seen)
+           (with-current-buffer buf
+             (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
+               (when lispm-chat--needs-redraw
+                 (lispm-chat-redraw buf))
+               (when (lispm-agent-working-p lispm-chat-agent)
+                 (setq any-busy t)))))))
+     'no-minibuf
+     (and (framep frame-or-window) frame-or-window))
+    (when any-busy
+      (lispm-chat--animate))))
 
 (defun lispm-chat--animate ()
   "Keep the spinners of working agents turning, and stop when none is."
@@ -686,7 +724,9 @@ the hints, or the menu of / commands."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
-        (lispm-chat-redraw-now)))))
+        (if (lispm-chat--visible-p buffer)
+            (lispm-chat-redraw-now)
+          (setq lispm-chat--needs-redraw t))))))
 
 (defun lispm-chat--draw-all-again ()
   "Draw every chat again, whole: in the language now spoken, with code
@@ -696,9 +736,25 @@ checked or not as `lispm-ground-code' now says."
       (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
         (setq lispm-chat--parsed nil
               lispm-chat-streamed nil)
-        (clrhash lispm-chat-rendered)
-        (lispm-chat-redraw-now)))))
+        (when (hash-table-p lispm-chat-rendered)
+          (clrhash lispm-chat-rendered))
+        (if (lispm-chat--visible-p buffer)
+            (lispm-chat-redraw-now)
+          (setq lispm-chat--needs-redraw t))))))
 
+(defun lispm-chat--on-media-ready (_file)
+  "Invalidate cached item renderings and redraw chats when media previews finish."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'lispm-chat-mode) lispm-chat-agent)
+        (setq lispm-chat--parsed nil
+              lispm-chat-streamed nil)
+        (when (hash-table-p lispm-chat-rendered)
+          (clrhash lispm-chat-rendered))
+        (lispm-chat-schedule lispm-chat-agent)))))
+
+(add-hook 'lispm-chat-media-ready-functions #'lispm-chat--on-media-ready)
+(add-hook 'window-buffer-change-functions #'lispm-chat--on-window-change)
 (add-hook 'lispm-session-mode-hook #'lispm-chat--watch-transcript)
 (add-hook 'lispm-state-change-functions #'lispm-chat--state-changed)
 (add-hook 'lispm-session-end-functions #'lispm-chat--session-ended)

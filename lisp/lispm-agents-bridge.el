@@ -633,19 +633,39 @@ When SERVER is given, do not execute a call after its session ends."
                                     (cons text (mapcar (lambda (file) (format "Image: %s" file)) images))
                                     errorp))))))
 
-(defun lispm-agents-bridge--detail (agent tool input reasons)
+(defun lispm-agents-bridge--format-detail (reasons preview input)
+  "Format REASONS, PREVIEW text and JSON INPUT into an approval prompt."
+  (lispm-truncate
+   (string-join (delq nil (append reasons
+                                  (list (or preview
+                                            (and input
+                                                 (condition-case nil
+                                                     (json-serialize input)
+                                                   (error (prin1-to-string input))))))))
+                "\n")
+   2000))
+
+(defun lispm-agents-bridge--detail-sync (agent tool input reasons)
   "What the user is shown of AGENT's call of TOOL on INPUT, held for REASONS."
   (let ((preview (let ((lispm-current-agent agent)
                        (default-directory (lispm-principal-root agent)))
                    (lispm-tool-preview-text tool input))))
-    (lispm-truncate (string-join (delq nil (append reasons
-                                                    (list (or preview
-                                                              (and input
-                                                                   (condition-case nil
-                                                                       (json-serialize input)
-                                                                     (error (prin1-to-string input))))))))
-                                  "\n")
-                     2000)))
+    (lispm-agents-bridge--format-detail reasons preview input)))
+
+(defalias 'lispm-agents-bridge--detail #'lispm-agents-bridge--detail-sync)
+
+(defun lispm-agents-bridge--detail-async (agent tool input reasons callback)
+  "Compute approval detail for AGENT calling TOOL with INPUT for REASONS.
+Calls CALLBACK with the formatted string without blocking on diffs."
+  (if (not (eq (symbol-function 'lispm-agents-bridge--detail)
+               #'lispm-agents-bridge--detail-sync))
+      (funcall callback (lispm-agents-bridge--detail agent tool input reasons))
+    (let ((lispm-current-agent agent)
+          (default-directory (lispm-principal-root agent)))
+      (lispm-tool-preview-text
+       tool input
+       (lambda (preview)
+         (funcall callback (lispm-agents-bridge--format-detail reasons preview input)))))))
 
 (defun lispm-agents-bridge--ask (kind agent tool input reasons answer &optional server)
   "Ask the user about AGENT's call of TOOL on INPUT, for an agent of KIND.
@@ -655,19 +675,30 @@ be live both before asking and after the user answers."
   (let ((live (lambda () (or (null server) (lispm-agents-bridge-server-live-p server)))))
     (if (not (funcall live))
         (funcall answer '("Cancelled: the session has ended.") t)
-      (let ((allowed
-             (condition-case nil
-                 (let ((detail (lispm-agents-bridge--detail agent tool input reasons)))
-                   ;; A preview or the confirmation can itself yield to DELETE.
-                   (and (funcall live)
-                        (funcall lispm-agents-confirm-function
-                                 (lispm-tr "%s wants to run %s" kind (lispm-tool-name tool))
-                                 detail (lispm-tr-in "permission" "Allow"))))
-               ((error quit) nil))))
-        (cond ((not (funcall live))
-               (funcall answer '("Cancelled: the session has ended.") t))
-              (allowed (lispm-agents-bridge--run agent tool input answer server))
-              (t (funcall answer (list "Denied: the user did not approve this call.") t)))))))
+      (condition-case nil
+          (lispm-agents-bridge--detail-async
+           agent tool input reasons
+           (lambda (detail)
+             (if (not (funcall live))
+                 (funcall answer '("Cancelled: the session has ended.") t)
+               (let ((allowed
+                      (condition-case nil
+                          (and (funcall live)
+                               (funcall lispm-agents-confirm-function
+                                        (lispm-tr "%s wants to run %s" kind (lispm-tool-name tool))
+                                        detail (lispm-tr-in "permission" "Allow")))
+                        ((error quit) nil))))
+                 (cond ((not (funcall live))
+                        (funcall answer '("Cancelled: the session has ended.") t))
+                       (allowed (lispm-agents-bridge--run agent tool input answer server))
+                       (t (funcall answer
+                                   (list "Denied: the user did not approve this call.") t)))))))
+        ((error quit)
+         (funcall answer
+                  (if (not (funcall live))
+                      '("Cancelled: the session has ended.")
+                    (list "Denied: the user did not approve this call."))
+                  t))))))
 
 (defun lispm-agents-bridge-tool-call (server arguments _id)
   "Run the LispM tool ARGUMENTS name, on their input, for SERVER's agent.
