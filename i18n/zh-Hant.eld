@@ -168,7 +168,6 @@
   ("diagnostics in %s" . "%s 的診斷")
   ("↓ Jump to bottom (%s)" . "↓ 跳至最底部 (%s)")
   ("● New output · ↓ Jump to bottom (%s)" . "● 有新輸出 · ↓ 跳至最底部 (%s)")
-  ("LispM: %s not updated: its buffer has unsaved changes" . "LispM：未更新 %s：它的緩衝區有未儲存的變更")
   ("%d argument" "%d 個引數")
   ("%d to %d arguments" . "%d 至 %d 個引數")
   ("at least %d argument" "至少 %d 個引數")

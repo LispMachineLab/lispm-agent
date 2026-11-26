@@ -168,7 +168,6 @@
   ("diagnostics in %s" . "%sの診断")
   ("↓ Jump to bottom (%s)" . "↓ 最下部へ移動 (%s)")
   ("● New output · ↓ Jump to bottom (%s)" . "● 新しい出力 · ↓ 最下部へ移動 (%s)")
-  ("LispM: %s not updated: its buffer has unsaved changes" . "LispM：%sを更新しませんでした：そのバッファに保存されていない変更があります")
   ("%d argument" "引数%d個")
   ("%d to %d arguments" . "引数%d〜%d個")
   ("at least %d argument" "引数%d個以上")

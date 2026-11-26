@@ -71,6 +71,15 @@ this says, a tool brings a buffer it uses up to date first."
 No buffers are reverted after their calls.  A Lisp program changes
 files only through the tools it calls, which revert them.")
 
+(defvar lispm-revert-skip-functions nil
+  "Hook of predicates `(BUFFER AGENT)' skipping `lispm-tools--revert-changed'.
+If any function returns non-nil for BUFFER after AGENT completes a call,
+that buffer is not reverted on disk-change detection.")
+
+(defvar lispm-tools--revert-paths nil
+  "Dynamic scope restricting `lispm-tools--revert-changed' to affected paths.
+May be nil (scan root), `none' (skip all), or a list of file paths.")
+
 (cl-defstruct (lispm-tool (:constructor lispm-make-tool) (:copier nil))
   "A tool callable by agents.
 Tools defined with `lispm-deftool' have PARAMS, from which their schema
@@ -519,6 +528,14 @@ around it either: that would leave the call without a result."
       (when pending
         (setq quit-flag pending)))))
 
+(defun lispm-tool-call-class (tool input)
+  "Return the effective permission class of calling TOOL on INPUT."
+  (or (when-let* ((class (lispm-tool-class tool)))
+        (condition-case nil
+            (apply class (lispm-tools-arguments tool input))
+          (error nil)))
+      (lispm-tool-permission tool)))
+
 (defun lispm-tools--deliver (done agent tool text errorp images &optional input call-id)
   "Give DONE the result of AGENT's call of TOOL: TEXT, ERRORP and IMAGES.
 INPUT, when provided, is the call's decoded JSON input.  CALL-ID binds
@@ -531,12 +548,18 @@ so that the user sees what the call did there (see
 turn: it records the result and may ask the model again, which C-g
 must not leave half done, so quitting is inhibited meanwhile."
   (let ((inhibit-quit t))
-    (when (and agent (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions)))
+    (when (and agent
+               (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions))
+               (not (eq (lispm-tool-call-class tool input) 'read)))
       (with-demoted-errors "LispM: forgetting remote file attributes: %S"
         (lispm-tools--flush-remote (lispm-principal-root agent)))
       (when lispm-revert-after-calls
         ;; Hooks the reverts run are the agent's doing.
-        (let ((lispm-current-agent agent))
+        (let* ((lispm-current-agent agent)
+               (lispm-tools--revert-paths
+                (when (eq (lispm-tool-permission tool) 'write)
+                  (or (seq-filter #'stringp (lispm-tool-call-resources tool input))
+                      'none))))
           (condition-case err
               (lispm-tools-interruptibly #'lispm-tools--revert-changed
                                           (list (lispm-principal-root agent)))
@@ -894,27 +917,89 @@ See `lispm-file-text'."
       (lispm-file-text file)
     (lispm-tools-buffer-text buffer)))
 
-(defun lispm-tools--revert-changed (root)
-  "Revert the stale buffers of files under ROOT (see `lispm-tools-state').
-Run after a call that may have changed files (a shell command, Lisp,
-an MCP server), so that the buffers the user and the agents see hold
-what is on disk; see `lispm-revert-after-calls'.  Remote files are
-left out, checking them would mean a connection each, unless ROOT is
-remote: then those under it are checked through its connection."
-  (let ((root (file-name-as-directory (expand-file-name root))))
-    (dolist (buffer (buffer-list))
-      (let ((file (buffer-file-name buffer)))
-        (when (and file
-                   (not (buffer-modified-p buffer))
-                   (string-prefix-p root file)
-                   (or (file-remote-p root) (not (file-remote-p file)))
-                   (eq (lispm-tools-state buffer) 'stale))
-          (with-demoted-errors "LispM: reverting a buffer: %S"
-            (let ((old (lispm-tools-buffer-text buffer)))
-              (lispm-tools-sync buffer)
-              (let ((new (lispm-tools-buffer-text buffer)))
-                (unless (equal old new)
-                  (run-hook-with-args 'lispm-buffer-change-functions buffer old new))))))))))
+(defvar lispm-tools--observed-revisions (make-hash-table :test #'eq :weakness 'key)
+  "Agent -> hash table mapping canonical file path -> last observed SHA-256 hash.")
+
+(defun lispm-tools-content-hash (text)
+  "Return the SHA-256 hex digest of UTF-8 encoded TEXT."
+  (secure-hash 'sha256 (encode-coding-string (or text "") 'utf-8)))
+
+(defun lispm-tools-record-revision (agent file text)
+  "Record for AGENT that FILE was observed holding content TEXT."
+  (when (and agent file)
+    (let* ((lispm-current-agent agent)
+           (canon (lispm-tool--normalize-resource file))
+           (tbl (or (gethash agent lispm-tools--observed-revisions)
+                    (let ((new (make-hash-table :test #'equal)))
+                      (puthash agent new lispm-tools--observed-revisions)
+                      new))))
+      (puthash canon (lispm-tools-content-hash text) tbl))))
+
+(defun lispm-tools-observed-revision (agent file)
+  "Return the last observed SHA-256 hash for AGENT and FILE, or nil."
+  (when-let* ((agent)
+              (file)
+              (tbl (gethash agent lispm-tools--observed-revisions)))
+    (let ((lispm-current-agent agent))
+      (gethash (lispm-tool--normalize-resource file) tbl))))
+
+(defun lispm-tools--clear-revisions (agent)
+  "Drop observed file revisions recorded for AGENT when its session ends."
+  (remhash agent lispm-tools--observed-revisions))
+
+(add-hook 'lispm-session-end-functions #'lispm-tools--clear-revisions)
+
+(defun lispm-tools-check-cas (agent file current-text &optional expected-hash check-observed)
+  "Verify MVCC/CAS preconditions before AGENT writes FILE with CURRENT-TEXT.
+When EXPECTED-HASH is \"missing\", fail if FILE exists.
+When EXPECTED-HASH is a SHA-256 hex string, fail unless CURRENT-TEXT matches it.
+Otherwise when CHECK-OBSERVED is non-nil and AGENT previously observed FILE,
+fail if FILE changed since AGENT last read it."
+  (let ((actual (lispm-tools-content-hash current-text)))
+    (cond
+     ((equal expected-hash "missing")
+      (when (file-exists-p file)
+        (error "CAS conflict on %s: file already exists (expected missing)"
+               (lispm-tools-label file))))
+     ((stringp expected-hash)
+      (unless (equal expected-hash actual)
+        (error "CAS conflict on %s: expected hash %s, current hash is %s; re-read before retrying"
+               (lispm-tools-label file) expected-hash actual)))
+     (check-observed
+      (when-let* ((observed (lispm-tools-observed-revision agent file))
+                  ((not (equal observed actual))))
+        (error "CAS conflict on %s: file changed since you last read it (observed %s, current %s); re-read before overwriting"
+               (lispm-tools-label file) observed actual))))))
+
+(defun lispm-tools--revert-changed (root &optional paths)
+  "Revert stale buffers under ROOT (or PATHS when specified).
+Respects dynamic `lispm-tools--revert-paths' and `lispm-revert-skip-functions'
+so unrelated buffers and buffers holding sibling edit proposals stay untouched."
+  (let ((scope (or paths lispm-tools--revert-paths)))
+    (unless (eq scope 'none)
+      (let* ((root (file-name-as-directory (expand-file-name root)))
+             (allowed (when (consp scope)
+                        (let ((tbl (make-hash-table :test #'equal)))
+                          (dolist (p scope tbl)
+                            (when (stringp p)
+                              (puthash (lispm-tool--normalize-resource p) t tbl)))))))
+        (dolist (buffer (buffer-list))
+          (let ((file (buffer-file-name buffer)))
+            (when (and file
+                       (not (buffer-modified-p buffer))
+                       (string-prefix-p root file)
+                       (or (not allowed)
+                           (gethash (lispm-tool--normalize-resource file) allowed))
+                       (or (file-remote-p root) (not (file-remote-p file)))
+                       (not (run-hook-with-args-until-success
+                             'lispm-revert-skip-functions buffer lispm-current-agent))
+                       (eq (lispm-tools-state buffer) 'stale))
+              (with-demoted-errors "LispM: reverting a buffer: %S"
+                (let ((old (lispm-tools-buffer-text buffer)))
+                  (lispm-tools-sync buffer)
+                  (let ((new (lispm-tools-buffer-text buffer)))
+                    (unless (equal old new)
+                      (run-hook-with-args 'lispm-buffer-change-functions buffer old new))))))))))))
 
 (defun lispm-tools-set-text (buffer text)
   "Make BUFFER's text TEXT as one undo step, journaled and saved.
@@ -927,6 +1012,9 @@ so is a read-only one, before anything is journaled."
     (error "Cannot change buffer %s: it is read-only" (buffer-name buffer)))
   (let ((old (lispm-tools-buffer-text buffer)))
     (lispm-tools--replace-text buffer text)
+    (when (and lispm-current-agent (buffer-file-name buffer))
+      (lispm-tools-record-revision lispm-current-agent (buffer-file-name buffer)
+                                   (lispm-tools-buffer-text buffer)))
     ;; The change is made: whatever shows it must not undo the call.
     (with-demoted-errors "LispM: showing a change: %S"
       (run-hook-with-args 'lispm-buffer-change-functions buffer old text))))

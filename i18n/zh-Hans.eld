@@ -168,7 +168,6 @@
   ("diagnostics in %s" . "%s 的诊断")
   ("↓ Jump to bottom (%s)" . "↓ 跳到最底部 (%s)")
   ("● New output · ↓ Jump to bottom (%s)" . "● 有新输出 · ↓ 跳到最底部 (%s)")
-  ("LispM: %s not updated: its buffer has unsaved changes" . "LispM：%s 未更新：其缓冲区有未存储的更改")
   ("%d argument" "%d 个参数")
   ("%d to %d arguments" . "%d 至 %d 个参数")
   ("at least %d argument" "至少 %d 个参数")
