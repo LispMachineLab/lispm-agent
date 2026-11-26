@@ -44,8 +44,10 @@
 
 ;;; Code:
 
+(require 'subr-x)
 (require 'lispm-core)
 (require 'lispm-exec)
+(require 'lispm-workspace)
 
 (defcustom lispm-journal-git t
   "Whether to take snapshots of a project's git work tree at every turn.
@@ -66,33 +68,35 @@ They are kept in a repository of LispM's own (see lispm-journal.el)."
   :group 'lispm)
 
 (defun lispm-journal--top (root)
-  "The top of the git work tree ROOT is in, or nil.
-Nil for a remote ROOT too: its work tree is on another machine, which
-LispM's repository is not on, and whose files the snapshots would read
-one by one through TRAMP.  Such a root has the in-memory journal only."
-  (when-let* (((not (file-remote-p root)))
-              (top (locate-dominating-file root ".git")))
-    (file-name-as-directory (expand-file-name top))))
+  "Return the snapshot work tree top for ROOT, or nil.
+Supports git checkouts/worktrees as well as non-git CoW workspaces.
+Returns nil for a remote ROOT so TRAMP keeps the in-memory journal only."
+  (when-let* (((not (file-remote-p root))))
+    (or (when-let* ((top (locate-dominating-file root ".git")))
+          (file-name-as-directory (expand-file-name top)))
+        (lispm-workspace-root-for-path root))))
 
-(defun lispm-journal--directory-path (root)
-  "Return the journal repository directory path for the project at ROOT."
-  (expand-file-name "journal.git/" (lispm-project-directory root)))
+(defun lispm-journal--directory-path (root &optional workspace)
+  "Return the journal repository directory path for ROOT and WORKSPACE."
+  (lispm-workspace-resolve-journal-dir root workspace))
 
-(defun lispm-journal--directory (root)
-  "The journal repository of the project at ROOT, made if need be; or nil."
-  (let ((dir (lispm-journal--directory-path root)))
+(defun lispm-journal--directory (root &optional workspace)
+  "Return the journal repository of ROOT and WORKSPACE, created if needed."
+  (let ((dir (lispm-journal--directory-path root workspace)))
     (if (file-exists-p (expand-file-name "HEAD" dir))
         dir
+      (make-directory dir t)
       (let ((process-environment (lispm-git-environment)))
         (when (zerop (call-process "git" nil nil nil "init" "-q" "--bare" dir))
           dir)))))
 
-(defun lispm-journal--ensure-directory-async (root callback)
-  "Ensure the journal repository for ROOT exists without blocking.
+(defun lispm-journal--ensure-directory-async (root callback &optional workspace)
+  "Ensure the journal repository for ROOT and WORKSPACE exists without blocking.
 Calls CALLBACK with the repository directory or nil on failure."
-  (let ((dir (lispm-journal--directory-path root)))
+  (let ((dir (lispm-journal--directory-path root workspace)))
     (if (file-exists-p (expand-file-name "HEAD" dir))
         (funcall callback dir)
+      (make-directory dir t)
       (let ((process-environment (lispm-git-environment)))
         (lispm-exec "git" (list "init" "-q" "--bare" dir)
                     (lambda (exit _out _err)
@@ -139,7 +143,6 @@ commit=$(git -c commit.gpgSign=false -c user.name=\"$LISPM_AUTHOR\" \\
 git update-ref \"$LISPM_REF\" \"$commit\"
 git for-each-ref --sort=-refname --format='%(refname)' \"$LISPM_REFS\" |
   tail -n +$((LISPM_KEEP + 1)) | while read -r ref; do git update-ref -d \"$ref\"; done
-git gc --auto --quiet >/dev/null 2>&1 || true
 echo \"$tree $commit\""
   "Shell script taking a snapshot of a work tree in a journal repository.
 The files to add come on its standard input, each after ./; those that
@@ -160,13 +163,16 @@ CALLBACK gets the tree and the commit, the commit nil if none was
 made, or nil and nil if the snapshot failed.  An error in it, or in
 taking the snapshot, is reported, never signaled: it would be an
 error in a process sentinel, which ends a batch Emacs."
-  (let ((files nil)
-        (process-environment (lispm-git-environment))
-        (default-directory top))
+  (let* ((files nil)
+         (git-p (file-exists-p (expand-file-name ".git" top)))
+         (process-environment (lispm-git-environment))
+         (default-directory top))
     (make-process
      :name "lispm-journal-files" :buffer (generate-new-buffer " *lispm-journal*") :noquery t
      :connection-type 'pipe
-     :command (list "git" "-C" top "ls-files" "-z" "--cached" "--others" "--exclude-standard")
+     :command (if git-p
+                  (list "git" "-C" top "ls-files" "-z" "--cached" "--others" "--exclude-standard")
+                (list "find" "." "-path" "./.git" "-prune" "-o" "-type" "f" "-print0"))
      :sentinel
      (lambda (process _event)
        (unless (process-live-p process)
@@ -177,7 +183,9 @@ error in a process sentinel, which ends a batch Emacs."
                ;; Which are regular files small enough, the script asks
                ;; find: looking at each here took this sentinel 0.1 s in a
                ;; project of 5,000 files, twice a turn.
-               (setq files (split-string (with-current-buffer buffer (buffer-string)) "\0" t)))
+               (setq files (split-string (with-current-buffer buffer (buffer-string)) "\0" t))
+               (unless git-p
+                 (setq files (mapcar (lambda (file) (string-remove-prefix "./" file)) files))))
              (kill-buffer buffer)
              ;; A snapshot that fails, its project gone say, is no journal
              ;; entry: never an error in a sentinel.
@@ -259,12 +267,46 @@ turn must not be taken before the end of the one before."
         (plist-put (cdr other) :then (append (plist-get (cdr other) :then) (list start)))
       (funcall start))))
 
-(defun lispm-journal--taken (snapshot)
-  "Note that SNAPSHOT is taken; take those that waited for it."
+(defvar lispm-journal--waiters (make-hash-table :test #'eq :weakness 'key)
+  "Map from `lispm-agent' to list of callbacks waiting for journal readiness.")
+
+(defun lispm-journal-on-ready (agent callback)
+  "Call CALLBACK once AGENT has no snapshot in flight.
+Runs asynchronously via timer if AGENT's journal is already idle."
+  (if (lispm-journal-busy-p agent)
+      (puthash agent (append (gethash agent lispm-journal--waiters) (list callback))
+               lispm-journal--waiters)
+    (run-at-time 0 nil callback)))
+
+(defun lispm-journal--cleanup-waiters (agent)
+  "Drop queued readiness callbacks when AGENT's session ends."
+  (remhash agent lispm-journal--waiters))
+
+(add-hook 'lispm-session-end-functions #'lispm-journal--cleanup-waiters)
+
+(defun lispm-journal-gc (dir &optional callback)
+  "Run `git gc --auto --quiet' in journal repository DIR asynchronously.
+Calls optional CALLBACK with exit status when done."
+  (if (and (stringp dir) (file-exists-p (expand-file-name "HEAD" dir)))
+      (let ((process-environment (cons (concat "GIT_DIR=" (directory-file-name dir))
+                                       (lispm-git-environment))))
+        (lispm-exec "git" '("gc" "--auto" "--quiet")
+                    (lambda (exit _out _err)
+                      (when callback (funcall callback exit)))))
+    (when callback (run-at-time 0 nil callback 0))))
+
+(defun lispm-journal--taken (agent snapshot)
+  "Note that AGENT's SNAPSHOT is taken; run chained snapshots and wake waiters."
   (let ((then (plist-get snapshot :then)))
     (plist-put snapshot :busy nil)
     (plist-put snapshot :then nil)
-    (mapc #'funcall then)))
+    (mapc #'funcall then)
+    (unless (lispm-journal-busy-p agent)
+      (when-let* ((waiters (gethash agent lispm-journal--waiters)))
+        (remhash agent lispm-journal--waiters)
+        (dolist (waiter waiters)
+          (with-demoted-errors "LispM: journal waiter: %S"
+            (funcall waiter)))))))
 
 (defun lispm-journal--begin-snapshot (agent top dir snapshot)
   "Record initial SNAPSHOT in journal DIR for AGENT's work tree TOP."
@@ -274,7 +316,7 @@ turn must not be taken before the end of the one before."
    :author (symbol-name (lispm-agent-name agent))
    :callback (lambda (_tree commit)
                (plist-put snapshot :before commit)
-               (lispm-journal--taken snapshot))))
+               (lispm-journal--taken agent snapshot))))
 
 (defun lispm-journal-begin (agent &optional resumed)
   "Take a snapshot of AGENT's project as its turn begins, if it is in git.
@@ -283,7 +325,8 @@ then it goes on from the snapshot taken as it first began, if any."
   (when-let* (((and lispm-journal-git (executable-find "git")))
               (top (lispm-journal--top (lispm-agent-root agent))))
     (let* ((session (lispm-agent-id agent))
-           (dir (lispm-journal--directory-path (lispm-agent-root agent)))
+           (dir (lispm-journal--directory-path (lispm-agent-root agent)
+                                               (lispm-agent-workspace agent)))
            (snapshot (list :top top :dir dir
                            :ref (format "refs/turns/%s/%s" session (lispm-journal--stamp)))))
       (setf (alist-get (lispm-agent-turn agent) (lispm-agent-snapshots agent)) snapshot)
@@ -296,7 +339,7 @@ then it goes on from the snapshot taken as it first began, if any."
           (lambda (ready-dir)
             (cond
              ((not ready-dir)
-              (lispm-journal--taken snapshot))
+              (lispm-journal--taken agent snapshot))
              (resumed
               (lispm-journal--records-async
                ready-dir session
@@ -307,10 +350,11 @@ then it goes on from the snapshot taken as it first began, if any."
                        (progn
                          (plist-put snapshot :ref (plist-get begun :ref))
                          (plist-put snapshot :before (plist-get begun :commit))
-                         (lispm-journal--taken snapshot))
+                         (lispm-journal--taken agent snapshot))
                      (lispm-journal--begin-snapshot agent top ready-dir snapshot))))))
              (t
-              (lispm-journal--begin-snapshot agent top ready-dir snapshot))))))))))
+              (lispm-journal--begin-snapshot agent top ready-dir snapshot))))
+          (lispm-agent-workspace agent)))))))
 
 (defun lispm-journal-busy-p (agent)
   "Non-nil while a snapshot of AGENT's is being taken.
@@ -341,7 +385,7 @@ A turn that changed nothing leaves no snapshot."
              :parent before :same (string-trim (or same ""))
              :callback (lambda (_tree commit)
                          (plist-put snapshot :after commit)
-                         (lispm-journal--taken snapshot))))))))))
+                         (lispm-journal--taken agent snapshot))))))))))
 
 (defun lispm-journal--parse-records (output)
   "Parse `git for-each-ref' OUTPUT into snapshot record plists."
@@ -386,8 +430,9 @@ gives it, with :dir and :top, and :turn, the turn's number, for a
 turn of this Emacs session.  Only finished turns are listed."
   (when-let* (((and lispm-journal-git (executable-find "git")))
               (top (lispm-journal--top (lispm-agent-root agent)))
-              (dir (let ((dir (expand-file-name "journal.git/"
-                                                (lispm-project-directory (lispm-agent-root agent)))))
+              (dir (let ((dir (lispm-journal--directory-path
+                               (lispm-agent-root agent)
+                               (lispm-agent-workspace agent))))
                      (and (file-exists-p dir) dir))))
     (mapcar (lambda (record)
               (append record

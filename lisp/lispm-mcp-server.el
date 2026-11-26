@@ -92,11 +92,21 @@ Nil for that of the editor's agents, `lispm-agents-bridge-role'."
   :type '(choice (const :tag "That of the editor's agents" nil) symbol)
   :group 'lispm)
 
+(defcustom lispm-mcp-server-multi-instance t
+  "When non-nil, each Emacs registers its own standing MCP server endpoint.
+Nil preserves legacy single-instance exclusive lock-file behavior."
+  :type 'boolean
+  :group 'lispm)
+
 (defvar lispm-mcp-server-file "~/.lispm/mcp-server"
-  "File naming the server to agents outside LispM, readable by its owner
-only: its address, its token and the process id of the Emacs serving, a
-line each.  bin/lispm-mcp and bin/lispm-tool read it, or the file
-$LISPM_MCP_SERVER names instead.")
+  "Primary descriptor file naming an Emacs server to agents outside LispM.
+Holds its address, token, and process id, one line each.  When multiple
+Emacsen run with `lispm-mcp-server-multi-instance' non-nil, each instance
+also registers under `lispm-mcp-server-directory'.")
+
+(defvar lispm-mcp-server-directory nil
+  "Directory holding per-instance standing MCP server descriptors.
+When nil, uses `mcp-servers/' beside `lispm-mcp-server-file'.")
 
 (defconst lispm-mcp-server-program
   (expand-file-name "../bin/lispm-mcp" (file-name-directory (or load-file-name buffer-file-name)))
@@ -117,6 +127,9 @@ LispM: those talking with the agents, whose messages reach none of them.")
 
 (defvar lispm-mcp-server--owned-file nil
   "Absolute descriptor name whose ownership lock this Emacs holds.")
+
+(defvar lispm-mcp-server--instance-file nil
+  "Absolute per-instance registry descriptor file owned by this Emacs.")
 
 (defvar lispm-mcp-server--sessions (make-hash-table :test #'equal)
   "The sessions of agents outside LispM: their Mcp-Session-Id, or (shell
@@ -360,18 +373,37 @@ POST /call/NAME answer bin/lispm-tool."
 
 ;;;; The server
 
-(defun lispm-mcp-server--read-file ()
-  "The lines of `lispm-mcp-server-file': address, token and process id."
+(defun lispm-mcp-server-registry-directory ()
+  "Return directory holding per-instance standing MCP server descriptors."
+  (file-name-as-directory
+   (expand-file-name
+    (or lispm-mcp-server-directory
+        (expand-file-name "mcp-servers/"
+                          (file-name-directory (expand-file-name lispm-mcp-server-file)))))))
+
+(defun lispm-mcp-server--read-descriptor (file)
+  "Read descriptor lines from FILE, or return nil if unreadable."
   (condition-case nil
       (with-temp-buffer
-        (insert-file-contents (expand-file-name lispm-mcp-server-file))
+        (insert-file-contents (expand-file-name file))
         (split-string (buffer-string) "\n" t))
     (file-error nil)))
+
+(defun lispm-mcp-server--read-file ()
+  "The lines of `lispm-mcp-server-file': address, token and process id."
+  (lispm-mcp-server--read-descriptor lispm-mcp-server-file))
 
 (defun lispm-mcp-server--emacs-p (pid)
   "Non-nil if PID is the process id of a running Emacs, LispM.app's too."
   (when-let* ((attributes (process-attributes pid)))
     (string-match-p "emacs\\|lispm" (downcase (or (alist-get 'comm attributes) "")))))
+
+(defun lispm-mcp-server--pid-alive-p (pid)
+  "Non-nil if PID belongs to this Emacs or another running Emacs process."
+  (and (integerp pid)
+       (> pid 0)
+       (or (= pid (emacs-pid))
+           (lispm-mcp-server--emacs-p pid))))
 
 (defun lispm-mcp-server-holder ()
   "Return the process id of another Emacs serving agents outside LispM,
@@ -382,22 +414,105 @@ which keeps `lispm-mcp-server-file' while it runs, or nil."
               ((lispm-mcp-server--emacs-p pid)))
     pid))
 
-(defun lispm-mcp-server--announce ()
-  "Name the server in `lispm-mcp-server-file', readable by its owner only.
-The file holds the token, so one left by a crash is replaced rather than
-written with whatever permissions it had."
-  (let* ((file lispm-mcp-server--owned-file)
-         (temporary (make-temp-file (concat file "."))))
+(defun lispm-mcp-server--write-descriptor (file lines)
+  "Atomically write LINES to descriptor FILE with `#o600' permissions."
+  (let* ((target (expand-file-name file))
+         (_ (with-file-modes #o700
+              (make-directory (file-name-directory target) t)))
+         (temporary (make-temp-file (concat target "."))))
     (unwind-protect
         (progn
           (set-file-modes temporary #o600)
-          (write-region (format "http://127.0.0.1:%d\n%s\n%d\n"
-                                (process-contact lispm-mcp-server--process :service)
-                                lispm-mcp-server--token (emacs-pid))
-                        nil temporary nil 'silent)
+          (write-region (concat (string-join lines "\n") "\n") nil temporary nil 'silent)
           ;; Readers see the complete old descriptor or the complete new one.
-          (rename-file temporary file t))
+          (rename-file temporary target t))
       (when (file-exists-p temporary) (delete-file temporary)))))
+
+(defun lispm-mcp-server--announce ()
+  "Name the server in `lispm-mcp-server-file', readable by its owner only."
+  (lispm-mcp-server--write-descriptor
+   (or lispm-mcp-server--owned-file lispm-mcp-server-file)
+   (list (format "http://127.0.0.1:%d" (process-contact lispm-mcp-server--process :service))
+         lispm-mcp-server--token
+         (number-to-string (emacs-pid)))))
+
+(defun lispm-mcp-server--announce-instance ()
+  "Publish this Emacs's endpoint descriptor into the multi-instance registry."
+  (let* ((dir (lispm-mcp-server-registry-directory))
+         (short (substring lispm-mcp-server--token 0 (min 8 (length lispm-mcp-server--token))))
+         (file (expand-file-name (format "%d-%s.server" (emacs-pid) short) dir))
+         (root (directory-file-name (or (ignore-errors (file-truename default-directory))
+                                        (expand-file-name default-directory)))))
+    (lispm-mcp-server--write-descriptor
+     file
+     (list (format "http://127.0.0.1:%d" (process-contact lispm-mcp-server--process :service))
+           lispm-mcp-server--token
+           (number-to-string (emacs-pid))
+           root))
+    (setq lispm-mcp-server--instance-file file)))
+
+(defun lispm-mcp-server-prune-stale ()
+  "Remove stale per-instance server descriptors whose Emacs exited.
+Return the number of stale descriptors removed."
+  (let ((dir (lispm-mcp-server-registry-directory))
+        (pruned 0))
+    (when (file-directory-p dir)
+      (dolist (file (directory-files dir t "\\.server\\'" t))
+        (let* ((lines (lispm-mcp-server--read-descriptor file))
+               (pid (string-to-number (or (nth 2 lines) ""))))
+          (unless (and (nth 0 lines) (nth 1 lines) (lispm-mcp-server--pid-alive-p pid))
+            (ignore-errors (delete-file file))
+            (cl-incf pruned)))))
+    pruned))
+
+(defun lispm-mcp-server-list (&optional prune)
+  "Return live standing MCP server descriptors as plists.
+When PRUNE is non-nil, remove stale descriptors first."
+  (when prune
+    (lispm-mcp-server-prune-stale))
+  (let ((dir (lispm-mcp-server-registry-directory))
+        entries)
+    (when (file-directory-p dir)
+      (dolist (file (sort (directory-files dir t "\\.server\\'" t) #'string<))
+        (let* ((lines (lispm-mcp-server--read-descriptor file))
+               (url (nth 0 lines))
+               (token (nth 1 lines))
+               (pid (string-to-number (or (nth 2 lines) "")))
+               (root (nth 3 lines)))
+          (when (and url token (lispm-mcp-server--pid-alive-p pid))
+            (push (list :file file :url url :token token :pid pid :root root)
+                  entries)))))
+    (nreverse entries)))
+
+(defun lispm-mcp-server-for-directory (directory)
+  "Return the best live standing MCP server descriptor for DIRECTORY, or nil.
+Prefers the server with the longest matching root prefix, falling back to
+the primary descriptor or the first live registered server."
+  (let* ((dir (file-name-as-directory (expand-file-name directory)))
+         (canon (or (ignore-errors (file-name-as-directory (file-truename dir))) dir))
+         (entries (lispm-mcp-server-list nil))
+         best
+         (best-len 0))
+    (dolist (entry entries)
+      (when-let* ((root (plist-get entry :root))
+                  (rdir (file-name-as-directory (expand-file-name root)))
+                  (rcanon (or (ignore-errors (file-name-as-directory (file-truename rdir))) rdir)))
+        (when (and (or (equal canon rcanon)
+                       (file-in-directory-p canon rcanon)
+                       (equal dir rdir)
+                       (file-in-directory-p dir rdir))
+                   (> (length rcanon) best-len))
+          (setq best entry
+                best-len (length rcanon)))))
+    (or best
+        (when-let* ((lines (lispm-mcp-server--read-file))
+                    (url (nth 0 lines))
+                    (token (nth 1 lines))
+                    (pid (string-to-number (or (nth 2 lines) "")))
+                    ((lispm-mcp-server--pid-alive-p pid)))
+          (list :file (expand-file-name lispm-mcp-server-file)
+                :url url :token token :pid pid :root nil))
+        (car entries))))
 
 (defun lispm-mcp-server--claim ()
   "Claim descriptor ownership atomically, returning nil when already held.
@@ -418,31 +533,57 @@ Use a dedicated name, so visiting the descriptor cannot release this lock."
       (setq lispm-mcp-server--owned-file file)
       t)))
 
+(defun lispm-mcp-server--launch ()
+  "Create the server HTTP listener, token, and shutdown hook."
+  (setq lispm-mcp-server--token (lispm-agents-uuid)
+        lispm-mcp-server--process (lispm-local-http-serve "lispm-mcp-server"
+                                                        #'lispm-mcp-server--authorized-p
+                                                        #'lispm-mcp-server--respond))
+  (add-hook 'kill-emacs-hook #'lispm-mcp-server--stop))
+
 (defun lispm-mcp-server--start ()
-  "Start the server and name it in `lispm-mcp-server-file'.
-Return non-nil if it started: it does not while another Emacs serves."
-  (when (lispm-mcp-server--claim)
+  "Start the server and advertise its endpoint.
+In multi-instance mode, registers in `lispm-mcp-server-directory' and also
+claims `lispm-mcp-server-file' if unheld.  In single-instance mode, only one
+Emacs serves."
+  (if (not lispm-mcp-server-multi-instance)
+      (when (lispm-mcp-server--claim)
+        (let (started)
+          (unwind-protect
+              ;; Also respect a running server from before ownership locks existed.
+              (if-let* ((holder (lispm-mcp-server-holder)))
+                  (message "%s" (lispm-tr "LispM: Emacs %d serves agents outside LispM; this one serves none"
+                                           holder))
+                (lispm-mcp-server--launch)
+                (lispm-mcp-server--announce)
+                (setq started t))
+            (unless started (lispm-mcp-server--stop)))
+          started))
     (let (started)
       (unwind-protect
-          ;; Also respect a running server from before ownership locks existed.
-          (if-let* ((holder (lispm-mcp-server-holder)))
-              (message "%s" (lispm-tr "LispM: Emacs %d serves agents outside LispM; this one serves none"
-                                       holder))
-            (setq lispm-mcp-server--token (lispm-agents-uuid)
-                  lispm-mcp-server--process (lispm-local-http-serve "lispm-mcp-server"
-                                                                  #'lispm-mcp-server--authorized-p
-                                                                  #'lispm-mcp-server--respond))
-            (lispm-mcp-server--announce)
-            (add-hook 'kill-emacs-hook #'lispm-mcp-server--stop)
+          (progn
+            (lispm-mcp-server-prune-stale)
+            (lispm-mcp-server--launch)
+            (lispm-mcp-server--announce-instance)
+            (when (condition-case nil (lispm-mcp-server--claim) (error nil))
+              (if (lispm-mcp-server-holder)
+                  (progn
+                    (unlock-file (concat lispm-mcp-server--owned-file ".owner"))
+                    (setq lispm-mcp-server--owned-file nil))
+                (lispm-mcp-server--announce)))
             (setq started t))
         (unless started (lispm-mcp-server--stop)))
       started)))
 
 (defun lispm-mcp-server--stop ()
-  "Stop the server, end its sessions, and delete `lispm-mcp-server-file'
-if it still names this server."
+  "Stop the server, end its sessions, and remove its server descriptors."
   (unwind-protect
       (maphash #'lispm-mcp-server--close lispm-mcp-server--sessions)
+    (when lispm-mcp-server--instance-file
+      (condition-case nil
+          (delete-file lispm-mcp-server--instance-file)
+        (file-error nil))
+      (setq lispm-mcp-server--instance-file nil))
     (when lispm-mcp-server--process
       (let ((lispm-mcp-server-file (or lispm-mcp-server--owned-file lispm-mcp-server-file)))
         (when (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token)

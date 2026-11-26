@@ -9,7 +9,7 @@ LISPM_KERNEL ?= ../lispm-kernel
 # The sources, in lisp/, in strict dependency layer order (Layers 0 -> 4).
 ELS = $(addprefix lisp/, \
       lispm-i18n.el lispm-exec.el lispm-local-http.el lispm-websocket.el lispm-agents-context.el \
-      lispm-util.el lispm-secrets.el lispm-core.el lispm-job.el lispm-sandbox.el lispm-services.el \
+      lispm-util.el lispm-secrets.el lispm-core.el lispm-workspace.el lispm-job.el lispm-sandbox.el lispm-services.el \
       lispm-roles.el lispm-media.el lispm-transcript.el lispm-anthropic.el lispm-openai.el lispm-api.el \
       lispm-deftool-macros.el lispm-agents-core.el lispm-agents-sessions.el lispm-agents-terminals.el \
       lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el \
@@ -65,6 +65,7 @@ test: deps
 	  -l test/lispm-mcp-lifecycle-test.el -l test/lispm-security-test.el \
 	  -l test/lispm-correctness-test.el -l test/lispm-basis-test.el -l test/lispm-unify-test.el \
 	  -l test/lispm-layers-test.el -l test/lispm-concurrency-test.el -l test/lispm-persistence-test.el -l test/lispm-office-test.el \
+	  -l test/lispm-workspace-test.el \
 	  -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
 	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'

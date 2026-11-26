@@ -256,9 +256,26 @@ is given up: the session goes on."
     (lispm-journal-begin agent))
   (lispm-turns-request agent))
 
+(defun lispm-turns-wake-waiting (agent &optional turn steps)
+  "Resume AGENT's waiting model request for TURN and STEPS, if still current."
+  (when (and (lispm-agent-p agent)
+             (buffer-live-p (lispm-agent-buffer agent))
+             (eq (lispm-agent-state agent) 'requesting)
+             (eq (lispm-agent-activity agent) 'waiting)
+             (or (null turn) (eql turn (lispm-agent-turn agent)))
+             (or (null steps) (eql steps (lispm-agent-steps agent))))
+    (lispm-turns-request agent)))
+
 (defun lispm--journal-wait (agent)
-  "What AGENT's request waits for, if a snapshot of its project is being taken."
-  (and (lispm-journal-busy-p agent) "taking a snapshot of the project"))
+  "What AGENT's request waits for, if a snapshot of its project is being taken.
+Registers an event-driven readiness callback and returns `(event . DESC)'
+so `lispm-turns-request' avoids polling."
+  (when (lispm-journal-busy-p agent)
+    (let ((turn (lispm-agent-turn agent))
+          (steps (lispm-agent-steps agent)))
+      (lispm-journal-on-ready
+       agent (lambda () (lispm-turns-wake-waiting agent turn steps))))
+    (cons 'event "taking a snapshot of the project")))
 
 (add-hook 'lispm-request-wait-functions #'lispm--journal-wait)
 
@@ -417,15 +434,13 @@ starting hold requests back so that their tools are there.")
    ((not (buffer-live-p (lispm-agent-buffer agent)))
     (lispm-set-state agent 'idle "session buffer was killed"))
    ((when-let* ((waiting (run-hook-with-args-until-success 'lispm-request-wait-functions agent)))
-      (lispm-set-state agent 'requesting waiting 'waiting)
-      (let ((turn (lispm-agent-turn agent))
-            (steps (lispm-agent-steps agent)))
-        (run-at-time 0.2 nil (lambda ()
-                               ;; Unless the turn was stopped meanwhile.
-                               (when (and (eq (lispm-agent-state agent) 'requesting)
-                                          (eql turn (lispm-agent-turn agent))
-                                          (eql steps (lispm-agent-steps agent)))
-                                 (lispm-turns-request agent)))))
+      (let* ((event-p (and (consp waiting) (eq (car waiting) 'event)))
+             (reason (if event-p (cdr waiting) waiting))
+             (turn (lispm-agent-turn agent))
+             (steps (lispm-agent-steps agent)))
+        (lispm-set-state agent 'requesting reason 'waiting)
+        (unless event-p
+          (run-at-time 0.2 nil #'lispm-turns-wake-waiting agent turn steps)))
       t))
    ((>= (lispm-agent-steps agent) lispm-max-steps)
     (funcall lispm-runtime-signal-function agent 'step-limit

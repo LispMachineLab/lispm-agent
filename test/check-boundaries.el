@@ -26,7 +26,7 @@
 (defconst lispm-boundaries-layers
   '((0 . ("lispm-i18n" "lispm-exec" "lispm-local-http" "lispm-websocket"
           "lispm-agents-context"))
-    (1 . ("lispm-util" "lispm-secrets" "lispm-core" "lispm-job" "lispm-sandbox"
+    (1 . ("lispm-util" "lispm-secrets" "lispm-core" "lispm-workspace" "lispm-job" "lispm-sandbox"
           "lispm-services" "lispm-roles" "lispm-media" "lispm-transcript"
           "lispm-anthropic" "lispm-openai" "lispm-api"
           "lispm-deftool-macros" "lispm-agents-core" "lispm-agents-sessions"

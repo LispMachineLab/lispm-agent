@@ -122,6 +122,7 @@ BODY can use `project', a scratch directory for agents to work in."
           (lispm--idle-work (make-hash-table :test #'equal))
           (lispm-memory--recall-stats (make-hash-table :test #'equal))
           (lispm-git--partitions (make-hash-table :test #'equal))
+          (lispm-workspace--registry (make-hash-table :test #'equal))
           ;; Run from git (a hook, rebase -x), the tests' git commands
           ;; would act on that repository rather than on their own.
           (process-environment (lispm-git-environment)))
@@ -6363,7 +6364,7 @@ is one badly named; interactively, it asks first."
                        "## Shared\nOne project."))))))
 
 (ert-deftest lispm-test-worktree-skill ()
-  "worktree_ask starts a helper in a worktree of its own; its work stays there until merged."
+  "worktree_ask starts a helper in a worktree asynchronously; replies arrive via inbox."
   (skip-unless (executable-find "git"))
   (lispm-test-env
     (lispm-defrole coder "Writes code." :policy '((write . auto)))
@@ -6380,12 +6381,15 @@ is one badly named; interactively, it asks first."
            (branch-p (lambda (name)
                        (not (string-empty-p (lispm-test--git project "branch" "--list"
                                                              (concat "lispm/" name)))))))
-      (should (string-match-p "tools now available: worktree_ask, worktree_list, worktree_remove"
+      (should (string-match-p "tools now available: worktree_ask, worktree_list, worktree_reconcile, worktree_remove"
                               (car (lispm-test--call boss "skill" '((name . "worktree"))))))
       (unwind-protect
           (let ((lispm-worktree-directory trees))
             (setq lispm-test--scripts
-                  `((coder@x ,(lispm-test--msg "tool_use"
+                  `((boss ,(lispm-test--msg "end_turn" (lispm-test--text "Noted x."))
+                          ,(lispm-test--msg "end_turn" (lispm-test--text "Noted y."))
+                          ,(lispm-test--msg "end_turn" (lispm-test--text "Noted z.")))
+                    (coder@x ,(lispm-test--msg "tool_use"
                                                (lispm-test--tool "c1" "write_file"
                                                                  '((why . "asked to") (path . "x.txt")
                                                                    (content . "from x\n"))))
@@ -6400,18 +6404,25 @@ is one badly named; interactively, it asks first."
                                 (lispm-test--git (funcall tree "z") "add" ".")
                                 (lispm-test--git (funcall tree "z") "commit" "-q" "-m" "Add z")
                                 (lispm-test--msg "end_turn" (lispm-test--text "Committed."))))))
-            ;; Work left uncommitted stays in the worktree, apart from the project.
+            ;; worktree_ask returns acceptance immediately; reply arrives in boss's inbox.
             (let ((result (funcall call "worktree_ask" '((why . "apart") (role . "coder")
                                                          (request . "Write x.txt") (name . "x")))))
               (should-not (cdr result))
-              (should (string-match-p
-                       (concat "\\`coder@x replied:\nWrote x\\.txt\\.\n\nIts work is in the worktree "
-                               ".*/worktrees/project/x/, on the branch lispm/x, made from [0-9a-f]\\{7\\}\\.\n"
-                               "Uncommitted:\n\\?\\? x\\.txt\n")
-                       (car result))))
+              (should (string-match-p "\\`Request q[^ ]+ accepted by coder@x" (car result)))
+              (should-not (lispm-agent-waiting-on boss)))
+            (should (lispm-test--wait
+                     (lambda ()
+                       (and (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss))
+                            (funcall (lispm-test--idle-p boss))
+                            (string-match-p "coder@x replied:" (lispm-test--transcript boss))))
+                     10))
+            (should (string-match-p
+                     (concat "coder@x replied:\nWrote x\\.txt\\.\n\nIts work is in the worktree "
+                             ".*/worktrees/project/x/, on the branch lispm/x, made from [0-9a-f]\\{7\\}\\.\n"
+                             "Uncommitted:\n\\?\\? x\\.txt\n")
+                     (lispm-test--transcript boss)))
             (should (equal (lispm-test--file (funcall tree "x") "x.txt") "from x\n"))
             (should-not (file-exists-p (expand-file-name "x.txt" project)))
-            (should (lispm-test--wait (lambda () (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss)))))
             (let ((helper (seq-find (lambda (body) (eq (lispm-test--agent-name body) 'coder@x))
                                     lispm-test--requests)))
               (should (string-match-p "You work in a git worktree of your own, .*/x/, on the branch lispm/x, made from HEAD"
@@ -6431,20 +6442,40 @@ is one badly named; interactively, it asks first."
             (should-not (file-exists-p (funcall tree "x")))
             (should-not (funcall branch-p "x"))
             ;; A helper that changed nothing leaves nothing behind.
-            (should (equal (funcall call "worktree_ask" '((why . "apart") (role . "coder")
-                                                          (request . "Check y") (name . "y")))
-                           (cons (concat "coder@y replied:\nNothing to do.\n\n"
-                                         "It changed nothing, so its worktree and branch are removed.")
-                                 nil)))
+            (let ((result (funcall call "worktree_ask" '((why . "apart") (role . "coder")
+                                                         (request . "Check y") (name . "y")))))
+              (should-not (cdr result))
+              (should (string-match-p "\\`Request q[^ ]+ accepted by coder@y" (car result))))
+            (should (lispm-test--wait
+                     (lambda ()
+                       (and (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss))
+                            (funcall (lispm-test--idle-p boss))
+                            (string-match-p "coder@y replied:" (lispm-test--transcript boss))))
+                     10))
+            (should (string-match-p
+                     (concat "coder@y replied:\nNothing to do\\.\n\n"
+                             "It changed nothing, so its worktree and branch are removed\\.")
+                     (lispm-test--transcript boss)))
             (should-not (file-exists-p (funcall tree "y")))
             (should-not (funcall branch-p "y"))
             ;; Committed work is merged from its branch, which then goes with its worktree.
             (let ((result (funcall call "worktree_ask" '((why . "apart") (role . "coder")
                                                          (request . "Write z.txt") (name . "z")))))
+              (should-not (cdr result))
+              (should (string-match-p "\\`Request q[^ ]+ accepted by coder@z" (car result))))
+            (should (lispm-test--wait
+                     (lambda ()
+                       (and (equal (mapcar #'lispm-agent-name (lispm-agents)) '(boss))
+                            (funcall (lispm-test--idle-p boss))
+                            (string-match-p "coder@z replied:" (lispm-test--transcript boss))))
+                     10))
+            (let* ((transcript (lispm-test--transcript boss))
+                   (start (string-match "coder@z replied:" transcript))
+                   (reply (substring transcript start)))
               (should (string-match-p
                        "\nCommits:\n[0-9a-f]+ Add z\nChanges from [0-9a-f]\\{7\\}:\n z\\.txt | 1 \\+\n"
-                       (car result)))
-              (should-not (string-match-p "Uncommitted" (car result))))
+                       reply))
+              (should-not (string-match-p "Uncommitted" reply)))
             (lispm-test--git project "merge" "-q" "--ff-only" "lispm/z")
             (should (equal (lispm-test--file project "z.txt") "from z\n"))
             (should (string-match-p "\\`Removed the worktree .*/z/ and its branch lispm/z\\.\\'"
@@ -6465,7 +6496,7 @@ is one badly named; interactively, it asks first."
                                       (car (funcall call "worktree_ask" '((why . "w") (role . "coder")
                                                                           (request . "r"))
                                                     (lispm-defagent plain :root plain)))))))
-        (dolist (name '("worktree_ask" "worktree_list" "worktree_remove"))
+        (dolist (name '("worktree_ask" "worktree_list" "worktree_remove" "worktree_reconcile"))
           (remhash name lispm-tools--registry))))))
 
 (ert-deftest lispm-test-compaction ()
@@ -12081,6 +12112,9 @@ running, named in a file of the test's own; `port' and `token' are its."
   (declare (indent 0))
   `(lispm-test-env
      (let ((lispm-mcp-server-file (expand-file-name "mcp-server" tmp))
+           (lispm-mcp-server-directory nil)
+           (lispm-mcp-server--owned-file nil)
+           (lispm-mcp-server--instance-file nil)
            (lispm-mcp-server--sessions (make-hash-table :test #'equal))
            (lispm-mcp-server--process nil)
            (lispm-mcp-server--token nil)
@@ -12203,6 +12237,10 @@ server while it runs; one coming after serves none, a batch Emacs none
 of its own accord, and an Emacs stopping leaves a file another wrote."
   (lispm-test-env
     (let ((lispm-mcp-server-file (expand-file-name "mcp-server" tmp))
+          (lispm-mcp-server-directory nil)
+          (lispm-mcp-server-multi-instance nil)
+          (lispm-mcp-server--owned-file nil)
+          (lispm-mcp-server--instance-file nil)
           (lispm-mcp-server--sessions (make-hash-table :test #'equal))
           (lispm-mcp-server--process nil)
           (lispm-mcp-server--token nil)

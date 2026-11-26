@@ -14,7 +14,9 @@
   (declare (indent 0))
   `(lispm-test-env
      (let ((lispm-mcp-server-file (expand-file-name "mcp-server" tmp))
+           (lispm-mcp-server-directory nil)
            (lispm-mcp-server--owned-file nil)
+           (lispm-mcp-server--instance-file nil)
            (lispm-mcp-server--process nil)
            (lispm-mcp-server--token nil)
            (lispm-mcp-server--sessions (make-hash-table :test #'equal))
@@ -180,30 +182,44 @@
   (lispm-mcp-lifecycle-test--env
     (let ((old "http://127.0.0.1:1\nstale\n0\n")
           (rename (symbol-function 'rename-file))
-          (announced nil))
+          (announced nil)
+          (instance-announced nil))
       (with-temp-file lispm-mcp-server-file (insert old))
       (cl-letf (((symbol-function 'rename-file)
                  (lambda (from to &optional replace)
-                   (should (equal (with-temp-buffer (insert-file-contents to) (buffer-string)) old))
                    (should (= (file-modes from) #o600))
-                   (should (= (length (with-temp-buffer
-                                       (insert-file-contents from)
-                                       (split-string (buffer-string) "\n" t))) 3))
-                   (setq announced t)
+                   (cond
+                    ((equal to lispm-mcp-server-file)
+                     (should (equal (with-temp-buffer (insert-file-contents to) (buffer-string)) old))
+                     (should (= (length (with-temp-buffer
+                                          (insert-file-contents from)
+                                          (split-string (buffer-string) "\n" t))) 3))
+                     (setq announced t))
+                    ((file-in-directory-p to (lispm-mcp-server-registry-directory))
+                     (should (= (length (with-temp-buffer
+                                          (insert-file-contents from)
+                                          (split-string (buffer-string) "\n" t))) 4))
+                     (setq instance-announced t)))
                    (funcall rename from to replace))))
         (should (lispm-mcp-server--start)))
       (should announced)
+      (should instance-announced)
+      (should (file-exists-p lispm-mcp-server--instance-file))
       (lispm-mcp-server--stop)
+      (should (null (directory-files (lispm-mcp-server-registry-directory) nil "\\.server\\'")))
       (cl-letf (((symbol-function 'lispm-mcp-server--announce)
                  (lambda () (error "Publication failed"))))
         (should-error (lispm-mcp-server--start)))
       (should-not lispm-mcp-server--process)
       (should-not lispm-mcp-server--owned-file)
+      (should-not lispm-mcp-server--instance-file)
+      (should (null (directory-files (lispm-mcp-server-registry-directory) nil "\\.server\\'")))
       (should-not (file-locked-p (concat lispm-mcp-server-file ".owner")))
       (should (lispm-mcp-server--start)))))
 
-(defun lispm-mcp-lifecycle-test--child (directory file index)
-  "Start a batch Emacs INDEX competing for FILE, synchronized in DIRECTORY."
+(defun lispm-mcp-lifecycle-test--child (directory file index &optional multi workdir)
+  "Start a batch Emacs INDEX with descriptor FILE, synchronized in DIRECTORY.
+When MULTI is non-nil, run in multi-instance mode in WORKDIR."
   (let* ((script (expand-file-name (format "child-%d.el" index) directory))
          (ready (expand-file-name (format "ready-%d" index) directory))
          (result (expand-file-name (format "result-%d" index) directory))
@@ -213,13 +229,22 @@
       (prin1 `(progn
                 (setq load-path ',load-path)
                 (require 'lispm)
-                (setq lispm-mcp-server-file ,file create-lockfiles nil)
+                (setq lispm-mcp-server-file ,file
+                      lispm-mcp-server-multi-instance ,multi
+                      create-lockfiles nil)
+                (when ,workdir
+                  (setq default-directory ,workdir))
                 (with-temp-file ,ready (insert "ready"))
                 (while (not (file-exists-p ,gate)) (sleep-for 0.01))
                 (unwind-protect
                     (progn
                       (let ((started (lispm-mcp-server--start)))
-                        (with-temp-file ,result (prin1 started (current-buffer))))
+                        (with-temp-file ,result
+                          (prin1 (list started
+                                       (and lispm-mcp-server--process
+                                            (process-contact lispm-mcp-server--process :service))
+                                       lispm-mcp-server--instance-file)
+                                 (current-buffer))))
                       (while (not (file-exists-p ,release)) (sleep-for 0.01)))
                   (lispm-mcp-server--stop)))
              (current-buffer)))
@@ -229,13 +254,14 @@
                   :buffer (get-buffer-create (format " *lispm-owner-test-%d*" index)))))
 
 (ert-deftest lispm-mcp-lifecycle-test-concurrent-and-stale-owner ()
-  "Two simultaneous Emacsen elect one owner; a crashed owner's lock is recovered."
+  "Two simultaneous Emacsen in single-instance mode elect one owner."
   (lispm-mcp-lifecycle-test--env
-    (let ((children nil))
+    (let ((children nil)
+          (lispm-mcp-server-multi-instance nil))
       (unwind-protect
           (progn
             (dotimes (index 2)
-              (push (lispm-mcp-lifecycle-test--child tmp lispm-mcp-server-file index) children))
+              (push (lispm-mcp-lifecycle-test--child tmp lispm-mcp-server-file index nil) children))
             (should (lispm-test--wait
                      (lambda () (and (file-exists-p (expand-file-name "ready-0" tmp))
                                      (file-exists-p (expand-file-name "ready-1" tmp)))) 15))
@@ -244,9 +270,9 @@
                      (lambda () (and (file-exists-p (expand-file-name "result-0" tmp))
                                      (file-exists-p (expand-file-name "result-1" tmp)))) 15))
             (let ((results (mapcar (lambda (index)
-                                    (with-temp-buffer
-                                      (insert-file-contents (expand-file-name (format "result-%d" index) tmp))
-                                      (read (current-buffer)))) '(0 1))))
+                                    (car (with-temp-buffer
+                                           (insert-file-contents (expand-file-name (format "result-%d" index) tmp))
+                                           (read (current-buffer))))) '(0 1))))
               (should (= (cl-count t results) 1))
               (should (= (cl-count nil results) 1)))
             (let* ((descriptor (lispm-mcp-server--read-file))
@@ -264,6 +290,63 @@
             (with-temp-file (expand-file-name "release" tmp) (insert "release"))
             (should (lispm-test--wait (lambda () (not (seq-some #'process-live-p children)))))
             (should (equal (nth 1 (lispm-mcp-server--read-file)) lispm-mcp-server--token)))
+        (dolist (process children)
+          (when (process-live-p process) (delete-process process))
+          (when (buffer-live-p (process-buffer process)) (kill-buffer (process-buffer process))))))))
+
+(ert-deftest lispm-mcp-lifecycle-test-multi-instance-coexistence ()
+  "Multiple concurrent Emacsen serve on distinct ports and prune stale descriptors."
+  (lispm-mcp-lifecycle-test--env
+    (let ((dir0 (file-name-as-directory (expand-file-name "ws-a/" tmp)))
+          (dir1 (file-name-as-directory (expand-file-name "ws-b/" tmp)))
+          (children nil))
+      (make-directory dir0 t)
+      (make-directory dir1 t)
+      (unwind-protect
+          (progn
+            (push (lispm-mcp-lifecycle-test--child tmp lispm-mcp-server-file 0 t dir0) children)
+            (push (lispm-mcp-lifecycle-test--child tmp lispm-mcp-server-file 1 t dir1) children)
+            (should (lispm-test--wait
+                     (lambda () (and (file-exists-p (expand-file-name "ready-0" tmp))
+                                     (file-exists-p (expand-file-name "ready-1" tmp)))) 15))
+            (with-temp-file (expand-file-name "go" tmp) (insert "go"))
+            (should (lispm-test--wait
+                     (lambda () (and (file-exists-p (expand-file-name "result-0" tmp))
+                                     (file-exists-p (expand-file-name "result-1" tmp)))) 15))
+            (let* ((r0 (with-temp-buffer
+                         (insert-file-contents (expand-file-name "result-0" tmp))
+                         (read (current-buffer))))
+                   (r1 (with-temp-buffer
+                         (insert-file-contents (expand-file-name "result-1" tmp))
+                         (read (current-buffer))))
+                   (entries (lispm-mcp-server-list)))
+              ;; Both instances started and listen on different ephemeral ports.
+              (should (eq (nth 0 r0) t))
+              (should (eq (nth 0 r1) t))
+              (should (integerp (nth 1 r0)))
+              (should (integerp (nth 1 r1)))
+              (should-not (= (nth 1 r0) (nth 1 r1)))
+              (should (= (length entries) 2))
+              (dolist (entry entries)
+                (should (= (file-modes (plist-get entry :file)) #o600)))
+              ;; Directory-based lookup selects the exact instance.
+              (let ((match0 (lispm-mcp-server-for-directory (expand-file-name "sub/" dir0)))
+                    (match1 (lispm-mcp-server-for-directory (expand-file-name "sub/" dir1))))
+                (should (equal (plist-get match0 :file) (nth 2 r0)))
+                (should (equal (plist-get match1 :file) (nth 2 r1))))
+              ;; Crashing child 0 leaves a stale .server descriptor; prune removes only child 0.
+              (let* ((pid0 (plist-get (lispm-mcp-server-for-directory dir0) :pid))
+                     (proc0 (seq-find (lambda (p) (= (process-id p) pid0)) children)))
+                (should proc0)
+                (signal-process pid0 9)
+                (should (lispm-test--wait (lambda () (not (process-live-p proc0)))))
+                (should (= (lispm-mcp-server-prune-stale) 1))
+                (let ((remaining (lispm-mcp-server-list)))
+                  (should (= (length remaining) 1))
+                  (should (equal (plist-get (car remaining) :file) (nth 2 r1))))))
+            (with-temp-file (expand-file-name "release" tmp) (insert "release"))
+            (should (lispm-test--wait (lambda () (not (seq-some #'process-live-p children)))))
+            (should (null (lispm-mcp-server-list))))
         (dolist (process children)
           (when (process-live-p process) (delete-process process))
           (when (buffer-live-p (process-buffer process)) (kill-buffer (process-buffer process))))))))

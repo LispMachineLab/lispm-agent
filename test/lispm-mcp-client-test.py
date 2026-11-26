@@ -211,6 +211,50 @@ class ClientTest(unittest.TestCase):
         self.assert_stopped(2)
         self.assertFalse(self.deleted.is_set())
 
+    def test_multi_instance_registry_selects_longest_matching_root(self):
+        servers_dir = self.root / "mcp-servers"
+        servers_dir.mkdir()
+        ws_root = self.root / "ws-target"
+        nested = ws_root / "sub"
+        nested.mkdir(parents=True)
+        # Stale dead-PID descriptor for the same workspace must be ignored.
+        (servers_dir / "999999-stale.server").write_text(
+            f"http://127.0.0.1:1\nwrong-token\n999999\n{ws_root.resolve()}\n"
+        )
+        # Live descriptor for a broader parent path vs exact workspace root.
+        (servers_dir / f"{os.getpid()}-parent.server").write_text(
+            f"http://127.0.0.1:1\nparent-token\n{os.getpid()}\n{self.root.resolve()}\n"
+        )
+        (servers_dir / f"{os.getpid()}-exact.server").write_text(
+            f"http://127.0.0.1:{self.server.server_port}\n{self.token}\n{os.getpid()}\n{ws_root.resolve()}\n"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "LISPM_MCP_SERVER"}
+        env["LISPM_MCP_SERVERS"] = str(servers_dir)
+        env["TMPDIR"] = str(self.root)
+        proc = subprocess.Popen(
+            [str(CLIENT)],
+            cwd=nested,
+            env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"clientInfo": {"name": "fixture"}},
+            }) + "\n")
+            proc.stdin.flush()
+            reply = json.loads(proc.stdout.readline())
+            self.assertEqual(reply["id"], 1)
+            proc.stdin.close()
+            self.assertEqual(proc.wait(timeout=4), 0, proc.stderr.read())
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=3)
+            for s in (proc.stdin, proc.stdout, proc.stderr):
+                s.close()
+
 
 if __name__ == "__main__":
     unittest.main()
