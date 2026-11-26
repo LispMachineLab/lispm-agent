@@ -528,8 +528,13 @@ around it either: that would leave the call without a result."
       (when pending
         (setq quit-flag pending)))))
 
-(defun lispm-tool-call-class (tool input)
-  "Return the effective permission class of calling TOOL on INPUT."
+(defun lispm-tool-call-permission (tool input)
+  "The class of TOOL's call on INPUT: the tool's, unless the call does less.
+A tool with a class function (`:class' in `lispm-deftool') has it say
+which class the call belongs to, as run_shell says `read' of a command
+that only reads (see `lispm-shell-read-only-p'); the policy then
+decides the call as it decides that class.  A function that answers
+nil, or fails, leaves the call in the tool's class."
   (or (when-let* ((class (lispm-tool-class tool)))
         (condition-case nil
             (apply class (lispm-tools-arguments tool input))
@@ -550,7 +555,7 @@ must not leave half done, so quitting is inhibited meanwhile."
   (let ((inhibit-quit t))
     (when (and agent
                (not (memq (lispm-tool-permission tool) lispm-tools--still-permissions))
-               (not (eq (lispm-tool-call-class tool input) 'read)))
+               (not (eq (lispm-tool-call-permission tool input) 'read)))
       (with-demoted-errors "LispM: forgetting remote file attributes: %S"
         (lispm-tools--flush-remote (lispm-principal-root agent)))
       (when lispm-revert-after-calls
@@ -558,8 +563,8 @@ must not leave half done, so quitting is inhibited meanwhile."
         (let* ((lispm-current-agent agent)
                (lispm-tools--revert-paths
                 (when (eq (lispm-tool-permission tool) 'write)
-                  (or (seq-filter #'stringp (lispm-tool-call-resources tool input))
-                      'none))))
+                  (when-let* ((resources (lispm-tool-call-resources tool input)))
+                    (or (seq-filter #'stringp resources) 'none)))))
           (condition-case err
               (lispm-tools-interruptibly #'lispm-tools--revert-changed
                                           (list (lispm-principal-root agent)))

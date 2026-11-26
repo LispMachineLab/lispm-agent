@@ -728,11 +728,14 @@ BAR, if non-nil, is a cursor at its end."
                   (cons (cons agent (float-time))
                         (assq-delete-all agent lispm-edits--seen))))
         ;; A buffer made only to show a change that was not made.
-        (when (and (lispm-edits--proposal-created p)
-                   (not (buffer-modified-p buffer))
-                   (not (and (buffer-file-name buffer)
-                             (file-exists-p (buffer-file-name buffer)))))
-          (kill-buffer buffer))))))
+        (when (lispm-edits--proposal-created p)
+          (if-let* ((other (seq-find (lambda (q) (eq (lispm-edits--proposal-buffer q) buffer))
+                                     lispm-edits--proposals)))
+              (setf (lispm-edits--proposal-created other) t)
+            (when (and (not (buffer-modified-p buffer))
+                       (not (and (buffer-file-name buffer)
+                                 (file-exists-p (buffer-file-name buffer)))))
+              (kill-buffer buffer))))))))
 
 (defun lispm-edits--update (agent)
   "Bring the proposals of AGENT's calls up to date with the calls."

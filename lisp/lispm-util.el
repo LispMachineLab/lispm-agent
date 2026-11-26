@@ -328,8 +328,25 @@ file inside TEMP-DIR instead of FILE's parent directory."
                   (inhibit-message t)
                   (lispm-inhibit-triggers t))
               (write-region content nil tmp nil 'silent))
-            (rename-file tmp target t)
-            (setq renamed t)
+            (if (eq expected-hash :missing)
+                (condition-case nil
+                    (progn
+                      (add-name-to-file tmp target nil)
+                      (ignore-errors (delete-file tmp))
+                      (setq renamed t))
+                  (file-already-exists
+                   (error "CAS conflict on %s: file already exists"
+                          (abbreviate-file-name target)))
+                  (file-error
+                   (condition-case nil
+                       (progn
+                         (rename-file tmp target nil)
+                         (setq renamed t))
+                     (file-already-exists
+                      (error "CAS conflict on %s: file already exists"
+                             (abbreviate-file-name target))))))
+              (rename-file tmp target t)
+              (setq renamed t))
             target)
         (unless renamed
           (ignore-errors (delete-file tmp)))))))

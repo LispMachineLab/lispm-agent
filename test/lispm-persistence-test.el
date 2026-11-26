@@ -75,6 +75,14 @@
                                    (list :id "ext-1" :from "external" :text "do not clobber"))
               ;; Saving `standing' after an external enqueue must never delete `ext-1'.
               (lispm-inbox-save agent)
+              ;; Entries without pre-assigned :id get one and are not pruned on save.
+              (let ((anon (list :from "user" :text "anon msg")))
+                (setf (lispm-agent-inbox agent) (append (lispm-agent-inbox agent) (list anon)))
+                (lispm-inbox-save agent)
+                (lispm-inbox-save agent)
+                (should (plist-get anon :id))
+                (should (seq-find (lambda (e) (equal (plist-get e :id) (plist-get anon :id)))
+                                  (lispm-inbox-entries project))))
               (should (lispm-test--wait
                        (lambda ()
                          (and (not (process-live-p p1))
@@ -89,7 +97,21 @@
                 (should (= (length (delete-dups (copy-sequence shared-ids))) 60))
                 (should (seq-find (lambda (e) (equal (plist-get e :id) "owned-1")) all))
                 (should (seq-find (lambda (e) (equal (plist-get e :id) "ext-1")) all))
-                (should-not (file-exists-p (lispm-inbox-file project)))))
+                (should-not (file-exists-p (lispm-inbox-file project))))
+              ;; Crash-duplicate files in queued/ and running/ must not resurrect after completion.
+              (let ((sdir (lispm-inbox-directory project (lispm-agent-id agent))))
+                (lispm-inbox-enqueue project (lispm-agent-id agent) "standing"
+                                     '(:id "crash-dup" :from "u" :text "crash") 'queued)
+                (lispm-inbox-enqueue project (lispm-agent-id agent) "standing"
+                                     '(:id "crash-dup" :from "u" :text "crash") 'running)
+                (let ((taken (lispm-inbox-take agent)))
+                  (should (equal (plist-get (cdr taken) :id) "crash-dup"))
+                  (should-not (seq-find (lambda (e) (equal (plist-get e :id) "crash-dup"))
+                                        (car taken))))
+                (setf (lispm-agent-entry agent) nil)
+                (lispm-inbox-save agent)
+                (should-not (lispm-inbox--session-has-entry-p sdir "crash-dup"))
+                (should-not (equal (plist-get (cdr (lispm-inbox-take agent)) :id) "crash-dup"))))
           (dolist (p (list p1 p2))
             (when (process-live-p p) (delete-process p))
             (when (buffer-live-p (process-buffer p))
@@ -127,7 +149,12 @@
           (should (string-match-p "^\\* RUNNING User" exported))
           (should (string-match-p "please review" exported))
           (should-not (file-exists-p legacy)))
-        (should (= (length (lispm-inbox-sessions)) 2))))))
+        (should (= (length (lispm-inbox-sessions)) 2))
+        ;; Entry ID suffix matching must not confuse "bar-foo" with "foo".
+        (let ((sdir (lispm-inbox-directory project "s-suffix")))
+          (lispm-inbox-enqueue project "s-suffix" "coder" '(:id "bar-foo" :text "a"))
+          (should (lispm-inbox--session-has-entry-p sdir "bar-foo"))
+          (should-not (lispm-inbox--session-has-entry-p sdir "foo")))))))
 
 (ert-deftest lispm-persistence-test-memory-recall-zero-disk-writes-and-cas ()
   "Memory recall never writes disk; CAS protects memory updates against concurrent writers."
@@ -163,7 +190,27 @@
             (insert "* Stale loser\n")
             (lispm-write-file-atomic file external-text))))
         (should (equal (lispm-file-text file) external-text))
-        (should-not (buffer-modified-p cur-buf))))))
+        (should-not (buffer-modified-p cur-buf))
+        ;; Pre-existing unsaved edits survive CAS rollback, and early expected-hash catches races.
+        (with-current-buffer cur-buf
+          (let ((inhibit-message t))
+            (revert-buffer t t t))
+          (goto-char (point-max))
+          (insert "* User unsaved\n"))
+        (let ((pre-hash (lispm-file-sha256 file))
+              (raced-text "#+title: Raced\n* Raced\n"))
+          (lispm-write-file-atomic file raced-text)
+          (should-error
+           (lispm-memory-commit-buffer
+            cur-buf
+            (lambda ()
+              (goto-char (point-max))
+              (insert "* Agent edit\n"))
+            pre-hash))
+          (should (equal (lispm-test--disk file) raced-text))
+          (should (buffer-modified-p cur-buf))
+          (should (string-match-p "User unsaved"
+                                  (with-current-buffer cur-buf (buffer-string)))))))))
 
 (ert-deftest lispm-persistence-test-git-nonblocking-shutdown-and-partitioned-scope ()
   "Shutdown does not wait on slow Git processes; partitioned repos avoid index.lock."
@@ -209,7 +256,8 @@
           (delete-file lock)
           (should (lispm-test--wait #'lispm-git-settled-p 10))
           (let ((default-directory repo-a))
-            (should (string-match-p "A2" (shell-command-to-string "git log -1 --format=%s")))))))))
+            (should (string-match-p "A2" (shell-command-to-string "git log -1 --format=%s"))))
+          (should (= (hash-table-count lispm-git--partitions) 0)))))))
 
 (ert-deftest lispm-persistence-test-mvcc-cas-write-file-and-edit-file ()
   "Concurrent `write_file' / `edit_file' rejects stale writers via MVCC/CAS."
@@ -287,7 +335,13 @@
         (should (cdr rejected))
         (should (string-match-p "CAS conflict" (car rejected)))
         (should-not (file-exists-p (expand-file-name "no-orphan" project)))
-        (should-not (find-buffer-visiting orphan))))))
+        (should-not (find-buffer-visiting orphan)))
+      ;; Kernel-atomic `:missing' CAS rejects overwriting an existing file.
+      (let ((cas-file (expand-file-name "cas-create.txt" project)))
+        (lispm-test--write cas-file "keep")
+        (should-error (lispm-write-file-atomic cas-file "clobber" :missing))
+        (should (equal (lispm-test--file project "cas-create.txt") "keep"))
+        (should-not (directory-files project nil "\\`\\.tmp-"))))))
 
 (ert-deftest lispm-persistence-test-scoped-revert-and-isolated-edit-overlays ()
   "Sibling agent proposals prevent unrelated buffer reverts and isolate by `(buffer, agent, id)'."
@@ -332,7 +386,19 @@
         (setf (lispm-agent-state fake-a) 'idle
               (lispm-agent-state fake-b) 'idle)
         (lispm-edits--update fake-a)
-        (lispm-edits--update fake-b)))))
+        (lispm-edits--update fake-b)
+        ;; Two agents proposing the same nonexistent file: retiring A preserves buffer for B.
+        (let* ((shared-new (expand-file-name "shared-new.txt" project))
+               (wtool (lispm-get-tool "write_file"))
+               (winput '((path . "shared-new.txt") (content . "proposed\n"))))
+          (lispm-edits--propose fake-a "p-new-a" wtool winput nil)
+          (lispm-edits--propose fake-b "p-new-b" wtool winput nil)
+          (let ((shared-buf (find-buffer-visiting shared-new)))
+            (should (buffer-live-p shared-buf))
+            (lispm-edits--retire (lispm-edits--proposal "p-new-a" fake-a) nil)
+            (should (buffer-live-p shared-buf))
+            (lispm-edits--retire (lispm-edits--proposal "p-new-b" fake-b) nil)
+            (should-not (buffer-live-p shared-buf))))))))
 
 (provide 'lispm-persistence-test)
 ;;; lispm-persistence-test.el ends here

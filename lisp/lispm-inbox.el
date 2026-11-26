@@ -60,7 +60,7 @@ having been lost with Emacs.")
   "Monotonic per-process counter ordering inbox message files.")
 
 (defvar lispm-inbox--known (make-hash-table :test #'eq :weakness 'key)
-  "Agent -> hash table mapping persisted entry ID -> (STATE FILE HASH ORDER).")
+  "Agent -> hash table mapping persisted entry ID -> (STATE FILES HASH ORDER).")
 
 (defun lispm-inbox--safe-name (value)
   "Convert VALUE into a safe single path component string."
@@ -69,6 +69,14 @@ having been lost with Emacs.")
                     (t (format "%s" (or value "")))))
          (clean (replace-regexp-in-string "[^[:alnum:]._-]" "_" raw)))
     (if (member clean '("" "." "..")) "_" clean)))
+
+(defun lispm-inbox--canon-root (root)
+  "Return canonical symlink-resolved directory name of ROOT."
+  (let ((dir (file-name-as-directory (expand-file-name root))))
+    (if (file-remote-p dir)
+        dir
+      (file-name-as-directory
+       (condition-case nil (file-truename dir) (file-error dir))))))
 
 (defun lispm-inbox-file (root)
   "Legacy single-file inbox path of the project at ROOT."
@@ -230,13 +238,13 @@ AGENT may be a `lispm-agent' struct or an agent name string."
 
 (defun lispm-inbox--session-has-entry-p (session-dir id)
   "Return non-nil when SESSION-DIR already persists an entry with ID."
-  (let ((pattern (format "*-%s.eld" (lispm-inbox--safe-name id))))
+  (let ((regexp (concat "\\`[0-9]+-[0-9]+-[0-9]+-"
+                        (regexp-quote (lispm-inbox--safe-name id))
+                        "\\.eld\\'")))
     (cl-some (lambda (state)
                (let ((dir (lispm-inbox--state-dir session-dir state)))
                  (and (file-directory-p dir)
-                      (directory-files dir nil
-                                       (wildcard-to-regexp pattern)
-                                       t))))
+                      (directory-files dir nil regexp t))))
              lispm-inbox--states)))
 
 (defun lispm-inbox--migrate-legacy-file (file &optional root)
@@ -294,42 +302,66 @@ AGENT may be a `lispm-agent' struct or an agent name string."
             record)))
     ((file-missing error) nil)))
 
+(defun lispm-inbox--scan-session-dir (sdir canon-root by-id files-by-id)
+  "Scan SDIR, recording latest entries in BY-ID and paths in FILES-BY-ID.
+When CANON-ROOT is non-nil, ignore entries rooted elsewhere."
+  (when (file-directory-p sdir)
+    (dolist (state lispm-inbox--states)
+      (let ((stdir (lispm-inbox--state-dir sdir state)))
+        (when (file-directory-p stdir)
+          (dolist (file (directory-files stdir t "\\.eld\\'" t))
+            (when-let* ((rec (lispm-inbox--read-file file)))
+              (when (or (not canon-root)
+                        (not (plist-get rec :root))
+                        (equal (lispm-inbox--canon-root (plist-get rec :root))
+                               canon-root))
+                (let* ((id (plist-get rec :id))
+                       (prev (gethash id by-id)))
+                  (puthash id (cons file (gethash id files-by-id)) files-by-id)
+                  (when (or (null prev)
+                            (< (lispm-inbox--state-rank (plist-get rec :state))
+                               (lispm-inbox--state-rank (plist-get prev :state)))
+                            (and (eq (plist-get rec :state) (plist-get prev :state))
+                                 (string> (or (plist-get rec :order) "")
+                                          (or (plist-get prev :order) ""))))
+                    (puthash id rec by-id)))))))))))
+
+(defun lispm-inbox--finalize-records (by-id files-by-id)
+  "Return deduplicated sorted records from BY-ID with paths from FILES-BY-ID."
+  (let (records)
+    (maphash (lambda (id rec)
+               (plist-put rec :files (nreverse (gethash id files-by-id)))
+               (push rec records))
+             by-id)
+    (sort records
+          (lambda (a b)
+            (let ((ra (lispm-inbox--state-rank (plist-get a :state)))
+                  (rb (lispm-inbox--state-rank (plist-get b :state))))
+              (if (/= ra rb)
+                  (< ra rb)
+                (string< (or (plist-get a :order) "")
+                         (or (plist-get b :order) ""))))))))
+
 (defun lispm-inbox--read-directory (inbox-dir &optional root)
   "Read deduplicated, ordered entry plists from partitioned INBOX-DIR.
 When ROOT is non-nil, only return entries matching ROOT or unset."
   (when (file-directory-p inbox-dir)
     (let ((by-id (make-hash-table :test #'equal))
-          (canon-root (and root (file-name-as-directory (expand-file-name root))))
-          records)
+          (files-by-id (make-hash-table :test #'equal))
+          (canon-root (and root (lispm-inbox--canon-root root))))
       (dolist (sdir (directory-files inbox-dir t "\\`[^.]" t))
-        (when (file-directory-p sdir)
-          (dolist (state lispm-inbox--states)
-            (let ((stdir (lispm-inbox--state-dir sdir state)))
-              (when (file-directory-p stdir)
-                (dolist (file (directory-files stdir t "\\.eld\\'" t))
-                  (when-let* ((rec (lispm-inbox--read-file file)))
-                    (when (or (not canon-root)
-                              (not (plist-get rec :root))
-                              (equal (file-name-as-directory (expand-file-name (plist-get rec :root)))
-                                     canon-root))
-                      (let* ((id (plist-get rec :id))
-                             (prev (gethash id by-id)))
-                        (when (or (null prev)
-                                  (< (lispm-inbox--state-rank (plist-get rec :state))
-                                     (lispm-inbox--state-rank (plist-get prev :state)))
-                                  (and (eq (plist-get rec :state) (plist-get prev :state))
-                                       (string> (or (plist-get rec :order) "")
-                                                (or (plist-get prev :order) ""))))
-                          (puthash id rec by-id)))))))))))
-      (maphash (lambda (_id rec) (push rec records)) by-id)
-      (sort records
-            (lambda (a b)
-              (let ((ra (lispm-inbox--state-rank (plist-get a :state)))
-                    (rb (lispm-inbox--state-rank (plist-get b :state))))
-                (if (/= ra rb)
-                    (< ra rb)
-                  (string< (or (plist-get a :order) "")
-                           (or (plist-get b :order) "")))))))))
+        (lispm-inbox--scan-session-dir sdir canon-root by-id files-by-id))
+      (lispm-inbox--finalize-records by-id files-by-id))))
+
+(defun lispm-inbox--read-session (root session-id)
+  "Read deduplicated, ordered entry plists for SESSION-ID under project ROOT."
+  (lispm-inbox--migrate-legacy root)
+  (let ((sdir (lispm-inbox-directory root session-id))
+        (by-id (make-hash-table :test #'equal))
+        (files-by-id (make-hash-table :test #'equal)))
+    (lispm-inbox--scan-session-dir
+     sdir (lispm-inbox--canon-root root) by-id files-by-id)
+    (lispm-inbox--finalize-records by-id files-by-id)))
 
 (defun lispm-inbox-entries (root)
   "The entries of the partitioned inbox of project ROOT."
@@ -344,6 +376,13 @@ keeps its conversation across sessions, its name."
       (and (lispm-agent-standing agent)
            (equal (plist-get entry :agent) (symbol-name (lispm-agent-name agent))))))
 
+(defun lispm-inbox--agent-entries (agent)
+  "Return persisted inbox entries visible to AGENT."
+  (let ((root (lispm-agent-root agent)))
+    (if (lispm-agent-standing agent)
+        (lispm-inbox-entries root)
+      (lispm-inbox--read-session root (lispm-agent-id agent)))))
+
 (defun lispm-inbox--agent-known (agent)
   "Return the per-agent persisted-entry tracking table for AGENT."
   (or (gethash agent lispm-inbox--known)
@@ -351,15 +390,20 @@ keeps its conversation across sessions, its name."
         (puthash agent tbl lispm-inbox--known)
         tbl)))
 
-(defun lispm-inbox--sync-desired (agent root session-dir known desired)
-  "Persist AGENT's DESIRED `(STATE . ENTRY)' items under ROOT into SESSION-DIR."
+(defun lispm-inbox--sync-desired (agent root session-dir known desired desired-ids)
+  "Persist AGENT's DESIRED `(STATE . ENTRY)' items under ROOT into SESSION-DIR.
+Record every written entry ID in DESIRED-IDS so it is never pruned."
   (let ((agent-name (symbol-name (lispm-agent-name agent)))
         (session-id (lispm-agent-id agent)))
     (pcase-dolist (`(,state . ,entry) desired)
       (let* ((id (or (plist-get entry :id) (lispm-inbox-new-id)))
              (prev (gethash id known))
              (prev-state (nth 0 prev))
-             (prev-file (nth 1 prev))
+             (raw-prev-files (nth 1 prev))
+             (prev-files (if (listp raw-prev-files)
+                             raw-prev-files
+                           (and raw-prev-files (list raw-prev-files))))
+             (prev-file (car prev-files))
              (prev-hash (nth 2 prev))
              (prev-order (nth 3 prev))
              (same-dir (and prev-file (file-in-directory-p prev-file session-dir)))
@@ -372,15 +416,18 @@ keeps its conversation across sessions, its name."
                       state order))
              (payload (lispm-inbox--serialize-record record))
              (digest (secure-hash 'sha256 payload)))
+        (puthash id t desired-ids)
         (unless (and (eq prev-state state)
                      same-dir
+                     (null (cdr prev-files))
                      (equal prev-hash digest)
                      prev-file
                      (file-exists-p prev-file))
           (let ((new-file (lispm-inbox--write-record session-dir state record)))
-            (when (and prev-file (not (equal prev-file new-file)))
-              (ignore-errors (delete-file prev-file)))
-            (puthash id (list state new-file digest order) known)))))))
+            (dolist (old-file prev-files)
+              (when (and old-file (not (equal old-file new-file)))
+                (ignore-errors (delete-file old-file))))
+            (puthash id (list state (list new-file) digest order) known)))))))
 
 (defun lispm-inbox-save (agent)
   "Persist AGENT's queued, running and suspended entries in its session partition.
@@ -409,18 +456,25 @@ other agents or processes in the same inbox directory are never touched."
         (with-demoted-errors "LispM: saving an inbox: %S"
           (setq desired-ids (make-hash-table :test #'equal))
           (dolist (item desired)
-            (when-let* ((id (plist-get (cdr item) :id)))
-              (puthash id t desired-ids)))
+            (let ((entry (cdr item)))
+              (when (consp entry)
+                (let ((id (or (plist-get entry :id)
+                              (let ((fresh (lispm-inbox-new-id)))
+                                (plist-put entry :id fresh)
+                                fresh))))
+                  (puthash id t desired-ids)))))
           (when desired
-            (lispm-inbox--sync-desired agent root session-dir known desired))
+            (lispm-inbox--sync-desired agent root session-dir known desired desired-ids))
           (let (stale)
             (maphash (lambda (id info)
                        (unless (gethash id desired-ids)
                          (push (cons id (nth 1 info)) stale)))
                      known)
             (dolist (item stale)
-              (when (cdr item)
-                (ignore-errors (delete-file (cdr item))))
+              (let ((files (cdr item)))
+                (dolist (file (if (listp files) files (and files (list files))))
+                  (when file
+                    (ignore-errors (delete-file file)))))
               (remhash (car item) known))))))))
 
 (defun lispm-inbox-forget (agent &optional id)
@@ -461,12 +515,15 @@ the entries queued for it, oldest first, and the one its last turn
 handled when Emacs stopped, if any."
   (let ((known (lispm-inbox--agent-known agent))
         queued running suspended)
-    (dolist (persisted (lispm-inbox-entries (lispm-agent-root agent)))
+    (dolist (persisted (lispm-inbox--agent-entries agent))
       (when (lispm-inbox--for-p agent persisted)
         (let ((entry (lispm-inbox--entry persisted))
-              (state (plist-get persisted :state)))
+              (state (plist-get persisted :state))
+              (files (or (plist-get persisted :files)
+                         (and (plist-get persisted :file)
+                              (list (plist-get persisted :file))))))
           (when-let* ((id (plist-get entry :id)))
-            (puthash id (list state (plist-get persisted :file) nil (plist-get persisted :order))
+            (puthash id (list state files nil (plist-get persisted :order))
                      known))
           (when-let* ((reply-to (plist-get entry :reply-to))
                       (callback (and lispm-inbox-callback-function
@@ -482,7 +539,7 @@ handled when Emacs stopped, if any."
 (defun lispm-inbox-pending (agent)
   "Non-nil if the inbox holds entries for AGENT."
   (seq-some (lambda (entry) (lispm-inbox--for-p agent entry))
-            (lispm-inbox-entries (lispm-agent-root agent))))
+            (lispm-inbox--agent-entries agent)))
 
 (defun lispm-inbox-sessions ()
   "The sessions the partitioned inboxes hold entries for, one each, as plists.

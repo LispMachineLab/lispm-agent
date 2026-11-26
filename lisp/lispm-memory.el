@@ -358,6 +358,7 @@ entry merged or dropped."
   (pcase-let* ((`(,replace . ,drop) plan)
                (buffer (lispm-memory-buffer agent scope nil t))
                (file (buffer-file-name buffer))
+               (expected (or (lispm-file-sha256 file) :missing))
                (old (lispm-memory--text buffer))
                (entries (vconcat (lispm-memory-entries buffer)))
                (line (lambda (id) (format "\"%s\"" (plist-get (aref entries (1- id)) :title))))
@@ -410,7 +411,8 @@ entry merged or dropped."
                  (inhibit-read-only t))
              (erase-buffer)
              (insert new)
-             (goto-char (min point (point-max)))))))
+             (goto-char (min point (point-max))))))
+       expected)
       (lispm-memory-clear-recall-stats file)
       (puthash file (cons (lispm-memory--hash new) 0) lispm-memory--tried)
       (lispm-git-commit

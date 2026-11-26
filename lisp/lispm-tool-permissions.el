@@ -245,19 +245,6 @@ function cannot tell does.  So do the calls of a tool that always asks
 `lispm-tool-decision' for why."
   (car (lispm-tool-decision agent tool input)))
 
-(defun lispm-tool-call-permission (tool input)
-  "The class of TOOL's call on INPUT: the tool's, unless the call does less.
-A tool with a class function (`:class' in `lispm-deftool') has it say
-which class the call belongs to, as run_shell says `read' of a command
-that only reads (see `lispm-shell-read-only-p'); the policy then
-decides the call as it decides that class.  A function that answers
-nil, or fails, leaves the call in the tool's class."
-  (or (when-let* ((class (lispm-tool-class tool)))
-        (condition-case nil
-            (apply class (lispm-tools-arguments tool input))
-          (error nil)))
-      (lispm-tool-permission tool)))
-
 (defvar lispm-auto-approve-all nil
   "When non-nil, calls whose policy is `auto' never ask for approval.
 This lets unattended batch runs use `always-ask' tools and write
