@@ -270,9 +270,9 @@ the model sees too.  Signal an error to report a failure to the model."
                        (lispm-tools-file resource)
                      (expand-file-name (car (lispm-tools-reference resource))))
                  (error (expand-file-name resource)))))
-      (if (and (not (file-remote-p ref)) (file-exists-p ref))
-          (file-truename ref)
-        ref)))
+      (if (file-remote-p ref)
+          ref
+        (condition-case nil (file-truename ref) (file-error ref)))))
    ((and (consp resource) (eq (car resource) 'buffer) (stringp (cdr resource)))
     (cons 'buffer
           (condition-case nil
@@ -898,7 +898,10 @@ cannot be written is an error, before it is visited (see
   (lispm-tools-check-writable file)
   (or (lispm-tools-visiting file)
       (and (file-exists-p file) (lispm-tools-find-file file))
-      (error "No such file: %s" (abbreviate-file-name file))))
+      (progn
+        (unless (file-exists-p file)
+          (lispm-tools-record-revision lispm-current-agent file :missing))
+        (error "No such file: %s" (abbreviate-file-name file)))))
 
 (defun lispm-tools-to-show (file &optional new)
   "A buffer to show a change to FILE in while it is proposed, or nil.
@@ -925,7 +928,8 @@ See `lispm-file-text'."
   (secure-hash 'sha256 (encode-coding-string (or text "") 'utf-8)))
 
 (defun lispm-tools-record-revision (agent file text)
-  "Record for AGENT that FILE was observed holding content TEXT."
+  "Record for AGENT that FILE was observed holding content TEXT.
+TEXT may be a string or `:missing' when FILE does not exist."
   (when (and agent file)
     (let* ((lispm-current-agent agent)
            (canon (lispm-tool--normalize-resource file))
@@ -933,7 +937,10 @@ See `lispm-file-text'."
                     (let ((new (make-hash-table :test #'equal)))
                       (puthash agent new lispm-tools--observed-revisions)
                       new))))
-      (puthash canon (lispm-tools-content-hash text) tbl))))
+      (puthash canon (if (eq text :missing)
+                         :missing
+                       (lispm-tools-content-hash text))
+               tbl))))
 
 (defun lispm-tools-observed-revision (agent file)
   "Return the last observed SHA-256 hash for AGENT and FILE, or nil."
@@ -949,27 +956,47 @@ See `lispm-file-text'."
 
 (add-hook 'lispm-session-end-functions #'lispm-tools--clear-revisions)
 
+(defun lispm-tools--file-missing-p (file)
+  "Return non-nil when FILE neither exists on disk nor has unsaved buffer text."
+  (and (not (file-exists-p file))
+       (let ((buf (find-buffer-visiting file)))
+         (not (and buf (buffer-modified-p buf))))))
+
 (defun lispm-tools-check-cas (agent file current-text &optional expected-hash check-observed)
   "Verify MVCC/CAS preconditions before AGENT writes FILE with CURRENT-TEXT.
 When EXPECTED-HASH is \"missing\", fail if FILE exists.
 When EXPECTED-HASH is a SHA-256 hex string, fail unless CURRENT-TEXT matches it.
 Otherwise when CHECK-OBSERVED is non-nil and AGENT previously observed FILE,
 fail if FILE changed since AGENT last read it."
-  (let ((actual (lispm-tools-content-hash current-text)))
+  (let ((actual (if (lispm-tools--file-missing-p file)
+                    :missing
+                  (lispm-tools-content-hash current-text))))
     (cond
      ((equal expected-hash "missing")
-      (when (file-exists-p file)
+      (unless (eq actual :missing)
         (error "CAS conflict on %s: file already exists (expected missing)"
                (lispm-tools-label file))))
      ((stringp expected-hash)
-      (unless (equal expected-hash actual)
+      (cond
+       ((eq actual :missing)
+        (error "CAS conflict on %s: expected hash %s, but file does not exist; re-read before retrying"
+               (lispm-tools-label file) expected-hash))
+       ((not (equal expected-hash actual))
         (error "CAS conflict on %s: expected hash %s, current hash is %s; re-read before retrying"
-               (lispm-tools-label file) expected-hash actual)))
+               (lispm-tools-label file) expected-hash actual))))
      (check-observed
       (when-let* ((observed (lispm-tools-observed-revision agent file))
                   ((not (equal observed actual))))
-        (error "CAS conflict on %s: file changed since you last read it (observed %s, current %s); re-read before overwriting"
-               (lispm-tools-label file) observed actual))))))
+        (cond
+         ((eq actual :missing)
+          (error "CAS conflict on %s: file was deleted since you last read it (observed %s); re-read before overwriting"
+                 (lispm-tools-label file) observed))
+         ((eq observed :missing)
+          (error "CAS conflict on %s: file was created since you last checked it (current %s); re-read before overwriting"
+                 (lispm-tools-label file) actual))
+         (t
+          (error "CAS conflict on %s: file changed since you last read it (observed %s, current %s); re-read before overwriting"
+                 (lispm-tools-label file) observed actual))))))))
 
 (defun lispm-tools--revert-changed (root &optional paths)
   "Revert stale buffers under ROOT (or PATHS when specified).

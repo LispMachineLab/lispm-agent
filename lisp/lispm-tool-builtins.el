@@ -92,7 +92,10 @@ the user sees.  Other agents name places as org links,
            (let ((text (lispm-file-text file)))
              (lispm-tools-record-revision lispm-current-agent file text)
              (lispm-tools-number-lines text offset limit)))
-          (t (error "No such file: %s" file)))))
+          (t
+           (unless (file-exists-p file)
+             (lispm-tools-record-revision lispm-current-agent file :missing))
+           (error "No such file: %s" file)))))
 
 (lispm-deftool list_directory
     ((path string "Directory, absolute or relative to your root (default: the root)."

@@ -250,7 +250,44 @@
         (should (cdr bad-edit))
         (should (string-match-p "CAS conflict" (car bad-edit)))
         (should-not (cdr good-edit))
-        (should (equal (lispm-test--file project "shared.txt") "v4 beta\n"))))))
+        (should (equal (lispm-test--file project "shared.txt") "v4 beta\n")))
+      ;; External deletion after read triggers CAS conflict until re-read observes missing.
+      (should-not (cdr (lispm-test--call alpha "read_file" '((path . "shared.txt")))))
+      (delete-file file)
+      (let ((stale-del (lispm-test--call alpha "write_file"
+                                         '((path . "shared.txt") (content . "clobber\n")))))
+        (should (cdr stale-del))
+        (should (string-match-p "deleted since you last read it" (car stale-del)))
+        (should-not (file-exists-p file)))
+      (let ((missing-read (lispm-test--call alpha "read_file" '((path . "shared.txt")))))
+        (should (cdr missing-read))
+        (should (string-match-p "No such file" (car missing-read))))
+      (should-not (cdr (lispm-test--call alpha "write_file"
+                                         '((path . "shared.txt") (content . "recreated\n")))))
+      (should (equal (lispm-test--file project "shared.txt") "recreated\n"))
+      ;; Distinguish an existing 0-byte file from :missing.
+      (lispm-test--write (expand-file-name "empty.txt" project) "")
+      (let ((empty-clash (lispm-test--call alpha "write_file"
+                                           '((path . "empty.txt") (content . "x\n")
+                                             (expected_hash . "missing")))))
+        (should (cdr empty-clash))
+        (should (string-match-p "CAS conflict" (car empty-clash))))
+      (should (cdr (lispm-test--call alpha "read_file" '((path . "race.txt")))))
+      (lispm-test--write (expand-file-name "race.txt" project) "")
+      (let ((race-clash (lispm-test--call alpha "write_file"
+                                          '((path . "race.txt") (content . "from-alpha\n")))))
+        (should (cdr race-clash))
+        (should (string-match-p "created since you last checked it" (car race-clash)))
+        (should (equal (lispm-test--file project "race.txt") "")))
+      ;; Rejected `write_file' leaves neither parent directory nor visiting buffer behind.
+      (let* ((orphan (expand-file-name "no-orphan/x.txt" project))
+             (rejected (lispm-test--call alpha "write_file"
+                                         '((path . "no-orphan/x.txt") (content . "x\n")
+                                           (expected_hash . "deadbeef")))))
+        (should (cdr rejected))
+        (should (string-match-p "CAS conflict" (car rejected)))
+        (should-not (file-exists-p (expand-file-name "no-orphan" project)))
+        (should-not (find-buffer-visiting orphan))))))
 
 (ert-deftest lispm-persistence-test-scoped-revert-and-isolated-edit-overlays ()
   "Sibling agent proposals prevent unrelated buffer reverts and isolate by `(buffer, agent, id)'."
