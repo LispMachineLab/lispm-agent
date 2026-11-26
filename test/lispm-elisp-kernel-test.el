@@ -425,7 +425,8 @@
                                :config (list :dialect :anthropic
                                              :url (cdr srv)
                                              :root project
-                                             :tool-policies '(:ask ("edit_buffer")))
+                                             :tool-policies '(:ask ("edit_buffer")
+                                                              :auto ("read_buffer" "eval_elisp")))
                                :runtime runtime)))
                   (let ((sess (lispm-control-plane-session agent nil)))
                     (should (lispm-elisp-kernel-test--wait
@@ -477,29 +478,37 @@
                          :body (json-serialize
                                 '((scenario . "reconnect")
                                   (messages . [((role . "user") (content . "run"))]))))
-                   :config (list :dialect :anthropic :url (cdr srv) :root project)
+                   :config (list :dialect :anthropic :url (cdr srv) :root project
+                                 :tool-policies '(:auto ("run_shell")))
                    :runtime rt1)
                   (let ((sess (lispm-control-plane-session agent nil)))
                     (should (lispm-elisp-kernel-test--wait
                              rt1 (lambda () (eq (lispm-control-session-state sess) :streaming))))
                     (lispm-control-plane-detach rt1)))
-                ;; Wait off-thread while detached for shell + step 2 SSE to finish in kernel
-                (sleep-for 0.35)
-                ;; Reconnect with fresh runtime rt2 and restore state/results
+                ;; Reconnect with fresh runtime rt2 and poll until detached background turn completes
                 (let* ((rt2 (lispm-control-plane-connect sock))
                        (lispm-control-plane-mode 'auto)
                        (lispm-control-plane-runtime-function (lambda (&optional _d) rt2))
-                       (restored nil))
+                       (restored nil)
+                       (deadline (+ (float-time) 10)))
                   (unwind-protect
                       (progn
                         (should (lispm-elisp-kernel-test--wait
                                  rt2 (lambda () (lispm-kernel-runtime-hello rt2))))
-                        (lispm-control-plane-reconnect rt2 nil
-                                                       (lambda (sess snap)
-                                                         (setq restored (list sess snap))))
-                        (should (lispm-elisp-kernel-test--wait rt2 (lambda () restored) 5))
+                        (while (and (not (and restored
+                                              (eq :idle (lispm-control-session-state (car restored)))))
+                                    (< (float-time) deadline))
+                          (setq restored nil)
+                          (lispm-control-plane-reconnect
+                           rt2 nil (lambda (sess snap) (setq restored (list sess snap))))
+                          (lispm-elisp-kernel-test--wait rt2 (lambda () restored) 2)
+                          (unless (and restored
+                                       (eq :idle (lispm-control-session-state (car restored))))
+                            (accept-process-output nil 0.05)))
+                        (should restored)
                         (let ((sess (car restored)))
                           (should (eq :idle (lispm-control-session-state sess)))
+                          (should (integerp (lispm-control-session-epoch sess)))
                           (should (= 1 (length (lispm-control-session-tool-results sess))))
                           (should (= 1 (length (lispm-control-session-turn-results sess))))
                           (should (string-search "detached-shell-ok"
@@ -559,6 +568,7 @@
                        :config (list :dialect :anthropic
                                      :url (cdr srv)
                                      :root project
+                                     :tool-policies '(:auto ("run_shell" "search_files"))
                                      :viewport (if (= (% i 4) 0) :visible :hidden))
                        :runtime runtime)))
                   (should (lispm-elisp-kernel-test--wait
@@ -580,6 +590,46 @@
                     (dolist (s sessions)
                       (should (= 2 (length (lispm-control-session-tool-results s)))))))
               (when probe-timer (cancel-timer probe-timer))
+              (when (process-live-p (car srv)) (delete-process (car srv)))))
+        (lispm-control-plane-reset)))))
+
+(ert-deftest lispm-elisp-kernel-test-stage3-real-lispm-tell-turn ()
+  "Verify real `lispm-tell' runs through `P_agents' and writes Org transcript."
+  (lispm-test-env
+    (lispm-elisp-kernel-test--with runtime
+      (skip-unless (and (fboundp 'lispm-kernel-feature-p)
+                        (lispm-kernel-feature-p runtime :agent-actors)))
+      (let ((default-directory project))
+        (call-process "git" nil nil nil "init" "-q")
+        (with-temp-file (expand-file-name "tracked.txt" project)
+          (insert "needle-20 live-turn-needle\n"))
+        (call-process "git" nil nil nil "add" "tracked.txt")
+        (call-process "git" nil nil nil
+                      "-c" "user.name=T" "-c" "user.email=t@e"
+                      "commit" "-q" "-m" "init"))
+      (unwind-protect
+          (let* ((srv (lispm-elisp-kernel-test--start-py-sse-server))
+                 (base-url (string-remove-suffix "/v1/messages" (cdr srv)))
+                 (lispm-backends (cons `(live-k :api anthropic :url ,base-url :model "claude-test" :key "k")
+                                       lispm-backends))
+                 (lispm-backend 'live-k)
+                 (lispm-api-function #'lispm-api-stream)
+                 (lispm-control-plane-mode 'auto)
+                 (lispm-control-plane-runtime-function (lambda (&optional _d) runtime))
+                 (lispm-sandbox-level 'none)
+                 ;; Default policy: `read' auto (`git status' read-only), `write' auto!
+                 (agent (lispm-defagent live-agent :root project))
+                 (reply nil))
+            (unwind-protect
+                (progn
+                  (lispm-tell agent "go check" :callback (lambda (ans) (setq reply ans)))
+                  (should (lispm-elisp-kernel-test--wait runtime (lambda () reply) 15))
+                  (should (string-search "line 1 and line 2 ok." reply))
+                  (should (funcall (lispm-test--idle-p agent)))
+                  (let ((transcript (lispm-test--transcript agent)))
+                    (should (string-match-p "\\*\\* DONE run_shell" transcript))
+                    (should (string-match-p "\\*\\* DONE search_files" transcript))
+                    (should (string-match-p "live-turn-needle" transcript))))
               (when (process-live-p (car srv)) (delete-process (car srv)))))
         (lispm-control-plane-reset)))))
 

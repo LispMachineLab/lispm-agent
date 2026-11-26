@@ -68,8 +68,8 @@
     (should (equal '(:status 429 :type "rate_limit_error" :message "slow")
                    (plist-get err :error)))))
 
-(ert-deftest lispm-control-protocol-tool-host-and-coalescer ()
-  "Verify editor vs kernel host boundary and pure delta coalescing."
+(ert-deftest lispm-control-protocol-tool-host-classification ()
+  "Verify editor vs kernel host boundary respects buffers, TRAMP, and policies."
   (dolist (ed '("read_buffer" "list_buffers" "edit_buffer" "edit_file" "write_file" "eval_elisp"))
     (should (eq 'editor (lispm-control-protocol-tool-host ed))))
   (dolist (kn '("run_shell" "search_files" "workspace_cmd" "read_file"))
@@ -79,11 +79,9 @@
                        "read_file" '(:path "/ssh:box:/tmp/a.txt"))))
   (should (eq 'editor (lispm-control-protocol-tool-host
                        "read_file" '(:unsaved-buffer-p t))))
-  (let ((coal (lispm-control-coalescer-create 10)))
-    (should-not (lispm-control-coalescer-push coal 'text "hel"))
-    (should-not (lispm-control-coalescer-push coal 'text "lo"))
-    (should (equal '((text . "hello") (tool . "read_buffer"))
-                   (lispm-control-coalescer-push coal 'tool "read_buffer")))))
+  ;; Policy override flips host cleanly.
+  (should (eq 'kernel (lispm-control-protocol-tool-host
+                       "custom_tool" '(:policies (:kernel ("custom_tool")))))))
 
 (ert-deftest lispm-control-plane-editor-effects-roundtrip ()
   "Verify `read_buffer', `edit_buffer', and `eval_elisp' execute cleanly on host."
@@ -161,7 +159,9 @@
           (lispm-control-plane-resolve-approval agent "call_ap" 'approve)
           (should (equal `(agent-approval-decision ,(lispm-agent-id agent) "call_ap" :approve)
                          (car sent)))
-          ;; Async effect cancelled by `lispm-control-plane-cancel'
+          ;; Async effect cancelled cleanly: `agent-cancel' is emitted without
+          ;; sending premature `:cancelled' effect replies that would advance turn.
+          (setq sent nil)
           (lispm-control-plane-handle-frame
            nil
            `(editor-effect-request
@@ -171,12 +171,8 @@
                                      '((code . "(lispm-async (lambda (_res) nil))"))))
              :timeout 5))
           (lispm-control-plane-cancel agent)
-          (should (cl-some (lambda (f)
-                             (and (eq (car f) 'agent-effect-reply)
-                                  (= (nth 2 f) 201)
-                                  (eq (nth 3 f) :cancelled)))
-                           sent))
-          (should (eq (caar sent) 'agent-cancel))
+          (should (equal `((agent-cancel ,(lispm-agent-id agent))) sent))
+          (should-not (cl-some (lambda (f) (eq (car f) 'agent-effect-reply)) sent))
           ;; Async effect timing out on host
           (setq sent nil)
           (lispm-control-plane-handle-frame
@@ -253,6 +249,146 @@
                        (lambda (ag text &rest _) (setq told (list ag text)))))
               (should (eq 'elisp (lispm-control-plane-start-turn agent "hello fallback")))
               (should (equal (list agent "hello fallback") told)))))
+      (lispm-control-plane-reset))))
+
+(ert-deftest lispm-control-plane-turns-transcript-and-approval-bridge ()
+  "Verify `lispm-turns' integration writes Org transcript and bridges `lispm-resolve'."
+  (lispm-test-env
+    (unwind-protect
+        (let* ((lispm-backends '((test :api anthropic :url "http://fake.invalid"
+                                       :key "sk-test" :model "test-model")))
+               (lispm-backend 'test)
+               (lispm-control-plane-mode 'kernel)
+               (sent nil)
+               (lispm-control-plane-send-function (lambda (_rt form) (push form sent)))
+               (lispm-api-function #'lispm-api-stream)
+               (agent (lispm-defagent tester :root project :policy '((shell . ask))))
+               (reply nil)
+               (run-count 0))
+          (cl-letf (((symbol-function 'lispm-turns-run-tool)
+                     (lambda (&rest _) (cl-incf run-count))))
+            (lispm-tell agent "check workspace" :callback (lambda (ans) (setq reply ans)))
+            (should (lispm-test--wait
+                     (lambda () (cl-some (lambda (f) (eq (car f) 'agent-turn)) sent))))
+            (let ((turn-cmd (cl-find-if (lambda (f) (eq (car f) 'agent-turn)) sent)))
+              (should turn-cmd)
+              (should (string= (nth 1 turn-cmd) (lispm-agent-id agent))))
+            (let ((sid (lispm-agent-id agent))
+                  (sess (lispm-control-plane-session agent nil)))
+              (should (lispm-control-session-turns-owned sess))
+              ;; Step 1 response with run_shell call
+              (lispm-control-plane-handle-frame
+               nil
+               `(turn-event ,sid
+                            (:seq 1 :epoch 10 :turn-id "t1" :step 1 :type :turn-started)))
+              (lispm-control-plane-handle-frame
+               nil
+               `(turn-event ,sid
+                            (:seq 2 :epoch 10 :turn-id "t1" :step 1 :type :step-response
+                                  :stop-reason "tool_use"
+                                  :usage (:input-tokens 15 :output-tokens 6)
+                                  :blocks ((:type :text :text "Let me check.")
+                                           (:type :tool-use :id "c_sh" :name "run_shell"
+                                                  :input-json "{\"command\":\"rm -rf tmp\"}")))))
+              ;; Approval request registers `:kernel-approval' without running local tool
+              (lispm-control-plane-handle-frame
+               nil
+               `(approval-request ,sid "c_sh" "run_shell" "{\"command\":\"rm -rf tmp\"}"
+                                  ("Needs shell confirmation")))
+              (should (equal '("c_sh") (lispm-waiting-calls agent)))
+              (lispm-approve-for agent "c_sh")
+              (should (= 0 run-count))
+              (should (cl-some (lambda (f)
+                                 (and (eq (car f) 'agent-approval-decision)
+                                      (equal (nth 2 f) "c_sh")
+                                      (eq (nth 3 f) :approve)))
+                               sent))
+              ;; Kernel finishes tool and final step
+              (lispm-control-plane-handle-frame
+               nil
+               `(turn-event ,sid
+                            (:seq 3 :epoch 10 :turn-id "t1" :step 1 :type :tool-result
+                                  :call-id "c_sh" :tool "run_shell" :is-error nil :result "clean")))
+              (lispm-control-plane-handle-frame
+               nil
+               `(turn-event ,sid
+                            (:seq 4 :epoch 10 :turn-id "t1" :step 2 :type :step-response
+                                  :stop-reason "end_turn"
+                                  :usage (:input-tokens 20 :output-tokens 8)
+                                  :blocks ((:type :text :text "All clear.")))))
+              (lispm-control-plane-handle-frame
+               nil
+               `(turn-event ,sid
+                            (:seq 5 :epoch 10 :turn-id "t1" :step 2 :type :turn-done
+                                  :stop-reason "end_turn" :text "All clear.")))
+              (should (equal "All clear." reply))
+              (should (funcall (lispm-test--idle-p agent)))
+              (let ((transcript (lispm-test--transcript agent)))
+                (should (string-match-p "Let me check\\." transcript))
+                (should (string-match-p "\\*\\* DONE run_shell" transcript))
+                (should (string-match-p "clean" transcript))
+                (should (string-match-p "All clear\\." transcript)))
+              (should (equal '(35 14 0) (lispm-agent-usage agent))))))
+      (lispm-control-plane-reset))))
+
+(ert-deftest lispm-control-plane-epoch-reset-and-snapshot-replay ()
+  "Verify epoch restart resets seq tracking and snapshot replays pending RPCs."
+  (lispm-test-env
+    (unwind-protect
+        (let* ((lispm-control-plane-mode 'kernel)
+               (sent nil)
+               (lispm-control-plane-send-function (lambda (_rt form) (push form sent)))
+               (buf (get-buffer-create " *cp-replay*"))
+               (agent (lispm-defagent tester :root project))
+               (sess (lispm-control-plane-register-agent agent)))
+          (with-current-buffer buf
+            (erase-buffer)
+            (insert "replay-line\n"))
+          (unwind-protect
+              (progn
+                ;; Old kernel epoch 1 reaches seq 99
+                (lispm-control-plane-handle-frame
+                 nil
+                 `(turn-event ,(lispm-agent-id agent)
+                              (:seq 99 :epoch 1 :turn-id "t1" :step 1 :type :delta :kind :text :text "old")))
+                ;; Restarted kernel epoch 2 starts at seq 1 — must NOT be dropped!
+                (lispm-control-plane-handle-frame
+                 nil
+                 `(turn-event ,(lispm-agent-id agent)
+                              (:seq 1 :epoch 2 :turn-id "t2" :step 1 :type :turn-started)))
+                (should (= 1 (lispm-control-session-last-seq sess)))
+                (should (= 2 (lispm-control-session-epoch sess)))
+                ;; Snapshot containing pending editor effect & pending approval replays both!
+                (let ((asked nil))
+                  (let ((lispm-control-plane-approval-function
+                         (lambda (_ag cid tool _inp _rs _s) (push (list cid tool) asked))))
+                    (lispm-control-plane-handle-frame
+                     nil
+                     `(agent-snapshot
+                       ,(lispm-agent-id agent)
+                       (:session ,(lispm-agent-id agent)
+                                 :epoch 2
+                                 :state :awaiting-effect
+                                 :turn-id "t2"
+                                 :step 1
+                                 :event-seq 1
+                                 :stream (:text "" :thinking "" :tools nil)
+                                 :pending-effects ((:effect-id 77 :call-id "ce" :kind :read-buffer
+                                                    :tool "read_buffer"
+                                                    :input-json ,(json-serialize '((buffer . " *cp-replay*")))))
+                                 :pending-approvals ((:call-id "ca" :tool "eval_elisp"
+                                                      :input-json "{}" :reasons ("ask")))
+                                 :completed-tools nil
+                                 :completed-turns nil
+                                 :events nil)))
+                    (should (equal '(("ca" "eval_elisp")) asked))
+                    (should (cl-some (lambda (f)
+                                       (and (eq (car f) 'agent-effect-reply)
+                                            (= (nth 2 f) 77)
+                                            (eq (nth 3 f) :ok)
+                                            (string-search "replay-line" (nth 4 f))))
+                                     sent)))))
+            (kill-buffer buf)))
       (lispm-control-plane-reset))))
 
 (provide 'lispm-control-plane-test)

@@ -206,6 +206,22 @@ It is fed on stdin, so keys stay off the command line."
           (delete-process proc))
         (condition-case nil (delete-file file) (file-error nil))))))
 
+(defun lispm-api-prepare-request (backend request)
+  "Prepare REQUEST for BACKEND as a plist for HTTP transport or kernel actors.
+Return a plist with keys `:dialect', `:url', `:headers', `:body', `:shape'."
+  (let* ((env (if (lispm-api-envelope-p request)
+                  request
+                (lispm-api-make-envelope request)))
+         (dialect (or (plist-get backend :api) 'anthropic))
+         (shape (lispm-api--shape backend))
+         (headers (funcall (plist-get shape :headers)
+                           (lispm-api-key backend)
+                           (lispm-api-envelope-headers env)))
+         (payload (lispm-json-encode (lispm-api-envelope-body env)))
+         (url (concat (string-remove-suffix "/" (plist-get backend :url))
+                      (plist-get shape :path))))
+    (list :dialect dialect :url url :headers headers :body payload :shape shape)))
+
 (cl-defun lispm-api-stream (backend request &key on-delta on-done on-error)
   "POST REQUEST to BACKEND and stream the response.
 REQUEST is a `lispm-api-envelope' (or a bare request body alist for
@@ -217,18 +233,13 @@ its :id, :name and the :json received so far.  ON-DONE receives the
 final message, in Messages shape; ON-ERROR a plist with :status,
 :type and :message.  Return the curl process or kernel cancellation
 function."
-  (let* ((env (if (lispm-api-envelope-p request)
-                  request
-                (lispm-api-make-envelope request)))
-         (dialect (or (plist-get backend :api) 'anthropic))
-         (shape (lispm-api--shape backend))
+  (let* ((prep (lispm-api-prepare-request backend request))
+         (dialect (plist-get prep :dialect))
+         (shape (plist-get prep :shape))
          (state (funcall (plist-get shape :stream)))
-         (headers (funcall (plist-get shape :headers)
-                           (lispm-api-key backend)
-                           (lispm-api-envelope-headers env)))
-         (payload (lispm-json-encode (lispm-api-envelope-body env)))
-         (url (concat (string-remove-suffix "/" (plist-get backend :url))
-                      (plist-get shape :path)))
+         (headers (plist-get prep :headers))
+         (payload (plist-get prep :body))
+         (url (plist-get prep :url))
          (client-error nil))
     (or (and lispm-api-kernel-sse-decode
              (fboundp 'lispm-kernel-llm-stream)

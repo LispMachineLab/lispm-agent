@@ -88,6 +88,8 @@ Optional CONTEXT plist may carry `:policies', `:path', `:directory', or
 
 ;;;; Wire Validation & Frame Constructors (Emacs -> Kernel)
 
+;; Cross-repo Layer 1 wire guard (duplicated intentionally from `lispm-kernel'
+;; so Layer 1 `lispm-control-protocol' has zero runtime dependency on kernel).
 (defun lispm-control-protocol--wire-symbol-p (sym)
   "Return non-nil when SYM prints and reads losslessly across the wire."
   (let ((name (string-remove-prefix ":" (symbol-name sym))))
@@ -260,7 +262,11 @@ Return `(:ok t :message ALIST)' on success, or `(:ok nil :error PLIST)'."
                                 (unless (member id invalid) (push id invalid))
                                 nil)))))
                (push `((type . "tool_use") (id . ,id) (name . ,name) (input . ,input))
-                     content)))))
+                     content)))
+            (:other
+             (when-let* ((json-str (plist-get b :json))
+                         (parsed (condition-case nil (lispm-json-decode json-str) (error nil))))
+               (push parsed content)))))
         (list :ok t
               :message
               `((role . "assistant")
@@ -272,51 +278,6 @@ Return `(:ok t :message ALIST)' on success, or `(:ok nil :error PLIST)'."
           :error (list :status (plist-get res :status)
                        :type (or (plist-get res :type) "http_error")
                        :message (or (plist-get res :message) "Request failed")))))
-
-;;;; Pure Functional Delta Coalescer (Fallback / Local Parity)
-
-(cl-defstruct (lispm-control-coalescer
-               (:constructor lispm-control-coalescer--create)
-               (:copier nil))
-  "Pure delta buffer merging adjacent text or thinking fragments up to MAX-BYTES."
-  kind chunks (bytes 0) (max-bytes 4096))
-
-(defun lispm-control-coalescer-create (&optional max-bytes)
-  "Create a delta coalescer flushing at MAX-BYTES (default 4096)."
-  (lispm-control-coalescer--create :max-bytes (or max-bytes 4096)))
-
-(defun lispm-control-coalescer-flush (coalescer)
-  "Return pending `(KIND . TEXT)' pair from COALESCER and reset it, or nil."
-  (when (and (lispm-control-coalescer-kind coalescer)
-             (lispm-control-coalescer-chunks coalescer))
-    (let ((kind (lispm-control-coalescer-kind coalescer))
-          (text (apply #'concat (nreverse (lispm-control-coalescer-chunks coalescer)))))
-      (setf (lispm-control-coalescer-kind coalescer) nil
-            (lispm-control-coalescer-chunks coalescer) nil
-            (lispm-control-coalescer-bytes coalescer) 0)
-      (unless (string-empty-p text)
-        (cons kind text)))))
-
-(defun lispm-control-coalescer-push (coalescer kind text)
-  "Push TEXT of KIND onto COALESCER; return list of ready `(K . S)' pairs."
-  (let ((emitted nil))
-    (if (not (memq kind '(text thinking :text :thinking)))
-        (progn
-          (when-let* ((flushed (lispm-control-coalescer-flush coalescer)))
-            (push flushed emitted))
-          (push (cons kind text) emitted))
-      (when (and (lispm-control-coalescer-kind coalescer)
-                 (not (eq (lispm-control-coalescer-kind coalescer) kind)))
-        (when-let* ((flushed (lispm-control-coalescer-flush coalescer)))
-          (push flushed emitted)))
-      (setf (lispm-control-coalescer-kind coalescer) kind)
-      (push text (lispm-control-coalescer-chunks coalescer))
-      (cl-incf (lispm-control-coalescer-bytes coalescer) (length text))
-      (when (>= (lispm-control-coalescer-bytes coalescer)
-                (lispm-control-coalescer-max-bytes coalescer))
-        (when-let* ((flushed (lispm-control-coalescer-flush coalescer)))
-          (push flushed emitted))))
-    (nreverse emitted)))
 
 (provide 'lispm-control-protocol)
 ;;; lispm-control-protocol.el ends here

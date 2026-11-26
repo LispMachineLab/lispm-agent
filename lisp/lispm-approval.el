@@ -203,9 +203,19 @@ call's remembered approval settles this one; otherwise it is `user'."
             (lispm-turns-update-state agent)
             (funcall (plist-get asking :continue) decision
                      (and (eq decision 'deny) (lispm--denial reason))))
-        (pcase decision
-          ((or 'approve 'allow) (lispm-turns-run-tool agent id))
-          ('deny (lispm-turns-tool-done agent id (lispm--denial reason) t "DENIED")))))
+        (if (plist-get call :kernel-approval)
+            (progn
+              (remhash id (lispm-agent-pending agent))
+              (lispm-emit-change agent '(calls))
+              (when-let* ((marker (plist-get call :marker))
+                          ((marker-buffer marker)))
+                (lispm-in-session agent
+                  (lispm-transcript-set-state
+                   marker (if (eq decision 'deny) "DENIED" "RUNNING"))))
+              (lispm-turns-update-state agent))
+          (pcase decision
+            ((or 'approve 'allow) (lispm-turns-run-tool agent id))
+            ('deny (lispm-turns-tool-done agent id (lispm--denial reason) t "DENIED"))))))
     (run-hook-with-args 'lispm-resolve-functions agent id decision reason)))
 
 (defun lispm-call-ask (agent id tool input continue &optional always reasons)
