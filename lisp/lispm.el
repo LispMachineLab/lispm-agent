@@ -92,6 +92,7 @@
 
 (require 'tabulated-list)
 (require 'lispm-core)
+(require 'lispm-workspace)
 (require 'lispm-sandbox)
 (require 'lispm-services)
 (require 'lispm-roles)

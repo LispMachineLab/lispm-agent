@@ -21,6 +21,7 @@
 
 set -u
 peers=${LISPM_PEERS:-$HOME/.lispm/peers}
+servers=${LISPM_MCP_SERVERS:-$HOME/.lispm/mcp-servers}
 outside=${LISPM_MCP_SERVER:-$HOME/.lispm/mcp-server}
 nl='
 '
@@ -49,6 +50,78 @@ server_file() {
       return 0
     fi
   done
+  if [ -n "${LISPM_MCP_SERVER:-}" ]; then
+    if [ -f "$LISPM_MCP_SERVER" ]; then
+      printf '%s\n' "$LISPM_MCP_SERVER"
+      return 0
+    fi
+    return 1
+  fi
+  phys=$(pwd -P 2>/dev/null || pwd)
+  best_file=
+  best_len=0
+  first_file=
+  for candidate in "$servers"/*.server; do
+    [ -f "$candidate" ] || continue
+    u=
+    t=
+    p=
+    r=
+    {
+      IFS= read -r u &&
+      IFS= read -r t &&
+      IFS= read -r p &&
+      IFS= read -r r || [ -n "$p" ]
+    } < "$candidate" 2>/dev/null || continue
+    [ -n "$u" ] && [ -n "$t" ] || continue
+    if [ -n "$p" ]; then
+      case $p in
+        *[!0-9]*) continue ;;
+      esac
+      kill -0 "$p" 2>/dev/null || continue
+    fi
+    base=${candidate##*/}
+    if [ -n "${LISPM_MCP_INSTANCE:-}" ]; then
+      case $base in
+        "${LISPM_MCP_INSTANCE}" | "${LISPM_MCP_INSTANCE}"-* | "${LISPM_MCP_INSTANCE}".server)
+          printf '%s\n' "$candidate"
+          return 0
+          ;;
+      esac
+      [ "$p" = "$LISPM_MCP_INSTANCE" ] && {
+        printf '%s\n' "$candidate"
+        return 0
+      }
+      continue
+    fi
+    [ -n "$first_file" ] || first_file=$candidate
+    if [ -n "$r" ]; then
+      r_phys=$(cd -P -- "$r" 2>/dev/null && pwd -P || printf '%s' "$r")
+      r_clean=${r_phys%/}
+      [ -n "$r_clean" ] || r_clean=/
+      matched=0
+      if [ "$r_clean" = "/" ]; then
+        matched=1
+      elif [ "$phys" = "$r_clean" ]; then
+        matched=1
+      else
+        case "$phys/" in
+          "$r_clean/"*) matched=1 ;;
+        esac
+      fi
+      if [ "$matched" = 1 ] && [ "${#r_clean}" -gt "$best_len" ]; then
+        best_file=$candidate
+        best_len=${#r_clean}
+      fi
+    fi
+  done
+  if [ -n "$best_file" ]; then
+    printf '%s\n' "$best_file"
+    return 0
+  elif [ -n "$first_file" ]; then
+    printf '%s\n' "$first_file"
+    return 0
+  fi
   if [ -f "$outside" ]; then
     printf '%s\n' "$outside"
     return 0
