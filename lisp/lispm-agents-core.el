@@ -315,6 +315,8 @@ An agent running inside Emacs has these instead:
   :buffer-p    predicate on buffers holding one of its sessions
   :send        function of a buffer and text putting the text into the
                session's input, without sending it
+  :submit      optional function of a buffer and text sending the text
+               immediately as the user's next message
 
 Defining AGENT again replaces what it was.  Return AGENT."
   (if-let* ((entry (assq agent lispm-agents-defined)))

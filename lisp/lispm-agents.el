@@ -228,7 +228,7 @@ Ask when several qualify."
       (_ (get-buffer (completing-read (lispm-tr "Send to agent: ")
                                       (mapcar #'buffer-name candidates) nil t))))))
 
-(defun lispm-agents--region-reference (beg end)
+(defun lispm-agents-region-reference (beg end)
   "Return a fenced reference to the text between BEG and END of this buffer.
 The header names the file relative to the project root and the line range."
   (let* ((file (if buffer-file-name
@@ -244,6 +244,8 @@ The header names the file relative to the project root and the line range."
             file first last lang
             (string-trim-right (buffer-substring-no-properties beg end)))))
 
+(defalias 'lispm-agents--region-reference #'lispm-agents-region-reference)
+
 (defun lispm-agents-send-region (beg end)
   "Send the region between BEG and END, with its location, to an agent terminal.
 Without an active region, send a reference to the current file and line.
@@ -252,7 +254,7 @@ The text is pasted into the agent's composer without submitting it."
                    (list (region-beginning) (region-end))
                  (list nil nil)))
   (let ((text (if beg
-                  (lispm-agents--region-reference beg end)
+                  (lispm-agents-region-reference beg end)
                 (format "%s:%d "
                         (if buffer-file-name
                             (file-relative-name buffer-file-name

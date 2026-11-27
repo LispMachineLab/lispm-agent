@@ -264,7 +264,7 @@ those running."
   (run-hooks 'lispm-agents-sessions-changed-hook)
   buffer)
 
-(defun lispm-agents--splash-buffer-p (&optional buffer)
+(defun lispm-agents-splash-buffer-p (&optional buffer)
   "Return non-nil when BUFFER is a welcome, desktop or system-agent buffer."
   (let ((buffer (or buffer (current-buffer))))
     (with-current-buffer buffer
@@ -278,6 +278,8 @@ those running."
           (let ((agent (or (bound-and-true-p lispm-chat-agent)
                            (bound-and-true-p lispm-session-agent))))
             (and agent (fboundp 'lispm-system-agent-p) (lispm-system-agent-p agent)))))))
+
+(defalias 'lispm-agents--splash-buffer-p #'lispm-agents-splash-buffer-p)
 
 (defvar lispm-agents-default-directory-function nil
   "Optional function returning the default directory for a new session or shell.
@@ -296,7 +298,7 @@ Welcome and surface buffers resolve to the home directory."
          (stringp lispm-finder--directory)
          (file-directory-p lispm-finder--directory))
     (file-name-as-directory (expand-file-name lispm-finder--directory)))
-   ((lispm-agents--splash-buffer-p)
+   ((lispm-agents-splash-buffer-p)
     (file-name-as-directory (expand-file-name "~")))
    ((if-let* ((project (project-current)))
         (project-root project)
@@ -319,7 +321,7 @@ window's buffer, see `lispm-agents-main-window-function'."
                          selected
                        main)))
         (with-selected-window window
-          (if (and (lispm-agents--splash-buffer-p)
+          (if (and (lispm-agents-splash-buffer-p)
                    (bound-and-true-p lispm-finder--had-focus)
                    (get-buffer " *Finder*")
                    (with-current-buffer " *Finder*"
