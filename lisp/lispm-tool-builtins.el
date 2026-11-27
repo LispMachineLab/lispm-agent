@@ -290,44 +290,35 @@ A GLOB without a slash is matched against the file's name alone."
              (member name vc-directory-exclusion-list)
              (member name '("node_modules" "vendor" "dist" "build" "target" "venv" "__pycache__"))))))
 
-(defun lispm-tools--remote-search-files (target ere case-fold)
-  "Return remote files under directory TARGET matching ERE.
-Uses a single remote `process-file' invocation (`git ls-files' or `find'
-piped to `grep -IlE'), plus any open buffers visiting files under TARGET."
-  (let* ((dir (file-name-as-directory target))
-         (default-directory dir)
-         (flag (if case-fold "-i" ""))
-         (script
-          (concat
-           "list_files() {\n"
-           "  git -c safe.directory='*' ls-files -z -co --exclude-standard 2>/dev/null ||\n"
-           "  find . \\( -name '.?*' -o -name CVS -o -name RCS -o -name SCCS -o -name _darcs"
-           " -o -name '{arch}' -o -name node_modules -o -name vendor -o -name dist"
-           " -o -name build -o -name target -o -name venv -o -name __pycache__ \\)"
-           " -prune -o -type f -size -" (number-to-string (1+ lispm-search-max-file-size)) "c -print0 2>/dev/null\n"
-           "}\n"
-           "if [ -n \"$2\" ]; then\n"
-           "  grep \"$2\" -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
-           "else\n"
-           "  grep -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
-           "fi\n"
-           "if [ $? -lt 2 ]; then\n"
-           "  if [ -n \"$2\" ]; then\n"
-           "    list_files | xargs -0 grep \"$2\" -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
-           "  else\n"
-           "    list_files | xargs -0 grep -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
-           "  fi\n"
-           "else\n"
-           "  list_files | tr '\\0' '\\n'\n"
-           "fi\n"))
-         (rel-files
-          (with-temp-buffer
-            (when (ignore-errors
-                    (process-file "sh" nil t nil "-c" script "sh" ere flag)
-                    t)
-              (split-string (buffer-string) "\n" t))))
-         (seen (make-hash-table :test #'equal))
-         out)
+(defun lispm-tools--remote-search-script ()
+  "Return the remote POSIX shell script used by `search_files'."
+  (concat
+   "list_files() {\n"
+   "  git -c safe.directory='*' ls-files -z -co --exclude-standard 2>/dev/null ||\n"
+   "  find . \\( -name '.?*' -o -name CVS -o -name RCS -o -name SCCS -o -name _darcs"
+   " -o -name '{arch}' -o -name node_modules -o -name vendor -o -name dist"
+   " -o -name build -o -name target -o -name venv -o -name __pycache__ \\)"
+   " -prune -o -type f -size -" (number-to-string (1+ lispm-search-max-file-size)) "c -print0 2>/dev/null\n"
+   "}\n"
+   "if [ -n \"$2\" ]; then\n"
+   "  grep \"$2\" -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
+   "else\n"
+   "  grep -E -- \"$1\" /dev/null >/dev/null 2>&1\n"
+   "fi\n"
+   "if [ $? -lt 2 ]; then\n"
+   "  if [ -n \"$2\" ]; then\n"
+   "    list_files | xargs -0 grep \"$2\" -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
+   "  else\n"
+   "    list_files | xargs -0 grep -IlE -- \"$1\" /dev/null 2>/dev/null || true\n"
+   "  fi\n"
+   "else\n"
+   "  list_files | tr '\\0' '\\n'\n"
+   "fi\n"))
+
+(defun lispm-tools--parse-remote-search-output (dir rel-files)
+  "Filter REL-FILES under remote DIR and merge open matching buffers."
+  (let ((seen (make-hash-table :test #'equal))
+        out)
     (dolist (rel rel-files)
       (unless (equal rel "/dev/null")
         (let* ((clean (string-remove-prefix "./" rel))
@@ -335,7 +326,8 @@ piped to `grep -IlE'), plus any open buffers visiting files under TARGET."
           (unless (seq-some (lambda (p)
                               (or (string-prefix-p "." p)
                                   (member p vc-directory-exclusion-list)
-                                  (member p '("node_modules" "vendor" "dist" "build" "target" "venv" "__pycache__"))))
+                                  (member p '("node_modules" "vendor" "dist" "build"
+                                              "target" "venv" "__pycache__"))))
                             (butlast parts))
             (let ((full (expand-file-name clean dir)))
               (unless (gethash full seen)
@@ -349,6 +341,63 @@ piped to `grep -IlE'), plus any open buffers visiting files under TARGET."
           (puthash full t seen)
           (push full out))))
     (nreverse out)))
+
+(defun lispm-tools--remote-search-files (target ere case-fold)
+  "Return remote files under directory TARGET matching ERE.
+Uses a single remote `process-file' invocation (`git ls-files' or `find'
+piped to `grep -IlE'), plus any open buffers visiting files under TARGET."
+  (let* ((dir (file-name-as-directory target))
+         (default-directory dir)
+         (flag (if case-fold "-i" ""))
+         (script (lispm-tools--remote-search-script))
+         (rel-files
+          (with-temp-buffer
+            (when (ignore-errors
+                    (process-file "sh" nil t nil "-c" script "sh" ere flag)
+                    t)
+              (split-string (buffer-string) "\n" t)))))
+    (lispm-tools--parse-remote-search-output dir rel-files)))
+
+(defun lispm-tools--remote-search-files-async (target ere case-fold callback)
+  "List candidate remote files under TARGET matching ERE without blocking.
+Calls CALLBACK with the list of file paths (falling back to `(list DIR)')."
+  (let* ((dir (file-name-as-directory target))
+         (default-directory dir)
+         (flag (if case-fold "-i" ""))
+         (script (lispm-tools--remote-search-script))
+         (buf (generate-new-buffer " *lispm-remote-search*" t))
+         (started nil))
+    (unwind-protect
+        (condition-case nil
+            (let ((proc
+                   (make-process
+                    :name "lispm-remote-search"
+                    :buffer buf
+                    :command (list "sh" "-c" script "sh" ere flag)
+                    :file-handler t
+                    :connection-type 'pipe
+                    :noquery t
+                    :sentinel
+                    (lambda (p _event)
+                      (when (and (not (process-live-p p)) (buffer-live-p buf))
+                        (let ((exit (and (eq (process-status p) 'exit)
+                                         (process-exit-status p)))
+                              (output (with-current-buffer buf (buffer-string))))
+                          (kill-buffer buf)
+                          (if (and exit (< exit 2))
+                              (funcall callback
+                                       (lispm-tools--parse-remote-search-output
+                                        dir (split-string output "\n" t)))
+                            (funcall callback (list dir)))))))))
+              (setq started t)
+              (when (and (not (process-live-p proc)) (buffer-live-p buf))
+                (funcall (process-sentinel proc) proc "finished\n")))
+          (error
+           (setq started nil)
+           (run-at-time 0 nil callback (list dir))))
+      (unless started
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
 
 (defun lispm-tools--search-files (target glob &optional ere case-fold)
   "The files a search of TARGET, a file or directory, goes through.
@@ -612,21 +661,33 @@ the unsaved contents of files open in Emacs."
          (remote-kernel (and (file-remote-p target)
                              (fboundp 'lispm-kernel-exec--runtime)
                              (lispm-kernel-exec--runtime :search-files target)))
-         (files (if remote-kernel
-                    (list target)
-                  (lispm-tools--search-files target glob ere case-fold)))
+         (remote-async (and (file-remote-p target)
+                            (file-directory-p target)
+                            ere
+                            (not remote-kernel)))
+         (files (cond
+                 (remote-kernel (list target))
+                 (remote-async nil)
+                 (t (lispm-tools--search-files target glob ere case-fold))))
          (glob-dir (if (or remote-kernel (file-directory-p target))
                        target
                      (file-name-directory target)))
          (glob-predicate (and glob (lispm-tools--glob-predicate glob glob-dir))))
     ;; An invalid regexp fails here, not file after file.
     (string-match-p regexp "")
-    (unless (lispm-tools--search-via-kernel
-             agent regexp clean-pat case-fold files glob glob-dir glob-predicate done)
-      (lispm-tools--search
-       agent regexp case-fold
-       (if remote-kernel (lispm-tools--search-files target glob ere case-fold) files)
-       done glob-predicate))))
+    (unless (and (not remote-async)
+                 (lispm-tools--search-via-kernel
+                  agent regexp clean-pat case-fold files glob glob-dir glob-predicate done))
+      (if (and (file-remote-p target) (file-directory-p target) ere)
+          (lispm-tools--remote-search-files-async
+           target ere case-fold
+           (lambda (found)
+             (let ((filtered (if glob-predicate (seq-filter glob-predicate found) found)))
+               (lispm-tools--search agent regexp case-fold filtered done glob-predicate))))
+        (lispm-tools--search
+         agent regexp case-fold
+         (if remote-kernel (lispm-tools--search-files target glob ere case-fold) files)
+         done glob-predicate)))))
 
 (lispm-deftool list_buffers ()
   "List the buffers open in Emacs: name, major mode, file and whether modified.

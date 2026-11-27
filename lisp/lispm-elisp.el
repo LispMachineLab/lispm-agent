@@ -19,6 +19,7 @@
 (declare-function lispm-kernel-runtime-hello "lispm-kernel" (runtime))
 (declare-function lispm-kernel-submit "lispm-kernel" (runtime job input &rest keys))
 (declare-function lispm-kernel-cancel "lispm-kernel" (runtime id))
+(declare-function lispm-kernel-exec-owner-id "lispm-kernel-exec" (&optional owner))
 (defvar lispm-kernel-exec-runtime-function)
 
 (defcustom lispm-elisp-program (expand-file-name invocation-name invocation-directory)
@@ -148,6 +149,9 @@ No worker is started in Emacs when the kernel is unavailable."
                      :env (lispm-elisp--environment directory)
                      :stdin (concat (prin1-to-string code) "\n")
                      :timeout timeout)
+               :owner (if (fboundp 'lispm-kernel-exec-owner-id)
+                          (lispm-kernel-exec-owner-id (and agent (lispm-agent-id agent)))
+                        4)
                :timeout (+ timeout 10)
                :on-result (lambda (kind value) (lispm-elisp--result job kind value)))))))
   nil)

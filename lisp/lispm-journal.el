@@ -74,14 +74,29 @@ one by one through TRAMP.  Such a root has the in-memory journal only."
               (top (locate-dominating-file root ".git")))
     (file-name-as-directory (expand-file-name top))))
 
+(defun lispm-journal--directory-path (root)
+  "Return the journal repository directory path for the project at ROOT."
+  (expand-file-name "journal.git/" (lispm-project-directory root)))
+
 (defun lispm-journal--directory (root)
   "The journal repository of the project at ROOT, made if need be; or nil."
-  (let ((dir (expand-file-name "journal.git/" (lispm-project-directory root))))
+  (let ((dir (lispm-journal--directory-path root)))
     (if (file-exists-p (expand-file-name "HEAD" dir))
         dir
       (let ((process-environment (lispm-git-environment)))
         (when (zerop (call-process "git" nil nil nil "init" "-q" "--bare" dir))
           dir)))))
+
+(defun lispm-journal--ensure-directory-async (root callback)
+  "Ensure the journal repository for ROOT exists without blocking.
+Calls CALLBACK with the repository directory or nil on failure."
+  (let ((dir (lispm-journal--directory-path root)))
+    (if (file-exists-p (expand-file-name "HEAD" dir))
+        (funcall callback dir)
+      (let ((process-environment (lispm-git-environment)))
+        (lispm-exec "git" (list "init" "-q" "--bare" dir)
+                    (lambda (exit _out _err)
+                      (funcall callback (and (eql exit 0) dir))))))))
 
 (defun lispm-journal--environment (dir top)
   "The environment of git commands on the journal DIR whose work tree is TOP."
@@ -251,32 +266,51 @@ turn must not be taken before the end of the one before."
     (plist-put snapshot :then nil)
     (mapc #'funcall then)))
 
+(defun lispm-journal--begin-snapshot (agent top dir snapshot)
+  "Record initial SNAPSHOT in journal DIR for AGENT's work tree TOP."
+  (lispm-journal--snapshot
+   top dir :index (lispm-journal--index dir agent) :ref (plist-get snapshot :ref)
+   :message (format "%s turn %d begins" (lispm-agent-name agent) (lispm-agent-turn agent))
+   :author (symbol-name (lispm-agent-name agent))
+   :callback (lambda (_tree commit)
+               (plist-put snapshot :before commit)
+               (lispm-journal--taken snapshot))))
+
 (defun lispm-journal-begin (agent &optional resumed)
   "Take a snapshot of AGENT's project as its turn begins, if it is in git.
 RESUMED non-nil if the turn is one Emacs stopped in the middle of:
 then it goes on from the snapshot taken as it first began, if any."
   (when-let* (((and lispm-journal-git (executable-find "git")))
-              (top (lispm-journal--top (lispm-agent-root agent)))
-              (dir (lispm-journal--directory (lispm-agent-root agent))))
+              (top (lispm-journal--top (lispm-agent-root agent))))
     (let* ((session (lispm-agent-id agent))
-           (begun (and resumed (lispm-journal--latest-begun dir session)))
+           (dir (lispm-journal--directory-path (lispm-agent-root agent)))
            (snapshot (list :top top :dir dir
-                           :ref (or (plist-get begun :ref)
-                                    (format "refs/turns/%s/%s" session (lispm-journal--stamp))))))
+                           :ref (format "refs/turns/%s/%s" session (lispm-journal--stamp)))))
       (setf (alist-get (lispm-agent-turn agent) (lispm-agent-snapshots agent)) snapshot)
       (setf (lispm-agent-snapshots agent) (seq-take (lispm-agent-snapshots agent) lispm-journal-turns))
-      (if begun
-          (plist-put snapshot :before (plist-get begun :commit))
-        (lispm-journal--take
-         agent snapshot
-         (lambda ()
-           (lispm-journal--snapshot
-            top dir :index (lispm-journal--index dir agent) :ref (plist-get snapshot :ref)
-            :message (format "%s turn %d begins" (lispm-agent-name agent) (lispm-agent-turn agent))
-            :author (symbol-name (lispm-agent-name agent))
-            :callback (lambda (_tree commit)
-                        (plist-put snapshot :before commit)
-                        (lispm-journal--taken snapshot)))))))))
+      (lispm-journal--take
+       agent snapshot
+       (lambda ()
+         (lispm-journal--ensure-directory-async
+          (lispm-agent-root agent)
+          (lambda (ready-dir)
+            (cond
+             ((not ready-dir)
+              (lispm-journal--taken snapshot))
+             (resumed
+              (lispm-journal--records-async
+               ready-dir session
+               (lambda (records)
+                 (let* ((first (car records))
+                        (begun (and first (not (plist-get first :finished)) first)))
+                   (if begun
+                       (progn
+                         (plist-put snapshot :ref (plist-get begun :ref))
+                         (plist-put snapshot :before (plist-get begun :commit))
+                         (lispm-journal--taken snapshot))
+                     (lispm-journal--begin-snapshot agent top ready-dir snapshot))))))
+             (t
+              (lispm-journal--begin-snapshot agent top ready-dir snapshot))))))))))
 
 (defun lispm-journal-busy-p (agent)
   "Non-nil while a snapshot of AGENT's is being taken.
@@ -309,6 +343,16 @@ A turn that changed nothing leaves no snapshot."
                          (plist-put snapshot :after commit)
                          (lispm-journal--taken snapshot))))))))))
 
+(defun lispm-journal--parse-records (output)
+  "Parse `git for-each-ref' OUTPUT into snapshot record plists."
+  (when (and (stringp output) (not (string-empty-p output)))
+    (mapcar (lambda (line)
+              (pcase-let ((`(,ref ,commit ,subject) (split-string line "\t")))
+                (list :ref ref :commit commit :subject subject
+                      :time (file-name-nondirectory ref)
+                      :finished (not (string-suffix-p " begins" subject)))))
+            (split-string output "\n" t))))
+
 (defun lispm-journal--records (dir session)
   "The turns of SESSION the journal DIR holds, newest first, as plists.
 Each has :ref, :commit, :subject, :time (its ref's name) and
@@ -321,12 +365,19 @@ Each has :ref, :commit, :subject, :time (its ref's name) and
                                                      "--format=%(refname)%09%(objectname)%09%(subject)"
                                                      (format "refs/turns/%s/" session)))
                             (buffer-string))))))
-    (mapcar (lambda (line)
-              (pcase-let ((`(,ref ,commit ,subject) (split-string line "\t")))
-                (list :ref ref :commit commit :subject subject
-                      :time (file-name-nondirectory ref)
-                      :finished (not (string-suffix-p " begins" subject)))))
-            (split-string output "\n" t))))
+    (lispm-journal--parse-records output)))
+
+(defun lispm-journal--records-async (dir session callback)
+  "Read turns of SESSION held in journal DIR asynchronously.
+Calls CALLBACK with the parsed list of record plists."
+  (let ((process-environment (cons (concat "GIT_DIR=" (directory-file-name dir))
+                                   (lispm-git-environment))))
+    (lispm-exec "git" (list "for-each-ref" "--sort=-refname"
+                            "--format=%(refname)%09%(objectname)%09%(subject)"
+                            (format "refs/turns/%s/" session))
+                (lambda (exit output _err)
+                  (funcall callback (and (eql exit 0)
+                                         (lispm-journal--parse-records output)))))))
 
 (defun lispm-journal-records (agent)
   "The turns with changes of AGENT's session its project's journal holds.

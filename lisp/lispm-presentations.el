@@ -25,6 +25,7 @@
 
 ;;; Code:
 
+(require 'lispm-exec)
 (require 'lispm-core)
 (require 'lispm-agents)
 (require 'lispm-tools)
@@ -365,15 +366,60 @@ Where none is, act as one of `lispm-act-functions' does."
 (defvar lispm-present--project-cache (make-hash-table :test #'equal)
   "Cache of (TIMESTAMP . BASENAME-HASH) per project root for `lispm-present-file'.")
 
+(defvar lispm-present--project-refreshing (make-hash-table :test #'equal)
+  "Directory roots currently refreshing their basename index asynchronously.")
+
+(defun lispm-present--build-project-table (files)
+  "Build a basename lookup table from relative FILES."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (rel files)
+      (let ((base (file-name-nondirectory rel)))
+        (puthash base (cons rel (gethash base table)) table)))
+    table))
+
+(defun lispm-present--refresh-project-index-async (dir &optional callback)
+  "Refresh project basename cache for git root DIR asynchronously.
+Calls CALLBACK with the resulting hash table when done."
+  (let ((root (file-name-as-directory (expand-file-name dir))))
+    (cond
+     ((or (file-remote-p root)
+          (not (file-directory-p root))
+          (not (locate-dominating-file root ".git")))
+      (when callback (funcall callback (make-hash-table :test #'equal))))
+     ((gethash root lispm-present--project-refreshing)
+      (when callback
+        (push callback (gethash root lispm-present--project-refreshing))))
+     (t
+      (puthash root (list (or callback #'ignore)) lispm-present--project-refreshing)
+      (let ((default-directory root))
+        (lispm-exec "git" '("ls-files" "-z" "--cached" "--others" "--exclude-standard")
+                    (lambda (exit output _err)
+                      (let* ((callbacks (nreverse (gethash root lispm-present--project-refreshing)))
+                             (files (and (eql exit 0) (split-string output "\0" t)))
+                             (table (lispm-present--build-project-table files)))
+                        (remhash root lispm-present--project-refreshing)
+                        (when files
+                          (puthash root (cons (float-time) table) lispm-present--project-cache))
+                        (dolist (cb callbacks)
+                          (unless (eq cb #'ignore)
+                            (funcall cb table)))))))))))
+
 (defun lispm-present--project-index (root)
   "Return a hash table mapping file basenames to relative paths under ROOT."
   (let* ((dir (file-name-as-directory (expand-file-name root)))
          (cached (gethash dir lispm-present--project-cache))
          (now (float-time)))
-    (if (and cached (< (- now (car cached)) 15.0))
-        (cdr cached)
-      (let ((table (make-hash-table :test #'equal))
-            files)
+    (cond
+     ((and cached (< (- now (car cached)) 15.0))
+      (cdr cached))
+     ((and (not noninteractive)
+           (not (file-remote-p dir))
+           (file-directory-p dir)
+           (locate-dominating-file dir ".git"))
+      (lispm-present--refresh-project-index-async dir)
+      (or (cdr cached) (make-hash-table :test #'equal)))
+     (t
+      (let (files)
         (when (and (not (file-remote-p dir)) (file-directory-p dir))
           (setq files
                 (or (and (locate-dominating-file dir ".git")
@@ -390,12 +436,10 @@ Where none is, act as one of `lispm-act-functions' does."
                                dir "\\`[^.]" nil
                                (lambda (d)
                                  (not (member (file-name-nondirectory (directory-file-name d))
-                                              '(".git" "node_modules" "target" ".deps" ".claude")))))))))
-          (dolist (rel files)
-            (let ((base (file-name-nondirectory rel)))
-              (puthash base (cons rel (gethash base table)) table))))
-        (puthash dir (cons now table) lispm-present--project-cache)
-        table))))
+                                              '(".git" "node_modules" "target" ".deps" ".claude"))))))))))
+        (let ((table (lispm-present--build-project-table files)))
+          (puthash dir (cons now table) lispm-present--project-cache)
+          table))))))
 
 (defun lispm-present--project-file (path root)
   "Find a file under ROOT matching relative suffix PATH, or nil."

@@ -173,6 +173,7 @@ Returns a summary, then each failure with its condition and the
 innermost calls of its backtrace.  Run the tests of what you changed
 once eval_definition has loaded it; give file to load tests first."
   :permission exec
+  :concurrency 'editor
   :deferred t
   (when file
     (let ((file (lispm-tools-file file)))

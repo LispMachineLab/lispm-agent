@@ -261,27 +261,39 @@ sees, and the chat shows.  Interactively, FILE is asked for."
   "Attach the image DATA, pasted, of media TYPE to the message being written.
 It is saved in the agent's session, as the images tools return are;
 one of a kind models do not take, TIFF say, is made a PNG first."
-  (let* ((type (symbol-name type))
-         (file (if (rassoc type lispm-transcript-image-types)
-                   (lispm-save-image lispm-chat-agent (base64-encode-string data t) type)
-                 (let ((pasted (make-temp-file "lispm-pasted-" nil
-                                               (concat "." (cadr (split-string type "/"))))))
-                   (with-temp-file pasted
-                     (set-buffer-multibyte nil)
-                     (insert data))
-                   (unwind-protect
-                       (if-let* ((png (lispm-image-as-png pasted)))
-                           (unwind-protect
-                               (lispm-save-image lispm-chat-agent
-                                                 (with-temp-buffer
-                                                   (set-buffer-multibyte nil)
-                                                   (insert-file-contents-literally png)
-                                                   (base64-encode-string (buffer-string) t))
-                                                 "image/png")
-                             (delete-file png))
-                         (user-error "%s" (lispm-tr "Cannot attach a %s image" type)))
-                     (delete-file pasted))))))
-    (lispm-chat-attach file)))
+  (let ((type (symbol-name type)))
+    (if (rassoc type lispm-transcript-image-types)
+        (lispm-chat-attach
+         (lispm-save-image lispm-chat-agent (base64-encode-string data t) type))
+      (let ((chat (current-buffer))
+            (agent lispm-chat-agent)
+            (pasted (make-temp-file "lispm-pasted-" nil
+                                    (concat "." (cadr (split-string type "/"))))))
+        (with-temp-file pasted
+          (set-buffer-multibyte nil)
+          (insert data))
+        (lispm-image-as-png-async
+         pasted
+         (lambda (png)
+           (unwind-protect
+               (if (not png)
+                   (message "%s" (lispm-tr "Cannot attach a %s image" type))
+                 (unwind-protect
+                     (when (lispm-agent-p agent)
+                       (let ((file (lispm-save-image
+                                    agent
+                                    (with-temp-buffer
+                                      (set-buffer-multibyte nil)
+                                      (insert-file-contents-literally png)
+                                      (base64-encode-string (buffer-string) t))
+                                    "image/png")))
+                         (when (buffer-live-p chat)
+                           (with-current-buffer chat
+                             (lispm-chat-attach file)))))
+                   (when (file-exists-p png)
+                     (ignore-errors (delete-file png)))))
+             (when (file-exists-p pasted)
+               (ignore-errors (delete-file pasted))))))))))
 
 (defun lispm-chat--drop (url _action)
   "Attach the file dropped on the chat, URL, to the message being written."

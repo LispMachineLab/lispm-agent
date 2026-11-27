@@ -16,6 +16,7 @@
 (require 'subr-x)
 (require 'org)
 (require 'lispm-i18n)
+(require 'lispm-exec)
 (require 'lispm-core)
 (require 'lispm-api)
 (require 'lispm-tools)
@@ -280,9 +281,27 @@ using BM25 and Lorebook keyword triggers."
   :type 'integer
   :group 'lispm-characters)
 
-(defun lispm-characters--fetch-embeddings (backend model texts)
-  "Fetch embeddings from BACKEND's `/embeddings' endpoint for MODEL and TEXTS."
-  (when-let* ((url (plist-get backend :url))
+(defvar lispm-characters--rag-query-cache (make-hash-table :test #'equal)
+  "In-memory cache mapping `(URL MODEL . QUERY)' to float embedding vectors.")
+
+(defvar lispm-characters--rag-warming (make-hash-table :test #'equal)
+  "Active background RAG embedding warmups, keyed by `(NAME . QUERY)'.")
+
+(defun lispm-characters--parse-embeddings-json (text)
+  "Parse an OpenAI-compatible `/embeddings' response JSON TEXT into vectors."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (when-let* ((json (ignore-errors
+                        (json-parse-string text :object-type 'alist :array-type 'list)))
+                (data (alist-get 'data json)))
+      (mapcar (lambda (item) (alist-get 'embedding item))
+              (sort (copy-sequence data)
+                    (lambda (a b) (< (or (alist-get 'index a) 0)
+                                     (or (alist-get 'index b) 0))))))))
+
+(defun lispm-characters--embeddings-request-spec (backend model texts)
+  "Return `(ENDPOINT CONFIG BODY)' for BACKEND and MODEL embeddings of TEXTS."
+  (when-let* (((and backend model texts))
+              (url (plist-get backend :url))
               (endpoint (concat (string-remove-suffix "/" url) "/embeddings"))
               (body (encode-coding-string
                      (json-serialize `((model . ,model)
@@ -290,9 +309,16 @@ using BM25 and Lorebook keyword triggers."
                      'utf-8)))
     (let* ((key (ignore-errors (lispm-api-key backend)))
            (headers (append '("Content-Type: application/json")
-                            (when key (list (concat "Authorization: Bearer " key)))))
-           (config (lispm-api-curl-config headers))
-           (payload-file (make-temp-file "lispm-embed-" nil ".json")))
+                            (when key (list (concat "Authorization: Bearer " key))))))
+      (list endpoint (lispm-api-curl-config headers) body))))
+
+(defun lispm-characters--fetch-embeddings (backend model texts)
+  "Fetch embeddings from BACKEND's `/embeddings' endpoint for MODEL and TEXTS."
+  (when-let* ((spec (lispm-characters--embeddings-request-spec backend model texts))
+              (endpoint (nth 0 spec))
+              (config (nth 1 spec))
+              (body (nth 2 spec)))
+    (let ((payload-file (make-temp-file "lispm-embed-" nil ".json")))
       (unwind-protect
           (progn
             (let ((coding-system-for-write 'binary))
@@ -310,36 +336,93 @@ using BM25 and Lorebook keyword triggers."
                                  "--config" "-" "--data-binary" (concat "@" payload-file)
                                  endpoint)))
                     (when (eq status 0)
-                      (with-current-buffer out
-                        (goto-char (point-min))
-                        (when-let* ((json (ignore-errors
-                                            (json-parse-buffer :object-type 'alist :array-type 'list)))
-                                    (data (alist-get 'data json)))
-                          (mapcar (lambda (item) (alist-get 'embedding item))
-                                  (sort (copy-sequence data)
-                                        (lambda (a b) (< (or (alist-get 'index a) 0)
-                                                         (or (alist-get 'index b) 0)))))))))))))
+                      (lispm-characters--parse-embeddings-json
+                       (with-current-buffer out (buffer-string)))))))))
         (when (file-exists-p payload-file) (delete-file payload-file))))))
+
+(defun lispm-characters--fetch-embeddings-async (backend model texts callback)
+  "Fetch embeddings from BACKEND for MODEL and TEXTS without blocking.
+Calls CALLBACK with the list of embedding vectors, or nil on failure."
+  (let ((spec (lispm-characters--embeddings-request-spec backend model texts)))
+    (if (not spec)
+        (funcall callback nil)
+      (pcase-let* ((`(,endpoint ,config ,body) spec)
+                   (payload-file (make-temp-file "lispm-embed-" nil ".json"))
+                   (started nil))
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'binary))
+                (with-temp-file payload-file
+                  (set-buffer-multibyte nil)
+                  (insert body)))
+              (lispm-exec
+               lispm-curl-program
+               (list "-sS" "--max-time" (number-to-string lispm-character-rag-timeout)
+                     "--config" "-" "--data-binary" (concat "@" payload-file)
+                     endpoint)
+               (lambda (exit output _errors)
+                 (unwind-protect
+                     (funcall callback
+                              (and (eql exit 0)
+                                   (lispm-characters--parse-embeddings-json output)))
+                   (when (file-exists-p payload-file)
+                     (ignore-errors (delete-file payload-file)))))
+               :input config)
+              (setq started t))
+          (unless started
+            (when (file-exists-p payload-file)
+              (ignore-errors (delete-file payload-file)))))))))
 
 (defun lispm-characters--rag-index-file (character)
   "File caching embedding vectors for CHARACTER."
   (expand-file-name ".rag-index.eld"
                     (lispm-character-directory (lispm-character-name (lispm-get-character character)))))
 
+(defun lispm-characters--rag-read-cache (index-file)
+  "Read persisted embedding hash table from INDEX-FILE, or make a fresh one."
+  (or (and (file-readable-p index-file)
+           (ignore-errors
+             (with-temp-buffer
+               (insert-file-contents index-file)
+               (read (current-buffer)))))
+      (make-hash-table :test #'equal)))
+
+(defun lispm-characters--rag-write-cache (index-file cache)
+  "Write embedding CACHE hash table to INDEX-FILE."
+  (ignore-errors
+    (let ((print-length nil) (print-level nil))
+      (with-temp-file index-file
+        (prin1 cache (current-buffer))))))
+
+(defun lispm-characters--rag-query-key (backend model query)
+  "Return lookup key for QUERY embeddings under BACKEND and MODEL."
+  (list (plist-get backend :url) model query))
+
+(defun lispm-characters--rag-cache-query-vec (backend model query vec)
+  "Store query vector VEC under BACKEND, MODEL and QUERY."
+  (when vec
+    (when (>= (hash-table-count lispm-characters--rag-query-cache) 64)
+      (clrhash lispm-characters--rag-query-cache))
+    (puthash (lispm-characters--rag-query-key backend model query)
+             vec lispm-characters--rag-query-cache)))
+
+(defun lispm-characters--rag-scores-from-cache (model chunks cache q-vec)
+  "Compute cosine similarity alist for CHUNKS using MODEL, CACHE and Q-VEC."
+  (when q-vec
+    (cl-loop for c in chunks
+             for v = (gethash (concat model ":" (plist-get c :id)) cache)
+             when v
+             collect (cons (plist-get c :id)
+                           (max 0.0 (lispm-characters--cosine-similarity q-vec v))))))
+
 (defun lispm-characters--rag-embedding-scores (character query chunks)
-  "Return an alist of (CHUNK-ID . COSINE-SCORE) when an embedding model
-is set, or nil."
+  "Return an alist of `(CHUNK-ID . COSINE-SCORE)' synchronously, or nil."
   (let* ((character (lispm-get-character character))
          (model (or (lispm-character-embedding-model character) lispm-embedding-model))
          (backend (and model (lispm-characters--character-backend character))))
     (when (and model backend chunks)
       (let* ((index-file (lispm-characters--rag-index-file character))
-             (cache (or (and (file-readable-p index-file)
-                             (ignore-errors
-                               (with-temp-buffer
-                                 (insert-file-contents index-file)
-                                 (read (current-buffer)))))
-                        (make-hash-table :test #'equal)))
+             (cache (lispm-characters--rag-read-cache index-file))
              (missing (seq-filter (lambda (c)
                                     (not (gethash (concat model ":" (plist-get c :id)) cache)))
                                   chunks))
@@ -356,16 +439,106 @@ is set, or nil."
                      do (puthash (concat model ":" (plist-get c :id)) v cache)
                         (setq dirty t))))
         (when dirty
-          (ignore-errors
-            (let ((print-length nil) (print-level nil))
-              (with-temp-file index-file
-                (prin1 cache (current-buffer))))))
+          (lispm-characters--rag-write-cache index-file cache))
         (when-let* ((q-vec (car (funcall lispm-embedding-function backend model (list query)))))
+          (lispm-characters--rag-cache-query-vec backend model query q-vec)
+          (lispm-characters--rag-scores-from-cache model chunks cache q-vec))))))
+
+(defun lispm-characters--warm-embeddings-async (character query chunks &optional callback)
+  "Fetch missing embeddings for CHARACTER, QUERY and CHUNKS without blocking.
+When CALLBACK is non-nil, call it with the resulting cosine scores alist."
+  (let* ((character (lispm-get-character character))
+         (model (or (lispm-character-embedding-model character) lispm-embedding-model))
+         (backend (and model (lispm-characters--character-backend character))))
+    (if (not (and model backend chunks))
+        (when callback (funcall callback nil))
+      (let* ((index-file (lispm-characters--rag-index-file character))
+             (cache (lispm-characters--rag-read-cache index-file))
+             (missing (seq-filter (lambda (c)
+                                    (not (gethash (concat model ":" (plist-get c :id)) cache)))
+                                  chunks))
+             (q-vec (gethash (lispm-characters--rag-query-key backend model query)
+                             lispm-characters--rag-query-cache)))
+        (if (and (null missing) q-vec)
+            (when callback
+              (funcall callback (lispm-characters--rag-scores-from-cache model chunks cache q-vec)))
+          (let ((warm-key (list (lispm-character-name character)
+                                model (plist-get backend :url) query)))
+            (if-let* ((existing (gethash warm-key lispm-characters--rag-warming)))
+                (when callback
+                  (puthash warm-key (cons callback existing) lispm-characters--rag-warming))
+              (puthash warm-key (list (or callback #'ignore)) lispm-characters--rag-warming)
+              (let ((texts (append (mapcar (lambda (c)
+                                             (concat (plist-get c :title) "\n" (plist-get c :text)))
+                                           missing)
+                                   (unless q-vec (list query))))
+                    (handed-off nil))
+                (unwind-protect
+                    (progn
+                      (lispm-characters--fetch-embeddings-async
+                       backend model texts
+                       (lambda (vecs)
+                         (let ((callbacks (nreverse (gethash warm-key lispm-characters--rag-warming)))
+                               (resolved-q-vec q-vec)
+                               (active-cache cache))
+                           (remhash warm-key lispm-characters--rag-warming)
+                           (when vecs
+                             (let ((dirty nil)
+                                   (merged (lispm-characters--rag-read-cache index-file)))
+                               (cl-loop for c in missing
+                                        for v in vecs
+                                        when v
+                                        do (puthash (concat model ":" (plist-get c :id)) v merged)
+                                           (setq dirty t))
+                               (when dirty
+                                 (lispm-characters--rag-write-cache index-file merged)
+                                 (setq active-cache merged))
+                               (unless resolved-q-vec
+                                 (setq resolved-q-vec (nth (length missing) vecs))
+                                 (lispm-characters--rag-cache-query-vec
+                                  backend model query resolved-q-vec))))
+                           (let ((scores (and resolved-q-vec
+                                              (lispm-characters--rag-scores-from-cache
+                                               model chunks active-cache resolved-q-vec))))
+                             (dolist (cb callbacks)
+                               (unless (eq cb #'ignore)
+                                 (funcall cb scores)))))))
+                      (setq handed-off t))
+                  (unless handed-off
+                    (remhash warm-key lispm-characters--rag-warming)))))))))))
+
+(defun lispm-characters--rag-embedding-scores-cached (character query chunks)
+  "Return cached embedding scores for CHARACTER, QUERY and CHUNKS, warming async."
+  (let* ((character (lispm-get-character character))
+         (model (or (lispm-character-embedding-model character) lispm-embedding-model))
+         (backend (and model (lispm-characters--character-backend character))))
+    (when (and model backend chunks)
+      (let* ((cache (lispm-characters--rag-read-cache (lispm-characters--rag-index-file character)))
+             (missing (seq-filter (lambda (c)
+                                    (not (gethash (concat model ":" (plist-get c :id)) cache)))
+                                  chunks))
+             (q-vec (gethash (lispm-characters--rag-query-key backend model query)
+                             lispm-characters--rag-query-cache)))
+        (when (or missing (not q-vec))
+          (lispm-characters--warm-embeddings-async character query chunks))
+        (and q-vec
+             (lispm-characters--rag-scores-from-cache model chunks cache q-vec))))))
+
+(defun lispm-characters--rag-rank (chunks bm25 emb limit)
+  "Combine BM25 and EMB scores over CHUNKS and return at most LIMIT results."
+  (let* ((max-bm25 (max 1.0 (apply #'max 0.0 (mapcar #'cdr bm25))))
+         (scored
           (cl-loop for c in chunks
-                   for v = (gethash (concat model ":" (plist-get c :id)) cache)
-                   when v
-                   collect (cons (plist-get c :id)
-                                 (max 0.0 (lispm-characters--cosine-similarity q-vec v)))))))))
+                   for id = (plist-get c :id)
+                   for b-score = (or (cdr (assoc id bm25)) 0.0)
+                   for e-score = (cdr (assoc id emb))
+                   for total = (if e-score
+                                   (+ (* 0.6 e-score) (* 0.4 (/ b-score max-bm25)))
+                                 b-score)
+                   when (> total 0.0)
+                   collect (plist-put (copy-sequence c) :score total))))
+    (seq-take (sort scored (lambda (a b) (> (plist-get a :score) (plist-get b :score))))
+              limit)))
 
 (defun lispm-character-rag-search (character query &optional limit)
   "Search CHARACTER's knowledge base for QUERY using hybrid RAG.
@@ -375,21 +548,35 @@ chunk plists, each with `:score'."
          (chunks (lispm-character-rag-chunks character))
          (limit (or limit lispm-character-rag-top-k)))
     (when chunks
+      (lispm-characters--rag-rank
+       chunks
+       (lispm-characters--rag-bm25-scores query chunks)
+       (lispm-characters--rag-embedding-scores character query chunks)
+       limit))))
+
+(defun lispm-character-rag-search-async (character query limit callback)
+  "Search CHARACTER's knowledge base for QUERY without blocking.
+Call CALLBACK with at most LIMIT matching chunk plists."
+  (let* ((character (lispm-get-character character))
+         (chunks (lispm-character-rag-chunks character))
+         (limit (or limit lispm-character-rag-top-k)))
+    (cond
+     ((null chunks)
+      (funcall callback nil))
+     ((not (eq lispm-embedding-function #'lispm-characters--fetch-embeddings))
       (let* ((bm25 (lispm-characters--rag-bm25-scores query chunks))
-             (max-bm25 (max 1.0 (apply #'max 0.0 (mapcar #'cdr bm25))))
-             (emb (lispm-characters--rag-embedding-scores character query chunks))
-             (scored
-              (cl-loop for c in chunks
-                       for id = (plist-get c :id)
-                       for b-score = (or (cdr (assoc id bm25)) 0.0)
-                       for e-score = (cdr (assoc id emb))
-                       for total = (if e-score
-                                       (+ (* 0.6 e-score) (* 0.4 (/ b-score max-bm25)))
-                                     b-score)
-                       when (> total 0.0)
-                       collect (plist-put (copy-sequence c) :score total))))
-        (seq-take (sort scored (lambda (a b) (> (plist-get a :score) (plist-get b :score))))
-                  limit)))))
+             (emb (lispm-characters--rag-embedding-scores character query chunks)))
+        (funcall callback (lispm-characters--rag-rank chunks bm25 emb limit))))
+     (t
+      (let ((bm25 (lispm-characters--rag-bm25-scores query chunks))
+            (model (or (lispm-character-embedding-model character) lispm-embedding-model))
+            (backend (lispm-characters--character-backend character)))
+        (if (not (and model backend))
+            (funcall callback (lispm-characters--rag-rank chunks bm25 nil limit))
+          (lispm-characters--warm-embeddings-async
+           character query chunks
+           (lambda (emb)
+             (funcall callback (lispm-characters--rag-rank chunks bm25 emb limit))))))))))
 
 (defun lispm-character-rag-add (character title content &optional keywords)
   "Add or update a lorebook entry TITLE with CONTENT and KEYWORDS
@@ -454,9 +641,15 @@ in CHARACTER's knowledge base."
               ((lispm-character-knowledge-files character))
               (input (cdr (lispm-characters-last-input agent)))
               ((not (string-empty-p input)))
-              (hits (lispm-character-rag-search character input lispm-character-rag-top-k)))
-    (concat "Relevant passages from your knowledge base for this turn:\n"
-            (lispm-truncate (lispm-characters--rag-format hits) 6000))))
+              (chunks (lispm-character-rag-chunks character)))
+    (let* ((bm25 (lispm-characters--rag-bm25-scores input chunks))
+           (emb (if (eq lispm-embedding-function #'lispm-characters--fetch-embeddings)
+                    (lispm-characters--rag-embedding-scores-cached character input chunks)
+                  (lispm-characters--rag-embedding-scores character input chunks)))
+           (hits (lispm-characters--rag-rank chunks bm25 emb lispm-character-rag-top-k)))
+      (when hits
+        (concat "Relevant passages from your knowledge base for this turn:\n"
+                (lispm-truncate (lispm-characters--rag-format hits) 6000))))))
 
 (add-hook 'lispm-system-prompt-functions #'lispm-characters--rag-prompt t)
 (add-hook 'lispm-request-context-functions #'lispm-characters--rag-context t)
@@ -467,15 +660,21 @@ in CHARACTER's knowledge base."
   "Search your knowledge base (RAG lorebook and attached documents) using
 hybrid vector embeddings and BM25 keyword retrieval."
   :permission read
+  :async t
+  :concurrency 'parallel
   :for #'lispm-character-rag-enabled-p
   (let* ((character (or (lispm-agent-character* lispm-current-agent)
                         (error "You are no character")))
-         (hits (lispm-character-rag-search character query (or limit lispm-character-rag-top-k))))
-    (if hits
-        (lispm-characters--rag-format hits)
-      (if (lispm-character-knowledge-files character)
-          "No matching passages found in your knowledge base."
-        "Your knowledge base is empty; add entries with knowledge_add or place files in your knowledge/ directory."))))
+         (empty (not (lispm-character-knowledge-files character))))
+    (lispm-character-rag-search-async
+     character query (or limit lispm-character-rag-top-k)
+     (lambda (hits)
+       (funcall done
+                (cond
+                 (hits (lispm-characters--rag-format hits))
+                 (empty "Your knowledge base is empty; add entries with knowledge_add or place files in your knowledge/ directory.")
+                 (t "No matching passages found in your knowledge base.")))))
+    nil))
 
 (lispm-deftool knowledge_add
     ((title string "Heading of the knowledge or lorebook entry.")

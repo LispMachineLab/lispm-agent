@@ -74,10 +74,13 @@
     (when (bound-and-true-p display-line-numbers-mode)
       (display-line-numbers-mode -1))))
 
-(defun lispm-stage-runner-buffer (tag agent mode)
-  "Return or create AGENT's stage buffer for TAG with major MODE."
-  (let* ((name (format "*lispm-stage-%s: %s*"
-                       tag (if agent (lispm-principal-name agent) "LispM")))
+(defun lispm-stage-runner-buffer (tag agent mode &optional call-id)
+  "Return or create AGENT's stage buffer for TAG with major MODE.
+When CALL-ID is non-nil, suffix the buffer name to isolate concurrent calls."
+  (let* ((label (if agent (lispm-principal-name agent) "LispM"))
+         (name (if call-id
+                   (format "*lispm-stage-%s: %s (%s)*" tag label call-id)
+                 (format "*lispm-stage-%s: %s*" tag label)))
          (buf (get-buffer-create name)))
     (with-current-buffer buf
       (unless (derived-mode-p mode)
@@ -122,7 +125,7 @@ Returns the stage window when presented, or nil."
   (when (and (buffer-live-p buffer)
              follow
              (lispm-spotlight-follow-agent-p agent (float-time))
-             (not (lispm-edits-active-p)))
+             (not (lispm-edits-active-p nil agent)))
     (when-let* ((win (lispm-stage-window buffer t agent kind)))
       (unless (eq win (selected-window))
         (with-current-buffer buffer

@@ -34,6 +34,16 @@
 (require 'lispm-journal)
 (require 'lispm-session)
 
+(defvar lispm-kernel-exec-owner)
+(declare-function lispm-kernel-exec-release-owner "lispm-kernel-exec" (owner))
+
+(defun lispm-turns--release-kernel-owner (agent)
+  "Release kernel owner quota state when AGENT's session ends."
+  (when (and (lispm-agent-p agent) (fboundp 'lispm-kernel-exec-release-owner))
+    (lispm-kernel-exec-release-owner (lispm-agent-id agent))))
+
+(add-hook 'lispm-session-end-functions #'lispm-turns--release-kernel-owner)
+
 (defvar-local lispm--live nil
   "Live section bounds while streaming.")
 
@@ -448,15 +458,16 @@ starting hold requests back so that their tools are there.")
                    (if (> attempt 0) (format "retry %d" attempt) "thinking")
                    (if (> attempt 0) 'retry 'thinking))
   (lispm--live-begin agent)
-  (let ((proc (funcall lispm-api-function (lispm-agent-backend* agent) request
-                       :on-delta (lambda (kind text)
-                                   (if (eq kind 'tool-input)
-                                       (with-demoted-errors "LispM: %S"
-                                         (run-hook-with-args 'lispm-tool-input-functions
-                                                             agent text))
-                                     (lispm--live-insert agent kind text)))
-                       :on-done (lambda (message) (lispm--on-message agent message))
-                       :on-error (lambda (err) (lispm--on-error agent err request attempt)))))
+  (let* ((lispm-kernel-exec-owner (lispm-agent-id agent))
+         (proc (funcall lispm-api-function (lispm-agent-backend* agent) request
+                        :on-delta (lambda (kind text)
+                                    (if (eq kind 'tool-input)
+                                        (with-demoted-errors "LispM: %S"
+                                          (run-hook-with-args 'lispm-tool-input-functions
+                                                              agent text))
+                                      (lispm--live-insert agent kind text)))
+                        :on-done (lambda (message) (lispm--on-message agent message))
+                        :on-error (lambda (err) (lispm--on-error agent err request attempt)))))
     (when (processp proc)
       (process-put proc 'lispm-agent agent))
     (setf (lispm-agent-process agent) proc)))
@@ -647,47 +658,90 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
 (defmacro lispm-turns-dispatching (agent &rest body)
   "Run BODY with AGENT marked as dispatching tool calls.
 While dispatching, `lispm-turns-tool-done' records results without
-requesting the next turn step until BODY finishes."
+requesting the next turn step until BODY finishes.  Reentrant across
+nested dispatch waves."
   (declare (indent 1) (debug t))
-  (let ((ag (make-symbol "agent")))
-    `(let ((,ag ,agent))
+  (let ((ag (make-symbol "agent"))
+        (was (make-symbol "was")))
+    `(let* ((,ag ,agent)
+            (,was (lispm-agent-dispatching ,ag)))
        (setf (lispm-agent-dispatching ,ag) t)
        (unwind-protect
            (progn ,@body)
-         (setf (lispm-agent-dispatching ,ag) nil)))))
+         (setf (lispm-agent-dispatching ,ag) ,was)))))
+
+(defun lispm--ensure-call-concurrency (agent call)
+  "Compute and cache CALL's conflict spec under AGENT when absent."
+  (or (plist-get call :concurrency)
+      (let* ((lispm-current-agent agent)
+             (default-directory (lispm-agent-root agent))
+             (tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name))))
+             (spec (lispm-tool-concurrency-spec tool (plist-get call :input))))
+        (plist-put call :concurrency spec)
+        spec)))
+
+(defun lispm--active-calls (agent)
+  "Return active started tool call plists for AGENT."
+  (let (active)
+    (maphash (lambda (_id call)
+               (when (and (eq (plist-get call :status) 'run)
+                          (plist-get call :started))
+                 (lispm--ensure-call-concurrency agent call)
+                 (push call active)))
+             (lispm-agent-pending agent))
+    active))
+
+(defun lispm--call-conflicts-p (call blockers)
+  "Return non-nil when CALL's concurrency spec conflicts with any of BLOCKERS."
+  (let ((spec (plist-get call :concurrency)))
+    (seq-some (lambda (other)
+                (lispm-tool-concurrency-conflict-p spec (plist-get other :concurrency)))
+              blockers)))
+
+(defun lispm--call-conflicts-active-p (agent call)
+  "Return non-nil when CALL conflicts with any currently running call of AGENT."
+  (lispm--ensure-call-concurrency agent call)
+  (lispm--call-conflicts-p call (lispm--active-calls agent)))
 
 (defun lispm--dispatch (agent uses decisions calls proceed)
   "Act on the tool calls USES of AGENT per DECISIONS.
 CALLS locates their headings.  If PROCEED, request the next step
 once every call has a result."
-  (let ((pending (lispm-agent-pending agent)))
+  (let ((pending (lispm-agent-pending agent))
+        (seq 0))
     (lispm-turns-dispatching agent
       ;; Register every call before running any, so that the first
       ;; result cannot resume the loop while others are unregistered.
       (dolist (b uses)
-        (let ((id (alist-get 'id b)))
+        (let* ((id (alist-get 'id b))
+               (name (alist-get 'name b))
+               (tool (lispm-get-tool name))
+               (input (alist-get 'input b))
+               (spec (let ((lispm-current-agent agent)
+                           (default-directory (lispm-agent-root agent)))
+                       (lispm-tool-concurrency-spec tool input))))
           (pcase-let ((`(,_ ,status ,reasons) (alist-get id decisions nil nil #'equal)))
             (puthash id (list :status status
+                              :seq seq
                               :turn (lispm-agent-turn agent)
-                              :name (alist-get 'name b)
-                              :tool (lispm-get-tool (alist-get 'name b))
-                              :input (alist-get 'input b)
+                              :name name
+                              :tool tool
+                              :input input
+                              :concurrency spec
                               :marker (alist-get id calls nil nil #'equal)
                               :reasons (and (eq status 'ask) reasons))
-                     pending))))
+                     pending)
+            (cl-incf seq))))
       (lispm-set-state agent 'acting)
       (dolist (b uses)
         (let* ((id (alist-get 'id b))
                (decision (alist-get id decisions nil nil #'equal)))
           (pcase (nth 1 decision)
-            ('run
-             (if (lispm--running-tool-p agent)
-                 (plist-put (gethash id pending) :queued t)
-               (lispm-turns-run-tool agent id)))
+            ('run (plist-put (gethash id pending) :queued t))
             ('ask (when lispm-runtime-ask-approval-function
                     (funcall lispm-runtime-ask-approval-function agent id)))
-            (_ (lispm-turns-tool-done agent id (nth 2 decision) t (car decision)))))))
-    (lispm--run-next-queued-tool agent)
+            (_ (lispm-turns-tool-done agent id (nth 2 decision) t (car decision))))))
+      (lispm--run-next-queued-tool agent))
     (lispm-turns-update-state agent)
     ;; The calls, awaiting approval or running, are on disk.
     (lispm-save-session agent)
@@ -696,28 +750,50 @@ once every call has a result."
 
 (defun lispm--running-tool-p (agent)
   "Non-nil if AGENT currently has an active started tool call in `run' state."
-  (let (active)
-    (maphash (lambda (_id call)
-               (when (and (eq (plist-get call :status) 'run)
-                          (plist-get call :started))
-                 (setq active t)))
+  (and (lispm--active-calls agent) t))
+
+(defun lispm--launch-unblocked-tools (agent)
+  "Start all queued `run' calls for AGENT not blocked by earlier or active calls.
+Return non-nil if any tool call started."
+  (let (pending-entries has-queued started)
+    (maphash (lambda (id call)
+               (let ((status (plist-get call :status)))
+                 (cond
+                  ((and (eq status 'run) (plist-get call :queued))
+                   (setq has-queued t)
+                   (push (cons id call) pending-entries))
+                  ((memq status '(ask stopped))
+                   (push (cons id call) pending-entries)))))
              (lispm-agent-pending agent))
-    active))
+    (when has-queued
+      (setq pending-entries
+            (sort pending-entries
+                  (lambda (a b)
+                    (< (or (plist-get (cdr a) :seq) 0)
+                       (or (plist-get (cdr b) :seq) 0)))))
+      (let ((blockers (lispm--active-calls agent)))
+        (lispm-turns-dispatching agent
+          (dolist (entry pending-entries)
+            (let ((id (car entry))
+                  (call (cdr entry)))
+              (lispm--ensure-call-concurrency agent call)
+              (cond
+               ((memq (plist-get call :status) '(ask stopped))
+                ;; Earlier unapproved/stopped calls act as conflict barriers.
+                (push call blockers))
+               ((lispm--call-conflicts-p call blockers)
+                ;; Keep FIFO ordering among conflicting resource/editor calls.
+                (push call blockers))
+               (t
+                (plist-put call :queued nil)
+                (push call blockers)
+                (lispm-turns-run-tool agent id)
+                (setq started t))))))))
+    started))
 
 (defun lispm--run-next-queued-tool (agent)
-  "Start the next queued `run' tool call for AGENT when none is currently active."
-  (while (and (not (lispm--running-tool-p agent))
-              (let (next-id)
-                (maphash (lambda (id call)
-                           (when (and (null next-id)
-                                      (eq (plist-get call :status) 'run)
-                                      (plist-get call :queued))
-                             (setq next-id id)))
-                         (lispm-agent-pending agent))
-                (when next-id
-                  (plist-put (gethash next-id (lispm-agent-pending agent)) :queued nil)
-                  (lispm-turns-run-tool agent next-id)
-                  t)))))
+  "Start queued `run' tool calls for AGENT whose concurrency specs do not conflict."
+  (while (lispm--launch-unblocked-tools agent)))
 
 (defvar lispm-current-call nil
   "Id of the call whose tool is starting, among the acting agent's pending calls.
@@ -725,27 +801,34 @@ A tool that makes calls in turn, such as run_lisp, keeps it to ask
 for their approval (see `lispm-call-ask').")
 
 (defun lispm-turns-run-tool (agent id)
-  "Run AGENT's pending tool call ID.
+  "Run AGENT's pending tool call ID when no conflicting call is active.
 A call taken up from a reopened session gets its tool now, by name:
 tools of MCP servers appear only once the servers have started."
   (let* ((call (gethash id (lispm-agent-pending agent)))
          (tool (or (plist-get call :tool) (lispm-get-tool (plist-get call :name)))))
-    (if (not tool)
-        (lispm-turns-tool-done agent id (format "There is no tool named %s available to you."
-                                           (plist-get call :name))
-                          t "FAILED")
+    (cond
+     ((not tool)
+      (lispm-turns-tool-done agent id (format "There is no tool named %s available to you."
+                                              (plist-get call :name))
+                             t "FAILED"))
+     ((and (not (plist-get call :started))
+           (lispm--call-conflicts-active-p agent call))
+      (plist-put call :status 'run)
+      (plist-put call :queued t)
+      (lispm-turns-update-state agent))
+     (t
       (plist-put call :status 'run)
       (plist-put call :started t)
       (lispm-in-session agent
         (lispm-transcript-set-state (plist-get call :marker) "RUNNING"))
-      (lispm-set-state agent 'acting (format "running %s" (plist-get call :name))
-                       (cons 'running (plist-get call :name)))
+      (lispm-turns-update-state agent)
       (let ((lispm-current-agent agent)
             (lispm-current-call id)
+            (lispm-kernel-exec-owner (lispm-agent-id agent))
             (default-directory (lispm-agent-root agent)))
         (lispm-tool-invoke tool (plist-get call :input)
                            (lambda (text errorp &optional images)
-                             (lispm-call-finished agent id text errorp images)))))))
+                             (lispm-call-finished agent id text errorp images))))))))
 
 (defcustom lispm-debug-tool-errors nil
   "Whether a tool's failure stops its call, for the user to choose how to go on.
@@ -815,13 +898,14 @@ result holds besides TEXT."
 (defun lispm-turns-update-state (agent)
   "Reflect AGENT's pending calls in its state."
   (when (memq (lispm-agent-state agent) '(acting waiting))
-    (let ((waiting 0) (stopped 0) (running nil))
+    (let ((waiting 0) (stopped 0) running)
       (maphash (lambda (_id call)
                  (pcase (plist-get call :status)
                    ('stopped (cl-incf stopped))
                    ('ask (cl-incf waiting))
-                   (_ (setq running (plist-get call :name)))))
+                   (_ (push (plist-get call :name) running))))
                (lispm-agent-pending agent))
+      (setq running (nreverse running))
       (cond ((> (+ waiting stopped) 0)
              (lispm-set-state
               agent 'waiting
@@ -834,8 +918,13 @@ result holds besides TEXT."
                                             (if (= waiting 1) "" "s")
                                             (if (= waiting 1) "s" "")))))
                ", ")))
-            (running (lispm-set-state agent 'acting (format "running %s" running)
-                                      (cons 'running running)))))))
+            ((cdr running)
+             (lispm-set-state agent 'acting
+                              (format "running %d tools (%s, …)" (length running) (car running))
+                              (cons 'running (car running))))
+            (running
+             (lispm-set-state agent 'acting (format "running %s" (car running))
+                              (cons 'running (car running))))))))
 
 (defun lispm-agent-status-record (agent)
   "Return what AGENT is doing as a record (:state STATE :kind KIND :msg

@@ -26,9 +26,9 @@
            (lispm-spotlight--in-batch t)
            (lispm-spotlight--ephemeral-buffers nil)
            (lispm-shell-stage--in-batch t)
-           (lispm-shell-stage--sessions (make-hash-table :test #'eq))
+           (lispm-shell-stage--sessions (make-hash-table :test #'equal))
            (lispm-eval-stage--in-batch t)
-           (lispm-eval-stage--sessions (make-hash-table :test #'eq)))
+           (lispm-eval-stage--sessions (make-hash-table :test #'equal)))
        (lispm-stage-reset)
        (lispm-spotlight-reset)
        (unwind-protect

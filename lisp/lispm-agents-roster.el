@@ -272,6 +272,52 @@ builds a fresh index so settled requests never remain cached."
                                 '(open-chat))))
        (lispm-agents-roster-waits buffer)))))
 
+(defvar-local lispm-agents-roster--child-scan-pos nil
+  "Buffer position up to which transcript child records were scanned.")
+
+(defvar-local lispm-agents-roster--child-scan-tick nil
+  "Modified-chars tick at the last transcript child scan.")
+
+(defvar-local lispm-agents-roster--child-scan-records nil
+  "Cached list of `(CHILD-ID . CHILD-NAME)' discovered in the current transcript.")
+
+(defun lispm-agents-roster--scan-buffer-children (tbuf)
+  "Return `(CHILD-ID . CHILD-NAME)' entries discovered in transcript TBUF.
+Maintains incremental buffer-local scan state so unchanged buffers run in O(1)."
+  (with-current-buffer tbuf
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((max-pos (point-max))
+              (tick (buffer-chars-modified-tick)))
+          (if (and (integerp lispm-agents-roster--child-scan-pos)
+                   (= lispm-agents-roster--child-scan-pos max-pos)
+                   (eql lispm-agents-roster--child-scan-tick tick))
+              lispm-agents-roster--child-scan-records
+            (let* ((incremental (and (integerp lispm-agents-roster--child-scan-pos)
+                                     (< lispm-agents-roster--child-scan-pos max-pos)))
+                   (scan-start (if incremental
+                                   (max (point-min) (- lispm-agents-roster--child-scan-pos 128))
+                                 (point-min)))
+                   (seen (make-hash-table :test #'equal))
+                   (out nil))
+              (when incremental
+                (dolist (pair lispm-agents-roster--child-scan-records)
+                  (puthash (car pair) t seen)
+                  (push pair out)))
+              (goto-char scan-start)
+              (while (re-search-forward
+                      "accepted by \\([^ \t\n(]+\\) (\\([0-9]\\{8\\}-[0-9]\\{6\\}-[0-9a-f]+\\))"
+                      nil t)
+                (let ((name (match-string-no-properties 1))
+                      (id (match-string-no-properties 2)))
+                  (unless (gethash id seen)
+                    (puthash id t seen)
+                    (push (cons id name) out))))
+              (setq lispm-agents-roster--child-scan-pos max-pos
+                    lispm-agents-roster--child-scan-tick tick
+                    lispm-agents-roster--child-scan-records (nreverse out)))))))))
+
 (defun lispm-agents-roster--retired-children (index)
   "Return records for retired child helpers of live sessions in INDEX."
   (let ((by-key (lispm-agents-roster--index-by-key index))
@@ -284,35 +330,28 @@ builds a fresh index so settled requests never remain cached."
                     (parent-key (gethash buffer (lispm-agents-roster--index-keys index)))
                     (tbuf (lispm-agent-buffer agent))
                     ((buffer-live-p tbuf)))
-          (with-current-buffer tbuf
-            (save-excursion
-              (save-restriction
-                (widen)
-                (goto-char (point-min))
-                (while (re-search-forward
-                        "accepted by \\([^ \t\n(]+\\) (\\([0-9]\\{8\\}-[0-9]\\{6\\}-[0-9a-f]+\\))"
-                        nil t)
-                  (let* ((child-name (match-string-no-properties 1))
-                         (child-id (match-string-no-properties 2))
-                         (child-key (list 'lispm child-id)))
-                    (unless (or (gethash child-key by-key)
-                                (gethash child-key seen)
-                                (gethash (lispm-agents-session-key
-                                          (list :agent 'lispm :id child-id))
-                                         archived))
-                      (puthash child-key t seen)
-                      (push (list :key child-key :buffer nil
-                                  :name child-name :kind 'lispm
-                                  :root (lispm-agent-root agent)
-                                  :parent parent-key
-                                  :alive nil :running nil
-                                  :status '(:state done :msg nil)
-                                  :character nil :character-name nil
-                                  :app-character nil :avatar nil
-                                  :mailbox '(:handling nil :queued 0)
-                                  :actions '(open-chat)
-                                  :waits-on nil :waited-on-by nil :request-ids nil)
-                            records))))))))))
+          (dolist (pair (lispm-agents-roster--scan-buffer-children tbuf))
+            (let* ((child-id (car pair))
+                   (child-name (cdr pair))
+                   (child-key (list 'lispm child-id)))
+              (unless (or (gethash child-key by-key)
+                          (gethash child-key seen)
+                          (gethash (lispm-agents-session-key
+                                    (list :agent 'lispm :id child-id))
+                                   archived))
+                (puthash child-key t seen)
+                (push (list :key child-key :buffer nil
+                            :name child-name :kind 'lispm
+                            :root (lispm-agent-root agent)
+                            :parent parent-key
+                            :alive nil :running nil
+                            :status '(:state done :msg nil)
+                            :character nil :character-name nil
+                            :app-character nil :avatar nil
+                            :mailbox '(:handling nil :queued 0)
+                            :actions '(open-chat)
+                            :waits-on nil :waited-on-by nil :request-ids nil)
+                      records)))))))
     (nreverse records)))
 
 (defun lispm-agents-roster ()

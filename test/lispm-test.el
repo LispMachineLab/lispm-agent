@@ -3222,6 +3222,7 @@ reaches a command that runs.  The result says what the sandbox allowed."
           (lispm-tool-invoke (lispm-get-tool "run_shell")
                              '((command . "echo hi; sleep 1; pwd"))
                              (lambda (text errorp) (setq result (cons text errorp)))))
+        (should (lispm-test--wait (lambda () lispm-sandbox--runs) 5))
         (let ((run (car lispm-sandbox--runs)))
           (should (eq (lispm-sandbox-run-started run) 'middle))
           (should (file-exists-p (lispm-sandbox-run-fifo run)))
@@ -6415,7 +6416,7 @@ is one badly named; interactively, it asks first."
                                                           (lispm-sessions))
                                                 :file)))
             (should (string-match-p "\\`- x: branch lispm/x, .*/x/ (uncommitted changes)\\'"
-                                    (car (lispm-test--call boss "worktree_list" nil))))
+                                    (car (lispm-test--call-async boss "worktree_list" nil))))
             (should (cdr (funcall call "worktree_remove" '((why . "done") (name . "x")))))
             (should (file-exists-p (funcall tree "x")))
             (should (string-match-p "\\`Removed the worktree .*/x/ and its branch lispm/x\\.\\'"
@@ -6442,7 +6443,7 @@ is one badly named; interactively, it asks first."
             (should (equal (lispm-test--file project "z.txt") "from z\n"))
             (should (string-match-p "\\`Removed the worktree .*/z/ and its branch lispm/z\\.\\'"
                                     (car (funcall call "worktree_remove" '((why . "merged") (name . "z"))))))
-            (should (equal (car (lispm-test--call boss "worktree_list" nil)) "No worktrees."))
+            (should (equal (car (lispm-test--call-async boss "worktree_list" nil)) "No worktrees."))
             ;; Mistakes are reported before anything is made.
             (should (equal (funcall call "worktree_ask" '((why . "w") (role . "coder") (request . "r")
                                                           (base . "nope")))
@@ -8882,11 +8883,15 @@ not what the reply defines itself."
         (search-forward "lispm-test-defined-zz")
         (should-not (get-text-property (1- (point)) 'lispm-ground)))
       ;; Turned off, the chat drawn shows none.
-      (unwind-protect
-          (progn (customize-set-variable 'lispm-ground-code nil)
-                 (with-current-buffer chat
-                   (should-not (text-property-not-all (point-min) (point-max) 'lispm-ground nil))))
-        (customize-set-variable 'lispm-ground-code t)))))
+      (let ((saved-buf (window-buffer (selected-window))))
+        (unwind-protect
+            (progn (set-window-buffer (selected-window) chat)
+                   (customize-set-variable 'lispm-ground-code nil)
+                   (with-current-buffer chat
+                     (should-not (text-property-not-all (point-min) (point-max) 'lispm-ground nil))))
+          (when (buffer-live-p saved-buf)
+            (set-window-buffer (selected-window) saved-buf))
+          (customize-set-variable 'lispm-ground-code t))))))
 
 (ert-deftest lispm-test-inspector ()
   "The inspector shows an agent whole, for the user and for agents."

@@ -43,6 +43,69 @@
 (require 'lispm-sandbox)
 (require 'lispm-tool-core)
 (require 'lispm-tool-permissions)
+
+(defvar lispm-current-call)
+
+(defun lispm-tools-shell-log-buffer-name (agent &optional call-id)
+  "Return the shell log buffer name for AGENT and optional CALL-ID."
+  (let ((label (if agent (lispm-principal-name agent) "?")))
+    (if call-id
+        (format "*lispm-shell: %s (%s)*" label call-id)
+      (format "*lispm-shell: %s*" label))))
+
+(defvar lispm-tools--shell-logs (make-hash-table :test #'equal)
+  "Active shell `(AGENT . CALL-ID)' -> log buffer.")
+
+(defvar lispm-tools--shell-primary-owner (make-hash-table :test #'eq)
+  "Agent -> call id currently owning `*lispm-shell: AGENT*'.")
+
+(defun lispm-tools-shell-log-buffer (agent &optional call-id)
+  "Return the active shell log buffer for AGENT and optional CALL-ID.
+Reuse `*lispm-shell: AGENT*' unless another shell call for AGENT is live,
+in which case allocate an isolated per-call buffer until released."
+  (if (not call-id)
+      (get-buffer-create (lispm-tools-shell-log-buffer-name agent nil))
+    (let* ((key (cons agent call-id))
+           (existing (gethash key lispm-tools--shell-logs)))
+      (if (buffer-live-p existing)
+          existing
+        (let* ((owner (gethash agent lispm-tools--shell-primary-owner))
+               (primary-p (or (null owner) (equal owner call-id)))
+               (buf (get-buffer-create
+                     (lispm-tools-shell-log-buffer-name
+                      agent (unless primary-p call-id)))))
+          (when primary-p
+            (puthash agent call-id lispm-tools--shell-primary-owner))
+          (puthash key buf lispm-tools--shell-logs)
+          buf)))))
+
+(defun lispm-tools-release-shell-log (agent &optional call-id)
+  "Release shell log ownership for AGENT and optional CALL-ID.
+Kill any ephemeral per-call log buffer when not currently displayed."
+  (when call-id
+    (let* ((key (cons agent call-id))
+           (buf (gethash key lispm-tools--shell-logs)))
+      (remhash key lispm-tools--shell-logs)
+      (when (equal (gethash agent lispm-tools--shell-primary-owner) call-id)
+        (remhash agent lispm-tools--shell-primary-owner))
+      (when (and (buffer-live-p buf)
+                 (not (equal (buffer-name buf)
+                             (lispm-tools-shell-log-buffer-name agent nil)))
+                 (not (get-buffer-window buf 'visible)))
+        (kill-buffer buf)))))
+
+(defun lispm-tools--cleanup-agent-shell-logs (agent)
+  "Release all shell log ownership and ephemeral buffers for AGENT."
+  (let (keys)
+    (maphash (lambda (key _buf)
+               (when (eq (car key) agent)
+                 (push key keys)))
+             lispm-tools--shell-logs)
+    (dolist (key keys)
+      (lispm-tools-release-shell-log agent (cdr key)))
+    (remhash agent lispm-tools--shell-primary-owner)))
+
+(add-hook 'lispm-session-end-functions #'lispm-tools--cleanup-agent-shell-logs)
 (require 'lispm-tool-search)
 (require 'lispm-tool-builtins)
 (require 'lispm-shell-classify)
@@ -87,9 +150,10 @@ wall-clock budget."
           (min requested budget))
       requested)))
 
-(defun lispm-tools--run-shell-via-kernel (agent command timeout log-buffer done fallback)
+(defun lispm-tools--run-shell-via-kernel (agent command timeout log-buffer done fallback &optional on-cancel)
   "Run unsandboxed COMMAND in the kernel when `lispm-kernel-exec-mode' is on.
-Return non-nil when the kernel took the command, or nil to run FALLBACK."
+Return non-nil when the kernel took the command, or nil to run FALLBACK.
+Invoke ON-CANCEL when registered cancellation fires."
   (when (and (bound-and-true-p lispm-kernel-exec-mode)
              (or (file-remote-p default-directory)
                  (eq lispm-sandbox-level 'none))
@@ -103,7 +167,10 @@ Return non-nil when the kernel took the command, or nil to run FALLBACK."
            (cancel nil)
            (job (lispm-job-register
                  agent 'kernel-shell
-                 (lambda () (when (functionp cancel) (funcall cancel))))))
+                 (lambda ()
+                   (unwind-protect
+                       (when (functionp cancel) (funcall cancel))
+                     (when (functionp on-cancel) (funcall on-cancel)))))))
       (setq cancel
             (condition-case err
                 (lispm-kernel-exec--submit
@@ -169,6 +236,8 @@ Return non-nil when the kernel took the command, or nil to run FALLBACK."
     (unless (or (process-live-p p) (process-get p 'interrupted)
                 (process-get p 'lispm-done))
       (process-put p 'lispm-done t)
+      ;; Drain any bytes buffered in the pipe before reading `output-text'.
+      (cl-loop repeat 64 while (ignore-errors (accept-process-output p 0 nil t)))
       (when-let* ((timer (process-get p 'timer))) (cancel-timer timer))
       (let ((output (funcall output-text)))
         (when (and (buffer-live-p proc-buffer) (string-empty-p output))
@@ -214,38 +283,91 @@ Return non-nil when the kernel took the command, or nil to run FALLBACK."
     (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
     (signal 'quit nil)))
 
-(defun lispm-tools--shell-run-locally (agent command timeout log-buffer done)
-  "Run shell COMMAND for AGENT into LOG-BUFFER, calling DONE."
-  (let* ((proc-buffer (generate-new-buffer
+(defun lispm-tools--shell-run-locally (agent command timeout log-buffer done &optional on-cancel)
+  "Run shell COMMAND for AGENT into LOG-BUFFER, calling DONE.
+Invoke ON-CANCEL if the registered job is cancelled before completion."
+  (let* ((start-dir default-directory)
+         (proc-buffer (generate-new-buffer
                        (format " *lispm-shell-proc: %s*" (if agent (lispm-principal-name agent) "?"))
                        t))
          (proc-name (format "lispm-shell-%d" (cl-incf lispm-tools--shell-seq)))
          (output-chunks nil)
          (output-text (lambda () (apply #'concat (reverse output-chunks))))
-         (run (lispm-sandbox-prepare
-               (with-connection-local-variables
-                (lispm-exec-shell-command
-                 shell-file-name shell-command-switch command
-                 (file-remote-p default-directory)))
-               nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…"))))
-         (proc (make-process
-                :name proc-name :buffer proc-buffer :noquery t
-                :connection-type 'pipe :file-handler t
-                :command (lispm-sandbox-run-command run)
-                :filter (lambda (_p chunk)
-                          (push chunk output-chunks)
-                          (lispm-tools--shell-append-log log-buffer chunk))
-                :sentinel (lispm-tools--shell-sentinel
-                           proc-buffer output-text done (lispm-sandbox-run-note run)))))
-    (lispm-sandbox-attach run proc)
-    (lispm-tools--shell-append-log log-buffer (format "\n$ %s\n" command))
-    (when (and (buffer-live-p proc-buffer) (null output-chunks))
-      (let ((pre (with-current-buffer proc-buffer (buffer-string))))
-        (unless (string-empty-p pre)
-          (push pre output-chunks)
-          (lispm-tools--shell-append-log log-buffer pre))))
-    (process-put proc 'lispm-agent agent)
-    (lispm-tools--shell-finish-start proc proc-buffer timeout)))
+         (cancelled nil)
+         (spawned-proc nil)
+         (job nil)
+         (raw-cmd (with-connection-local-variables
+                   (lispm-exec-shell-command
+                    shell-file-name shell-command-switch command
+                    (file-remote-p start-dir))))
+         (in-start t)
+         (started nil))
+    (setq job (lispm-job-register
+               agent 'shell
+               (lambda ()
+                 (setq cancelled t)
+                 (when spawned-proc
+                   (process-put spawned-proc 'interrupted t)
+                   (when-let* ((timer (process-get spawned-proc 'timer)))
+                     (cancel-timer timer))
+                   (when (process-live-p spawned-proc)
+                     (lispm-exec-delete spawned-proc)))
+                 (when (buffer-live-p proc-buffer)
+                   (kill-buffer proc-buffer))
+                 (when (functionp on-cancel)
+                   (funcall on-cancel)))))
+    (unwind-protect
+        (progn
+          (lispm-sandbox-prepare-async
+           raw-cmd
+           (lambda (run err-msg)
+             (cond
+              (cancelled
+               (when run (ignore-errors (lispm-sandbox-forget run))))
+              ((not run)
+               (lispm-job-finish job)
+               (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
+               (funcall done (or err-msg "Sandbox unavailable") t))
+              (t
+               (condition-case err
+                   (let* ((default-directory start-dir)
+                          (proc (make-process
+                                 :name proc-name :buffer proc-buffer :noquery t
+                                 :connection-type 'pipe :file-handler t
+                                 :command (lispm-sandbox-run-command run)
+                                 :filter (lambda (_p chunk)
+                                           (push chunk output-chunks)
+                                           (lispm-tools--shell-append-log log-buffer chunk))
+                                 :sentinel (lispm-tools--shell-sentinel
+                                            proc-buffer output-text
+                                            (lambda (text errorp)
+                                              (lispm-job-finish job)
+                                              (funcall done text errorp))
+                                            (lispm-sandbox-run-note run)))))
+                     (setq spawned-proc proc)
+                     (lispm-sandbox-attach run proc)
+                     (lispm-tools--shell-append-log log-buffer (format "\n$ %s\n" command))
+                     (when (and (buffer-live-p proc-buffer) (null output-chunks))
+                       (let ((pre (with-current-buffer proc-buffer (buffer-string))))
+                         (unless (string-empty-p pre)
+                           (push pre output-chunks)
+                           (lispm-tools--shell-append-log log-buffer pre))))
+                     (process-put proc 'lispm-agent agent)
+                     (lispm-tools--shell-finish-start proc proc-buffer timeout))
+                 (error
+                  (lispm-job-finish job)
+                  (ignore-errors (lispm-sandbox-forget run))
+                  (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
+                  (if in-start
+                      (signal (car err) (cdr err))
+                    (funcall done (error-message-string err) t)))))))
+           nil (format "the command `%s'" (truncate-string-to-width command 30 nil nil "…")))
+          (setq in-start nil
+                started t))
+      (unless started
+        (setq cancelled t)
+        (lispm-job-finish job)
+        (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))))))
 
 (lispm-deftool run_shell
     ((command string "Shell command, run in your root directory.")
@@ -259,24 +381,40 @@ remote, the command runs on its machine.  The user may have the
 command run in a sandbox: its result then says what the sandbox
 allows."
   :permission shell
-  ;; A command that only reads is decided as reading is.
+  ;; A command that only reads is decided as reading is and runs in parallel;
+  ;; mutating commands serialize by root directory while staying parallel across roots.
   :class (lambda (command &optional _timeout)
            (and (lispm-shell-read-only-p command) 'read))
+  :concurrency (lambda (command &optional _timeout)
+                 (if (lispm-shell-read-only-p command)
+                     'parallel
+                   (list 'resource (cons 'shell (lispm-tools-root)))))
   :async t
   ;; Setting up must not be cut short by C-g: a process left without
   ;; its timer and its agent could be neither timed out nor aborted.
   ;; A C-g meanwhile stops the command once it is set up.
   (let* ((inhibit-quit t)
          (agent lispm-current-agent)
-         (log-buffer (get-buffer-create
-                      (format "*lispm-shell: %s*" (if agent (lispm-principal-name agent) "?"))))
+         (call-id (bound-and-true-p lispm-current-call))
+         (log-buffer (lispm-tools-shell-log-buffer agent call-id))
          (default-directory (lispm-tools-root))
+         (release (lambda () (lispm-tools-release-shell-log agent call-id)))
+         (wrapped-done (lambda (text &optional errorp)
+                         (unwind-protect
+                             (funcall done text errorp)
+                           (funcall release))))
          (fallback (lambda ()
                      (lispm-tools--shell-run-locally
-                      agent command timeout log-buffer done))))
-    (unless (lispm-tools--run-shell-via-kernel
-             agent command timeout log-buffer done fallback)
-      (funcall fallback))))
+                      agent command timeout log-buffer wrapped-done release)))
+         (handed-off nil))
+    (unwind-protect
+        (unless (setq handed-off
+                      (lispm-tools--run-shell-via-kernel
+                       agent command timeout log-buffer wrapped-done fallback release))
+          (funcall fallback)
+          (setq handed-off t))
+      (unless handed-off
+        (funcall release)))))
 
 (defun lispm-tools-read-forms (code)
   "All Lisp forms in the string CODE."
@@ -524,6 +662,7 @@ write_file, edit_buffer, edit_definition), which show the user a diff
 to approve and can be undone as one step.  Lisp that saves or rewrites
 a file gets no such review: it is for what the edit tools cannot do."
   :permission exec
+  :concurrency 'editor
   :async t
   :preview #'lispm-tools-code-writes-note
   (let* ((agent lispm-current-agent)
