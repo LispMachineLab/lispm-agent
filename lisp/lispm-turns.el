@@ -428,6 +428,11 @@ a short description of what the request waits for, or nil.  While
 one does, the request is tried again shortly; MCP servers still
 starting hold requests back so that their tools are there.")
 
+(defvar lispm-turns-control-plane-function nil
+  "Optional function `(AGENT REQUEST)' routing turns to a kernel control plane.
+When non-nil and returning non-nil, AGENT's multi-step turn executes inside
+`lispm-kernel' instead of `lispm--send'.")
+
 (defun lispm-turns-request (agent)
   "Ask the model for AGENT's next step."
   (cond
@@ -465,7 +470,9 @@ starting hold requests back so that their tools are there.")
                0))
        ;; What the request carries is on disk, should Emacs stop now.
        (lispm-save-session agent)
-       (lispm--send agent request 0))))))
+       (unless (and lispm-turns-control-plane-function
+                    (funcall lispm-turns-control-plane-function agent request))
+         (lispm--send agent request 0)))))))
 
 (defun lispm--send (agent request attempt)
   "Send the REQUEST envelope for AGENT; ATTEMPT counts retries."
@@ -562,6 +569,14 @@ Each is a plist: (:kind text :text TEXT), (:kind thinking :text TEXT) or
                 (setq pos next)))
             (nreverse segments)))))))
 
+(defun lispm-turns-live-begin (agent)
+  "Open the streamed live region in AGENT's session buffer."
+  (lispm--live-begin agent))
+
+(defun lispm-turns-live-insert (agent kind text)
+  "Insert streamed TEXT of KIND (`text', `thinking', or `tool') for AGENT."
+  (lispm--live-insert agent kind text))
+
 (defun lispm-turns-live-delete (agent)
   "Remove AGENT's streamed region; the final message replaces it."
   (lispm-in-session agent
@@ -579,6 +594,11 @@ Each is a plist: (:kind text :text TEXT), (:kind thinking :text TEXT) or
              for i from 0
              for n = (alist-get key usage)
              when (numberp n) do (cl-incf (nth i totals) n))))
+
+(defun lispm-turns-record-usage (agent usage)
+  "Add response USAGE to AGENT's totals and update context size metrics."
+  (lispm--add-usage agent usage)
+  (lispm--note-context agent usage))
 
 (defun lispm--note-context (agent usage)
   "Record the size of AGENT's session that the USAGE of a response reports.
@@ -632,6 +652,11 @@ if the response ended abnormally.  Return (STATE ACTION MESSAGE), or
     ("refusal" . refused)
     ("pause_turn" . paused))
   "Conditions a turn stops at when a response stops for these reasons.")
+
+(defun lispm-turns-stop-outcome (stop message)
+  "Return `(NOTE . CONDITION-TYPE)' for STOP reason on MESSAGE."
+  (let ((note (lispm--stop-note stop message)))
+    (cons note (and note (cdr (assoc stop lispm--stop-conditions))))))
 
 (defun lispm--on-message (agent message)
   "Handle the complete response MESSAGE for AGENT."

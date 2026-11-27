@@ -38,6 +38,12 @@
 
 ;;;; Commands
 
+(defvar lispm-abort-functions nil
+  "Functions called with `(AGENT)' when `lispm--stop' aborts an agent.")
+
+(defvar lispm-resolve-functions nil
+  "Functions called with `(AGENT ID DECISION REASON)' on approval settlement.")
+
 (defvar org-state)
 
 (defun lispm-send ()
@@ -108,6 +114,7 @@ KEEP-INBOX, queued inputs stay, to be taken up next."
       (setf (lispm-agent-process agent) nil)
       (when (functionp proc)
         (lispm-exec-delete proc)))
+    (run-hook-with-args 'lispm-abort-functions agent)
     (dolist (p (process-list))
       (when (eq (process-get p 'lispm-agent) agent)
         (process-put p 'lispm-aborted t)
@@ -196,9 +203,20 @@ call's remembered approval settles this one; otherwise it is `user'."
             (lispm-turns-update-state agent)
             (funcall (plist-get asking :continue) decision
                      (and (eq decision 'deny) (lispm--denial reason))))
-        (pcase decision
-          ((or 'approve 'allow) (lispm-turns-run-tool agent id))
-          ('deny (lispm-turns-tool-done agent id (lispm--denial reason) t "DENIED")))))))
+        (if (plist-get call :kernel-approval)
+            (progn
+              (remhash id (lispm-agent-pending agent))
+              (lispm-emit-change agent '(calls))
+              (when-let* ((marker (plist-get call :marker))
+                          ((marker-buffer marker)))
+                (lispm-in-session agent
+                  (lispm-transcript-set-state
+                   marker (if (eq decision 'deny) "DENIED" "RUNNING"))))
+              (lispm-turns-update-state agent))
+          (pcase decision
+            ((or 'approve 'allow) (lispm-turns-run-tool agent id))
+            ('deny (lispm-turns-tool-done agent id (lispm--denial reason) t "DENIED"))))))
+    (run-hook-with-args 'lispm-resolve-functions agent id decision reason)))
 
 (defun lispm-call-ask (agent id tool input continue &optional always reasons)
   "Have AGENT's running call ID await approval of a call of TOOL on INPUT.
