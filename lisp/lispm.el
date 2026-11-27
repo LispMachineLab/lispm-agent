@@ -122,6 +122,7 @@
 (require 'lispm-skills)
 (require 'lispm-inspect)
 (require 'lispm-agents-roster)
+(require 'lispm-agents-actions)
 (require 'lispm-runtime-tools)
 (require 'lispm-session-tools)
 (require 'lispm-process-tools)

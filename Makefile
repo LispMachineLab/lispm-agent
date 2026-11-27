@@ -12,7 +12,7 @@ ELS = $(addprefix lisp/, \
       lispm-util.el lispm-secrets.el lispm-core.el lispm-workspace.el lispm-job.el lispm-sandbox.el lispm-services.el \
       lispm-roles.el lispm-media.el lispm-transcript.el lispm-anthropic.el lispm-openai.el lispm-control-protocol.el lispm-api.el \
       lispm-deftool-macros.el lispm-agents-core.el lispm-agents-sessions.el lispm-agents-terminals.el \
-      lispm-agents.el lispm-agents-mcp.el lispm-agents-ide.el \
+      lispm-agents.el lispm-agents-actions.el lispm-agents-mcp.el lispm-agents-ide.el \
       lispm-agents-claude.el lispm-agents-codex.el \
       lispm-tool-core.el lispm-tool-permissions.el lispm-tool-search.el lispm-tool-builtins.el \
       lispm-shell-classify.el lispm-tools.el lispm-elisp-worker.el lispm-elisp.el \
@@ -66,6 +66,7 @@ test: deps
 	  -l test/lispm-correctness-test.el -l test/lispm-basis-test.el -l test/lispm-unify-test.el \
 	  -l test/lispm-layers-test.el -l test/lispm-concurrency-test.el -l test/lispm-persistence-test.el -l test/lispm-office-test.el \
 	  -l test/lispm-workspace-test.el -l test/lispm-control-plane-test.el \
+	  -l test/lispm-agents-actions-test.el \
 	  -f ert-run-tests-batch-and-exit
 	$(EMACS) -Q --batch $(DEPS) -L lisp -L test -l test/lispm-hyperbole-test.el \
 	  --eval '(ert-run-tests-batch-and-exit "^lispm-hyperbole-test-")'

@@ -30,7 +30,7 @@
           "lispm-services" "lispm-roles" "lispm-media" "lispm-transcript"
           "lispm-anthropic" "lispm-openai" "lispm-control-protocol" "lispm-api"
           "lispm-deftool-macros" "lispm-agents-core" "lispm-agents-sessions"
-          "lispm-agents-terminals" "lispm-agents" "lispm-agents-mcp"
+          "lispm-agents-terminals" "lispm-agents" "lispm-agents-actions" "lispm-agents-mcp"
           "lispm-agents-ide" "lispm-agents-claude" "lispm-agents-codex"))
     (2 . ("lispm-tool-core" "lispm-tool-permissions" "lispm-tool-search"
           "lispm-tool-builtins" "lispm-shell-classify" "lispm-tools"
