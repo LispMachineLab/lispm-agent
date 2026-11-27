@@ -80,15 +80,22 @@ the user sees.  Other agents name places as org links,
           ((memq state '(current conflict held))
            ;; Out of step with its file, the buffer is what the user
            ;; sees, or what the runtime holds: say so.
-           (concat (pcase state
-                     ('conflict "[open in Emacs, unsaved changes; the file changed on disk too]\n")
-                     ('held "[the session of an agent, as LispM holds it; the file changed on disk]\n")
-                     (_ (if (buffer-modified-p open) "[open in Emacs, unsaved changes]\n" "")))
-                   (lispm-tools-number-lines (lispm-tools-buffer-text open) offset limit)))
+           (let ((text (lispm-tools-buffer-text open)))
+             (lispm-tools-record-revision lispm-current-agent file text)
+             (concat (pcase state
+                       ('conflict "[open in Emacs, unsaved changes; the file changed on disk too]\n")
+                       ('held "[the session of an agent, as LispM holds it; the file changed on disk]\n")
+                       (_ (if (buffer-modified-p open) "[open in Emacs, unsaved changes]\n" "")))
+                     (lispm-tools-number-lines text offset limit))))
           ((file-directory-p file) (error "%s is a directory; use list_directory" path))
           ((file-readable-p file)
-           (lispm-tools-number-lines (lispm-file-text file) offset limit))
-          (t (error "No such file: %s" file)))))
+           (let ((text (lispm-file-text file)))
+             (lispm-tools-record-revision lispm-current-agent file text)
+             (lispm-tools-number-lines text offset limit)))
+          (t
+           (unless (file-exists-p file)
+             (lispm-tools-record-revision lispm-current-agent file :missing))
+           (error "No such file: %s" file)))))
 
 (lispm-deftool list_directory
     ((path string "Directory, absolute or relative to your root (default: the root)."
@@ -729,6 +736,9 @@ Reading preserves point, narrowing and unsaved edits. Output is bounded."
     (when (and tail (not (<= 1 tail 2000))) (error "tail must be from 1 to 2000"))
     (when (and tail offset) (error "Use tail or offset, not both"))
     (when (and query (string-empty-p query)) (error "query must not be empty"))
+    (when (buffer-file-name b)
+      (lispm-tools-record-revision lispm-current-agent (buffer-file-name b)
+                                   (lispm-tools-buffer-text b)))
     (with-current-buffer b
       (save-excursion
         (save-restriction
@@ -811,24 +821,35 @@ Nothing is loaded or evaluated; use this before writing live-editor Elisp."
     ((path string "File to edit, absolute or relative to your root.")
      (old-text string "Exact text to replace, with enough context to be unique.")
      (new-text string "Replacement text.")
-     (replace-all boolean "Replace every occurrence instead of exactly one." :optional t))
+     (replace-all boolean "Replace every occurrence instead of exactly one." :optional t)
+     (expected-hash string "Optional SHA-256 content hash precondition; fails on conflict."
+                    :optional t))
   "Replace text in a file.  The edit happens in the file's Emacs buffer
 as one undoable step and is then saved.  old_text must match the
 current contents exactly, so read the file first."
   :permission write
   :edit (:file path
-         :transform (text (lispm-tools-replace text old-text new-text replace-all))
+         :transform (text (progn
+                            (when expected-hash
+                              (lispm-tools-check-cas
+                               lispm-current-agent (lispm-tools-file path) text expected-hash nil))
+                            (lispm-tools-replace text old-text new-text replace-all)))
          :bind (count label))
   (format "Replaced %d occurrence%s in %s." count (if (= count 1) "" "s") label))
 
 (lispm-deftool write_file
     ((path string "File to create or overwrite, absolute or relative to your root.")
-     (content string "The complete new contents."))
+     (content string "The complete new contents.")
+     (expected-hash string "Optional SHA-256 content hash precondition (or \"missing\"); fails on conflict."
+                    :optional t))
   "Create a file, or replace a file's entire contents.  Prefer edit_file
 for existing files; create new files only when required."
   :permission write
   :edit (:file path :create t
-         :transform (_text (cons content nil))
+         :transform (text (progn
+                            (lispm-tools-check-cas
+                             lispm-current-agent (lispm-tools-file path) text expected-hash t)
+                            (cons content nil)))
          :bind (_meta label existed))
   (format "%s %s." (if existed "Overwrote" "Created") label))
 

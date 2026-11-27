@@ -284,6 +284,73 @@ See `lispm-buffer-current-p'.  The empty string if FILE cannot be read."
           (buffer-string))
       "")))
 
+(defvar lispm-inhibit-triggers)
+
+(defvar lispm--atomic-write-seq 0
+  "Monotonic counter for unique temporary filenames in atomic writes.")
+
+(defun lispm-file-sha256 (file)
+  "Return the SHA-256 hex digest of FILE on disk, or nil when missing."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally file)
+      (secure-hash 'sha256 (current-buffer)))))
+
+(defun lispm-write-file-atomic (file content &optional expected-hash temp-dir)
+  "Atomically write CONTENT to FILE via a unique temp file and `rename-file'.
+When EXPECTED-HASH is `:missing', signal an error if FILE already exists.
+When EXPECTED-HASH is a string, signal an error unless `lispm-file-sha256'
+matches EXPECTED-HASH.  When TEMP-DIR is non-nil, stage the temporary
+file inside TEMP-DIR instead of FILE's parent directory."
+  (let* ((target (expand-file-name file))
+         (parent (file-name-directory target))
+         (stage-dir (file-name-as-directory (expand-file-name (or temp-dir parent)))))
+    (make-directory parent t)
+    (make-directory stage-dir t)
+    (when expected-hash
+      (let ((actual (lispm-file-sha256 target)))
+        (cond
+         ((eq expected-hash :missing)
+          (when actual
+            (error "CAS conflict on %s: file already exists" (abbreviate-file-name target))))
+         ((not (equal actual expected-hash))
+          (error "CAS conflict on %s: expected %s, found %s"
+                 (abbreviate-file-name target) expected-hash (or actual "missing"))))))
+    (let* ((tmp (expand-file-name
+                 (format ".tmp-%d-%d-%06x"
+                         (emacs-pid) (cl-incf lispm--atomic-write-seq) (random #x1000000))
+                 stage-dir))
+           (renamed nil))
+      (unwind-protect
+          (progn
+            (let ((coding-system-for-write (or coding-system-for-write 'utf-8-unix))
+                  (inhibit-message t)
+                  (lispm-inhibit-triggers t))
+              (write-region content nil tmp nil 'silent))
+            (if (eq expected-hash :missing)
+                (condition-case nil
+                    (progn
+                      (add-name-to-file tmp target nil)
+                      (ignore-errors (delete-file tmp))
+                      (setq renamed t))
+                  (file-already-exists
+                   (error "CAS conflict on %s: file already exists"
+                          (abbreviate-file-name target)))
+                  (file-error
+                   (condition-case nil
+                       (progn
+                         (rename-file tmp target nil)
+                         (setq renamed t))
+                     (file-already-exists
+                      (error "CAS conflict on %s: file already exists"
+                             (abbreviate-file-name target))))))
+              (rename-file tmp target t)
+              (setq renamed t))
+            target)
+        (unless renamed
+          (ignore-errors (delete-file tmp)))))))
+
 (defun lispm-git-environment ()
   "`process-environment' without the variables that steer git from outside.
 Git gives them to the commands it runs, such as hooks and those of

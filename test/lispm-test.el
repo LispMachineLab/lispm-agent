@@ -120,6 +120,8 @@ BODY can use `project', a scratch directory for agents to work in."
           ;; Work waiting for idle time stays in the test, never to run
           ;; on in the user's Emacs once the scratch directory is gone.
           (lispm--idle-work (make-hash-table :test #'equal))
+          (lispm-memory--recall-stats (make-hash-table :test #'equal))
+          (lispm-git--partitions (make-hash-table :test #'equal))
           ;; Run from git (a hook, rebase -x), the tests' git commands
           ;; would act on that repository rather than on their own.
           (process-environment (lispm-git-environment)))
@@ -132,11 +134,16 @@ BODY can use `project', a scratch directory for agents to work in."
        (when lispm-git--timer
          (cancel-timer lispm-git--timer)
          (setq lispm-git--timer nil))
-       (setq lispm-git--queue nil lispm-git--process nil)
+       (maphash (lambda (_ slot)
+                  (when-let* ((timer (plist-get slot :timer)))
+                    (cancel-timer timer)))
+                lispm-git--partitions)
+       (clrhash lispm-git--partitions)
+       (setq lispm-git--queue nil lispm-git--process nil lispm-git--retries 0)
        ;; Snapshots and git commits still running would outlive their directory.
        (dolist (p (process-list))
          (when (or (string-prefix-p "lispm-journal" (process-name p))
-                   (equal (process-name p) "lispm-git"))
+                   (string-prefix-p "lispm-git" (process-name p)))
            (delete-process p)))
        (dolist (b (buffer-list))
          (when (and (buffer-file-name b) (file-in-directory-p (buffer-file-name b) tmp))
@@ -931,10 +938,10 @@ BODY can use `port' and `log', the file the server records requests in."
     (should (equal (alist-get 'name schema) "edit_file"))
     (should (equal (alist-get 'required input-schema) ["why" "path" "old_text" "new_text"]))
     (should (equal (mapcar #'car (alist-get 'properties input-schema))
-                   '(why path old_text new_text replace_all)))
+                   '(why path old_text new_text replace_all expected_hash)))
     (should (equal (lispm-tools-arguments tool '((path . "a") (old_text . "x") (new_text . "y")
                                                   (replace_all . :false) (why . "w")))
-                   '("a" "x" "y" nil)))
+                   '("a" "x" "y" nil nil)))
     (should-error (lispm-tools-arguments tool '((path . 3) (old_text . "x") (new_text . "y"))))
     (should-error (lispm-tools-arguments tool '((path . "a"))))
     ;; read tools take no rationale
@@ -4602,9 +4609,8 @@ agents wrote, and the agents are forgotten, standing ones too."
           (write-region text nil file nil 'silent))))))
 
 (defun lispm-test--inbox (root)
-  "The text of the inbox file of the project at ROOT, or nil."
-  (let ((file (lispm-inbox-file root)))
-    (and (file-exists-p file) (lispm-file-text file))))
+  "The rendered Org projection of the inbox of the project at ROOT, or nil."
+  (lispm-inbox-export-org root))
 
 (ert-deftest lispm-test-inbox-outlives-emacs ()
   "Inputs queued for a busy agent, and the one its turn handles, outlive Emacs.
@@ -8122,10 +8128,10 @@ entries were recalled is nothing new.  Without git, it is not tried."
         (lispm-memory--maintain agent nil)
         (should (funcall tried 2))
         (should (equal (lispm-file-text file) before))
-        ;; Recalling says nothing new.
+        ;; Recalling says nothing new and performs zero disk writes.
         (funcall wait-over)
         (lispm-memory-recall agent "about")
-        (should-not (equal (lispm-file-text file) before))
+        (should (equal (lispm-file-text file) before))
         (lispm-memory--maintain agent nil)
         (accept-process-output nil 0.1)
         (should (= asked 2))

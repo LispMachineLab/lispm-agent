@@ -25,6 +25,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'org)
 (require 'seq)
 (require 'lispm-core)
@@ -116,14 +117,19 @@ is, being what the user sees, but cannot be changed: with TO-CHANGE,
 that is an error."
   (let ((buffer (lispm-tools-visit file (not to-change))))
     (with-current-buffer buffer
-      ;; Not over a file changed on disk: saving would ask.
+      ;; Not over a file changed on disk: initialize atomically when absent.
       (when (and (zerop (buffer-size)) (eq (lispm-tools-state buffer) 'current))
         (insert header)
         (org-mode)
-        (let ((inhibit-message t)
-              (select-safe-coding-system-function nil)
-              (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
-          (save-buffer))))
+        (if (file-exists-p file)
+            (lispm-memory-save buffer)
+          (condition-case nil
+              (progn
+                (let ((coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
+                  (lispm-write-file-atomic file header :missing))
+                (set-visited-file-modtime)
+                (set-buffer-modified-p nil))
+            (error (lispm-tools-sync buffer))))))
     buffer))
 
 (defalias 'lispm-memory--visit #'lispm-memory-visit)
@@ -164,48 +170,128 @@ TO-CHANGE is as for `lispm-memory-visit'."
                                  (abbreviate-file-name (lispm-agent-root agent))))
                        to-change))
 
+(defvar lispm-memory--recall-stats (make-hash-table :test #'equal)
+  "Canonical memory file path -> table of downcased title -> (DELTA . STAMP).")
+
+(defun lispm-memory--recall-key (title)
+  "Return canonical lookup key for memory TITLE."
+  (downcase (string-trim (or title ""))))
+
+(defun lispm-memory-recall-stat (file title)
+  "Return pending in-memory `(DELTA . STAMP)' telemetry for FILE and TITLE."
+  (when-let* ((canon (and file (expand-file-name file)))
+              (tbl (gethash canon lispm-memory--recall-stats)))
+    (gethash (lispm-memory--recall-key title) tbl)))
+
+(defun lispm-memory-clear-recall-stats (file &optional title)
+  "Clear pending in-memory recall telemetry for FILE, or just TITLE within it."
+  (when-let* ((canon (and file (expand-file-name file)))
+              (tbl (gethash canon lispm-memory--recall-stats)))
+    (if title
+        (progn
+          (remhash (lispm-memory--recall-key title) tbl)
+          (when (zerop (hash-table-count tbl))
+            (remhash canon lispm-memory--recall-stats)))
+      (remhash canon lispm-memory--recall-stats))))
+
+(defun lispm-memory--overlay-recalls (file entries)
+  "Return ENTRIES with pending in-memory recall telemetry overlaid for FILE."
+  (if (not (and file (gethash (expand-file-name file) lispm-memory--recall-stats)))
+      entries
+    (mapcar (lambda (entry)
+              (if-let* ((stat (lispm-memory-recall-stat file (plist-get entry :title))))
+                  (let* ((copy (copy-sequence entry))
+                         (old-recalls (or (plist-get copy :recalls) 0))
+                         (old-recalled (plist-get copy :recalled))
+                         (new-recalled (cdr stat)))
+                    (plist-put copy :recalls (+ old-recalls (car stat)))
+                    (when (or (null old-recalled) (string> new-recalled old-recalled))
+                      (plist-put copy :recalled new-recalled))
+                    copy)
+                entry))
+            entries)))
+
 (defun lispm-memory-entries (buffer)
   "Top-level entries of the org BUFFER, as plists.
 Keys: :title :tags :todo :id :body :beg :end, and the properties
 :created :updated :recalled (timestamps, or nil) and :recalls (a
 number)."
-  (with-current-buffer buffer
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (let (starts)
-          (while (re-search-forward "^\\* " nil t)
-            (push (match-beginning 0) starts))
-          (cl-loop for (beg . rest) on (nreverse starts)
-                   for end = (or (car rest) (point-max))
-                   collect
-                   (progn
-                     (goto-char beg)
-                     (list :title (org-get-heading t t t t)
-                           :tags (org-get-tags nil t)
-                           :todo (org-get-todo-state)
-                           :id (org-entry-get nil "ID")
-                           :created (org-entry-get nil "CREATED")
-                           :updated (org-entry-get nil "UPDATED")
-                           :recalled (org-entry-get nil "RECALLED")
-                           :recalls (string-to-number (or (org-entry-get nil "RECALLS") "0"))
-                           :body (progn (org-end-of-meta-data t)
-                                        (string-trim
-                                         (org-unescape-code-in-string
-                                          (buffer-substring-no-properties
-                                           (min (point) end) end))))
-                           :beg beg :end end))))))))
+  (let ((entries
+         (with-current-buffer buffer
+           (save-excursion
+             (save-restriction
+               (widen)
+               (goto-char (point-min))
+               (let (starts)
+                 (while (re-search-forward "^\\* " nil t)
+                   (push (match-beginning 0) starts))
+                 (cl-loop for (beg . rest) on (nreverse starts)
+                          for end = (or (car rest) (point-max))
+                          collect
+                          (progn
+                            (goto-char beg)
+                            (list :title (org-get-heading t t t t)
+                                  :tags (org-get-tags nil t)
+                                  :todo (org-get-todo-state)
+                                  :id (org-entry-get nil "ID")
+                                  :created (org-entry-get nil "CREATED")
+                                  :updated (org-entry-get nil "UPDATED")
+                                  :recalled (org-entry-get nil "RECALLED")
+                                  :recalls (string-to-number (or (org-entry-get nil "RECALLS") "0"))
+                                  :body (progn (org-end-of-meta-data t)
+                                               (string-trim
+                                                (org-unescape-code-in-string
+                                                 (buffer-substring-no-properties
+                                                  (min (point) end) end))))
+                                  :beg beg :end end)))))))))
+    (lispm-memory--overlay-recalls (buffer-file-name buffer) entries)))
 
 (defalias 'lispm-memory--entries #'lispm-memory-entries)
 
-(defun lispm-memory-save (buffer)
-  "Save BUFFER quietly."
+(defun lispm-memory-save (buffer &optional expected-hash)
+  "Atomically write BUFFER to disk, checking EXPECTED-HASH when non-nil."
   (with-current-buffer buffer
-    (let ((inhibit-message t)
-          (select-safe-coding-system-function nil)
-          (coding-system-for-write (or coding-system-for-write 'utf-8-unix)))
-      (save-buffer))))
+    (let* ((file (or buffer-file-name
+                     (error "Buffer %s visits no file" (buffer-name buffer))))
+           (base (and buffer-file-coding-system
+                      (coding-system-base buffer-file-coding-system)))
+           (coding (if (memq base '(nil undecided us-ascii))
+                       'utf-8-unix
+                     buffer-file-coding-system))
+           (text (save-restriction
+                   (widen)
+                   (buffer-substring-no-properties (point-min) (point-max)))))
+      (let ((coding-system-for-write (or coding-system-for-write coding)))
+        (lispm-write-file-atomic file text expected-hash))
+      (set-visited-file-modtime)
+      (set-buffer-modified-p nil))))
+
+(defun lispm-memory-commit-buffer (buffer fn &optional expected-hash)
+  "Run FN mutating BUFFER and save atomically with SHA-256 CAS verification.
+EXPECTED-HASH, when non-nil, overrides the baseline hash checked before saving.
+Restore BUFFER's previous text and modified state on CAS conflict."
+  (with-current-buffer buffer
+    (let* ((file (or buffer-file-name
+                     (error "Buffer %s visits no file" (buffer-name buffer))))
+           (expected (or expected-hash (lispm-file-sha256 file) :missing))
+           (was-modified (buffer-modified-p))
+           (snapshot (save-restriction
+                       (widen)
+                       (buffer-substring-no-properties (point-min) (point-max)))))
+      (cl-letf (((symbol-function 'ask-user-about-supersession-threat) #'ignore))
+        (condition-case err
+            (prog1 (funcall fn)
+              (lispm-memory-save buffer expected))
+          (error
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (save-restriction
+                 (widen)
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert snapshot)))
+               (set-buffer-modified-p was-modified)))
+           (signal (car err) (cdr err))))))))
 
 (defun lispm-memory--tag (tag)
   "TAG made valid for org."
@@ -239,9 +325,12 @@ An entry of that title is replaced; when it was saved and recalled
 stays on record."
   (let* ((scope (lispm-memory-scope agent scope))
          (buffer (lispm-memory-buffer agent scope nil t))
+         (file (buffer-file-name buffer))
+         (expected (or (lispm-file-sha256 file) :missing))
          (title (lispm-oneline title 120))
          (existing (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
                              (lispm-memory-entries buffer)))
+         (stat (and existing (lispm-memory-recall-stat file title)))
          ;; The past of the entry replaced: when it was saved, recalled, merged.
          (past (and existing
                     (with-current-buffer buffer
@@ -249,24 +338,37 @@ stays on record."
                         (widen)
                         (mapcar (lambda (name) (cons name (org-entry-get (plist-get existing :beg) name)))
                                 '("CREATED" "RECALLED" "RECALLS" "MERGED")))))))
-    (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (if existing
-              (progn (delete-region (plist-get existing :beg) (plist-get existing :end))
-                     (goto-char (plist-get existing :beg)))
-            (goto-char (point-max))
-            (unless (bolp) (insert "\n")))
-          (insert (lispm-memory-entry-text
-                   title tags
-                   `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory-stamp)))
-                     ("UPDATED" . ,(and existing (lispm-memory-stamp)))
-                     ,@(assoc-delete-all "CREATED" past))
-                   content)))))
-    (lispm-memory-save buffer)
+    (when stat
+      (let* ((old-recalls (string-to-number (or (cdr (assoc "RECALLS" past)) "0")))
+             (total-recalls (+ old-recalls (car stat)))
+             (old-recalled (cdr (assoc "RECALLED" past)))
+             (latest-recalled (if (and old-recalled (string> old-recalled (cdr stat)))
+                                  old-recalled
+                                (cdr stat))))
+        (setf (alist-get "RECALLS" past nil nil #'equal) (number-to-string total-recalls))
+        (setf (alist-get "RECALLED" past nil nil #'equal) latest-recalled)))
+    (lispm-memory-commit-buffer
+     buffer
+     (lambda ()
+       (save-excursion
+         (save-restriction
+           (widen)
+           (if existing
+               (progn (delete-region (plist-get existing :beg) (plist-get existing :end))
+                      (goto-char (plist-get existing :beg)))
+             (goto-char (point-max))
+             (unless (bolp) (insert "\n")))
+           (insert (lispm-memory-entry-text
+                    title tags
+                    `(("CREATED" . ,(or (cdr (assoc "CREATED" past)) (lispm-memory-stamp)))
+                      ("UPDATED" . ,(and existing (lispm-memory-stamp)))
+                      ,@(assoc-delete-all "CREATED" past))
+                    content)))))
+     expected)
+    (lispm-memory-clear-recall-stats file title)
     (lispm-git-commit agent (format "%s: %s \"%s\"" (lispm-agent-name agent)
-                                    (if existing "update memory" "remember") title))
+                                    (if existing "update memory" "remember") title)
+                      (list file))
     (format "%s %s memory \"%s\"." (if existing "Updated" "Saved") scope title)))
 
 (defun lispm-memory--label (entry)
@@ -286,25 +388,21 @@ character's own, its scope."
   (concat "## " (lispm-memory--label entry) "\n" (plist-get entry :body)))
 
 (defun lispm-memory--note-recalls (entries)
-  "Record that ENTRIES were recalled now, in their RECALLED and RECALLS.
-That is what consolidation goes by (see `lispm-memory-max-entries'),
-and not a change of what is known: it is committed with the turn.  A
-memory file whose buffer has changes of the user's is left as it is."
-  (pcase-dolist (`(,file . ,recalled) (seq-group-by (lambda (e) (plist-get e :file)) entries))
-    (when-let* ((buffer (and file (find-buffer-visiting file)))
-                ((not (buffer-modified-p buffer)))
-                ((eq (lispm-tools-state buffer) 'current)))
-      (with-current-buffer buffer
-        (save-excursion
-          (save-restriction
-            (widen)
-            ;; The latest first: a property added moves what follows.
-            (dolist (e (sort (copy-sequence recalled)
-                             (lambda (a b) (> (plist-get a :beg) (plist-get b :beg)))))
-              (goto-char (plist-get e :beg))
-              (org-entry-put nil "RECALLED" (lispm-memory-stamp))
-              (org-entry-put nil "RECALLS" (number-to-string (1+ (plist-get e :recalls))))))))
-      (lispm-memory-save buffer))))
+  "Record in memory that ENTRIES were recalled now, without touching disk.
+Telemetry accumulates lock-free per file/title and is folded into disk
+only during explicit writes or asynchronous consolidation."
+  (let ((stamp (lispm-memory-stamp)))
+    (dolist (entry entries)
+      (when-let* ((raw-file (plist-get entry :file))
+                  (file (expand-file-name raw-file))
+                  (title (plist-get entry :title)))
+        (let* ((tbl (or (gethash file lispm-memory--recall-stats)
+                        (let ((new (make-hash-table :test #'equal)))
+                          (puthash file new lispm-memory--recall-stats)
+                          new)))
+               (key (lispm-memory--recall-key title))
+               (prev (gethash key tbl)))
+          (puthash key (cons (1+ (or (car prev) 0)) stamp) tbl))))))
 
 (defun lispm-memory-recall (agent query &optional role)
   "Entries of AGENT's memory matching every word of QUERY.
@@ -335,17 +433,32 @@ noted as recalled."
 (defun lispm-memory-forget (agent title)
   "Delete the entry TITLE from AGENT's own memory, or else its role memory.
 A character's own memory comes first."
-  (let* ((entry (seq-find (lambda (e) (string-equal-ignore-case (plist-get e :title) title))
-                          (mapcan (lambda (scope) (lispm-memory--scope-entries agent scope))
-                                  (lispm-memory-scopes agent))))
-         (buffer (and entry (lispm-memory-buffer agent (plist-get entry :scope) nil t))))
+  (let* ((found (cl-loop for scope in (lispm-memory-scopes agent)
+                         for file = (lispm-memory-file agent scope)
+                         when (file-exists-p file)
+                         do (let* ((buf (lispm-memory-buffer agent scope nil t))
+                                   (hash (or (lispm-file-sha256 file) :missing))
+                                   (hit (seq-find
+                                         (lambda (e)
+                                           (string-equal-ignore-case (plist-get e :title) title))
+                                         (lispm-memory-entries buf))))
+                              (when hit
+                                (cl-return (list buf file hash hit))))))
+         (buffer (nth 0 found))
+         (file (nth 1 found))
+         (expected (nth 2 found))
+         (entry (nth 3 found)))
     (unless entry (error "No memory titled \"%s\"" title))
-    (with-current-buffer buffer
-      (save-restriction
-        (widen)
-        (delete-region (plist-get entry :beg) (plist-get entry :end))))
-    (lispm-memory-save buffer)
-    (lispm-git-commit agent (format "%s: forget \"%s\"" (lispm-agent-name agent) title))
+    (lispm-memory-commit-buffer
+     buffer
+     (lambda ()
+       (save-restriction
+         (widen)
+         (delete-region (plist-get entry :beg) (plist-get entry :end))))
+     expected)
+    (lispm-memory-clear-recall-stats file title)
+    (lispm-git-commit agent (format "%s: forget \"%s\"" (lispm-agent-name agent) title)
+                      (list file))
     (format "Forgot \"%s\" (it remains in git history)." title)))
 
 ;;;; Tasks
@@ -361,23 +474,28 @@ A character's own memory comes first."
 (defun lispm-tasks-add (agent title &optional notes)
   "Add a TODO titled TITLE (with NOTES) to AGENT's tasks; return its ID."
   (let* ((buffer (lispm-tasks--buffer agent t))
+         (file (buffer-file-name buffer))
+         (expected (or (lispm-file-sha256 file) :missing))
          (ids (mapcar (lambda (e) (plist-get e :id)) (lispm-memory-entries buffer)))
          (id (cl-loop for id = (format "T%04x" (random #x10000))
                       unless (member id ids) return id)))
-    (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (goto-char (point-max))
-          (unless (bolp) (insert "\n"))
-          (insert "* TODO " (lispm-oneline title 120) "\n"
-                  ":PROPERTIES:\n:ID:       " id "\n"
-                  ":CREATED:  " (lispm-memory-stamp) "\n:END:\n"
-                  (if (and notes (not (string-blank-p notes)))
-                      (concat (org-escape-code-in-string (string-trim notes)) "\n")
-                    "")))))
-    (lispm-memory-save buffer)
-    (lispm-git-commit agent (format "%s: add task %s" (lispm-agent-name agent) id))
+    (lispm-memory-commit-buffer
+     buffer
+     (lambda ()
+       (save-excursion
+         (save-restriction
+           (widen)
+           (goto-char (point-max))
+           (unless (bolp) (insert "\n"))
+           (insert "* TODO " (lispm-oneline title 120) "\n"
+                   ":PROPERTIES:\n:ID:       " id "\n"
+                   ":CREATED:  " (lispm-memory-stamp) "\n:END:\n"
+                   (if (and notes (not (string-blank-p notes)))
+                       (concat (org-escape-code-in-string (string-trim notes)) "\n")
+                     "")))))
+     expected)
+    (lispm-git-commit agent (format "%s: add task %s" (lispm-agent-name agent) id)
+                      (list file))
     id))
 
 (defun lispm-tasks-update (agent id &optional state note)
@@ -385,24 +503,29 @@ A character's own memory comes first."
   (when (and state (not (member state lispm-tasks--states)))
     (error "State must be one of %s" (string-join lispm-tasks--states ", ")))
   (let* ((buffer (lispm-tasks--buffer agent t))
+         (file (buffer-file-name buffer))
+         (expected (or (lispm-file-sha256 file) :missing))
          (task (lispm-tasks--find agent id)))
-    (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (when note
-            (goto-char (plist-get task :end))
-            (unless (bolp) (insert "\n"))
-            (insert "- " (lispm-memory-stamp) " " (lispm-oneline note 500) "\n"))
-          (when state
-            (goto-char (plist-get task :beg))
-            (let ((case-fold-search nil))
-              (if (looking-at "\\* \\(?:\\(TODO\\|NEXT\\|BLOCKED\\|DONE\\|CANCELLED\\) \\)?")
-                  (replace-match (concat "* " state " ") t t)
-                (error "Malformed task heading")))))))
-    (lispm-memory-save buffer)
+    (lispm-memory-commit-buffer
+     buffer
+     (lambda ()
+       (save-excursion
+         (save-restriction
+           (widen)
+           (when note
+             (goto-char (plist-get task :end))
+             (unless (bolp) (insert "\n"))
+             (insert "- " (lispm-memory-stamp) " " (lispm-oneline note 500) "\n"))
+           (when state
+             (goto-char (plist-get task :beg))
+             (let ((case-fold-search nil))
+               (if (looking-at "\\* \\(?:\\(TODO\\|NEXT\\|BLOCKED\\|DONE\\|CANCELLED\\) \\)?")
+                   (replace-match (concat "* " state " ") t t)
+                 (error "Malformed task heading")))))))
+     expected)
     (lispm-git-commit agent (format "%s: task %s%s" (lispm-agent-name agent) id
-                                    (if state (concat " -> " state) " note")))
+                                    (if state (concat " -> " state) " note"))
+                      (list file))
     (format "Task %s updated." id)))
 
 (defun lispm-tasks-list (agent &optional include-done)
@@ -424,92 +547,249 @@ A character's own memory comes first."
 
 ;;;; Git
 
-(defvar lispm-git--queue nil "Changes not yet committed: (AUTHOR . MESSAGE).")
+(defcustom lispm-git-scope 'directory
+  "Repository partitioning scope for archival commits under `lispm-directory'.
+`directory' uses a single repository at `lispm-directory'.
+`partitioned' creates independent per-scope Git repos for each project,
+role, character, or system directory so writes never share `index.lock'."
+  :type '(choice (const :tag "Single lispm-directory repo" directory)
+                 (const :tag "Independent per-scope repos" partitioned))
+  :group 'lispm)
+
+(defcustom lispm-git-debounce 0.2
+  "Seconds to batch explicit memory, task, or consolidation Git commits."
+  :type 'number
+  :group 'lispm)
+
+(defcustom lispm-git-turn-delay 1.5
+  "Seconds to coalesce low-priority turn-end archival snapshots."
+  :type 'number
+  :group 'lispm)
+
+(defvar lispm-git--queue nil "Changes not yet committed: `(AUTHOR MESSAGE . PATHS)'.")
 (defvar lispm-git--timer nil "Timer of the next commit.")
+(defvar lispm-git--deadline nil "Epoch timestamp when `lispm-git--timer' is scheduled to fire.")
 (defvar lispm-git--process nil "The git process running, if any.")
+(defvar lispm-git--retries 0 "Consecutive `.git/index.lock' retry count for default repo.")
+(defvar lispm-git--partitions (make-hash-table :test #'equal)
+  "Partition repo root -> state plist (:queue :timer :deadline :process :retries).")
+
+(defun lispm-git--default-repo ()
+  "Return the canonical default archival repository root."
+  (file-name-as-directory (expand-file-name lispm-directory)))
+
+(defun lispm-git--repo-root (agent paths)
+  "Select the Git repository root for AGENT and modified PATHS."
+  (let ((base (lispm-git--default-repo)))
+    (if (not (eq lispm-git-scope 'partitioned))
+        base
+      (or (when-let* ((first (car paths))
+                      (canon (expand-file-name first))
+                      ((file-in-directory-p canon base))
+                      (rel (file-relative-name canon base)))
+            (cond
+             ((string-match "\\`\\(\\(?:projects\\|roles\\|characters\\)/[^/]+/\\)" rel)
+              (expand-file-name (match-string 1 rel) base))
+             ((string-prefix-p "system/" rel)
+              (expand-file-name "system/" base))))
+          (when (lispm-agent-p agent)
+            (file-name-as-directory (expand-file-name (lispm-home-directory agent))))
+          base))))
+
+(defun lispm-git--repo-slot (repo)
+  "Return mutable state plist for REPO."
+  (if (equal repo (lispm-git--default-repo))
+      nil
+    (or (gethash repo lispm-git--partitions)
+        (let ((slot (list :queue nil :timer nil :deadline nil :process nil :retries 0)))
+          (puthash repo slot lispm-git--partitions)
+          slot))))
+
+(defun lispm-git--slot-get (repo key)
+  "Get KEY (`:queue', `:timer', `:deadline', `:process', or `:retries') for REPO."
+  (if (equal repo (lispm-git--default-repo))
+      (pcase key
+        (:queue lispm-git--queue)
+        (:timer lispm-git--timer)
+        (:deadline lispm-git--deadline)
+        (:process lispm-git--process)
+        (:retries lispm-git--retries))
+    (plist-get (gethash repo lispm-git--partitions) key)))
+
+(defun lispm-git--slot-set (repo key value)
+  "Set KEY to VALUE on REPO's state."
+  (if (equal repo (lispm-git--default-repo))
+      (pcase key
+        (:queue (setq lispm-git--queue value))
+        (:timer (setq lispm-git--timer value))
+        (:deadline (setq lispm-git--deadline value))
+        (:process (setq lispm-git--process value))
+        (:retries (setq lispm-git--retries value)))
+    (let ((slot (lispm-git--repo-slot repo)))
+      (puthash repo (plist-put slot key value) lispm-git--partitions)))
+  value)
+
+(defun lispm-git--schedule (repo delay &optional urgent)
+  "Schedule an async flush for REPO after DELAY seconds.
+When URGENT is non-nil and an existing timer fires later, replace it."
+  (let* ((existing (lispm-git--slot-get repo :timer))
+         (existing-dl (lispm-git--slot-get repo :deadline))
+         (wait (max 0.01 (or delay lispm-git-debounce)))
+         (target (+ (float-time) wait)))
+    (when (and existing urgent existing-dl (< target existing-dl))
+      (cancel-timer existing)
+      (lispm-git--slot-set repo :timer nil)
+      (lispm-git--slot-set repo :deadline nil)
+      (setq existing nil))
+    (unless existing
+      (lispm-git--slot-set repo :deadline target)
+      (lispm-git--slot-set
+       repo :timer (run-at-time wait nil #'lispm-git--flush repo)))))
 
 (defun lispm-git-p ()
   "Non-nil if changes to `lispm-directory' are committed to git.
 See `lispm-git'."
   (and lispm-git (executable-find "git") t))
 
-(defun lispm-git-commit (agent message)
-  "Record a change by AGENT, described by MESSAGE, for the next commit.
-Changes made within a fraction of a second, such as several tool
-calls of one response, become one commit listing each of them."
-  (when (lispm-git-p)
-    (setq lispm-git--queue
-          (append lispm-git--queue
-                  (list (cons (format "%s" (if (lispm-agent-p agent) (lispm-agent-name agent) agent))
-                              message))))
-    (unless lispm-git--timer
-      (setq lispm-git--timer (run-at-time 0.2 nil #'lispm-git--flush)))))
+(defun lispm-git-settled-p ()
+  "Non-nil when every queued Git archival commit has finished."
+  (and (null lispm-git--queue)
+       (null lispm-git--timer)
+       (null lispm-git--process)
+       (catch 'busy
+         (maphash (lambda (_repo slot)
+                    (when (or (plist-get slot :queue)
+                              (plist-get slot :timer)
+                              (plist-get slot :process))
+                      (throw 'busy nil)))
+                  lispm-git--partitions)
+         t)))
 
-(defun lispm-git--flush ()
-  "Commit everything under `lispm-directory' with the queued messages."
-  (setq lispm-git--timer nil)
-  (cond
-   ((process-live-p lispm-git--process)
-    (setq lispm-git--timer (run-at-time 0.2 nil #'lispm-git--flush)))
-   (lispm-git--queue
-    (let* ((entries lispm-git--queue)
-           (authors (delete-dups (mapcar #'car entries)))
-           (author (if (cdr authors) "lispm" (car authors)))
-           (message (if (cdr entries)
-                        (concat (format "%s: %d changes\n\n" author (length entries))
-                                (mapconcat #'cdr entries "\n"))
-                      (cdar entries)))
-           (default-directory (file-name-as-directory (expand-file-name lispm-directory))))
-      (setq lispm-git--queue nil)
-      (make-directory default-directory t)
-      (setq lispm-git--process
-            (let ((process-environment (lispm-git-environment)))
-              (make-process
-               :name "lispm-git" :buffer (get-buffer-create " *lispm-git*") :noquery t
-               :command
-               (list "sh" "-c"
-                     (concat "{ [ -d .git ] || git init -q; } && "
-                             ;; Images of sessions stay out of the history, and
-                             ;; so do the state of inboxes, the snapshots of
-                             ;; projects, a repository of their own, the
-                             ;; sandbox's srt and settings, and RAG caches.
-                             "for p in '*.images/' 'journal.git/' 'inbox.org' 'sandbox/' '.rag-index.eld'; do"
-                             " grep -qxF \"$p\" .git/info/exclude 2>/dev/null"
-                             " || { mkdir -p .git/info && echo \"$p\" >> .git/info/exclude; }; done && "
-                             "git add -A && "
-                             "{ git diff --cached --quiet || git"
-                             " -c user.name=" (shell-quote-argument author)
-                             " -c user.email=" (shell-quote-argument (concat author "@lispm.invalid"))
-                             " commit -q -m " (shell-quote-argument message) "; }"))
-               :sentinel (lambda (p _event)
-                           (unless (process-live-p p)
-                             (when (eq lispm-git--process p)
-                               (setq lispm-git--process nil))
-                             (when (and lispm-git--queue (not lispm-git--timer))
-                               (setq lispm-git--timer
-                                     (run-at-time 0.2 nil #'lispm-git--flush))))))))))))
+(defun lispm-git-commit (agent message &optional paths delay)
+  "Record a change by AGENT, described by MESSAGE, for the next commit.
+Optional PATHS lists files modified by this change; when every entry in a
+batch specifies paths inside the repository root, only those paths are staged.
+Optional DELAY overrides the batching delay (default `lispm-git-debounce')."
+  (when (lispm-git-p)
+    (let* ((repo (lispm-git--repo-root agent paths))
+           (author (format "%s" (if (lispm-agent-p agent) (lispm-agent-name agent) agent)))
+           (entry (cons author (cons message paths))))
+      (lispm-git--slot-set repo :queue
+                           (append (lispm-git--slot-get repo :queue) (list entry)))
+      (lispm-git--schedule repo (or delay lispm-git-debounce) (null delay)))))
+
+(defun lispm-git--pathspecs (repo entries)
+  "Return relative pathspecs inside REPO when every entry lists paths."
+  (let (all-paths
+        (complete t))
+    (dolist (e entries)
+      (let ((ps (cddr e)))
+        (if (null ps)
+            (setq complete nil)
+          (dolist (p ps)
+            (let ((canon (expand-file-name p)))
+              (if (file-in-directory-p canon repo)
+                  (push (file-relative-name canon repo) all-paths)
+                (setq complete nil)))))))
+    (when complete
+      (delete-dups (nreverse all-paths)))))
+
+(defun lispm-git--flush (&optional repo)
+  "Commit queued changes for REPO (default `lispm-directory') asynchronously."
+  (let ((repo (file-name-as-directory (expand-file-name (or repo (lispm-git--default-repo))))))
+    (lispm-git--slot-set repo :timer nil)
+    (lispm-git--slot-set repo :deadline nil)
+    (let ((proc (lispm-git--slot-get repo :process))
+          (queue (lispm-git--slot-get repo :queue)))
+      (cond
+       ((process-live-p proc)
+        (lispm-git--schedule repo lispm-git-debounce))
+       (queue
+        (let* ((entries queue)
+               (authors (delete-dups (mapcar #'car entries)))
+               (author (if (cdr authors) "lispm" (car authors)))
+               (message (if (cdr entries)
+                            (concat (format "%s: %d changes\n\n" author (length entries))
+                                    (mapconcat #'cadr entries "\n"))
+                          (cadar entries)))
+               (pathspecs (lispm-git--pathspecs repo entries))
+               (add-cmd (if pathspecs
+                            (concat "git add -A -- "
+                                    (mapconcat #'shell-quote-argument pathspecs " "))
+                          "git add -A"))
+               (default-directory repo))
+          (lispm-git--slot-set repo :queue nil)
+          (make-directory repo t)
+          (lispm-git--slot-set
+           repo :process
+           (let ((process-environment (lispm-git-environment))
+                 (pname (if (equal repo (lispm-git--default-repo))
+                            "lispm-git"
+                          (format "lispm-git:%s" (file-name-nondirectory
+                                                  (directory-file-name repo))))))
+             (make-process
+              :name pname :buffer nil :noquery t
+              :command
+              (list "sh" "-c"
+                    (concat "{ [ -d .git ] || git init -q; } && "
+                            "for p in '*.images/' 'journal.git/' 'inbox/' 'inbox.org' 'inbox.org.migrated' 'sandbox/' '.rag-index.eld'; do"
+                            " grep -qxF \"$p\" .git/info/exclude 2>/dev/null"
+                            " || { mkdir -p .git/info && echo \"$p\" >> .git/info/exclude; }; done && "
+                            "if [ -e .git/index.lock ]; then exit 75; fi && "
+                            "err=$({ " add-cmd " && "
+                            "{ git diff --cached --quiet || git"
+                            " -c user.name=" (shell-quote-argument author)
+                            " -c user.email=" (shell-quote-argument (concat author "@lispm.invalid"))
+                            " commit -q -m " (shell-quote-argument message) "; }; } 2>&1) "
+                            "|| { rc=$?; case \"$err\" in *index.lock*) exit 75;; esac; "
+                            "if [ -e .git/index.lock ]; then exit 75; fi; exit $rc; }"))
+              :sentinel
+              (lambda (p _event)
+                (unless (process-live-p p)
+                  (when (eq (lispm-git--slot-get repo :process) p)
+                    (lispm-git--slot-set repo :process nil))
+                  (let ((status (process-exit-status p))
+                        (retries (or (lispm-git--slot-get repo :retries) 0)))
+                    (if (and (= status 75) (< retries 5))
+                        (progn
+                          (lispm-git--slot-set
+                           repo :queue (append entries (lispm-git--slot-get repo :queue)))
+                          (lispm-git--slot-set repo :retries (1+ retries))
+                          (lispm-git--schedule
+                           repo (* lispm-git-debounce (expt 2 retries))))
+                      (lispm-git--slot-set repo :retries 0)
+                      (if (lispm-git--slot-get repo :queue)
+                          (lispm-git--schedule repo lispm-git-debounce)
+                        (unless (or (equal repo (lispm-git--default-repo))
+                                    (lispm-git--slot-get repo :timer)
+                                    (process-live-p (lispm-git--slot-get repo :process)))
+                          (remhash repo lispm-git--partitions))))))))))))))))
 
 (defun lispm-git--on-kill-emacs ()
-  "Flush pending `lispm-git' commits cleanly within a bounded wait on exit."
+  "Cancel pending archival timers cleanly without blocking Emacs shutdown."
   (when lispm-git--timer
     (cancel-timer lispm-git--timer)
-    (setq lispm-git--timer nil))
-  (when (and lispm-git--queue (lispm-git-p))
-    (let ((deadline (+ (float-time) 1.5)))
-      (while (and (process-live-p lispm-git--process) (< (float-time) deadline))
-        (accept-process-output lispm-git--process 0.05))
-      (unless (process-live-p lispm-git--process)
-        (lispm-git--flush))))
-  (let ((deadline (+ (float-time) 1.5)))
-    (while (and (process-live-p lispm-git--process) (< (float-time) deadline))
-      (accept-process-output lispm-git--process 0.05))))
+    (setq lispm-git--timer nil
+          lispm-git--deadline nil))
+  (maphash (lambda (repo slot)
+             (when-let* ((timer (plist-get slot :timer)))
+               (cancel-timer timer)
+               (setq slot (plist-put slot :timer nil))
+               (puthash repo (plist-put slot :deadline nil)
+                        lispm-git--partitions)))
+           lispm-git--partitions))
 
 (add-hook 'kill-emacs-hook #'lispm-git--on-kill-emacs)
 
 (defun lispm-git--commit-turn (agent _reply)
-  "Commit AGENT's session after a turn."
-  (lispm-git-commit agent (format "%s: turn %d" (lispm-agent-name agent)
-                                  (lispm-agent-turn agent))))
+  "Schedule low-priority archival commit for AGENT's finished turn."
+  (let* ((buf (lispm-agent-buffer agent))
+         (file (and (buffer-live-p buf) (buffer-file-name buf))))
+    (lispm-git-commit agent
+                      (format "%s: turn %d" (lispm-agent-name agent)
+                              (lispm-agent-turn agent))
+                      (and file (list file))
+                      lispm-git-turn-delay)))
 
 (add-hook 'lispm-turn-end-functions #'lispm-git--commit-turn)
 

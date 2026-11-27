@@ -168,7 +168,6 @@
   ("diagnostics in %s" . "diagnostics dans %s")
   ("↓ Jump to bottom (%s)" . "↓ Aller en bas (%s)")
   ("● New output · ↓ Jump to bottom (%s)" . "● Nouvelle sortie · ↓ Aller en bas (%s)")
-  ("LispM: %s not updated: its buffer has unsaved changes" . "LispM : %s non mis à jour : son tampon a des modifications non enregistrées")
   ("%d argument" "%d argument" "%d arguments")
   ("%d to %d arguments" . "%d à %d arguments")
   ("at least %d argument" "au moins %d argument" "au moins %d arguments")

@@ -325,7 +325,7 @@ the selected window, a side window, or a chat."
 Typing it takes TYPE seconds from START (none for a change seen as a
 proposal).  HUNKS are (BEG END REMOVED LENGTH): markers around new
 text, the text it replaced, and its length, TOTAL in all."
-  buffer agent window start type hunks total overlays)
+  buffer agent call-id window start type hunks total overlays)
 
 (defvar lispm-edits--shows nil
   "Changes being shown.")
@@ -334,42 +334,44 @@ text, the text it replaced, and its length, TOTAL in all."
   "Timer drawing the changes being shown.")
 
 (defvar-local lispm-edits--seen nil
-  "When a proposed change to this buffer was made: it need not be typed in.")
+  "Alist `(AGENT . TIME)' recording when a proposal on this buffer became an edit.")
 
 (defun lispm-edits--changed (buffer old new)
   "Show the change a tool just made to BUFFER, from OLD to NEW."
   (when (and (lispm-edits--live-p) (buffer-live-p buffer))
-    (lispm-edits--finish buffer)
-    (when-let* ((raw-hunks (lispm-edits--hunks old new)))
-      (with-current-buffer buffer
-        (lispm-edits-mark-shared buffer)
-        (pcase-dolist (`(,_ ,_ ,nf ,nt) raw-hunks)
-          (when (< nf nt)
-            (lispm-edits--stamp-provenance
-             buffer (1+ nf) (1+ nt) 'agent lispm-current-agent)))
-        (when-let* ((window (lispm-edits--window buffer)))
-          (let* ((seen (and lispm-edits--seen
-                            (< (- (float-time) lispm-edits--seen) 10)))
-                 (hunks (mapcar (pcase-lambda (`(,of ,ot ,nf ,nt))
-                                  (list (copy-marker (1+ nf)) (copy-marker (1+ nt))
-                                        (substring old of ot) (- nt nf)))
-                                raw-hunks))
-                 (total (apply #'+ (mapcar (lambda (h) (nth 3 h)) hunks)))
-                 (show (lispm-edits--show-create
-                        :buffer buffer :agent lispm-current-agent :window window
-                        :start (float-time) :hunks hunks :total total
-                        :type (if (or seen (zerop total))
-                                  0
-                                (min lispm-edits-max-duration
-                                     (/ total (float lispm-edits-speed)))))))
-            (setq lispm-edits--seen nil)
-            (add-hook 'before-change-functions #'lispm-edits--interrupt nil t)
-            (lispm-edits-reveal window (marker-position (caar hunks)))
-            (push show lispm-edits--shows)
-            (lispm-edits--draw show (float-time))
-            (unless (timerp lispm-edits--timer)
-              (setq lispm-edits--timer
-                    (run-at-time 0.066 0.066 #'lispm-edits--tick)))))))))
+    (let ((agent lispm-current-agent)
+          (call-id (bound-and-true-p lispm-current-call)))
+      (lispm-edits--finish buffer agent call-id)
+      (when-let* ((raw-hunks (lispm-edits--hunks old new)))
+        (with-current-buffer buffer
+          (lispm-edits-mark-shared buffer)
+          (pcase-dolist (`(,_ ,_ ,nf ,nt) raw-hunks)
+            (when (< nf nt)
+              (lispm-edits--stamp-provenance
+               buffer (1+ nf) (1+ nt) 'agent agent)))
+          (when-let* ((window (lispm-edits--window buffer)))
+            (let* ((seen-at (cdr (assq agent lispm-edits--seen)))
+                   (seen (and seen-at (< (- (float-time) seen-at) 10)))
+                   (hunks (mapcar (pcase-lambda (`(,of ,ot ,nf ,nt))
+                                    (list (copy-marker (1+ nf)) (copy-marker (1+ nt))
+                                          (substring old of ot) (- nt nf)))
+                                  raw-hunks))
+                   (total (apply #'+ (mapcar (lambda (h) (nth 3 h)) hunks)))
+                   (show (lispm-edits--show-create
+                          :buffer buffer :agent agent :call-id call-id :window window
+                          :start (float-time) :hunks hunks :total total
+                          :type (if (or seen (zerop total))
+                                    0
+                                  (min lispm-edits-max-duration
+                                       (/ total (float lispm-edits-speed)))))))
+              (setq lispm-edits--seen (assq-delete-all agent lispm-edits--seen))
+              (add-hook 'before-change-functions #'lispm-edits--interrupt nil t)
+              (lispm-edits-reveal window (marker-position (caar hunks)))
+              (push show lispm-edits--shows)
+              (lispm-edits--draw show (float-time))
+              (unless (timerp lispm-edits--timer)
+                (setq lispm-edits--timer
+                      (run-at-time 0.066 0.066 #'lispm-edits--tick))))))))))
 
 (defun lispm-edits--tick (&optional now)
   "Draw the changes being shown as they are at NOW (default, the time)."
@@ -411,10 +413,17 @@ text, the text it replaced, and its length, TOTAL in all."
               (setq left (- left shown))
               (when (and (> lingering 0) (not (string-empty-p removed)))
                 (push (lispm-edits--overlay beg beg 'before-string
-                                            (lispm-edits--ghost removed lingering))
+                                            (lispm-edits--ghost removed lingering)
+                                            'lispm-edits-show
+                                            (list buffer (lispm-edits--show-agent show)
+                                                  (lispm-edits--show-call-id show)))
                       overlays))
               (when (and glow (> shown 0))
-                (push (lispm-edits--overlay beg at 'face `(:background ,glow :extend t)) overlays))
+                (push (lispm-edits--overlay beg at 'face `(:background ,glow :extend t)
+                                            'lispm-edits-show
+                                            (list buffer (lispm-edits--show-agent show)
+                                                  (lispm-edits--show-call-id show)))
+                      overlays))
               (when (< shown length)
                 ;; Not typed in yet: hidden, behind the cursor where typing is.
                 (let ((here (not cursor)))
@@ -422,7 +431,10 @@ text, the text it replaced, and its length, TOTAL in all."
                   (push (lispm-edits--overlay at end 'display
                                               (if here
                                                   (concat tag (if (eq (char-before end) ?\n) "\n" ""))
-                                                ""))
+                                                "")
+                                              'lispm-edits-show
+                                              (list buffer (lispm-edits--show-agent show)
+                                                    (lispm-edits--show-call-id show)))
                         overlays)))))
           ;; Typed in: the cursor lingers after the change a moment.
           (when (and (not cursor) (< elapsed (+ type (* 0.7 lispm-edits-fade))))
@@ -430,7 +442,11 @@ text, the text it replaced, and its length, TOTAL in all."
                                                      (lispm-edits--show-hunks show))))))
               (let* ((end (nth 1 last))
                      (at (if (eq (char-before end) ?\n) (1- end) end)))
-                (push (lispm-edits--overlay at at 'before-string tag) overlays))))
+                (push (lispm-edits--overlay at at 'before-string tag
+                                            'lispm-edits-show
+                                            (list buffer (lispm-edits--show-agent show)
+                                                  (lispm-edits--show-call-id show)))
+                      overlays))))
           (when cursor
             (let ((window (lispm-edits--show-window show)))
               (when (and (window-live-p window) (not (eq window (selected-window)))
@@ -462,11 +478,15 @@ text, the text it replaced, and its length, TOTAL in all."
     (set-marker beg nil)
     (set-marker end nil)))
 
-(defun lispm-edits--finish (buffer)
-  "Stop showing changes to BUFFER: show its text as it is."
+(defun lispm-edits--finish (buffer &optional agent call-id)
+  "Stop showing changes to BUFFER (scoped by AGENT and CALL-ID when non-nil)."
   (setq lispm-edits--shows
         (seq-remove (lambda (show)
-                      (when (eq (lispm-edits--show-buffer show) buffer)
+                      (when (and (eq (lispm-edits--show-buffer show) buffer)
+                                 (or (null agent) (eq (lispm-edits--show-agent show) agent))
+                                 (or (null call-id)
+                                     (null (lispm-edits--show-call-id show))
+                                     (equal (lispm-edits--show-call-id show) call-id)))
                         (lispm-edits--drop show)
                         t))
                     lispm-edits--shows)))
@@ -574,11 +594,15 @@ BUFFER was made to show it; REVEALED once it was brought into view."
   "Proposed changes being shown.")
 
 (defvar lispm-edits--writing (make-hash-table :test #'equal)
-  "Call id -> (AGENT . CALL): the latest input of calls being written.")
+  "Cons `(AGENT . CALL-ID)' -> (AGENT . CALL): calls currently streaming.")
 
-(defun lispm-edits--proposal (id)
-  "The proposal of call ID, or nil."
-  (seq-find (lambda (p) (equal (lispm-edits--proposal-id p) id)) lispm-edits--proposals))
+(defun lispm-edits--proposal (id &optional agent buffer)
+  "The proposal of call ID, optionally filtered by AGENT and BUFFER."
+  (seq-find (lambda (p)
+              (and (equal (lispm-edits--proposal-id p) id)
+                   (or (null agent) (eq (lispm-edits--proposal-agent p) agent))
+                   (or (null buffer) (eq (lispm-edits--proposal-buffer p) buffer))))
+            lispm-edits--proposals))
 
 (defun lispm-edits--propose (agent id tool input streaming)
   "Show the change AGENT's call ID of TOOL on INPUT would make.
@@ -593,7 +617,7 @@ changes no buffer, or does not make sense yet."
                         (error nil)))))
     (pcase change
       (`(,(and (pred buffer-live-p) buffer) . ,(and (pred stringp) text))
-       (let ((p (lispm-edits--proposal id)))
+       (let ((p (lispm-edits--proposal id agent)))
          (when (and p (not (eq (lispm-edits--proposal-buffer p) buffer)))
            (lispm-edits--retire p nil)
            (setq p nil))
@@ -619,6 +643,7 @@ changes no buffer, or does not make sense yet."
                (text (lispm-edits--proposal-text p))
                (streaming (lispm-edits--proposal-streaming p))
                (agent (lispm-edits--proposal-agent p))
+               (tag-key (list buffer agent (lispm-edits--proposal-id p)))
                (window (lispm-edits--window buffer))
                (room (if (window-live-p window) (max 4 (- (window-body-height window) 4)) 30))
                (hunks (lispm-edits--hunks old text))
@@ -638,15 +663,19 @@ changes no buffer, or does not make sense yet."
                                     (and streaming (null more) bar))))
                         (when (< of ot)
                           (push (lispm-edits--overlay (1+ of) (1+ ot)
-                                                      'face 'lispm-edits-proposed-removed)
+                                                      'face 'lispm-edits-proposed-removed
+                                                      'lispm-edits-proposal tag-key)
                                 overlays))
                         (when (and first (< of ot))
-                          (push (lispm-edits--overlay (1+ of) (1+ of) 'before-string tag)
+                          (push (lispm-edits--overlay (1+ of) (1+ of)
+                                                      'before-string tag
+                                                      'lispm-edits-proposal tag-key)
                                 overlays))
                         (when (or (> (length added) 0) (and first (= of ot)))
                           (push (lispm-edits--overlay (1+ ot) (1+ ot) 'before-string
                                                       (concat (if (and first (= of ot)) tag "")
-                                                              added))
+                                                              added)
+                                                      'lispm-edits-proposal tag-key)
                                 overlays))))
           (setf (lispm-edits--proposal-overlays p) overlays)
           (when (and hunks (not (lispm-edits--proposal-revealed p)))
@@ -690,16 +719,23 @@ BAR, if non-nil, is a cursor at its end."
   (mapc #'delete-overlay (lispm-edits--proposal-overlays p))
   (setf (lispm-edits--proposal-overlays p) nil)
   (setq lispm-edits--proposals (delq p lispm-edits--proposals))
-  (let ((buffer (lispm-edits--proposal-buffer p)))
+  (let ((buffer (lispm-edits--proposal-buffer p))
+        (agent (lispm-edits--proposal-agent p)))
     (when (buffer-live-p buffer)
       (if made
-          (with-current-buffer buffer (setq lispm-edits--seen (float-time)))
+          (with-current-buffer buffer
+            (setq lispm-edits--seen
+                  (cons (cons agent (float-time))
+                        (assq-delete-all agent lispm-edits--seen))))
         ;; A buffer made only to show a change that was not made.
-        (when (and (lispm-edits--proposal-created p)
-                   (not (buffer-modified-p buffer))
-                   (not (and (buffer-file-name buffer)
-                             (file-exists-p (buffer-file-name buffer)))))
-          (kill-buffer buffer))))))
+        (when (lispm-edits--proposal-created p)
+          (if-let* ((other (seq-find (lambda (q) (eq (lispm-edits--proposal-buffer q) buffer))
+                                     lispm-edits--proposals)))
+              (setf (lispm-edits--proposal-created other) t)
+            (when (and (not (buffer-modified-p buffer))
+                       (not (and (buffer-file-name buffer)
+                                 (file-exists-p (buffer-file-name buffer)))))
+              (kill-buffer buffer))))))))
 
 (defun lispm-edits--update (agent)
   "Bring the proposals of AGENT's calls up to date with the calls."
@@ -729,18 +765,26 @@ it is then: the input grows faster than it is worth drawing."
               (id (plist-get call :id))
               (tool (lispm-get-tool (plist-get call :name)))
               ((lispm-tool-changes tool)))
-    (unless (gethash id lispm-edits--writing)
-      (run-at-time 0.08 nil #'lispm-edits--written id))
-    (puthash id (cons agent call) lispm-edits--writing)))
+    (let ((key (cons agent id)))
+      (unless (gethash key lispm-edits--writing)
+        (run-at-time 0.08 nil #'lispm-edits--written key))
+      (puthash key (cons agent call) lispm-edits--writing))))
 
-(defun lispm-edits--written (id)
-  "Show what the call ID being written would change, as far as it goes."
-  (pcase-let ((`(,agent . ,call) (gethash id lispm-edits--writing)))
-    (remhash id lispm-edits--writing)
-    ;; Unless the response is over, and the call proposed or made.
-    (when (and agent (eq (lispm-agent-state agent) 'requesting))
-      (lispm-edits--propose agent id (lispm-get-tool (plist-get call :name))
-                            (lispm-edits--partial-json (plist-get call :json)) t))))
+(defun lispm-edits--written (key)
+  "Show what the streaming call KEY `(AGENT . ID)' or bare ID would change."
+  (let ((lookup key))
+    (unless (or (consp lookup) (gethash lookup lispm-edits--writing))
+      (maphash (lambda (k _v)
+                 (when (and (consp k) (equal (cdr k) key))
+                   (setq lookup k)))
+               lispm-edits--writing))
+    (pcase-let ((`(,agent . ,call) (gethash lookup lispm-edits--writing)))
+      (remhash lookup lispm-edits--writing)
+      ;; Unless the response is over, and the call proposed or made.
+      (when (and agent (eq (lispm-agent-state agent) 'requesting))
+        (lispm-edits--propose agent (plist-get call :id)
+                              (lispm-get-tool (plist-get call :name))
+                              (lispm-edits--partial-json (plist-get call :json)) t)))))
 
 (defun lispm-edits--reverted ()
   "Draw again the proposals laid over the current buffer, just reverted.
@@ -755,6 +799,13 @@ that still make sense are made again from the text it has now."
     (dolist (agent (delete-dups (mapcar #'lispm-edits--proposal-agent proposals)))
       (lispm-edits--update agent))))
 
+(defun lispm-edits--skip-revert-p (buffer agent)
+  "Non-nil if BUFFER holds an active proposal owned by an agent other than AGENT."
+  (seq-some (lambda (p)
+              (and (eq (lispm-edits--proposal-buffer p) buffer)
+                   (not (eq (lispm-edits--proposal-agent p) agent))))
+            lispm-edits--proposals))
+
 (defun lispm-edits-active-p (&optional buffer agent)
   "Return non-nil if BUFFER, or any buffer when nil, shows a proposal or edit.
 When AGENT is non-nil, limit the check to shows or proposals owned by AGENT."
@@ -768,6 +819,7 @@ When AGENT is non-nil, limit the check to shows or proposals owned by AGENT."
                 lispm-edits--proposals)))
 
 (add-hook 'after-revert-hook #'lispm-edits--reverted)
+(add-hook 'lispm-revert-skip-functions #'lispm-edits--skip-revert-p)
 (add-hook 'lispm-buffer-change-functions #'lispm-edits--changed)
 (add-hook 'lispm-state-change-functions #'lispm-edits--update)
 (add-hook 'lispm-tool-input-functions #'lispm-edits--input)

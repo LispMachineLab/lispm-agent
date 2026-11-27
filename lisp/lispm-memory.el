@@ -332,6 +332,19 @@ in its MERGED property."
                                sources " | ")))
      content)))
 
+(defun lispm-memory--apply-recall-properties (entry-text entry)
+  "Return ENTRY-TEXT with ENTRY's overlaid recall metadata applied."
+  (with-temp-buffer
+    (insert entry-text)
+    (delay-mode-hooks (org-mode))
+    (goto-char (point-min))
+    (when-let* ((recalled (plist-get entry :recalled)))
+      (org-entry-put nil "RECALLED" recalled))
+    (when-let* ((recalls (plist-get entry :recalls))
+                ((> recalls 0)))
+      (org-entry-put nil "RECALLS" (number-to-string recalls)))
+    (buffer-string)))
+
 (defun lispm-memory--carry-out (agent scope hash plan)
   "Carry out the consolidation PLAN of AGENT's memory in SCOPE.
 The plan was made when what the memory said had HASH (see
@@ -344,6 +357,8 @@ of the first of them.  The change is one commit, which names every
 entry merged or dropped."
   (pcase-let* ((`(,replace . ,drop) plan)
                (buffer (lispm-memory-buffer agent scope nil t))
+               (file (buffer-file-name buffer))
+               (expected (or (lispm-file-sha256 file) :missing))
                (old (lispm-memory--text buffer))
                (entries (vconcat (lispm-memory-entries buffer)))
                (line (lambda (id) (format "\"%s\"" (plist-get (aref entries (1- id)) :title))))
@@ -372,8 +387,11 @@ entry merged or dropped."
                                  parts))
                           (group)
                           (t (push (plist-get e :title) titles)
-                             (push (let ((text (buffer-substring-no-properties
-                                                (plist-get e :beg) (plist-get e :end))))
+                             (push (let* ((text (buffer-substring-no-properties
+                                                 (plist-get e :beg) (plist-get e :end)))
+                                          (text (if (lispm-memory-recall-stat file (plist-get e :title))
+                                                    (lispm-memory--apply-recall-properties text e)
+                                                  text)))
                                      (if (string-suffix-p "\n" text) text (concat text "\n")))
                                    parts))))))
     (let ((new (apply #'concat (nreverse parts))))
@@ -384,16 +402,19 @@ entry merged or dropped."
         (error "The plan leaves two entries titled \"%s\"" twice))
       (unless (lispm-memory--progress-p (lispm-memory--size old) (lispm-memory--size new))
         (error "The plan does not bring the memory nearer its budget"))
-      (with-current-buffer buffer
-        (save-restriction
-          (widen)
-          (let ((point (point))
-                (inhibit-read-only t))
-            (erase-buffer)
-            (insert new)
-            (goto-char (min point (point-max))))))
-      (lispm-memory-save buffer)
-      (puthash (buffer-file-name buffer) (cons (lispm-memory--hash new) 0) lispm-memory--tried)
+      (lispm-memory-commit-buffer
+       buffer
+       (lambda ()
+         (save-restriction
+           (widen)
+           (let ((point (point))
+                 (inhibit-read-only t))
+             (erase-buffer)
+             (insert new)
+             (goto-char (min point (point-max))))))
+       expected)
+      (lispm-memory-clear-recall-stats file)
+      (puthash file (cons (lispm-memory--hash new) 0) lispm-memory--tried)
       (lispm-git-commit
        agent
        (concat (format "%s: consolidate %s, %d entries to %d\n\n"
@@ -405,7 +426,8 @@ entry merged or dropped."
                (if (and replace drop) "\n" "")
                (mapconcat (pcase-lambda (`(,id . ,reason))
                             (format "drop %s: %s" (funcall line id) (lispm-oneline reason 200)))
-                          drop "\n"))))))
+                          drop "\n"))
+       (list file)))))
 
 ;;;; Tools
 
