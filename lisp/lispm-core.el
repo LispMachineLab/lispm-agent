@@ -747,8 +747,7 @@ A backend that needs no key does not count: it must be named."
      ((stringp key) (not (string-empty-p key)))
      ((and (consp key) (eq (car key) 'secret))
       (condition-case nil
-          (let ((secret (lispm-secret-get (cdr key) t)))
-            (and secret (not (string-empty-p secret))))
+          (lispm-secret-exists-p (cdr key))
         (error nil)))
      (t nil))))
 

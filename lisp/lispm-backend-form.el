@@ -131,7 +131,7 @@ Signal an error when the source needs something that is missing."
          (when (and (stringp key) (not (string-empty-p key)))
            (lispm-secret-set id key))
          (unless (or (and (stringp key) (not (string-empty-p key)))
-                     (lispm-secret-get id t))
+                     (lispm-secret-exists-p id))
            (user-error "%s" (lispm-tr "Type a key, or choose where it comes from")))
          (plist-put backend :key (cons 'secret id))))
       ('typed
@@ -237,7 +237,7 @@ says, once it is valid."
          (stored-secret (and name
                              (eq source 'secret)
                              (ignore-errors
-                               (lispm-secret-get (lispm-backend-secret-id name) t))))
+                               (lispm-secret-exists-p (lispm-backend-secret-id name)))))
          (stored-key (and backend (stringp (plist-get backend :key))
                           (not (string-empty-p (plist-get backend :key)))))
          (variable (and backend (lispm-key-variable backend)))

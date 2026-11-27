@@ -333,12 +333,11 @@ without asking anyone for its key: a plist of :state and :message, see
             (list 'no-key (lispm-tr "No key: set %s." variable)))
            ((null key) (list 'ready (lispm-tr "Ready; it needs no key.")))
            ((and (consp key) (eq (car key) 'secret))
-            (let ((secret (condition-case nil
-                              (lispm-secret-get (cdr key) t)
-                            (error nil))))
-              (if (and secret (not (string-empty-p secret)))
-                  (list 'ready (lispm-tr "Ready; its key is stored encrypted."))
-                (list 'no-key (lispm-tr "No key: set it in LispM's settings.")))))
+            (if (condition-case nil
+                    (lispm-secret-exists-p (cdr key))
+                  (error nil))
+                (list 'ready (lispm-tr "Ready; its key is stored encrypted."))
+              (list 'no-key (lispm-tr "No key: set it in LispM's settings."))))
            ((stringp key) (list 'ready (lispm-tr "Ready; its key is set.")))
            ((or (assq key lispm-key-sources) (eq key 'auth-source))
             (list 'unchecked

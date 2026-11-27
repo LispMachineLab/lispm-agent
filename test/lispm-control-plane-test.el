@@ -391,5 +391,50 @@
             (kill-buffer buf)))
       (lispm-control-plane-reset))))
 
+(ert-deftest lispm-control-plane-take-request-and-start-turn-rollback ()
+  "Failures in control-plane preparation or send never strand `requesting'."
+  (lispm-test-env
+    (unwind-protect
+        (let* ((lispm-control-plane-mode 'kernel)
+               (lispm-api-function #'lispm-api-stream)
+               (lispm-runtime-signal-function nil)
+               (agent (lispm-defagent tester :root project))
+               (fallthrough 0))
+          (lispm-session-buffer agent)
+          ;; 1. Prepare error returns handled and does not fall back to `lispm--send'.
+          (cl-letf (((symbol-function 'lispm-control-plane-active-p) (lambda (&optional _) t))
+                    ((symbol-function 'lispm-api-prepare-request)
+                     (lambda (&rest _) (user-error "Missing secret")))
+                    ((symbol-function 'lispm--send)
+                     (lambda (&rest _) (cl-incf fallthrough))))
+            (should (eq t (lispm-control-plane--take-request agent '(:messages []))))
+            (should (= 0 fallthrough))
+            (should (eq (lispm-agent-state agent) 'idle)))
+          ;; 2. Control-plane send error cleans up live region and ownership.
+          (let ((lispm-control-plane-send-function
+                 (lambda (_rt form)
+                   (when (eq (car form) 'agent-turn)
+                     (error "Broken pipe")))))
+            (cl-letf (((symbol-function 'lispm-control-plane-active-p) (lambda (&optional _) t))
+                      ((symbol-function 'lispm-api-prepare-request)
+                       (lambda (&rest _)
+                         (list :url "http://fake.invalid" :headers nil :body "{}"))))
+              (should (eq t (lispm-control-plane--take-request agent '(:messages []))))
+              (should (eq (lispm-agent-state agent) 'idle))
+              (should-not (lispm-live-region (lispm-agent-buffer agent)))
+              (should-not (lispm-control-session-turns-owned
+                           (lispm-control-plane-session agent nil))))
+            ;; 3. `lispm-control-plane-start-turn' rolls back before signaling.
+            (should-error
+             (let ((lispm-control-plane-send-function
+                    (lambda (_rt form)
+                      (when (eq (car form) 'agent-turn)
+                        (error "Transport down")))))
+               (cl-letf (((symbol-function 'lispm-control-plane-active-p) (lambda (&optional _) t)))
+                 (lispm-control-plane-start-turn agent "hello")))
+             :type 'error)
+            (should (eq (lispm-agent-state agent) 'idle))))
+      (lispm-control-plane-reset))))
+
 (provide 'lispm-control-plane-test)
 ;;; lispm-control-plane-test.el ends here

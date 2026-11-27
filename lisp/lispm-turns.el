@@ -474,25 +474,56 @@ When non-nil and returning non-nil, AGENT's multi-step turn executes inside
                     (funcall lispm-turns-control-plane-function agent request))
          (lispm--send agent request 0)))))))
 
+(defun lispm-turns-abort-request (agent &optional message interrupted)
+  "Clean up AGENT's failed or interrupted request and leave `requesting'.
+When INTERRUPTED is non-nil, finish the turn cleanly as idle;
+otherwise signal `request-failed' with MESSAGE via
+`lispm-runtime-signal-function', or finish the turn when unset."
+  (setf (lispm-agent-process agent) nil)
+  (lispm-turns-live-delete agent)
+  (cond
+   (interrupted
+    (lispm-turns-finish agent (or message "Interrupted.")))
+   (lispm-runtime-signal-function
+    (funcall lispm-runtime-signal-function
+             agent 'request-failed (or message "Request failed.")))
+   (t
+    (lispm-turns-finish agent (or message "Request failed.")))))
+
 (defun lispm--send (agent request attempt)
   "Send the REQUEST envelope for AGENT; ATTEMPT counts retries."
   (lispm-set-state agent 'requesting
                    (if (> attempt 0) (format "retry %d" attempt) "thinking")
                    (if (> attempt 0) 'retry 'thinking))
   (lispm--live-begin agent)
-  (let* ((lispm-kernel-exec-owner (lispm-agent-id agent))
-         (proc (funcall lispm-api-function (lispm-agent-backend* agent) request
-                        :on-delta (lambda (kind text)
-                                    (if (eq kind 'tool-input)
-                                        (with-demoted-errors "LispM: %S"
-                                          (run-hook-with-args 'lispm-tool-input-functions
-                                                              agent text))
-                                      (lispm--live-insert agent kind text)))
-                        :on-done (lambda (message) (lispm--on-message agent message))
-                        :on-error (lambda (err) (lispm--on-error agent err request attempt)))))
-    (when (processp proc)
-      (process-put proc 'lispm-agent agent))
-    (setf (lispm-agent-process agent) proc)))
+  (condition-case err
+      (let* ((lispm-kernel-exec-owner (lispm-agent-id agent))
+             (proc (funcall lispm-api-function (lispm-agent-backend* agent) request
+                            :on-delta (lambda (kind text)
+                                        (if (eq kind 'tool-input)
+                                            (with-demoted-errors "LispM: %S"
+                                              (run-hook-with-args 'lispm-tool-input-functions
+                                                                  agent text))
+                                          (lispm--live-insert agent kind text)))
+                            :on-done (lambda (message)
+                                       (condition-case done-err
+                                           (lispm--on-message agent message)
+                                         (error
+                                          (when (and (memq (lispm-agent-state agent)
+                                                           '(requesting acting))
+                                                     (null (lispm-agent-condition agent)))
+                                            (lispm-turns-abort-request
+                                             agent (error-message-string done-err))))))
+                            :on-error (lambda (err) (lispm--on-error agent err request attempt)))))
+        (when (processp proc)
+          (process-put proc 'lispm-agent agent))
+        (setf (lispm-agent-process agent) proc))
+    (quit
+     (lispm-turns-abort-request agent "Interrupted." t)
+     nil)
+    (error
+     (lispm-turns-abort-request agent (error-message-string err))
+     nil)))
 
 (defmacro lispm--unsaved (&rest body)
   "Run BODY, which changes the current buffer, leaving it as modified as it was.

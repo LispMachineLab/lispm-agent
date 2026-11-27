@@ -196,8 +196,7 @@ variable or the secret store, is set there."
           (key (plist-get backend :key)))
       (cond (variable (not (string-empty-p (or (getenv variable) ""))))
             ((and (consp key) (eq (car key) 'secret))
-             (let ((secret (ignore-errors (lispm-secret-get (cdr key) t))))
-               (and (stringp secret) (not (string-empty-p secret)))))
+             (ignore-errors (lispm-secret-exists-p (cdr key))))
             (t t)))))
 
 (defun lispm-bar-setup-model ()

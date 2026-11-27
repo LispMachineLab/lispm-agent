@@ -48,6 +48,11 @@ Each is called with ID and returns non-nil when it removed it.")
 Each is called with no argument and returns non-nil when it is, as
 `lispm-secret-available-p' answers.")
 
+(defvar lispm-secret-exists-functions nil
+  "Functions checking whether a secret exists, for `lispm-secret-exists-p'.
+Each is called with ID and returns non-nil when the store keeps ID
+without prompting or decrypting.")
+
 (defvar lispm--auth-started nil
   "Non-nil once `lispm-ensure-auth' has opened LispM Auth for this session.")
 
@@ -93,6 +98,15 @@ Each is called with no argument and returns non-nil when it is, as
 NO-PROMPT non-nil asks the store not to ask the user for its password,
 as a window of settings does when it only says how a backend stands."
   (run-hook-with-args-until-success 'lispm-secret-get-functions id no-prompt))
+
+(defun lispm-secret-exists-p (id)
+  "Return non-nil when ID has a stored secret without prompting or decrypting.
+Uses `lispm-secret-exists-functions' when registered; falls back to a
+non-prompting `lispm-secret-get' check otherwise."
+  (if lispm-secret-exists-functions
+      (and (run-hook-with-args-until-success 'lispm-secret-exists-functions id) t)
+    (let ((secret (lispm-secret-get id t)))
+      (and (stringp secret) (not (string-empty-p secret))))))
 
 (defun lispm-secret-set (id secret)
   "Keep SECRET as ID in the secret store.
