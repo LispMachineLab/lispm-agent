@@ -307,6 +307,67 @@ one of a kind models do not take, TIFF say, is made a PNG first."
       (call-interactively #'lispm-chat-attach)
     (lispm-chat-attach (expand-file-name argument (lispm-chat-root)))))
 
+(defun lispm-chat--in-prompt-p ()
+  "Return non-nil when point sits within the read-only input prompt."
+  (and (markerp lispm-chat-prompt-start)
+       (markerp lispm-chat-input-start)
+       (marker-position lispm-chat-prompt-start)
+       (marker-position lispm-chat-input-start)
+       (<= lispm-chat-prompt-start (point))
+       (< (point) lispm-chat-input-start)))
+
+(defun lispm-chat-beginning-of-line (&optional n)
+  "Move point to the start of the current line, never entering the prompt.
+Optional argument N specifies how many lines to move."
+  (interactive "^p")
+  (let ((prompt (and (markerp lispm-chat-prompt-start)
+                     (marker-position lispm-chat-prompt-start)))
+        (input (and (markerp lispm-chat-input-start)
+                    (marker-position lispm-chat-input-start))))
+    (if (and prompt input (>= (point) prompt))
+        (progn
+          (move-beginning-of-line n)
+          (when (and (<= prompt (point)) (< (point) input))
+            (goto-char input)))
+      (if (bound-and-true-p visual-line-mode)
+          (beginning-of-visual-line n)
+        (move-beginning-of-line n)))))
+
+(defun lispm-chat-end-of-line (&optional n)
+  "Move point to the end of the current line, staying before the footer.
+Optional argument N specifies how many lines to move."
+  (interactive "^p")
+  (let ((prompt (and (markerp lispm-chat-prompt-start)
+                     (marker-position lispm-chat-prompt-start))))
+    (if (and prompt (>= (point) prompt))
+        (move-end-of-line n)
+      (if (bound-and-true-p visual-line-mode)
+          (end-of-visual-line n)
+        (move-end-of-line n)))))
+
+(defun lispm-chat-kill-line (&optional arg)
+  "Kill the rest of the current line in the chat input, respecting the prompt.
+Optional argument ARG specifies how many lines or direction to kill."
+  (interactive "P")
+  (when (lispm-chat--in-prompt-p)
+    (goto-char lispm-chat-input-start))
+  (let ((input (and (markerp lispm-chat-input-start)
+                    (marker-position lispm-chat-input-start))))
+    (cond
+     ((and input (>= (point) input) (integerp arg) (<= arg 0))
+      (kill-region
+       (max input
+            (save-excursion
+              (lispm-chat-beginning-of-line (if (zerop arg) 1 (1+ arg)))
+              (point)))
+       (point)))
+     ((and input (>= (point) input))
+      (kill-line arg))
+     ((bound-and-true-p visual-line-mode)
+      (kill-visual-line arg))
+     (t
+      (kill-line arg)))))
+
 (defun lispm-chat-newline ()
   "Start a new line in the text being written."
   (interactive)
@@ -697,6 +758,15 @@ When invoked by mouse EVENT, select the clicked window first."
   :doc "Keymap of `lispm-chat-mode'."
   "<remap> <self-insert-command>" #'lispm-chat-self-insert
   "<remap> <end-of-buffer>" #'lispm-chat-scroll-to-bottom
+  "C-a" #'lispm-chat-beginning-of-line
+  "C-e" #'lispm-chat-end-of-line
+  "C-k" #'lispm-chat-kill-line
+  "<remap> <move-beginning-of-line>" #'lispm-chat-beginning-of-line
+  "<remap> <beginning-of-visual-line>" #'lispm-chat-beginning-of-line
+  "<remap> <move-end-of-line>" #'lispm-chat-end-of-line
+  "<remap> <end-of-visual-line>" #'lispm-chat-end-of-line
+  "<remap> <kill-line>" #'lispm-chat-kill-line
+  "<remap> <kill-visual-line>" #'lispm-chat-kill-line
   "RET" #'lispm-chat-return
   "S-<return>" #'lispm-chat-newline
   "M-RET" #'lispm-chat-newline
@@ -746,6 +816,7 @@ Write at the bottom and press RET; / starts a command (/help lists them).
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (propertize lispm-chat-prompt 'face 'lispm-chat-accent 'read-only t
+                        'field 'lispm-chat-prompt
                         'front-sticky '(read-only) 'rear-nonsticky t))
     (setq lispm-chat-prompt-start (copy-marker (point-min) t)
           lispm-chat-input-start (point-marker)

@@ -287,8 +287,17 @@ Return `kernel' when routed to `lispm-kernel', or `elisp' on fallback."
                 (lispm-control-session-stream-tools sess) nil)
           (when (lispm-agent-p agent)
             (lispm-set-state agent 'requesting "thinking" 'thinking))
-          (lispm-control-plane--send
-           rt (lispm-control-protocol-agent-turn (lispm-control-session-id sess) payload))
+          (condition-case err
+              (lispm-control-plane--send
+               rt (lispm-control-protocol-agent-turn (lispm-control-session-id sess) payload))
+            (quit
+             (when (lispm-agent-p agent)
+               (lispm-turns-abort-request agent "Interrupted." t))
+             (signal 'quit nil))
+            (error
+             (when (lispm-agent-p agent)
+               (lispm-turns-abort-request agent (error-message-string err)))
+             (signal (car err) (cdr err))))
           'kernel)
       (cond
        (fallback-fn
@@ -318,14 +327,17 @@ Return non-nil when handled by the kernel control plane, else nil."
       (when (and (not (file-remote-p root))
                  (memq dialect '(anthropic openai))
                  (lispm-control-plane-active-p rt))
-        (let ((prep (condition-case err
-                        (lispm-api-prepare-request backend request)
-                      (error
-                       (if lispm-runtime-signal-function
-                           (funcall lispm-runtime-signal-function
-                                    agent 'request-failed (error-message-string err))
-                         (signal (car err) (cdr err)))
-                       nil))))
+        (let* ((handled nil)
+               (prep (condition-case err
+                         (lispm-api-prepare-request backend request)
+                       (quit
+                        (setq handled t)
+                        (lispm-turns-abort-request agent "Interrupted." t)
+                        nil)
+                       (error
+                        (setq handled t)
+                        (lispm-turns-abort-request agent (error-message-string err))
+                        nil))))
           (when prep
             (let* ((view (lispm-agent-view agent))
                    (visible-p (or (not (buffer-live-p view))
@@ -335,33 +347,45 @@ Return non-nil when handled by the kernel control plane, else nil."
                    (unsaved (lispm-control-plane--unsaved-files root))
                    (remaining (max 1 (- (or (bound-and-true-p lispm-max-steps) 16)
                                         (max 0 (1- (lispm-agent-steps agent))))))
-                   (sess (lispm-control-plane-register-agent
-                          agent
-                          :runtime rt
-                          :dialect (if (eq dialect 'openai) :openai :anthropic)
-                          :url (plist-get prep :url)
-                          :headers (plist-get prep :headers)
-                          :root root
-                          :max-steps remaining
-                          :viewport (if visible-p :visible :hidden)
-                          :tool-policies policies)))
-              (setf (lispm-control-session-turns-owned sess) t
-                    (lispm-control-session-stream-text sess) ""
-                    (lispm-control-session-stream-thinking sess) ""
-                    (lispm-control-session-stream-tools sess) nil)
-              (clrhash (lispm-control-session-call-markers sess))
-              (lispm-set-state agent 'requesting "thinking" 'thinking)
-              (lispm-turns-live-begin agent)
-              (lispm-control-plane--send
-               rt (lispm-control-protocol-agent-turn
-                   (lispm-control-session-id sess)
-                   (list :turn-id (format "t%d-%d" (lispm-agent-turn agent) (lispm-agent-steps agent))
-                         :url (plist-get prep :url)
-                         :headers (plist-get prep :headers)
-                         :max-steps remaining
-                         :unsaved-files unsaved
-                         :body (plist-get prep :body))))
-              t)))))))
+                   (sess nil))
+              (condition-case err
+                  (progn
+                    (setq sess (lispm-control-plane-register-agent
+                                agent
+                                :runtime rt
+                                :dialect (if (eq dialect 'openai) :openai :anthropic)
+                                :url (plist-get prep :url)
+                                :headers (plist-get prep :headers)
+                                :root root
+                                :max-steps remaining
+                                :viewport (if visible-p :visible :hidden)
+                                :tool-policies policies))
+                    (setf (lispm-control-session-turns-owned sess) t
+                          (lispm-control-session-stream-text sess) ""
+                          (lispm-control-session-stream-thinking sess) ""
+                          (lispm-control-session-stream-tools sess) nil)
+                    (clrhash (lispm-control-session-call-markers sess))
+                    (lispm-set-state agent 'requesting "thinking" 'thinking)
+                    (lispm-turns-live-begin agent)
+                    (lispm-control-plane--send
+                     rt (lispm-control-protocol-agent-turn
+                         (lispm-control-session-id sess)
+                         (list :turn-id (format "t%d-%d" (lispm-agent-turn agent) (lispm-agent-steps agent))
+                               :url (plist-get prep :url)
+                               :headers (plist-get prep :headers)
+                               :max-steps remaining
+                               :unsaved-files unsaved
+                               :body (plist-get prep :body))))
+                    (setq handled t))
+                (quit
+                 (when sess (setf (lispm-control-session-turns-owned sess) nil))
+                 (lispm-turns-abort-request agent "Interrupted." t)
+                 (setq handled t))
+                (error
+                 (when sess (setf (lispm-control-session-turns-owned sess) nil))
+                 (lispm-turns-abort-request agent (error-message-string err))
+                 (setq handled t)))))
+          handled)))))
 
 (defun lispm-control-plane-cancel (agent-or-session)
   "Cancel active kernel turn and local editor effects for AGENT-OR-SESSION."

@@ -596,17 +596,23 @@ section's parts, a cleared result read back whole."
   (should (memq #'lispm-auth--secret-set lispm-secret-set-functions))
   (should (memq #'lispm-auth--secret-delete lispm-secret-delete-functions))
   (should (memq #'lispm-auth--secret-available lispm-secret-available-functions))
+  (when (fboundp 'lispm-auth--secret-exists)
+    (should (memq #'lispm-auth--secret-exists lispm-secret-exists-functions)))
   (let (lispm-secret-available-functions
+        lispm-secret-exists-functions
         lispm-secret-get-functions
         lispm-secret-set-functions
         lispm-secret-delete-functions)
     (should-not (lispm-secret-available-p))
+    (should-not (lispm-secret-exists-p 'nowhere))
     (should-not (lispm-secret-get 'nowhere))
     (should-error (lispm-secret-set 'nowhere "k") :type 'user-error)
     (should-not (lispm-secret-delete 'nowhere)))
   (let ((store nil)
         (asked nil))
     (let ((lispm-secret-available-functions (list (lambda () t)))
+          (lispm-secret-exists-functions
+           (list (lambda (id) (and (assq id store) t))))
           (lispm-secret-get-functions
            (list (lambda (id &optional no-prompt)
                    (push (list id no-prompt) asked)
@@ -620,14 +626,39 @@ section's parts, a cleared result read back whole."
                    (prog1 (and (assq id store) t)
                      (setq store (assq-delete-all id store)))))))
       (should (lispm-secret-available-p))
+      (should-not (lispm-secret-exists-p 'gateway))
       (lispm-secret-set 'gateway "sk-1")
+      (should (lispm-secret-exists-p 'gateway))
+      ;; Existence probe never touched `lispm-secret-get-functions'.
+      (should-not asked)
+      ;; Falling back to `lispm-secret-get' when `lispm-secret-exists-functions' is nil.
+      (let ((lispm-secret-exists-functions nil))
+        (should (lispm-secret-exists-p 'gateway))
+        (should (equal asked '((gateway t)))))
+      (setq asked nil)
       (should (equal (lispm-secret-get 'gateway t) "sk-1"))
       (should (equal (lispm-secret-get 'gateway) "sk-1"))
       ;; Told when it may ask for the password, and when not.
       (should (equal asked '((gateway nil) (gateway t))))
       (should (lispm-secret-delete 'gateway))
+      (should-not (lispm-secret-exists-p 'gateway))
       (should-not (lispm-secret-get 'gateway t))
       (should-not (lispm-secret-delete 'gateway)))))
+
+(ert-deftest lispm-test-secret-exists-avoids-decryption ()
+  "Status probes use `lispm-secret-exists-p' without calling `lispm-secret-get'."
+  (lispm-test--with-settings
+    (setf (alist-get 'gateway lispm-backends)
+          '(:api openai :url "https://gateway.example/v1" :model "m"
+            :key (secret . lispm-backend-gateway)))
+    (setq lispm-backend 'gateway)
+    (let ((lispm-secret-exists-functions
+           (list (lambda (id) (eq id 'lispm-backend-gateway))))
+          (lispm-secret-get-functions
+           (list (lambda (&rest _) (error "Must not decrypt during status probe")))))
+      (should (lispm-secret-exists-p 'lispm-backend-gateway))
+      (should (lispm-backend-key-at-hand-p (lispm-backend-get 'gateway)))
+      (should (eq (plist-get (lispm-model-status) :state) 'ready)))))
 
 (ert-deftest lispm-test-backend-key-secret ()
   "A backend's key may be kept in the secret store, asked for only as it
@@ -650,14 +681,16 @@ needs one."
   (let ((lispm-backends '((gateway :api openai :url "https://gateway.example/v1" :model "m"
                                    :key (secret . lispm-backend-gateway))))
         (lispm-backend nil)
-        (asked nil))
+        (checked nil))
     (cl-letf (((symbol-function 'lispm-secret-get)
-               (lambda (id &optional no-prompt)
-                 (push (list id no-prompt) asked)
+               (lambda (&rest _) (error "Should not call `lispm-secret-get'")))
+              ((symbol-function 'lispm-secret-exists-p)
+               (lambda (id)
+                 (push id checked)
                  nil)))
       (should-not (lispm-backend-name)))
-    (should (equal asked '((lispm-backend-gateway t))))
-    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) "sk-1")))
+    (should (equal checked '(lispm-backend-gateway)))
+    (cl-letf (((symbol-function 'lispm-secret-exists-p) (lambda (&rest _) t)))
       (should (eq (lispm-backend-name) 'gateway)))))
 
 (ert-deftest lispm-test-request-features ()
@@ -4897,6 +4930,69 @@ whatever their names, and leaves out larger ones and symbolic links."
       (should (equal (car lispm-test--requests) (cadr lispm-test--requests)))
       (should-not (string-match-p "Condition: " (format "%S" (car lispm-test--requests)))))))
 
+(ert-deftest lispm-test-send-error-rolls-back-requesting-state ()
+  "Synchronous errors during send clear the live region and leave `requesting'."
+  (lispm-test-with-conditions
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (lispm-api-function (lambda (&rest _) (user-error "No API key configured"))))
+      (lispm-tell agent "hi")
+      (should (lispm-test--wait (lambda () (lispm-agent-condition agent))))
+      (should (eq (lispm-agent-state agent) 'waiting))
+      (should (eq (plist-get (lispm-agent-condition agent) :type) 'request-failed))
+      (should-not (lispm-agent-process agent))
+      (should-not (lispm-live-region (lispm-agent-buffer agent)))
+      (lispm-restart agent (lispm-test--condition-id agent) 'abort)
+      (should (lispm-test--wait (lispm-test--idle-p agent)))))
+  (lispm-test-env
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (lispm-runtime-signal-function nil)
+           (called nil)
+           (lispm-api-function
+            (lambda (&rest _)
+              (setq called t)
+              (user-error "Missing key"))))
+      (lispm-tell agent "hi")
+      (should (lispm-test--wait (lambda () called)))
+      (should (lispm-test--wait (lispm-test--idle-p agent)))
+      (should-not (lispm-live-region (lispm-agent-buffer agent))))))
+
+(ert-deftest lispm-test-send-quit-rolls-back-requesting-state ()
+  "A user quit (`C-g') during send restores `idle' and removes the live region."
+  (lispm-test-with-conditions
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (reply nil)
+           (lispm-api-function (lambda (&rest _) (signal 'quit nil))))
+      (lispm-tell agent "hi" :callback (lambda (r) (setq reply r)))
+      (should (lispm-test--wait (lambda () reply)))
+      (should (eq (lispm-agent-state agent) 'idle))
+      (should-not (lispm-agent-process agent))
+      (should-not (lispm-live-region (lispm-agent-buffer agent)))
+      (should (string-match-p "Interrupted" reply)))))
+
+(ert-deftest lispm-test-on-done-error-recovers-requesting-state ()
+  "Errors raised inside `:on-done' recover instead of stranding `requesting'."
+  (lispm-test-with-conditions
+    (let* ((agent (lispm-defagent tester "Test agent." :root project))
+           (lispm-api-function
+            (lambda (_backend _request &rest args)
+              (funcall (plist-get args :on-done)
+                       `((role . "assistant")
+                         (stop_reason . "tool_use")
+                         (content . [((type . "tool_use")
+                                      (id . "call-1")
+                                      (name . "read_file")
+                                      (input . ((path . "foo"))))])))
+              nil)))
+      (cl-letf (((symbol-function 'lispm-tool-decision)
+                 (lambda (&rest _) (error "Policy check failed"))))
+        (lispm-tell agent "hi")
+        (should (lispm-test--wait (lambda () (lispm-agent-condition agent))))
+        (should (eq (lispm-agent-state agent) 'waiting))
+        (should (eq (plist-get (lispm-agent-condition agent) :type) 'request-failed))
+        (should-not (lispm-live-region (lispm-agent-buffer agent)))
+        (lispm-restart agent (lispm-test--condition-id agent) 'abort)
+        (should (lispm-test--wait (lispm-test--idle-p agent)))))))
+
 (ert-deftest lispm-test-condition-abort ()
   "Stopping at a condition ends the turn as a failed turn always ended."
   (lispm-test-with-conditions
@@ -7003,6 +7099,8 @@ it is, its models, and where its key comes from."
   (lispm-test--with-settings
     (let* ((store nil)
            (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-exists-functions
+            (list (lambda (id) (and (assq id store) t))))
            (lispm-secret-get-functions
             (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
            (lispm-secret-set-functions
@@ -7121,6 +7219,8 @@ when LispM starts without a model."
            (lispm-backends (cl-remove-if (lambda (b) (eq (car b) 'test))
                                          (copy-tree lispm-backends)))
            (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-exists-functions
+            (list (lambda (id) (and (assq id store) t))))
            (lispm-secret-get-functions
             (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
            (lispm-secret-set-functions
@@ -7232,6 +7332,8 @@ the end of Model so pasting or deleting replaces the old model cleanly."
     (let* ((store nil)
            (key-fn (lambda () "rotom-dynamic-key"))
            (lispm-secret-available-functions (list (lambda () t)))
+           (lispm-secret-exists-functions
+            (list (lambda (id) (and (assq id store) t))))
            (lispm-secret-get-functions
             (list (lambda (id &optional _no-prompt) (cdr (assq id store)))))
            (lispm-secret-set-functions
@@ -9246,6 +9348,51 @@ approval box and in the transcript's preview; one that computes does not."
             (should (lispm-test--wait (lambda () (> (widest) narrow))))
             (should (<= (widest) (room)))))))))
 
+(ert-deftest lispm-test-chat-beginning-of-line-and-kill-line ()
+  "C-a, C-e, and C-k respect the prompt and footer even under `visual-line-mode'."
+  (lispm-test-env
+    (let ((default-directory project))
+      (save-window-excursion
+        (switch-to-buffer (lispm))
+        (should (bound-and-true-p visual-line-mode))
+        (should (eq (key-binding (kbd "C-a")) #'lispm-chat-beginning-of-line))
+        (should (eq (key-binding (kbd "C-e")) #'lispm-chat-end-of-line))
+        (should (eq (key-binding (kbd "C-k")) #'lispm-chat-kill-line))
+        (should (eq (get-text-property lispm-chat-prompt-start 'field)
+                    'lispm-chat-prompt))
+        ;; Single-line input: C-a stops after `λ >> ', C-e goes to end, and C-k kills input text.
+        (let ((kill-ring nil))
+          (goto-char (point-max))
+          (insert "hello world")
+          (execute-kbd-macro (kbd "C-a"))
+          (should (= (point) lispm-chat-input-start))
+          (execute-kbd-macro (kbd "C-e"))
+          (should (= (point) (point-max)))
+          (execute-kbd-macro (kbd "C-a"))
+          (should (= (point) lispm-chat-input-start))
+          (execute-kbd-macro (kbd "C-k"))
+          (should (equal (lispm-chat--input) ""))
+          (should (equal (car kill-ring) "hello world")))
+        ;; Even if point somehow sits inside `λ >> ', C-a and C-k recover to input.
+        (let ((kill-ring nil))
+          (lispm-chat-set-input "secret command")
+          (goto-char lispm-chat-prompt-start)
+          (execute-kbd-macro (kbd "C-a"))
+          (should (= (point) lispm-chat-input-start))
+          (goto-char lispm-chat-prompt-start)
+          (execute-kbd-macro (kbd "C-k"))
+          (should (equal (lispm-chat--input) ""))
+          (should (equal (car kill-ring) "secret command")))
+        ;; Multi-line input: C-a/C-k on second line stays on second line.
+        (let ((kill-ring nil))
+          (lispm-chat-set-input "first\nsecond")
+          (goto-char (point-max))
+          (execute-kbd-macro (kbd "C-a"))
+          (should (looking-at-p "second"))
+          (execute-kbd-macro (kbd "C-k"))
+          (should (equal (lispm-chat--input) "first\n"))
+          (should (equal (car kill-ring) "second")))))))
+
 (ert-deftest lispm-test-chat-commands ()
   "M-x lispm opens a chat; /clear starts over; the org interface remains."
   (lispm-test-env
@@ -10100,27 +10247,29 @@ keys kept encrypted with them."
 
 (ert-deftest lispm-test-settings-backend-status-secret ()
   "A backend whose key is kept encrypted is ready when the store has it,
-asked without asking anyone for the password."
+asked without decrypting or prompting."
   (lispm-test--with-settings
     (setf (alist-get 'gateway lispm-backends)
           '(:api openai :url "https://gateway.example/v1" :model "m"
             :key (secret . lispm-backend-gateway)))
     (setq lispm-backend 'gateway)
-    (let ((asked nil))
+    (let ((checked nil))
       (cl-letf (((symbol-function 'lispm-secret-get)
-                 (lambda (id no-prompt) (push (list id no-prompt) asked) nil)))
+                 (lambda (&rest _) (error "Should not decrypt during status check")))
+                ((symbol-function 'lispm-secret-exists-p)
+                 (lambda (id) (push id checked) nil)))
         (let ((status (lispm-model-status)))
           (should (eq (plist-get status :state) 'no-key))
           (should (equal (plist-get status :message)
                          "No key: set it in LispM's settings."))
-          (should (equal asked '((lispm-backend-gateway t)))))))
-    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) "sk-1")))
+          (should (equal checked '(lispm-backend-gateway))))))
+    (cl-letf (((symbol-function 'lispm-secret-exists-p) (lambda (&rest _) t)))
       (let ((status (lispm-model-status)))
         (should (eq (plist-get status :state) 'ready))
         (should (equal (plist-get status :message)
                        "Ready; its key is stored encrypted."))))
-    ;; A store that locks is one with no key at hand.
-    (cl-letf (((symbol-function 'lispm-secret-get) (lambda (&rest _) (error "Locked"))))
+    ;; An error checking store availability reports no key at hand.
+    (cl-letf (((symbol-function 'lispm-secret-exists-p) (lambda (&rest _) (error "Locked"))))
       (should (eq (plist-get (lispm-model-status) :state) 'no-key)))))
 
 (ert-deftest lispm-test-settings-change-hook ()
@@ -12598,9 +12747,8 @@ applications found and offering `Set up a model…' below."
                                   lispm-backends))
             (lispm-backend 'sec)
             (secret nil))
-        (cl-letf (((symbol-function 'lispm-secret-get)
-                   (lambda (id &optional _no-prompt)
-                     (and (eq id 'lispm-backend-sec) secret))))
+        (cl-letf (((symbol-function 'lispm-secret-exists-p)
+                   (lambda (id) (and (eq id 'lispm-backend-sec) secret))))
           (should-not (lispm-bar-model-ready-p (lispm-system-agent)))
           (setq secret "sk-secret")
           (should (lispm-bar-model-ready-p (lispm-system-agent))))))))
